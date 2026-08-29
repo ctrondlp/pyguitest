@@ -885,7 +885,16 @@ class TestPyGObjectIsOnlyNeededToNegotiate(unittest.TestCase):
                 ]
             ]
         )
-        self.assertIsNotNone(self._backend(sender=sender))
+        # An injected sender's fd is a plain int, not a real descriptor, so
+        # _wait_for_devices' select() has to be patched here as everywhere
+        # else. Without it the result depends on whether that number happens
+        # to be an open fd in the running process: fine on a developer
+        # machine with a busy fd table, EBADF on a CI runner.
+        with (
+            _always_ready(),
+            mock.patch("pyguitest.backends.eiinput._SIBLING_SETTLE", 0.05),
+        ):
+            self.assertIsNotNone(self._backend(sender=sender))
 
     def test_negotiating_without_pygobject_still_refuses_clearly(self):
         # The requirement is real on the path that actually uses it, and
