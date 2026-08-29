@@ -1,0 +1,123 @@
+# The suite needs no dependencies and no display: 578 tests that import only
+# the standard library, because every display-server mechanism this package
+# drives is probed at runtime and stands in as a fake under test. That is
+# what makes the matrix below cheap enough to run on every push.
+#
+# It is also the reason CI matters here more than usual. Almost nothing in
+# this package can be exercised against the real thing in an automated
+# environment -- there is no compositor, no session bus, no X server, no
+# consent dialog anyone can click -- so the tests drive stand-ins for
+# python-xlib, Gio and the portal. Stand-ins drift. Running them on every
+# supported Python is the cheapest guard against that drift going unnoticed.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      # Deliberately no `pip install`. The package declares no hard
+      # dependencies, and the suite passes with nothing installed and no
+      # capture or input tool on PATH -- so running it bare is not a
+      # shortcut, it is the claim under test. An install step here would
+      # hide a stray `import` creeping into a module that must stay
+      # importable on a machine with none of the optional extras.
+      - name: Run the test suite
+        env:
+          PYTHONPATH: src
+        run: python -m unittest discover -s tests -v
+
+  lint:
+    name: lint and types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # The floor, not the newest: ruff and mypy are both configured
+          # for py310, and type errors that only appear on the oldest
+          # supported version are exactly the ones worth catching.
+          python-version: "3.10"
+
+      - run: pip install ruff mypy
+
+      - run: ruff check src tests
+      - run: ruff format --check src tests
+
+      # Type-checks src/pyguitest per [tool.mypy] in pyproject.toml.
+      # ignore_missing_imports is set there because the optional backends
+      # import libraries that may not be installed -- their absence is a
+      # runtime condition this package handles, not a typing error.
+      - run: mypy
+
+  portal:
+    name: portal against a real D-Bus session
+    runs-on: ubuntu-latest
+    # The one thing that can be exercised for real in CI. Everything else
+    # needs a compositor or a human; a private D-Bus session bus does not,
+    # and PortalBackend's negotiation is where a live bug was found before
+    # (a missing session_handle_token crashed xdg-desktop-portal outright).
+    # These tests skip themselves if anything is missing, so this job is
+    # only meaningful with the system packages below -- dbus-python needs
+    # compiling and dbus-daemon is a binary, so neither comes from pip.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install python-dbusmock, dbus-python and dbus-daemon
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            python3-dbusmock python3-dbus python3-gi dbus
+
+      # The system python3, not setup-python: the packages above are
+      # installed for it, and a setup-python interpreter cannot see them.
+      #
+      # The run is captured rather than streamed because a *skip* has to
+      # fail this job. These tests skip themselves when dbusmock, dbus or
+      # PyGObject are missing, which is right when someone runs them on a
+      # laptop and wrong here -- a green job that silently proved nothing
+      # is worse than a red one. Captured once and inspected, not run
+      # twice.
+      #
+      # `discover -p`, never the dotted module name: there is no
+      # tests/__init__.py, and while 3.13 resolves that name as a
+      # namespace package, 3.14 fails with ModuleNotFoundError, which
+      # reads like a missing file rather than a bad invocation.
+      - name: Run the D-Bus tests
+        env:
+          PYTHONPATH: src
+        run: |
+          set -o pipefail
+          output=$(python3 -m unittest discover -s tests \
+              -p test_portal_dbusmock.py -v 2>&1) || status=$?
+          echo "$output"
+          if [ -n "${status:-}" ]; then
+            exit "$status"
+          fi
+          if echo "$output" | grep -q "skipped"; then
+            echo "::error::the dbusmock tests skipped themselves, so this"
+            echo "::error::job proved nothing -- the apt packages above"
+            echo "::error::did not land for the system python3."
+            exit 1
+          fi

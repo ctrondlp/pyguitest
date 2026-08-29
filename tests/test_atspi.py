@@ -1,0 +1,294 @@
+"""AT-SPI adapter tests against a stand-in dogtail.
+
+dogtail needs a live accessibility bus, so these fake the module to check the
+adapter's own logic: capability gating, the Wayland coordinate refusal, and
+frame filtering.
+"""
+
+import sys
+import types
+import unittest
+from unittest import mock
+
+from pyguitest.capabilities import Capability
+from pyguitest.errors import CapabilityUnsupported
+from pyguitest.session import SessionType, detect
+
+
+class FakeState:
+    """Stands in for a pyatspi StateSet."""
+
+    def __init__(self, states=()):
+        self._states = set(states)
+
+    def contains(self, state):
+        return state in self._states
+
+
+class FakeNode:
+    def __init__(
+        self,
+        name="",
+        role="filler",
+        children=(),
+        position=(0, 0),
+        size=(0, 0),
+        active=False,
+    ):
+        self.name = name
+        self.roleName = role
+        self.children = list(children)
+        self.position = position
+        self.size = size
+        self.parent = None
+        self.showing = True
+        self.clicked = False
+        self.focused = False
+        self._active = active
+        for child in self.children:
+            child.parent = self
+
+    def click(self):
+        self.clicked = True
+
+    def grabFocus(self):
+        self.focused = True
+
+    def getState(self):
+        return FakeState({"STATE_ACTIVE"} if self._active else set())
+
+    def findChildren(self, pred):
+        out = []
+        for child in self.children:
+            if pred.matches(child):
+                out.append(child)
+            out.extend(child.findChildren(pred))
+        return out
+
+    def applications(self):
+        return self.children
+
+
+class _RaisingSize:
+    """Stands in for a node whose Component.size raises, like a dead ponytail."""
+
+    def __init__(self, position, error):
+        self.position = position
+        self._error = error
+
+    @property
+    def size(self):
+        raise self._error
+
+
+class FakePredicate:
+    def __init__(self, roleName=None, name=None):
+        self.roleName = roleName
+        self.name = name
+
+    def matches(self, node):
+        return self.roleName in (None, node.roleName) and self.name in (None, node.name)
+
+
+def build_tree():
+    button = FakeNode("OK", "push button", position=(10, 20), size=(80, 30))
+    frame = FakeNode("Document - Editor", "frame", [button], (0, 0), (800, 600))
+    palette = FakeNode("Tools", "tool bar", [])
+    app = FakeNode("gedit", "application", [frame, palette])
+    return FakeNode("desktop", "desktop frame", [app]), frame, button
+
+
+def install_fake_dogtail():
+    root, frame, button = build_tree()
+    dogtail = types.ModuleType("dogtail")
+    tree = types.ModuleType("dogtail.tree")
+    predicate = types.ModuleType("dogtail.predicate")
+    tree.root = root
+    predicate.GenericPredicate = FakePredicate
+    dogtail.tree = tree
+    dogtail.predicate = predicate
+    modules = {
+        "dogtail": dogtail,
+        "dogtail.tree": tree,
+        "dogtail.predicate": predicate,
+    }
+    return mock.patch.dict(sys.modules, modules), frame, button
+
+
+class AtspiTestCase(unittest.TestCase):
+    def setUp(self):
+        patcher, self.frame, self.button = install_fake_dogtail()
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        from pyguitest.backends import atspi
+
+        self.atspi = atspi
+
+    def backend(self, session_type=SessionType.X11):
+        env = detect({"DISPLAY": ":0", "XDG_SESSION_TYPE": "x11"})
+        import dataclasses
+
+        return self.atspi.AtspiBackend(
+            dataclasses.replace(env, session_type=session_type)
+        )
+
+
+class TestAvailability(AtspiTestCase):
+    def test_available_when_dogtail_imports(self):
+        self.assertTrue(self.atspi.available())
+
+
+class TestWaylandCoordinateHonesty(AtspiTestCase):
+    def test_geometry_declared_under_x11(self):
+        gui = self.backend(SessionType.X11)
+        self.assertIn(Capability.WINDOW_GEOMETRY, gui.capabilities)
+
+    def test_geometry_withheld_under_pure_wayland(self):
+        # A Wayland client is never told its position on screen, so the extents
+        # it reports through AT-SPI cannot be trusted as screen coordinates.
+        gui = self.backend(SessionType.WAYLAND)
+        self.assertNotIn(Capability.WINDOW_GEOMETRY, gui.capabilities)
+
+    def test_geometry_call_explains_the_refusal(self):
+        gui = self.backend(SessionType.WAYLAND)
+        with self.assertRaises(CapabilityUnsupported) as ctx:
+            gui.geometry(gui.windows()[0])
+        self.assertIn("where it is on screen", str(ctx.exception))
+
+    def test_geometry_returns_extents_under_x11(self):
+        gui = self.backend(SessionType.X11)
+        self.assertEqual(gui.geometry(gui.windows()[0]), (0, 0, 800, 600))
+
+    def test_missing_ponytail_daemon_raises_typed_not_a_bare_runtime_error(self):
+        # Live regression: dogtail's Component.get_size/get_position route
+        # through its own gnome-ponytail-daemon on GNOME, even under X11/
+        # XWayland where pyguitest already trusts the coordinates -- the
+        # daemon being absent is a missing system dependency, not a Wayland
+        # honesty problem, and must not leak dogtail's bare RuntimeError.
+        gui = self.backend(SessionType.X11)
+        window = gui.windows()[0]
+        window.handle = _RaisingSize(
+            self.frame.position,
+            RuntimeError(
+                "Error in ponytail initiation might be caused by several reasons"
+            ),
+        )
+        with self.assertRaises(CapabilityUnsupported) as ctx:
+            gui.geometry(window)
+        self.assertIn("gnome-ponytail-daemon", str(ctx.exception))
+
+    def test_a_different_ponytail_failure_mode_is_also_wrapped(self):
+        # Second live regression, on the same machine: once the daemon was
+        # installed, get_size() failed a completely different way --
+        # dbus.exceptions.DBusException("GetWindows is not allowed"), not a
+        # RuntimeError at all. There is no closed list of ponytail's failure
+        # types to match against, so geometry() must wrap *any* exception
+        # from this pair of calls, not just RuntimeError -- while still
+        # keeping the original message visible for diagnosis.
+        class DBusLikeError(Exception):
+            pass
+
+        gui = self.backend(SessionType.X11)
+        window = gui.windows()[0]
+        window.handle = _RaisingSize(
+            self.frame.position,
+            DBusLikeError(
+                "org.freedesktop.DBus.Error.AccessDenied: GetWindows is not allowed"
+            ),
+        )
+        with self.assertRaises(CapabilityUnsupported) as ctx:
+            gui.geometry(window)
+        self.assertIn("GetWindows is not allowed", str(ctx.exception))
+
+
+class TestWindows(AtspiTestCase):
+    def test_only_frames_count_as_windows(self):
+        # The application also owns a tool bar; it is not a window.
+        gui = self.backend()
+        windows = gui.windows()
+        self.assertEqual(len(windows), 1)
+        self.assertEqual(windows[0].title, "Document - Editor")
+        self.assertEqual(windows[0].app_id, "gedit")
+
+    def test_window_list_works_where_no_wayland_protocol_does(self):
+        # The practical reason this backend leads on GNOME: the accessibility
+        # bus knows the frames even though Mutter exposes no foreign-toplevel.
+        gui = self.backend(SessionType.WAYLAND)
+        self.assertIn(Capability.WINDOW_LIST, gui.capabilities)
+        self.assertEqual(len(gui.windows()), 1)
+
+    def test_activate_grabs_focus(self):
+        gui = self.backend()
+        gui.activate_window(gui.windows()[0])
+        self.assertTrue(self.frame.focused)
+
+    def test_is_window_viewable_reads_the_showing_state(self):
+        gui = self.backend()
+        window = gui.windows()[0]
+        self.assertTrue(gui.is_window_viewable(window))
+        self.frame.showing = False
+        self.assertFalse(gui.is_window_viewable(window))
+
+
+class TestActiveWindow(AtspiTestCase):
+    """A missing pyatspi must raise typed, not crash active_window().
+
+    It is imported bare inside _state_active, not through the guarded
+    _dogtail() pattern, and is declared in no dependency list -- only
+    dogtail is pulled in by the atspi extra, with pyatspi meant to come
+    from the distro. A box with dogtail but not pyatspi used to get a bare
+    ImportError from active_window() on a backend that otherwise looked
+    fully constructed.
+    """
+
+    def test_missing_pyatspi_raises_a_typed_error_not_a_bare_import_error(self):
+        # pyatspi is genuinely not installed in this environment, so this
+        # exercises the real failure path rather than a simulated one.
+        with mock.patch.dict(sys.modules, {"pyatspi": None}):
+            gui = self.backend()
+            with self.assertRaises(CapabilityUnsupported) as ctx:
+                gui.active_window()
+            self.assertIn("pyatspi", str(ctx.exception))
+
+    def test_active_window_is_found_once_pyatspi_is_available(self):
+        fake_pyatspi = types.ModuleType("pyatspi")
+        fake_pyatspi.STATE_ACTIVE = "STATE_ACTIVE"
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi}):
+            gui = self.backend()
+            self.frame._active = True
+            self.assertEqual(gui.active_window().title, "Document - Editor")
+
+    def test_returns_none_when_no_frame_is_active(self):
+        fake_pyatspi = types.ModuleType("pyatspi")
+        fake_pyatspi.STATE_ACTIVE = "STATE_ACTIVE"
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi}):
+            gui = self.backend()
+            self.assertIsNone(gui.active_window())
+
+
+class TestElements(AtspiTestCase):
+    def test_find_elements_by_role(self):
+        gui = self.backend()
+        found = gui.find_elements(role="push button")
+        self.assertEqual([e.name for e in found], ["OK"])
+
+    def test_find_element_returns_none_when_absent(self):
+        gui = self.backend()
+        self.assertIsNone(gui.find_element(role="slider"))
+
+    def test_click_needs_no_coordinates_or_injection(self):
+        gui = self.backend()
+        gui.find_element(name="OK").click()
+        self.assertTrue(self.button.clicked)
+
+    def test_element_exposes_role_name_and_ancestry(self):
+        gui = self.backend()
+        button = gui.find_element(name="OK")
+        self.assertEqual(button.role, "push button")
+        self.assertEqual(button.parent.name, "Document - Editor")
+        self.assertTrue(button.parent.is_ancestor_of(button))
+        self.assertFalse(button.is_ancestor_of(button.parent))
+
+
+if __name__ == "__main__":
+    unittest.main()

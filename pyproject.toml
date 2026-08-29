@@ -1,0 +1,139 @@
+[build-system]
+# license = "..." below is the PEP 639 SPDX-string form, which setuptools
+# only understands from 77 onward; a build environment resolving an older
+# setuptools fails or silently drops the license metadata.
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyguitest"
+version = "0.0.1.dev0"
+description = "Cross-platform GUI automation; successor to X11::GUITest"
+# 3.9 reached end-of-life in October 2025; 3.10 is the oldest
+# version still receiving security fixes.
+requires-python = ">=3.10"
+license = "GPL-2.0-or-later"
+authors = [{name = "Dennis K. Paulsen"}]
+readme = "README.md"
+keywords = ["gui-automation", "testing", "x11", "wayland", "accessibility", "atspi"]
+
+# Upload guard. PyPI rejects any distribution carrying this classifier, so an
+# accidental `twine upload` or a CI publish step fails instead of going public.
+# Remove it deliberately, as its own commit, when publishing is actually wanted.
+classifiers = ["Private :: Do Not Upload"]
+
+# No hard dependencies by design. Every display-server mechanism is probed at
+# runtime and degrades to an unsupported capability rather than an import error,
+# because no single set of bindings is present across GNOME, KDE, wlroots, X11,
+# and the BSDs. See docs/wayland-audit.html.
+dependencies = []
+
+# Rationale for each choice is in docs/adr-001-dependencies.md.
+# Input injection and screen capture deliberately have NO Python dependency --
+# they adapt maintained command-line tools (wdotool, wtype, grim, swaymsg)
+# through subprocess instead. See src/pyguitest/tools.py.
+# End users get a `pyguitest` command; no need for `python -m`.
+[project.scripts]
+pyguitest = "pyguitest.__main__:main"
+
+[project.optional-dependencies]
+atspi = ["dogtail>=2.0"]        # element automation. NB: dogtail declares no
+                                # deps; PyGObject + pyatspi must come from
+                                # the distro. See README INSTALL.
+x11   = ["python-xlib>=0.33"]   # X11 backend, incl. FreeBSD/Solaris
+uinput = ["evdev>=1.9"]         # last-resort input where no tool is installed
+eiinput = ["python-libei>=0.1.0"]  # libei input backend (opt-in). Needs the
+                                   # native libei library from the distro too;
+                                   # pip cannot supply that. See README.
+dev   = ["pytest>=7", "ruff>=0.6", "mypy>=1.11",
+         "python-dbusmock>=0.30"]  # tests/test_portal_dbusmock.py: PortalBackend
+                                   # against a real, private D-Bus session bus.
+                                   # Also needs dbus-python and real PyGObject
+                                   # (the atspi extra's PyGObject dependency,
+                                   # already required to use PortalBackend at
+                                   # all) and a `dbus-daemon` binary on PATH;
+                                   # the test skips itself if any are missing.
+
+[project.urls]
+homepage = "https://github.com/ctrondlp/pyguitest"
+repository = "https://github.com/ctrondlp/pyguitest"
+issues = "https://github.com/ctrondlp/pyguitest/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# PEP 561: ship the marker so type checkers use our annotations.
+[tool.setuptools.package-data]
+pyguitest = ["py.typed"]
+
+
+# --------------------------------------------------------------------------
+# Linting and formatting: ruff covers both, so there is one tool and one
+# config rather than black + isort + flake8 + pydocstyle.
+#
+#   ruff check src tests        report problems
+#   ruff check --fix src tests  fix what is mechanical
+#   ruff format src tests       apply the formatting
+# --------------------------------------------------------------------------
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # import sorting
+    "D",        # pydocstyle
+    "B",        # bugbear
+    "UP",       # pyupgrade
+    "C4",       # comprehensions
+    "SIM",      # simplification
+    "RET",      # return consistency
+    "ARG",      # unused arguments
+]
+ignore = [
+    "D203",    # incompatible with D211; keep no blank line before class docstring
+    "D213",    # incompatible with D212; keep the summary on the first line
+    "D401",    # properties read better as noun phrases than imperatives
+    "B027",    # GUIBackend.close is an intentional optional hook, not abstract
+    "D105",    # __enter__/__exit__ and friends document themselves
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "pep257"
+
+[tool.ruff.lint.per-file-ignores]
+# The backend interface exists to be overridden: its stubs necessarily accept
+# arguments they do not use.
+"src/pyguitest/backends/base.py" = ["ARG002"]
+# Backends legitimately ignore arguments other backends need -- a screen index
+# is meaningless where there is one output.
+"src/pyguitest/backends/*.py" = ["ARG002", "ARG005"]
+# Backend factories share one signature; not all of them need the
+# environment to decide.
+"src/pyguitest/backends/__init__.py" = ["ARG001", "ARG002"]
+# Tests use fakes with deliberately unused arguments and bare attribute access
+# to assert that lookups raise.
+"tests/*" = [
+    "ARG001", "ARG002", "ARG003", "ARG005",  # fakes accept arguments they ignore
+    "B018",                        # bare attribute access asserts a raise
+    "SIM117",                      # nested with-blocks read better in tests
+    "D100", "D101", "D102", "D103", "D104", "D107",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+
+[tool.mypy]
+files = ["src/pyguitest"]
+python_version = "3.10"
+# Optional backends import libraries that may not be installed; their absence
+# is a runtime condition this package handles, not a typing error.
+ignore_missing_imports = true
+warn_unused_configs = true
+warn_redundant_casts = true

@@ -1,0 +1,69 @@
+"""Exception hierarchy.
+
+X11::GUITest signalled failure by returning zero. The audit found 19 functions
+whose availability varies by compositor and 6 that are unavailable everywhere,
+which makes a bare zero impossible to act on: the caller cannot tell "the click
+missed" from "this desktop cannot click". Every failure here is therefore typed.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .capabilities import Capability
+
+
+class PyGUITestError(Exception):
+    """Base for every error raised by this package."""
+
+
+class BackendUnavailable(PyGUITestError):
+    """No backend could drive the current session."""
+
+
+class CapabilityUnsupported(PyGUITestError):
+    """The active backend cannot perform this operation.
+
+    Carries the capability and the reason so callers can skip rather than fail
+    -- the intended pattern for test suites spanning several desktops.
+    """
+
+    def __init__(
+        self,
+        capability: Capability,
+        backend: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        """Record which capability failed, on which backend, and why."""
+        self.capability = capability
+        self.backend = backend
+        self.reason = reason
+        where = f" on {backend}" if backend else ""
+        why = f": {reason}" if reason else ""
+        super().__init__(f"{capability.name} is unsupported{where}{why}")
+
+
+class PermissionRequired(CapabilityUnsupported):
+    """The operation exists but was not granted.
+
+    Raised for a declined portal dialog or an inaccessible /dev/uinput -- both
+    recoverable by user action, unlike CapabilityUnsupported generally.
+    """
+
+
+class ElementNotFound(PyGUITestError):
+    """No accessible element matched the search.
+
+    Raised by the convenience finders rather than returning None, so a script
+    fails where the mistake is rather than several lines later on an attribute
+    of None.
+    """
+
+
+class WindowNotFound(PyGUITestError):
+    """No window matched, or a handle refers to a window that has closed."""
+
+
+class ImageNotFound(PyGUITestError):
+    """No match for the template image cleared the similarity threshold."""

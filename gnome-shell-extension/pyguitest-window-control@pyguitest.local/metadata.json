@@ -1,0 +1,26 @@
+{
+    "uuid": "pyguitest-window-control@pyguitest.local",
+    "name": "pyguitest window control",
+    "description": "Exposes window listing, geometry, move/resize, activate, minimize and per-window screen capture over D-Bus at /org/gnome/Shell/Extensions/Pyguitest, for pyguitest's GnomeShellBackend. Not useful on its own -- it has no UI. See gnome-shell-extension/README.md in the pyguitest source tree.",
+    "version-name": "0.2.0-capture",
+    "shell-version": [
+        "45",
+        "46",
+        "47",
+        "48",
+        "49",
+        "50",
+        "51",
+        "52",
+        "53",
+        "54",
+        "55",
+        "56",
+        "57",
+        "58",
+        "59",
+        "60",
+        "61",
+        "62"
+    ]
+}
