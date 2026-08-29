@@ -1,10 +1,12 @@
+import dataclasses
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
-from pyguitest import Capability, connect
+from pyguitest import Capability, backends, connect, tools
 from pyguitest.backends import NullBackend, available, select
 from pyguitest.errors import BackendUnavailable, CapabilityUnsupported
-from pyguitest.session import detect
+from pyguitest.session import Compositor, SessionType, detect
 
 
 class TestNullBackend(unittest.TestCase):
@@ -155,3 +157,162 @@ class TestSessionFacade(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _env(**overrides):
+    """A detected Environment with fields overridden."""
+    base = detect({"WAYLAND_DISPLAY": "wayland-0", "XDG_CURRENT_DESKTOP": "GNOME"})
+    return dataclasses.replace(base, **overrides)
+
+
+class TestCaptureFactory(unittest.TestCase):
+    """Which screenshot tool a session is given, if any.
+
+    Selection is where the capture bugs lived. A tool being installed was
+    treated as a tool being usable, and gnome-screenshot on GNOME Wayland
+    is installed, selected, and hangs for the full subprocess timeout.
+    """
+
+    def _factory(self, environment):
+        return backends._capture_factory(environment)
+
+    def test_a_real_x11_session_may_use_the_root_reading_tools(self):
+        with mock.patch.object(tools.ExternalTool, "present", True):
+            backend = self._factory(_env(session_type=SessionType.X11))
+        self.assertIsNotNone(backend)
+
+    def test_xwayland_never_gets_a_root_reading_tool(self):
+        # The X root is unreadable there, and gnome-screenshot does not
+        # fail quickly -- it hangs. Both must be excluded.
+        with mock.patch.object(tools.ExternalTool, "present", True):
+            backend = self._factory(_env(session_type=SessionType.XWAYLAND))
+        if backend is not None:
+            self.assertNotIn(backend.tool.name, ("gnome-screenshot", "import"))
+
+    def test_pure_wayland_never_gets_one_either(self):
+        with mock.patch.object(tools.ExternalTool, "present", True):
+            backend = self._factory(_env(session_type=SessionType.WAYLAND))
+        if backend is not None:
+            self.assertNotIn(backend.tool.name, ("gnome-screenshot", "import"))
+
+    def test_no_tool_installed_yields_no_backend(self):
+        with mock.patch.object(tools.ExternalTool, "present", False):
+            self.assertIsNone(self._factory(_env(session_type=SessionType.X11)))
+
+
+class TestInputFactoryRanking(unittest.TestCase):
+    """Input transports are ranked by correctness before convenience.
+
+    The ordering is a policy, not an implementation detail: a keymap-unsafe
+    tool types the wrong characters on a non-US layout, so it must lose to
+    a safe one even though both "work".
+    """
+
+    def _pick(self, environment, present):
+        with mock.patch.object(
+            tools.ExternalTool, "present", property(lambda self: self.name in present)
+        ):
+            with mock.patch("pyguitest.backends.uinput.available", return_value=False):
+                return backends._input_factory(environment)
+
+    def test_a_keymap_safe_tool_wins_over_an_unsafe_one(self):
+        backend = self._pick(_env(session_type=SessionType.X11), {"ydotool", "xdotool"})
+        # xdotool resolves keysyms against the server's live map; ydotool
+        # injects scancodes below the compositor and cannot.
+        self.assertEqual(backend.tool.name, "xdotool")
+
+    def test_an_unsafe_tool_is_still_better_than_nothing(self):
+        backend = self._pick(_env(session_type=SessionType.X11), {"ydotool"})
+        self.assertEqual(backend.tool.name, "ydotool")
+
+    def test_an_x11_only_tool_is_not_offered_to_a_wayland_session(self):
+        # xdotool runs there and reaches no native Wayland client.
+        backend = self._pick(_env(session_type=SessionType.WAYLAND), {"xdotool"})
+        self.assertIsNone(backend)
+
+    def test_uinput_is_preferred_over_a_keymap_unsafe_tool(self):
+        # Both are keymap-unsafe, but uinput holds one device open instead
+        # of spawning a process per event.
+        fake = mock.Mock()
+        with mock.patch.object(
+            tools.ExternalTool, "present", property(lambda self: self.name == "ydotool")
+        ):
+            with mock.patch("pyguitest.backends.uinput.available", return_value=True):
+                with mock.patch(
+                    "pyguitest.backends.uinput.UinputBackend", return_value=fake
+                ):
+                    backend = backends._input_factory(
+                        _env(session_type=SessionType.WAYLAND)
+                    )
+        self.assertIs(backend, fake)
+
+
+class TestOtherFactoriesDeclineCleanly(unittest.TestCase):
+    """A factory that cannot serve a session returns None, never raises.
+
+    select() builds every registered factory, so one that raised on an
+    unsuitable session would take the whole composition down with it.
+    """
+
+    def test_x11_declines_a_pure_wayland_session(self):
+        self.assertIsNone(backends._x11_factory(_env(session_type=SessionType.WAYLAND)))
+
+    def test_x11_declines_when_python_xlib_is_absent(self):
+        with mock.patch("pyguitest.backends.x11.available", return_value=False):
+            self.assertIsNone(backends._x11_factory(_env(session_type=SessionType.X11)))
+
+    def test_gnomeshell_declines_off_mutter(self):
+        self.assertIsNone(
+            backends._gnomeshell_factory(_env(compositor=Compositor.WLROOTS))
+        )
+
+    def test_atspi_declines_when_dogtail_is_absent(self):
+        with mock.patch("pyguitest.backends.atspi.available", return_value=False):
+            self.assertIsNone(backends._atspi_factory(_env()))
+
+    def test_portalcapture_declines_without_pygobject(self):
+        with mock.patch(
+            "pyguitest.backends.portalcapture.available", return_value=False
+        ):
+            self.assertIsNone(backends._portalcapture_factory(_env()))
+
+    def test_a_backend_unavailable_during_construction_is_swallowed(self):
+        # Probing can fail for reasons detection cannot see -- an extension
+        # that is installed but disabled, a bus that is unreachable.
+        with mock.patch("pyguitest.backends.x11.available", return_value=True):
+            with mock.patch(
+                "pyguitest.backends.x11.X11Backend",
+                side_effect=BackendUnavailable("no display"),
+            ):
+                self.assertIsNone(
+                    backends._x11_factory(_env(session_type=SessionType.X11))
+                )
+
+
+class TestScreenSize(unittest.TestCase):
+    """uinput needs a real screen size at device-creation time.
+
+    Absolute axes are declared once and cannot be changed, so a device
+    built for 1920x1080 on a 4K output makes every move_mouse land
+    somewhere else. Guessing is the failure being avoided.
+    """
+
+    def test_it_falls_back_rather_than_raising_when_nothing_answers(self):
+        with mock.patch("shutil.which", return_value=None):
+            size = backends._screen_size(_env(session_type=SessionType.WAYLAND))
+        self.assertEqual(size, backends._FALLBACK_SCREEN_SIZE)
+
+    def test_a_broken_tool_falls_back_too(self):
+        with mock.patch("shutil.which", return_value="/usr/bin/xrandr"):
+            with mock.patch("subprocess.run", side_effect=OSError("boom")):
+                size = backends._screen_size(_env(session_type=SessionType.X11))
+        self.assertEqual(size, backends._FALLBACK_SCREEN_SIZE)
+
+    def test_xrandr_output_is_parsed_when_it_works(self):
+        with mock.patch("shutil.which", return_value="/usr/bin/xrandr"):
+            with mock.patch(
+                "subprocess.run",
+                return_value=SimpleNamespace(stdout="Screen 0: current 3840 x 2160"),
+            ):
+                size = backends._screen_size(_env(session_type=SessionType.X11))
+        self.assertEqual(size, (3840, 2160))

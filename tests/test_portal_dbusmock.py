@@ -16,7 +16,7 @@ genuine D-Bus method calls, genuine Request/Response signal subscription,
 no monkeypatching of gi at all.
 
 This is NOT a way to skip the dialog on a real desktop -- see the
-"Avoiding repeat consent dialogs" section of the README for what that
+"Avoiding repeat consent dialogs" section of docs/input.md for what that
 means and why a fake bus can't provide it. Every bus this file touches is
 one it started itself in a private temp directory and tears down
 afterward; it never opens whatever $DBUS_SESSION_BUS_ADDRESS already
@@ -28,7 +28,7 @@ Skips itself wherever it can't run: needs `python-dbusmock` importable,
 inside setUpClass via plain unittest.SkipTest, not module-level
 pytest.skip()/importorskip() -- this suite's other 404 tests run under
 plain `python3 -m unittest discover` with no dependencies at all (see the
-README's Development section), and that runner does not understand
+CONTRIBUTING.md), and that runner does not understand
 pytest's collection-time skip outcome: it would report a missing
 `dbusmock` as a load *error*, not a skip. `pytest` (used for the dev-extra
 workflow) understands unittest.SkipTest natively, so this reads as a clean

@@ -221,13 +221,14 @@ class LibeiBackend(GUIBackend):
         `oeffis_create_session()` takes only a device-type bitmask and
         exposes neither options nor the session handle.
         """
-        gio_modules = _gio()
-        if gio_modules is None:
-            raise BackendUnavailable(
-                "PyGObject is not installed; pip install 'pyguitest[atspi]' "
-                "pulls in the same dependency this needs (see README)"
-            )
-        self._Gio, self._GLib = gio_modules
+        # PyGObject is deliberately NOT required here. It is needed only to
+        # negotiate the portal session, and the branch below already says
+        # so about the bus: an injected sender or device means there is
+        # nothing to negotiate. Demanding it up front contradicted that and
+        # refused a construction that needs nothing from it -- which is
+        # exactly how the integration test fails on a machine that has
+        # python-libei but not PyGObject.
+        self._Gio = self._GLib = None
         ei = _libei()
         if ei is None:
             raise BackendUnavailable(
@@ -251,6 +252,14 @@ class LibeiBackend(GUIBackend):
         self._keymap = keymap
         if device is None:
             if sender is None:
+                gio_modules = _gio()
+                if gio_modules is None:
+                    raise BackendUnavailable(
+                        "PyGObject is not installed; pip install "
+                        "'pyguitest[atspi]' pulls in the same dependency "
+                        "this needs (see README)"
+                    )
+                self._Gio, self._GLib = gio_modules
                 # The bus is only needed to negotiate; an injected sender or
                 # device means there is nothing to negotiate, so do not open
                 # a session bus that a test (or a headless run) may not have.

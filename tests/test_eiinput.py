@@ -39,6 +39,29 @@ class FakeDeviceCapability(enum.IntFlag):
     TEXT = 1 << 6
 
 
+def _capability_tuple(caps):
+    """Normalise a capability set the way real python-libei reports one.
+
+    libei's `Seat.capabilities` and `Device.capabilities` are both typed
+    `tuple[DeviceCapability, ...]` -- a tuple of individual flags, not a
+    single combined Flag value. Tests find it far more readable to write
+    `POINTER_ABSOLUTE | BUTTON`, so this converts.
+
+    It is not cosmetic. Storing the combined Flag instead made the fake
+    iterable only on Python 3.11+, where iterating a Flag *member* was
+    introduced; on 3.10 the same code raises "object is not iterable", and
+    the production loop over `seat.capabilities` blew up on CI's oldest
+    matrix job while passing everywhere else. The fake diverged from the
+    API it stands in for, and a newer interpreter concealed it.
+
+    Iterating the enum *class* works on every supported version; only
+    iterating a member does not.
+    """
+    if isinstance(caps, FakeDeviceCapability):
+        return tuple(c for c in FakeDeviceCapability if caps & c)
+    return tuple(caps)
+
+
 class FakeEventType(enum.IntEnum):
     SEAT_ADDED = 1
     DEVICE_ADDED = 2
@@ -64,7 +87,7 @@ class FakeDevice:
         ),
     ):
         self.calls = []
-        self.capabilities = capabilities
+        self.capabilities = _capability_tuple(capabilities)
 
     def start_emulating(self):
         self.calls.append(("start_emulating",))
@@ -120,7 +143,7 @@ class FakeKeymap:
 
 class FakeSeat:
     def __init__(self, offered):
-        self.capabilities = offered
+        self.capabilities = _capability_tuple(offered)
         self.bound = None
 
     def bind(self, caps):
@@ -757,3 +780,116 @@ class TestNegotiation(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheFakeMatchesTheRealApiShape(unittest.TestCase):
+    """The fake must report capabilities the way python-libei does.
+
+    CI's first run caught this on Python 3.10 and nowhere else. libei types
+    both `Seat.capabilities` and `Device.capabilities` as
+    `tuple[DeviceCapability, ...]`, but the fake stored a single combined
+    Flag. Iterating a Flag *member* was introduced in 3.11, so on 3.11+ the
+    production loop over `seat.capabilities` happened to work and the
+    divergence was invisible; on 3.10 it raised "object is not iterable".
+
+    That is the failure mode a stand-in has that the real thing does not:
+    it can be wrong in a way only some interpreters reveal. These pin the
+    shape rather than the behaviour it happened to have.
+    """
+
+    def test_a_seat_reports_a_tuple_of_individual_capabilities(self):
+        seat = FakeSeat(
+            FakeDeviceCapability.POINTER_ABSOLUTE | FakeDeviceCapability.KEYBOARD
+        )
+        self.assertIsInstance(seat.capabilities, tuple)
+        self.assertEqual(
+            set(seat.capabilities),
+            {FakeDeviceCapability.POINTER_ABSOLUTE, FakeDeviceCapability.KEYBOARD},
+        )
+
+    def test_a_device_reports_a_tuple_too(self):
+        device = FakeDevice(
+            capabilities=FakeDeviceCapability.BUTTON | FakeDeviceCapability.SCROLL
+        )
+        self.assertIsInstance(device.capabilities, tuple)
+        self.assertEqual(
+            set(device.capabilities),
+            {FakeDeviceCapability.BUTTON, FakeDeviceCapability.SCROLL},
+        )
+
+    def test_every_element_is_a_single_flag_not_a_combination(self):
+        # A tuple containing one combined value would still be iterable and
+        # would still pass a careless test, while meaning something the
+        # real library never returns.
+        seat = FakeSeat(
+            FakeDeviceCapability.POINTER
+            | FakeDeviceCapability.BUTTON
+            | FakeDeviceCapability.SCROLL
+        )
+        self.assertEqual(len(seat.capabilities), 3)
+        for cap in seat.capabilities:
+            with self.subTest(cap=cap):
+                self.assertEqual(bin(int(cap)).count("1"), 1)
+
+    def test_a_tuple_is_accepted_unchanged(self):
+        given = (FakeDeviceCapability.KEYBOARD,)
+        self.assertEqual(FakeSeat(given).capabilities, given)
+
+
+class TestPyGObjectIsOnlyNeededToNegotiate(unittest.TestCase):
+    """Constructing with an injected sender must not demand PyGObject.
+
+    The backend needs Gio to negotiate a portal session and for nothing
+    else, and the code says as much where it declines to open a session
+    bus: "an injected sender or device means there is nothing to
+    negotiate". The import check sat above that branch and fired first, so
+    a machine with python-libei and no PyGObject could not construct the
+    backend even when handing it a ready-made sender.
+
+    That is not hypothetical -- it is the shape of a developer venv, and
+    it made tests/test_eiinput_libei.py error there rather than run. CI
+    cannot catch it either way, because CI has neither library.
+    """
+
+    def setUp(self):
+        """Install the fake ei module, but deliberately not the fake gi."""
+        patcher = install_fake_ei()
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        from pyguitest.backends.eiinput import LibeiBackend
+
+        self.LibeiBackend = LibeiBackend
+
+    def _backend(self, **kwargs):
+        # _gio() returning None is exactly what a machine without
+        # PyGObject looks like from inside the backend.
+        with mock.patch("pyguitest.backends.eiinput._gio", return_value=None):
+            return self.LibeiBackend(**kwargs)
+
+    def test_an_injected_device_constructs_without_pygobject(self):
+        self.assertIsNotNone(self._backend(device=FakeDevice()))
+
+    def test_an_injected_sender_alone_constructs_too(self):
+        # FakeSender takes batches of events, one batch per dispatch().
+        sender = FakeSender(
+            [
+                [
+                    FakeEvent(
+                        FakeEventType.SEAT_ADDED,
+                        seat=FakeSeat(
+                            FakeDeviceCapability.POINTER_ABSOLUTE
+                            | FakeDeviceCapability.BUTTON
+                        ),
+                    ),
+                    FakeEvent(FakeEventType.DEVICE_RESUMED, device=FakeDevice()),
+                ]
+            ]
+        )
+        self.assertIsNotNone(self._backend(sender=sender))
+
+    def test_negotiating_without_pygobject_still_refuses_clearly(self):
+        # The requirement is real on the path that actually uses it, and
+        # the message must still name the package to install.
+        with self.assertRaises(BackendUnavailable) as caught:
+            self._backend()
+        self.assertIn("PyGObject", str(caught.exception))

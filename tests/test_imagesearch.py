@@ -17,12 +17,14 @@ supported metric and the rest as caller's-risk.
 """
 
 import os
+import shutil
 import subprocess
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from pyguitest import tools
+from pyguitest import png, tools
 from pyguitest.backends import crop, imagesearch
 from pyguitest.backends.imagesearch import ToolImageSearchBackend
 from pyguitest.capabilities import Capability
@@ -289,3 +291,169 @@ class TestRealCompareOutput(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCropModule(unittest.TestCase):
+    """crop.py's own behaviour, including the paths that fail.
+
+    Shared by the capture backends and the image search, so a mistake here
+    is a mistake in both. Its error handling was entirely untested: every
+    caller injected a runner, so `_run` -- the part that actually decides
+    what a failed crop looks like -- never executed.
+    """
+
+    def test_available_needs_only_one_of_the_two_commands(self):
+        with mock.patch("pyguitest.backends.crop.shutil.which") as which:
+            which.side_effect = lambda name: (
+                "/usr/bin/magick" if name == "magick" else None
+            )
+            self.assertTrue(crop.available())
+            which.side_effect = lambda name: (
+                "/usr/bin/convert" if name == "convert" else None
+            )
+            self.assertTrue(crop.available())
+            which.side_effect = lambda name: None
+            self.assertFalse(crop.available())
+
+    def test_argv_puts_repage_after_the_crop(self):
+        # +repage is not decoration: without it ImageMagick keeps the crop
+        # offset in the page geometry and every later operation sees
+        # coordinates shifted by it.
+        line = crop.argv("/tmp/in.png", (1, 2, 3, 4), "/tmp/out.png")
+        self.assertEqual(
+            line[1:], ["/tmp/in.png", "-crop", "3x4+1+2", "+repage", "/tmp/out.png"]
+        )
+
+    def test_crop_returns_the_destination(self):
+        calls = []
+        self.assertEqual(
+            crop.crop("/a.png", (0, 0, 1, 1), "/b.png", runner=calls.append),
+            "/b.png",
+        )
+        self.assertEqual(len(calls), 1)
+
+    def test_a_missing_imagemagick_says_what_to_install(self):
+        # The likeliest failure on a machine that has a screenshot tool but
+        # no ImageMagick -- and "FileNotFoundError: magick" alone would not
+        # explain why a *capture* needed it.
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError("magick")):
+            with self.assertRaises(PyGUITestError) as caught:
+                crop.crop("/a.png", (0, 0, 1, 1), "/b.png")
+        message = str(caught.exception)
+        self.assertIn("not installed", message)
+        self.assertIn("ImageMagick", message)
+
+    def test_a_timeout_is_reported_as_one(self):
+        with mock.patch(
+            "subprocess.run", side_effect=subprocess.TimeoutExpired("magick", 15)
+        ):
+            with self.assertRaises(PyGUITestError) as caught:
+                crop.crop("/a.png", (0, 0, 1, 1), "/b.png")
+        self.assertIn("timed out", str(caught.exception))
+
+    def test_a_nonzero_exit_reports_imagemagicks_own_stderr(self):
+        with mock.patch(
+            "subprocess.run",
+            return_value=SimpleNamespace(
+                returncode=1, stdout="", stderr="unable to open image"
+            ),
+        ):
+            with self.assertRaises(PyGUITestError) as caught:
+                crop.crop("/a.png", (0, 0, 1, 1), "/b.png")
+        self.assertIn("unable to open image", str(caught.exception))
+
+    def test_a_silent_failure_still_names_the_exit_code(self):
+        with mock.patch(
+            "subprocess.run",
+            return_value=SimpleNamespace(returncode=2, stdout="", stderr=""),
+        ):
+            with self.assertRaises(PyGUITestError) as caught:
+                crop.crop("/a.png", (0, 0, 1, 1), "/b.png")
+        self.assertIn("no output", str(caught.exception))
+
+
+def _pattern(width, height, x0=0, y0=0):
+    """Deterministic, position-unique pixels.
+
+    Every coordinate gets a different colour, so a sub-image can only match
+    at one place. A flat background would let compare match anywhere and
+    the test would pass without proving the offset arithmetic.
+    """
+    rows = []
+    for y in range(y0, y0 + height):
+        row = bytearray()
+        for x in range(x0, x0 + width):
+            row += bytes([(x * 7) % 256, (y * 11) % 256, (x * y) % 256])
+        rows.append(bytes(row))
+    return rows
+
+
+@unittest.skipUnless(
+    shutil.which("compare") and (shutil.which("magick") or shutil.which("convert")),
+    "ImageMagick is not installed",
+)
+class TestAgainstRealImageMagick(unittest.TestCase):
+    """The crop/compare/offset round trip, run for real.
+
+    Everything else in this file mocks the runner, so it checks the command
+    line and the parsing but never that the numbers coming back mean what
+    locate() claims. In particular the region path adds the crop's own
+    offset back onto compare's answer, and arithmetic like that is exactly
+    what a mocked test cannot confirm.
+
+    The images are generated with this package's own PNG encoder rather
+    than committed as fixtures: no binary files in the tree, and it
+    exercises png.py against a real decoder at the same time.
+    """
+
+    HAYSTACK = (60, 40)
+    TEMPLATE_AT = (20, 12)
+    TEMPLATE_SIZE = (8, 6)
+
+    def setUp(self):
+        self.gui = ToolImageSearchBackend(
+            next(t for t in tools.IMAGE_TOOLS if t.name == "compare")
+        )
+        self.haystack = self._write(_pattern(*self.HAYSTACK), self.HAYSTACK)
+        self.template = self._write(
+            _pattern(*self.TEMPLATE_SIZE, *self.TEMPLATE_AT), self.TEMPLATE_SIZE
+        )
+
+    def _write(self, rows, size):
+        descriptor, path = tempfile.mkstemp(suffix=".png")
+        os.close(descriptor)
+        self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
+        png.write_rgb(path, size[0], size[1], rows)
+        return path
+
+    def test_a_template_is_found_at_the_position_it_was_cut_from(self):
+        match = self.gui.locate(self.haystack, self.template)
+        self.assertIsNotNone(match, "compare found nothing at all")
+        self.assertEqual((match.x, match.y), self.TEMPLATE_AT)
+        self.assertEqual((match.width, match.height), self.TEMPLATE_SIZE)
+
+    def test_a_region_search_returns_haystack_coordinates_not_crop_ones(self):
+        # The assertion that matters. compare sees only the cropped image
+        # and answers in *its* coordinates; locate() must add the crop
+        # offset back. Getting this wrong yields a plausible number that is
+        # wrong by exactly the region's origin.
+        match = self.gui.locate(self.haystack, self.template, region=(16, 8, 30, 25))
+        self.assertIsNotNone(match)
+        self.assertEqual((match.x, match.y), self.TEMPLATE_AT)
+
+    def test_the_offset_is_added_rather_than_coincidental(self):
+        # Two different regions containing the same block must both report
+        # the same haystack position -- which they cannot do by accident.
+        first = self.gui.locate(self.haystack, self.template, region=(0, 0, 40, 30))
+        second = self.gui.locate(self.haystack, self.template, region=(10, 5, 40, 30))
+        self.assertEqual((first.x, first.y), self.TEMPLATE_AT)
+        self.assertEqual((second.x, second.y), self.TEMPLATE_AT)
+
+    def test_an_exact_match_scores_zero_on_a_lower_is_better_metric(self):
+        match = self.gui.locate(self.haystack, self.template)
+        self.assertEqual(match.score, 0.0)
+
+    def test_a_template_that_is_not_present_is_refused_by_a_threshold(self):
+        absent = self._write([bytes([255, 0, 255] * 4) for _ in range(4)], (4, 4))
+        match = self.gui.locate(self.haystack, absent, threshold=0.01)
+        self.assertIsNone(match)

@@ -10,11 +10,15 @@ pyguitest/
 ├── pyproject.toml              packaging, ruff and pytest config
 ├── .pre-commit-config.yaml     ruff lint + format on commit
 ├── .github/workflows/ci.yml    tests on 3.10-3.14, lint, types, D-Bus
-├── README.md                   status, install, usage
+├── README.md                   what this is, install, usage
+├── CONTRIBUTING.md             tests, lint, types, CI
 ├── examples/                   runnable scripts, simplest first
-├── gnome-shell-extension/       pyguitest-window-control; opt-in, unverified live
+├── gnome-shell-extension/       pyguitest-window-control; opt-in, live-verified
 ├── docs/
 │   ├── wayland-audit.html      the audit all of this derives from
+│   ├── install.md              what each backend needs, per distribution
+│   ├── input.md                injecting input: permissions, keymaps, libei
+│   ├── validation.md           what has been run against a real desktop
 │   ├── adr-001-dependencies.md why libraries were chosen as they were
 │   ├── adr-002-transports.md   why sockets replaced CLI tools
 │   └── structure.md            this file
@@ -297,8 +301,14 @@ PYTHONPATH=src python3 -m unittest discover -s tests
 **What is not tested:** sway, Hyprland, niri and KWin backends have never run
 against a live session -- the sway and Hyprland JSON schemas are
 reconstructions from their documentation, and niri's is transcribed from the
-`niri-ipc` crate's serde types, all unexercised against a real compositor. UinputBackend hasn't been driven live either. X11Backend now has
-(see below); its python-evdev sibling has not.
+`niri-ipc` crate's serde types, all unexercised against a real compositor.
+UinputBackend has not been driven live either.
+
+X11Backend largely has. On a real X11 session: whole-screen capture (the
+one capability real X11 has that XWayland does not), window control, and
+four of the five tier-6 capabilities. On XWayland: per-window capture.
+What remains untested there is XTest input *injection* and
+`is_window_cursor`.
 
 AT-SPI and the CLI-tool input/capture backends *have* now run live, on a real
 GNOME/XWayland desktop -- and that surfaced three real bugs no unit test

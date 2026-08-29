@@ -84,7 +84,7 @@ exact failure the audit documents for XTest under XWayland.
 ## Consequences
 
 - A minimal install is the package plus one extra, but the `atspi` extra
-  additionally requires distro packages (see README). A virtualenv must be
+  additionally requires distro packages (see install.md). A virtualenv must be
   created with `--system-site-packages` to see them.
 - Backends degrade to unsupported capabilities when a tool is absent, rather
   than failing at import.
