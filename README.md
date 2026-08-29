@@ -56,9 +56,13 @@ set through the same API. Discovering which one you are on is what
 - **AT-SPI leads.** It answers what the window-tree walk was really used for,
   needs neither geometry nor injection permission, and behaves identically under
   X11 and Wayland — the one layer needing no backend matrix.
-- **The X11 backend is a peer, not a legacy path.** It is the only route to
-  FreeBSD and Solaris — libei, uinput and the compositor IPC tools are all Linux
-  interfaces — and the only backend serving tier-6 capabilities at all.
+- **The X11 backend is a peer, not a legacy path.** It is the surest route to
+  the BSDs and Solaris — python-xlib speaks the wire protocol in pure Python and
+  assumes no kernel — and the only backend serving tier-6 capabilities at all.
+  Less is Linux-only than it looks: `/dev/uinput` and libei are kernel
+  interfaces, but compositor IPC is a unix socket and JSON, and sway, grim and
+  wtype are all in FreeBSD ports. Nothing here gates on the platform; nothing
+  off Linux is tested either.
 - **Compositor IPC fills the geometry hole.** sway, Hyprland and niri report
   window rectangles, which no Wayland protocol exposes — and once every rectangle is
   known, hit-testing a coordinate is arithmetic rather than a compositor query.

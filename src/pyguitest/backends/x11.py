@@ -1,11 +1,19 @@
 """The X11 backend, over python-xlib.
 
-Not a legacy path. It is the only route to the FreeBSD and Solaris support
-X11::GUITest has today -- libei, uinput and the compositor IPC tools are all
-Linux interfaces -- and it is the only backend that can serve the tier-6
-capabilities at all.
+Not a legacy path. It is the surest route to the FreeBSD and Solaris support
+X11::GUITest has today -- python-xlib speaks the wire protocol in pure Python,
+so it assumes no kernel -- and it is the only backend that can serve the
+tier-6 capabilities at all.
 
-That last point is the reason the tier scale is documented as a *Wayland*
+It is not the *sole* route off Linux, though, and the README no longer claims
+it is: /dev/uinput and libei are kernel interfaces, but compositor IPC is a
+unix socket and JSON, and sway, grim and wtype are all in FreeBSD ports. A
+wlroots session there would get window IPC, capture and keymap-safe typing
+without this backend. Nothing in the package gates on the platform -- every
+mechanism is probed -- and nothing off Linux is tested either, so treat all
+of it as reasoned rather than demonstrated.
+
+The tier-6 point is the reason the tier scale is documented as a *Wayland*
 ceiling rather than an absolute one. Reading the global pointer position or the
 keyboard state is impossible for an ordinary Wayland client on any compositor,
 but under X11 it is a single round trip. Same API, larger capability set --

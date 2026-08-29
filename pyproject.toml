@@ -7,7 +7,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyguitest"
-version = "0.0.1.dev0"
+# The version lives in src/pyguitest/__init__.py and is read from there, so
+# `pyguitest.__version__`, the wheel and the `--version` flag cannot disagree.
+# setuptools parses that assignment statically; it does not import the package.
+dynamic = ["version"]
 description = "Cross-platform GUI automation; successor to X11::GUITest"
 # 3.9 reached end-of-life in October 2025; 3.10 is the oldest
 # version still receiving security fixes.
@@ -17,10 +20,31 @@ authors = [{name = "Dennis K. Paulsen"}]
 readme = "README.md"
 keywords = ["gui-automation", "testing", "x11", "wayland", "accessibility", "atspi"]
 
-# Upload guard. PyPI rejects any distribution carrying this classifier, so an
-# accidental `twine upload` or a CI publish step fails instead of going public.
-# Remove it deliberately, as its own commit, when publishing is actually wanted.
-classifiers = ["Private :: Do Not Upload"]
+# No `License ::` classifier: with the PEP 639 `license` SPDX string above,
+# setuptools>=77 rejects the distribution if both are present.
+classifiers = [
+    # Every capability is implemented and the API is settled enough to use,
+    # but docs/validation.md still lists paths not yet run against the real
+    # thing -- that is 4-Beta, not 5-Production/Stable.
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: POSIX :: BSD :: FreeBSD",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3 :: Only",
+    "Environment :: X11 Applications",
+    "Topic :: Desktop Environment",
+    "Topic :: Software Development :: Testing",
+    "Topic :: Software Development :: Quality Assurance",
+    # PEP 561: py.typed is shipped, so annotations are usable downstream.
+    "Typing :: Typed",
+]
 
 # No hard dependencies by design. Every display-server mechanism is probed at
 # runtime and degrades to an unsupported capability rather than an import error,
@@ -58,6 +82,11 @@ dev   = ["pytest>=7", "ruff>=0.6", "mypy>=1.11",
 homepage = "https://github.com/ctrondlp/pyguitest"
 repository = "https://github.com/ctrondlp/pyguitest"
 issues = "https://github.com/ctrondlp/pyguitest/issues"
+documentation = "https://github.com/ctrondlp/pyguitest/tree/main/docs"
+changelog = "https://github.com/ctrondlp/pyguitest/blob/main/CHANGELOG.md"
+
+[tool.setuptools.dynamic]
+version = {attr = "pyguitest.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["src"]

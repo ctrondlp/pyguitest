@@ -1,0 +1,10 @@
+# The sdist picks up README, LICENSE, pyproject.toml and tests/ on its own.
+# These are the ones setuptools does not infer, and they matter: distro
+# packagers build from the sdist and expect the changelog and the docs that
+# the README and the source comments point at.
+include CHANGELOG.md
+recursive-include docs *
+recursive-include examples *
+recursive-include scripts *
+prune docs/__pycache__
+global-exclude *.py[cod] __pycache__/*

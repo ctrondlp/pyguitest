@@ -108,3 +108,56 @@ through the layers, the backend registry and its opt-in gating, and
 [what adding a backend involves](docs/structure.md#adding-a-backend).
 Why the dependencies and transports are what they are:
 [ADR 001](docs/adr-001-dependencies.md), [ADR 002](docs/adr-002-transports.md).
+
+## Releasing
+
+Publishing to PyPI is automated and tag-driven. There are no GitHub Releases;
+a plain annotated tag is the record, and [CHANGELOG.md](CHANGELOG.md) is the
+release notes.
+
+The version lives in exactly one place, `src/pyguitest/__init__.py`.
+`pyproject.toml` reads it from there via `[tool.setuptools.dynamic]`, so the
+wheel, `pyguitest --version` and `pyguitest.__version__` cannot drift apart.
+
+### One-time setup
+
+**On PyPI** — the project does not exist yet, so register a *pending*
+publisher rather than uploading anything by hand:
+
+1. pypi.org → *Your account* → *Publishing* → *Add a new pending publisher*
+2. PyPI Project Name `pyguitest`, Owner `ctrondlp`, Repository `pyguitest`,
+   Workflow name `ci.yml`, Environment name `pypi`.
+
+That is the whole credential story. Trusted Publishing (OIDC) mints a
+short-lived token for exactly this repository, workflow file and environment,
+so there is no API token in repository secrets to leak or rotate. The four
+fields above must match the workflow exactly or the publish is rejected.
+
+**On GitHub** — *Settings* → *Environments* → *New environment* → `pypi`.
+Adding yourself as a required reviewer on it is worth doing: it makes each
+publish a deliberate approval rather than a side effect of pushing a tag,
+and a PyPI version number can never be reused or reverted.
+
+### Cutting a release
+
+```sh
+# 1. Bump the single source of truth and record the change.
+$EDITOR src/pyguitest/__init__.py   # __version__ = "0.2.0"
+$EDITOR CHANGELOG.md                # move Unreleased -> 0.2.0, add the links
+git commit -am "Release 0.2.0"
+git push
+
+# 2. Tag. The tag must match __version__ or the build job fails on purpose.
+git tag -a v0.2.0 -m "pyguitest 0.2.0"
+git push origin v0.2.0
+```
+
+The tag push runs the full suite, then `build`, then `publish`. `build` is
+where the release-specific guards live: the tag is checked against the version
+in the built artifact, `twine check --strict` catches a README that renders on
+GitHub but not on PyPI, and the sdist is unpacked and its test suite run — the
+sdist ships `tests/`, and `tests/test_docs.py` reads `docs/`, so `MANIFEST.in`
+has to keep including them for a distro packager to be able to build and test
+from it. `publish` uploads the exact artifact `build` checked, never a rebuild.
+
+Nothing publishes on a branch push: `publish` is gated on `refs/tags/v*`.

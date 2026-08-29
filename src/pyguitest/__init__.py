@@ -46,7 +46,7 @@ from .errors import (
 from .roles import Role
 from .session import Compositor, Environment, SessionType, detect
 
-__version__ = "0.0.1.dev0"
+__version__ = "0.1.0"
 
 __all__ = [
     "connect",
