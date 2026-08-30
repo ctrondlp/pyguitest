@@ -16,6 +16,7 @@ import os
 import pathlib
 from collections.abc import Iterator
 
+from .capabilities import Capability, CapabilitySet
 from .session import Environment
 
 __all__ = ["Hint", "detect_distro", "hints_for", "advice"]
@@ -69,13 +70,36 @@ _FAMILIES = {
 class Hint:
     """One missing piece, and how to install it."""
 
-    __slots__ = ("component", "why", "command")
+    __slots__ = ("component", "why", "command", "installable", "packages")
 
-    def __init__(self, component: str, why: str, command: str | None) -> None:
-        """Describe a gap, what it costs, and the command that closes it."""
+    def __init__(
+        self,
+        component: str,
+        why: str,
+        command: str | None,
+        installable: bool = True,
+        packages: str | None = None,
+    ) -> None:
+        """Describe a gap, what it costs, and the command that closes it.
+
+        `command` is None either because a package exists but its name for
+        this distro isn't known, or because nothing can be installed at all
+        (`installable=False`) -- advice() renders those two cases
+        differently: the former still points at "your distribution", the
+        latter would be telling the user to install something that does not
+        exist.
+
+        `packages` names the tool(s) to look for even when `command` is
+        None -- which backend needs which tool (grim vs. xdotool vs.
+        gnome-screenshot) is decided before the distro's package manager is
+        known, so this lets an unrecognised distro still get a concrete
+        name instead of a bare "ask your distribution".
+        """
         self.component = component
         self.why = why
         self.command = command
+        self.installable = installable
+        self.packages = packages
 
     def __repr__(self) -> str:
         return f"Hint({self.component!r})"
@@ -112,8 +136,20 @@ def detect_distro(os_release: str | None = None) -> str | None:
     return None
 
 
-def hints_for(environment: Environment, distro: str | None = None) -> Iterator[Hint]:
-    """Yield a Hint for each capability the environment is missing."""
+def hints_for(
+    environment: Environment,
+    distro: str | None = None,
+    capabilities: CapabilitySet | None = None,
+) -> Iterator[Hint]:
+    """Yield a Hint for each capability the environment is missing.
+
+    `capabilities` is the set a live `connect()` actually assembled, which is
+    the only way to know whether the pyguitest-window-control GNOME Shell
+    extension is installed and enabled: that requires a real D-Bus call, and
+    Environment/detect() deliberately makes none, so this is the one hint
+    below that reasons from the connection already made rather than from
+    `environment` alone. Passing None just skips that one hint.
+    """
     from .session import Compositor, SessionType
 
     family = _PACKAGES.get(distro or detect_distro() or "", {})
@@ -130,6 +166,26 @@ def hints_for(environment: Environment, distro: str | None = None) -> Iterator[H
             "backend that works on GNOME",
             command("atspi"),
         )
+    # WINDOW_PLACEMENT is a reliable stand-in for "the extension joined the
+    # composite": AT-SPI never provides it (Mutter exposes no
+    # foreign-toplevel protocol AT-SPI could read placement from), so on
+    # Mutter it comes from nowhere else.
+    if (
+        environment.compositor is Compositor.MUTTER
+        and capabilities is not None
+        and Capability.WINDOW_PLACEMENT not in capabilities
+    ):
+        yield Hint(
+            "window control extension",
+            "moving, resizing, minimizing or hit-testing a window, and "
+            "mapping one to its pid -- Mutter implements no foreign-toplevel "
+            "protocol, so only the pyguitest-window-control GNOME Shell "
+            "extension can reach this. Install it by hand: "
+            "see gnome-shell-extension/README.md, then "
+            "`gnome-extensions enable pyguitest-window-control@pyguitest.local`",
+            None,
+            installable=False,
+        )
     # Capture has three routes and the advice differs sharply between them.
     # can_capture, not capture_tools: python-xlib on a real X session and
     # the Screenshot portal both capture with no tool installed, and
@@ -141,11 +197,17 @@ def hints_for(environment: Environment, distro: str | None = None) -> Iterator[H
     if not environment.can_capture:
         # grim is the wlroots-native tool; recommending gnome-screenshot
         # there installs a tool that captures nothing on that compositor.
+        capture_package: str | None
         if environment.compositor is Compositor.WLROOTS:
-            capture_command = f"{installer} grim" if installer else None
+            capture_package = "grim"
         else:
-            capture_command = command("capture")
-        yield Hint("screenshots", "screen capture", capture_command)
+            capture_package = family.get("capture")
+        capture_command = (
+            f"{installer} {capture_package}" if installer and capture_package else None
+        )
+        yield Hint(
+            "screenshots", "screen capture", capture_command, packages=capture_package
+        )
     elif not environment.capture_tools and not captures_natively:
         # Only the portal can capture here, and automatic composition never
         # reaches it -- it is opt-in because its first use prompts. Without
@@ -163,6 +225,7 @@ def hints_for(environment: Environment, distro: str | None = None) -> Iterator[H
             'but the Screenshot portal can -- connect(backend="portalcapture"). '
             "It prompts for consent once, then the desktop remembers it",
             None,
+            installable=False,
         )
     if not environment.image_tools:
         yield Hint(
@@ -170,21 +233,26 @@ def hints_for(environment: Environment, distro: str | None = None) -> Iterator[H
             "locating a control by an image of it, for widgets AT-SPI cannot see",
             command("imagemagick"),
         )
-    if not environment.input_tools and not environment.uinput_writable:
+    uinput_usable = environment.uinput_writable and environment.has_evdev
+    if not environment.input_tools and not uinput_usable:
         # ydotool is ranked last in tools.py precisely because it is
         # keymap-unsafe; recommending it unconditionally here contradicts
         # that ranking on any desktop that has a better option. xdotool
         # (X11, via XTest) and wtype (wlroots, typing only) are both
         # ordinarily packaged, unlike wdotool below.
+        input_package: str | None
         if environment.session_type is SessionType.X11:
-            input_command = f"{installer} xdotool" if installer else None
+            input_package = "xdotool"
             ydotool_is_last_resort = False
         elif environment.compositor is Compositor.WLROOTS:
-            input_command = f"{installer} wtype" if installer else None
+            input_package = "wtype"
             ydotool_is_last_resort = False
         else:
-            input_command = command("input")
+            input_package = family.get("input")
             ydotool_is_last_resort = True
+        input_command = (
+            f"{installer} {input_package}" if installer and input_package else None
+        )
         yield Hint(
             "input injection",
             "moving the pointer and typing"
@@ -195,10 +263,14 @@ def hints_for(environment: Environment, distro: str | None = None) -> Iterator[H
                 else ""
             ),
             input_command,
+            packages=input_package,
         )
         # xdotool and wtype need no /dev/uinput access at all -- only the
-        # ydotool/uinput path this hint exists for does.
-        if ydotool_is_last_resort:
+        # ydotool/uinput path this hint exists for does. And skip this one
+        # when the device is already writable: what's missing there is
+        # python-evdev, not group membership, and telling someone to
+        # usermod/newgrp for a permission they already have is a dead end.
+        if ydotool_is_last_resort and not environment.uinput_writable:
             yield Hint(
                 "membership of the 'input' group",
                 "/dev/uinput is root-only by default. Groups are set at "
@@ -210,9 +282,13 @@ def hints_for(environment: Environment, distro: str | None = None) -> Iterator[H
             )
 
 
-def advice(environment: Environment, distro: str | None = None) -> str:
+def advice(
+    environment: Environment,
+    distro: str | None = None,
+    capabilities: CapabilitySet | None = None,
+) -> str:
     """Render the hints as text, or say that nothing is missing."""
-    found = list(hints_for(environment, distro))
+    found = list(hints_for(environment, distro, capabilities=capabilities))
     if not found:
         return "Nothing missing: every capability this desktop can offer is available."
 
@@ -221,8 +297,13 @@ def advice(environment: Environment, distro: str | None = None) -> str:
         lines.append(f"\n  {hint.component} -- {hint.why}")
         if hint.command:
             lines.append(f"      {hint.command}")
-        else:
-            lines.append("      (install it through your distribution)")
+        elif hint.installable:
+            if hint.packages:
+                lines.append(
+                    f"      ({hint.packages} -- install through your distribution)"
+                )
+            else:
+                lines.append("      (install it through your distribution)")
     # The "input" group hint only appears alongside the uinput/ydotool
     # recommendation (xdotool and wtype need no /dev/uinput access), so its
     # presence is the signal that this caveat -- specific to that path -- applies.

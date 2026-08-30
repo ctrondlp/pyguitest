@@ -3,8 +3,9 @@
 import dataclasses
 import unittest
 
+from pyguitest.capabilities import Capability, CapabilitySet
 from pyguitest.hints import advice, detect_distro, hints_for
-from pyguitest.session import SessionType, detect
+from pyguitest.session import Compositor, SessionType, detect
 
 
 def environment(**overrides):
@@ -173,9 +174,33 @@ class TestInputAdvice(unittest.TestCase):
             capture_tools=("grim",),
             input_tools=(),
             uinput_writable=True,
+            has_evdev=True,
         )
         components = [h.component for h in hints_for(env)]
         self.assertNotIn("input injection", components)
+
+    def test_writable_uinput_without_evdev_still_needs_input_advice(self):
+        # Regression: a writable /dev/uinput proves permissions are fine, not
+        # that python-evdev is importable -- UinputBackend needs both. A box
+        # with the device already writable but the pip package never
+        # installed used to be told nothing was missing.
+        env = environment(
+            has_atspi=True,
+            has_pygobject=True,
+            capture_tools=("grim",),
+            input_tools=(),
+            uinput_writable=True,
+            has_evdev=False,
+        )
+        hints = list(hints_for(env, distro="fedora"))
+        components = [h.component for h in hints]
+        self.assertIn("input injection", components)
+        input_hint = next(h for h in hints if h.component == "input injection")
+        self.assertIn("python3-evdev", input_hint.command)
+        # The device is already writable, so telling the user to join the
+        # 'input' group would be a dead end -- nothing here is a permission
+        # problem.
+        self.assertNotIn("membership of the 'input' group", components)
 
 
 class TestToolRecommendationsAreKeyedByCompositor(unittest.TestCase):
@@ -293,6 +318,19 @@ class TestCaptureHintFollowsEveryRoute(unittest.TestCase):
         self.assertIn("portalcapture", hint.why)
         # Nothing to install: no tool can work on this session.
         self.assertIsNone(hint.command)
+        self.assertFalse(hint.installable)
+        # Regression: advice() used to append a generic "(install it
+        # through your distribution)" fallback whenever command was None,
+        # contradicting the "no tool can work" text right above it.
+        env = environment(
+            has_atspi=True,
+            has_pygobject=True,
+            capture_tools=(),
+            has_portal=True,
+            input_tools=("wdotool",),
+            image_tools=("compare",),
+        )
+        self.assertNotIn("install it through your distribution", advice(env))
 
     def test_a_working_tool_silences_it_completely(self):
         self.assertIsNone(self._hint(capture_tools=("grim",)))
@@ -303,3 +341,67 @@ class TestCaptureHintFollowsEveryRoute(unittest.TestCase):
         self.assertIsNone(
             self._hint(has_xlib=True, session_type=SessionType.X11, has_portal=True)
         )
+
+
+class TestGnomeShellExtensionHint(unittest.TestCase):
+    """Whether the pyguitest-window-control extension is missing.
+
+    Unlike every other hint, this one cannot be answered from `environment`
+    alone -- detecting it needs a real D-Bus call, which session.py's
+    detect() deliberately never makes (see its module docstring). So the
+    signal instead comes from the capability set a live connect() actually
+    assembled: WINDOW_PLACEMENT is a reliable stand-in for "the extension
+    joined the composite", since AT-SPI never provides it on Mutter (Mutter
+    exposes no foreign-toplevel protocol for AT-SPI to read placement from).
+    """
+
+    def _complete(self, **overrides):
+        base = {
+            "has_atspi": True,
+            "has_pygobject": True,
+            "capture_tools": ("grim",),
+            "input_tools": ("wdotool",),
+            "image_tools": ("compare",),
+        }
+        return environment(**{**base, **overrides})
+
+    def test_fires_when_the_extension_never_joined_the_composite(self):
+        env = self._complete()
+        caps = CapabilitySet({Capability.WINDOW_LIST})
+        found = list(hints_for(env, capabilities=caps))
+        self.assertEqual([h.component for h in found], ["window control extension"])
+        hint = found[0]
+        self.assertIsNone(hint.command)
+        self.assertFalse(hint.installable)
+        self.assertIn("gnome-shell-extension/README.md", hint.why)
+
+    def test_silent_once_the_extension_is_active(self):
+        env = self._complete()
+        caps = CapabilitySet({Capability.WINDOW_LIST, Capability.WINDOW_PLACEMENT})
+        self.assertEqual(list(hints_for(env, capabilities=caps)), [])
+
+    def test_silent_when_no_capability_set_was_supplied(self):
+        # The common case: callers that never connected (or don't pass
+        # capabilities through) get every other hint but not this one --
+        # there is no live evidence either way, so staying silent beats
+        # guessing "missing" and nagging a desktop that has it installed.
+        env = self._complete()
+        found = list(hints_for(env))
+        self.assertNotIn("window control extension", [h.component for h in found])
+
+    def test_silent_off_mutter_regardless_of_capabilities(self):
+        # The extension is GNOME-specific; a wlroots or KWin session missing
+        # WINDOW_PLACEMENT has an entirely different (and already-hinted)
+        # cause, not "install a GNOME Shell extension".
+        env = self._complete(compositor=Compositor.WLROOTS)
+        caps = CapabilitySet({Capability.WINDOW_LIST})
+        found = list(hints_for(env, capabilities=caps))
+        self.assertNotIn("window control extension", [h.component for h in found])
+
+    def test_advice_never_suggests_a_distro_package_for_it(self):
+        env = self._complete()
+        caps = CapabilitySet({Capability.WINDOW_LIST})
+        text = advice(env, capabilities=caps)
+        self.assertIn("window control extension", text)
+        self.assertIn("gnome-extensions enable", text)
+        self.assertNotIn("install it through your distribution", text)

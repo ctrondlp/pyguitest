@@ -64,9 +64,9 @@ def _report() -> int:
         # package -- so gating on it printed a table full of [ no] followed
         # by advice() truthfully saying nothing installable is missing.
         # hints_for() is what actually reasons about installed components.
-        if list(hints_for(gui.environment)):
+        if list(hints_for(gui.environment, capabilities=gui.capabilities)):
             print()
-            print(advice(gui.environment))
+            print(advice(gui.environment, capabilities=gui.capabilities))
     return 0
 
 
@@ -75,7 +75,7 @@ def _doctor() -> int:
     with connect() as gui:
         print(gui.environment.summary())
         print()
-        print(advice(gui.environment))
+        print(advice(gui.environment, capabilities=gui.capabilities))
     return 0
 
 

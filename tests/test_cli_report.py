@@ -18,13 +18,11 @@ from pyguitest.__main__ import _report
 
 
 class _FakeGui:
-    def __init__(self, environment, capabilities_missing):
+    def __init__(self, environment, capabilities=None):
         self.environment = environment
-        self._missing = capabilities_missing
-
-    @property
-    def capabilities(self):
-        return mock.Mock(missing=self._missing)
+        self.capabilities = (
+            capabilities if capabilities is not None else pyguitest.CapabilitySet()
+        )
 
     def report(self):
         return "fake report"
@@ -60,7 +58,14 @@ class TestReportAdviceGating(unittest.TestCase):
             input_tools=("wdotool",),
             image_tools=("compare",),
         )
-        text = self._run(_FakeGui(complete, capabilities_missing={"anything"}))
+        # WINDOW_PLACEMENT stands in for "the GNOME Shell extension is
+        # active" -- compositor is MUTTER here (XDG_CURRENT_DESKTOP=GNOME),
+        # and without it hints_for() would (correctly) report the extension
+        # as missing, which is not what this test is exercising.
+        complete_capabilities = pyguitest.CapabilitySet(
+            {pyguitest.Capability.WINDOW_PLACEMENT}
+        )
+        text = self._run(_FakeGui(complete, capabilities=complete_capabilities))
         self.assertIn("fake report", text)
         self.assertNotIn("Nothing missing", text)
         self.assertNotIn("unlock more capabilities", text)
@@ -72,7 +77,7 @@ class TestReportAdviceGating(unittest.TestCase):
         import dataclasses
 
         incomplete = dataclasses.replace(environment, has_atspi=False)
-        text = self._run(_FakeGui(incomplete, capabilities_missing={"anything"}))
+        text = self._run(_FakeGui(incomplete))
         self.assertIn("unlock more capabilities", text)
 
 

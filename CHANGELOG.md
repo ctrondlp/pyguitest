@@ -58,9 +58,40 @@ All notable changes to pyguitest are recorded here. The format follows
   "fixed": matching X11::GUITest's original `IsWindowCursor` contract is
   the point of this backend, so this is an inherent limitation of that
   contract on a modern desktop, not a regression to correct.
+- `examples/01_what_can_i_do.py` now follows its capability table with
+  install advice for whatever is missing, via `hints.advice()` — the same
+  call `pyguitest doctor` already made, now demonstrated in the example
+  that says "start here" rather than left for the reader to discover on
+  their own. `hints.hints_for()`/`hints.advice()` gained an optional
+  `capabilities=` parameter, which enables one new hint: on GNOME/Mutter, a
+  missing `WINDOW_PLACEMENT` — never provided by AT-SPI there, since Mutter
+  implements no foreign-toplevel protocol for it to read placement from —
+  means the `pyguitest-window-control` Shell extension isn't installed or
+  enabled, and `doctor`/the example now say so, pointing at
+  `gnome-shell-extension/README.md` and `gnome-extensions enable`.
+  Detecting this needs a real D-Bus call, which `session.py`'s `detect()`
+  deliberately never makes (see its module docstring), so the signal
+  instead comes from the capability set a live `connect()` already
+  assembled — passed through by `pyguitest.__main__` and the example,
+  rather than adding a second, redundant probe.
 
 ### Fixed
 
+- `hints.advice()`'s screen-capture hint said `(install it through your
+  distribution)` even in the one case where nothing can be installed at
+  all: a Wayland/Mutter session with no screenshot tool that can reach the
+  compositor, where the actual fix is `connect(backend="portalcapture")`,
+  not a package — the line directly contradicted the hint's own "no
+  screenshot tool can work on this session" text. `Hint` gained an
+  `installable` flag so the fallback line is skipped when there is
+  genuinely nothing to install.
+- The same fallback also named no tool at all when a distro's
+  install-command prefix was unknown (an unrecognised `/etc/os-release`),
+  even though which tool a given backend needs — `grim` on wlroots,
+  `xdotool` on X11, `wtype` on wlroots for input — was already decided
+  before the distro lookup ran. `Hint` gained a `packages` field so the
+  fallback now names the actual tool even without a runnable install
+  command.
 - `ToolClipboardBackend.set_clipboard()` hung for the full 15-second
   subprocess timeout on every call. The write tools all fork into the
   background to keep serving the clipboard after the caller returns —

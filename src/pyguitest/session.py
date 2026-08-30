@@ -123,6 +123,8 @@ class Environment:
     uinput_writable: bool = False
     has_atspi: bool = False
     has_pygobject: bool = False
+    has_dogtail: bool = False
+    has_evdev: bool = False
     has_portal: bool = False
     has_xtest: bool = False
     has_xlib: bool = False
@@ -144,18 +146,25 @@ class Environment:
         machine where nothing can actually inject, which suppresses the
         "install an input tool" hint exactly where it is needed most.
         """
-        return bool(self.input_tools) or self.has_libei or self.uinput_writable
+        return (
+            bool(self.input_tools)
+            or self.has_libei
+            or (self.uinput_writable and self.has_evdev)
+        )
 
     @property
     def can_use_atspi(self) -> bool:
         """Whether the accessibility layer is actually reachable.
 
-        Needs both halves: the libatspi service and the PyGObject binding. The
-        C library alone is common on desktops where nobody installed the Python
-        bindings, and reporting that as support would strand the one layer that
-        works identically under X11 and Wayland.
+        Needs all three pieces: the libatspi service and the PyGObject
+        binding, both from the distro, plus dogtail, the one part pip
+        actually supplies (see the 'atspi' extra). The distro halves alone
+        are common on a fresh box where nobody has run `pip install
+        pyguitest[atspi]` yet, and reporting that as support would silence
+        the hint that says so -- see hints.py -- while AtspiBackend still
+        fails to construct.
         """
-        return self.has_atspi and self.has_pygobject
+        return self.has_atspi and self.has_pygobject and self.has_dogtail
 
     @property
     def can_capture(self) -> bool:
@@ -230,7 +239,7 @@ class Environment:
                     for n, ok in (
                         ("libei", self.has_libei),
                         ("portal", self.has_portal),
-                        ("uinput", self.uinput_writable),
+                        ("uinput", self.uinput_writable and self.has_evdev),
                         ("at-spi", self.can_use_atspi),
                         ("xtest", self.has_xtest),
                     )
@@ -293,8 +302,9 @@ def detect(env: Mapping[str, str] | None = None) -> Environment:
 
     Only affects the parts of detection that read environment variables:
     session classification, compositor identification, and portal detection.
-    Library presence (has_libei, has_atspi, has_pygobject), /dev/uinput
-    access, and installed tools are always probed against the real host --
+    Library presence (has_libei, has_atspi, has_pygobject, has_dogtail,
+    has_evdev), /dev/uinput access, and installed tools are always probed
+    against the real host --
     a fake `env` cannot make evdev importable or put swaymsg on PATH. A test
     against those needs to mock the underlying probe (_lib, _module, _uinput,
     tools.discover) directly rather than routing through `env`.
@@ -304,6 +314,10 @@ def detect(env: Mapping[str, str] | None = None) -> Environment:
     session_type = _classify(env)
     compositor = _compositor(env, session_type)
     uinput_present, uinput_writable = _uinput()
+    has_atspi = _lib("atspi")
+    has_pygobject = _module("gi.repository")
+    has_dogtail = _module("dogtail")
+    has_evdev = _module("evdev")
     notes = []
 
     if session_type is SessionType.XWAYLAND:
@@ -316,10 +330,23 @@ def detect(env: Mapping[str, str] | None = None) -> Environment:
             "Mutter implements no foreign-toplevel protocol; window capabilities "
             "need a Shell extension"
         )
-    if _lib("atspi") and not _module("gi.repository"):
+    if has_atspi and not has_pygobject:
         notes.append(
             "libatspi is present but PyGObject is not; install the 'atspi' extra "
             "to use element automation"
+        )
+    if has_atspi and has_pygobject and not has_dogtail:
+        notes.append(
+            "libatspi and PyGObject are present but dogtail is not; install "
+            "the 'atspi' extra (pip install 'pyguitest[atspi]') to use "
+            "element automation"
+        )
+    if uinput_writable and not has_evdev:
+        notes.append(
+            "/dev/uinput is writable but python-evdev is not installed; "
+            "install the 'uinput' extra (pip install 'pyguitest[uinput]') to "
+            "use it -- building it needs a C compiler and the matching "
+            "kernel headers"
         )
     # A tool that only talks to an X server cannot see native Wayland
     # clients, so it is not a usable transport in a pure Wayland session --
@@ -357,8 +384,10 @@ def detect(env: Mapping[str, str] | None = None) -> Environment:
         has_libei=_lib("ei"),
         has_uinput=uinput_present,
         uinput_writable=uinput_writable,
-        has_atspi=_lib("atspi"),
-        has_pygobject=_module("gi.repository"),
+        has_atspi=has_atspi,
+        has_pygobject=has_pygobject,
+        has_dogtail=has_dogtail,
+        has_evdev=has_evdev,
         has_portal=_portal(env),
         has_xtest=_lib("Xtst"),
         has_xlib=_module("Xlib"),

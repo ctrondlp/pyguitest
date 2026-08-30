@@ -218,11 +218,14 @@ nothing starts persisting behind your back. Ask for it explicitly, and save
 the token that comes back:
 
 ```python
-gui = connect(backend="portal", backend_options={
-    "persist_mode": 2,        # PERSIST_UNTIL_REVOKED
-    "restore_token": saved,   # None on the first run
-})
-save_it_yourself(gui.backend.restore_token)   # single-use: replaces `saved`
+gui = connect(
+    backend="portal",
+    backend_options={
+        "persist_mode": 2,  # PERSIST_UNTIL_REVOKED
+        "restore_token": saved,  # None on the first run
+    },
+)
+save_it_yourself(gui.backend.restore_token)  # single-use: replaces `saved`
 ```
 
 pyguitest deliberately never writes the token anywhere itself — see the

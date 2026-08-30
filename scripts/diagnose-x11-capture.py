@@ -10,37 +10,49 @@ d = display.Display()
 screen = d.screen()
 root = screen.root
 
-print("session   XDG_SESSION_TYPE=%r WAYLAND_DISPLAY=%r DISPLAY=%r"
-      % (os.environ.get("XDG_SESSION_TYPE"), os.environ.get("WAYLAND_DISPLAY"),
-         os.environ.get("DISPLAY")))
-print("setup     screen.width_in_pixels x height = %sx%s"
-      % (screen.width_in_pixels, screen.height_in_pixels))
-print("setup     root_depth=%s root_visual=0x%x white=0x%x"
-      % (screen.root_depth, screen.root_visual, screen.white_pixel))
-print("screens   screen_count=%s" % d.screen_count())
+print(
+    f"session   XDG_SESSION_TYPE={os.environ.get('XDG_SESSION_TYPE')!r} "
+    f"WAYLAND_DISPLAY={os.environ.get('WAYLAND_DISPLAY')!r} "
+    f"DISPLAY={os.environ.get('DISPLAY')!r}"
+)
+print(
+    f"setup     screen.width_in_pixels x height = "
+    f"{screen.width_in_pixels}x{screen.height_in_pixels}"
+)
+print(
+    f"setup     root_depth={screen.root_depth} "
+    f"root_visual=0x{screen.root_visual:x} white=0x{screen.white_pixel:x}"
+)
+print(f"screens   screen_count={d.screen_count()}")
 
 g = root.get_geometry()
-print("live      root.get_geometry() = %sx%s+%s+%s depth=%s"
-      % (g.width, g.height, g.x, g.y, g.depth))
-print("live      root id = 0x%x (%d)" % (root.id, root.id))
+print(
+    f"live      root.get_geometry() = {g.width}x{g.height}+{g.x}+{g.y} depth={g.depth}"
+)
+print(f"live      root id = 0x{root.id:x} ({root.id})")
 
-print("byteorder image_byte_order=%s (0=LSBFirst)" % d.display.info.image_byte_order)
-print("formats   %s" % [(f.depth, f.bits_per_pixel, f.scanline_pad)
-                        for f in d.display.info.pixmap_formats])
+print(f"byteorder image_byte_order={d.display.info.image_byte_order} (0=LSBFirst)")
+formats = [
+    (f.depth, f.bits_per_pixel, f.scanline_pad) for f in d.display.info.pixmap_formats
+]
+print(f"formats   {formats}")
 
 attrs = root.get_attributes()
-print("root      map_state=%s (2=IsViewable)" % attrs.map_state)
+print(f"root      map_state={attrs.map_state} (2=IsViewable)")
 
 
 def attempt(label, drawable, x, y, w, h, fmt=X.ZPixmap, mask=0xFFFFFFFF):
+    """Try one GetImage call and report whether it succeeded."""
     try:
         r = drawable.get_image(x, y, w, h, fmt, mask)
         data = r.data if isinstance(r.data, bytes) else bytes(r.data)
-        print("OK   %-42s depth=%s bytes=%d (stride=%.2f)"
-              % (label, r.depth, len(data), len(data) / h if h else 0))
+        stride = len(data) / h if h else 0
+        print(
+            f"OK   {label:<42} depth={r.depth} bytes={len(data)} (stride={stride:.2f})"
+        )
         return True
     except Exception as exc:
-        print("FAIL %-42s %s: %s" % (label, type(exc).__name__, exc))
+        print(f"FAIL {label:<42} {type(exc).__name__}: {exc}")
         return False
 
 
@@ -68,8 +80,10 @@ for child in root.query_tree().children:
         cls = child.get_wm_class()
     except Exception:
         cls = None
-    print("     id=0x%-9x %5sx%-5s depth=%-3s map_state=%s wm_class=%s"
-          % (child.id, cg.width, cg.height, cg.depth, a.map_state, cls))
+    print(
+        f"     id=0x{child.id:<9x} {cg.width:>5}x{cg.height:<5} depth={cg.depth:<3} "
+        f"map_state={a.map_state} wm_class={cls}"
+    )
     # No size floor. A 1x1 InputOutput window is a perfectly valid
     # GetImage target, and on a pure Wayland session it may be the only
     # one in existence -- an earlier `width > 8` filter excluded the
@@ -86,7 +100,7 @@ if not candidates:
     print("     or  xterm &")
 else:
     for child, cg, cls in candidates[:5]:
-        label = "child 0x%x %s" % (child.id, cls[0] if cls else "?")
+        label = f"child 0x{child.id:x} {cls[0] if cls else '?'}"
         attempt(label + " 1x1", child, 0, 0, 1, 1)
         attempt(label + " full", child, 0, 0, cg.width, cg.height)
 
@@ -95,7 +109,7 @@ for i in range(d.screen_count()):
     s = d.screen(i)
     try:
         sg = s.root.get_geometry()
-        ok = attempt("screen %d root 1x1" % i, s.root, 0, 0, 1, 1)
-        print("     screen %d root=0x%x %sx%s ok=%s" % (i, s.root.id, sg.width, sg.height, ok))
+        ok = attempt(f"screen {i} root 1x1", s.root, 0, 0, 1, 1)
+        print(f"     screen {i} root=0x{s.root.id:x} {sg.width}x{sg.height} ok={ok}")
     except Exception:
         traceback.print_exc()

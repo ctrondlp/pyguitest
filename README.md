@@ -148,8 +148,8 @@ see one object. `backend.providers()` shows the routing.
 ### Screenshots
 
 ```python
-gui.screenshot("desktop.png")                       # the whole desktop
-gui.screenshot("editor.png", window=window)         # one window
+gui.screenshot("desktop.png")  # the whole desktop
+gui.screenshot("editor.png", window=window)  # one window
 gui.screenshot("corner.png", region=(0, 0, 400, 300))
 ```
 

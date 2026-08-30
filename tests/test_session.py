@@ -111,10 +111,26 @@ class TestAtspiDetection(unittest.TestCase):
         # while the Python binding is missing, and an empty namespace directory
         # makes find_spec("gi") succeed too.
         e = detect(env(WAYLAND_DISPLAY="wayland-0"))
-        both = dataclasses.replace(e, has_atspi=True, has_pygobject=True)
+        both = dataclasses.replace(
+            e, has_atspi=True, has_pygobject=True, has_dogtail=True
+        )
         self.assertTrue(both.can_use_atspi)
-        c_only = dataclasses.replace(e, has_atspi=True, has_pygobject=False)
+        c_only = dataclasses.replace(
+            e, has_atspi=True, has_pygobject=False, has_dogtail=True
+        )
         self.assertFalse(c_only.can_use_atspi)
+
+    def test_distro_halves_alone_are_not_reported_as_usable(self):
+        # Regression: libatspi and PyGObject both come from the distro and
+        # can be present with dogtail -- the one part pip actually
+        # installs -- still missing. AtspiBackend cannot construct without
+        # it, so reporting can_use_atspi True here silences the hint that
+        # says to `pip install pyguitest[atspi]`.
+        e = detect(env(WAYLAND_DISPLAY="wayland-0"))
+        no_dogtail = dataclasses.replace(
+            e, has_atspi=True, has_pygobject=True, has_dogtail=False
+        )
+        self.assertFalse(no_dogtail.can_use_atspi)
 
 
 class TestPortalDetectionHonoursTheFakeEnvironment(unittest.TestCase):
