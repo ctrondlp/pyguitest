@@ -33,6 +33,10 @@ class FakeVariant:
         self.signature = signature
         self.value = value
 
+    def unpack(self):
+        """Mirrors real GLib.Variant.unpack(): back to a plain Python value."""
+        return self.value
+
 
 class FakeReply:
     """Stands in for the GVariant call_sync() returns."""
@@ -44,12 +48,105 @@ class FakeReply:
         return self._value
 
 
+class FakeConnection:
+    """Stands in for the Gio.DBusConnection window_events() subscribes on."""
+
+    def __init__(self):
+        self.subscriptions = {}
+        self.unsubscribed = []
+        self._next_id = 1
+
+    def signal_subscribe(
+        self, _bus_name, _iface, _signal, _path, _arg0, _flags, callback, _user_data
+    ):
+        sub_id = self._next_id
+        self._next_id += 1
+        self.subscriptions[sub_id] = callback
+        return sub_id
+
+    def signal_unsubscribe(self, sub_id):
+        self.subscriptions.pop(sub_id, None)
+        self.unsubscribed.append(sub_id)
+
+    def deliver(self, change, wid, title):
+        """Simulate the extension's WindowEvent signal arriving.
+
+        Real GDBus dispatches to every matching subscription; these tests
+        only ever have one live at a time, but broadcasting to all matches
+        that rather than assuming it.
+        """
+        params = FakeVariant("(sus)", (change, wid, title))
+        for callback in list(self.subscriptions.values()):
+            callback(None, None, None, None, None, params, None)
+
+
+class FakeLoopDriver:
+    """What FakeMainLoop.run() actually does, scripted by each test.
+
+    Stands in for a real GLib main context: nothing here is asynchronous,
+    so a test scripts what should "arrive" by pushing onto `scripted`
+    (delivered on the connection, exactly like a real WindowEvent signal)
+    before calling into window_events()/wait_for_window(). A run() with
+    nothing scripted and no pending timeout raises rather than hanging --
+    the fake equivalent of what would otherwise be an indefinite block.
+    """
+
+    def __init__(self, connection):
+        self.connection = connection
+        self.scripted = []
+        self._timeout_callback = None
+
+    def timeout_add(self, _milliseconds, callback):
+        self._timeout_callback = callback
+        return 1
+
+    def source_remove(self, _source_id):
+        self._timeout_callback = None
+
+    def pump(self):
+        if self.scripted:
+            self.connection.deliver(*self.scripted.pop(0))
+            return
+        if self._timeout_callback is not None:
+            callback = self._timeout_callback
+            self._timeout_callback = None
+            callback()
+            return
+        raise AssertionError(
+            "FakeMainLoop.run() was called with nothing scripted -- the "
+            "real GLib.MainLoop would block here forever"
+        )
+
+
+class FakeMainLoop:
+    """Stands in for GLib.MainLoop, driven by a FakeLoopDriver."""
+
+    def __init__(self, driver):
+        self._driver = driver
+        self._running = False
+
+    def run(self):
+        self._running = True
+        self._driver.pump()
+        self._running = False
+
+    def quit(self):
+        self._running = False
+
+    def is_running(self):
+        return self._running
+
+
 class FakeProxy:
     """Stands in for a Gio.DBusProxy bound to the extension's interface."""
 
-    def __init__(self, windows=None):
+    def __init__(self, windows=None, connection=None):
         self.windows = list(windows) if windows is not None else [_EDITOR, _BROWSER]
         self.calls = []
+        self._connection = connection or FakeConnection()
+
+    def get_connection(self):
+        return self._connection
 
     def call_sync(self, method, parameters, flags, timeout, cancellable):
         args = parameters.value if parameters is not None else None
@@ -108,7 +205,7 @@ class FakeProxy:
         return FakeReply((0,))
 
 
-def install_fake_gi():
+def install_fake_gi(driver=None):
     gi = types.ModuleType("gi")
     gi.require_version = lambda *a, **kw: None
     repository = types.ModuleType("gi.repository")
@@ -117,10 +214,15 @@ def install_fake_gi():
     Gio.BusType = types.SimpleNamespace(SESSION=1)
     Gio.DBusProxyFlags = types.SimpleNamespace(NONE=0)
     Gio.DBusCallFlags = types.SimpleNamespace(NONE=0)
+    Gio.DBusSignalFlags = types.SimpleNamespace(NONE=0)
     Gio.DBusProxy = types.SimpleNamespace(new_for_bus_sync=lambda *a, **kw: FakeProxy())
 
     GLib = types.ModuleType("gi.repository.GLib")
     GLib.Variant = FakeVariant
+    if driver is not None:
+        GLib.MainLoop = lambda: FakeMainLoop(driver)
+        GLib.timeout_add = driver.timeout_add
+        GLib.source_remove = driver.source_remove
 
     repository.Gio = Gio
     repository.GLib = GLib
@@ -138,13 +240,15 @@ def install_fake_gi():
 
 class GnomeShellTestCase(unittest.TestCase):
     def setUp(self):
-        patcher = install_fake_gi()
+        self.connection = FakeConnection()
+        self.driver = FakeLoopDriver(self.connection)
+        patcher = install_fake_gi(driver=self.driver)
         patcher.start()
         self.addCleanup(patcher.stop)
         from pyguitest.backends import gnomeshell
 
         self.module = gnomeshell
-        self.proxy = FakeProxy()
+        self.proxy = FakeProxy(connection=self.connection)
         self.gui = gnomeshell.GnomeShellBackend(proxy=self.proxy)
 
 
@@ -440,3 +544,93 @@ class TestCaptureWindow(GnomeShellTestCase):
         with self.assertRaises(CapabilityUnsupported) as caught:
             gui.capture(window=1, path="/tmp/x.png")
         self.assertIn("Meta.WindowActor.get_image", str(caught.exception))
+
+
+class TestWindowEvents(GnomeShellTestCase):
+    """window_events()/wait_for_window() against the fake main loop above.
+
+    Not exercised against real gnome-shell or GLib -- same limitation the
+    module docstring states for everything else here. FakeLoopDriver
+    stands in for the event loop deterministically: a test scripts what
+    "arrives" before consuming the generator, rather than anything actually
+    running concurrently.
+    """
+
+    def test_yields_a_new_window_event(self):
+        self.driver.scripted.append(("new", 3, "Terminal"))
+        events = self.gui.window_events(timeout=1)
+        event = next(events)
+        self.assertEqual(event.change, "new")
+        self.assertEqual(event.window.handle, 3)
+        self.assertEqual(event.window.title, "Terminal")
+        events.close()
+
+    def test_close_event_carries_the_title_even_though_the_window_is_gone(self):
+        # Regression risk: by the time a "close" signal reaches Python the
+        # window is already gone from ListWindows, so there is nothing left
+        # to look its title up against -- the extension must send it with
+        # the event itself, not just the id.
+        self.driver.scripted.append(("close", 1, "Editor"))
+        event = next(self.gui.window_events(timeout=1))
+        self.assertEqual(event.change, "close")
+        self.assertEqual(event.window.title, "Editor")
+
+    def test_multiple_events_are_each_yielded_in_order(self):
+        self.driver.scripted.extend(
+            [("new", 3, "Terminal"), ("title", 1, "Editor - modified")]
+        )
+        events = self.gui.window_events(timeout=1)
+        first = next(events)
+        second = next(events)
+        self.assertEqual((first.change, first.window.title), ("new", "Terminal"))
+        self.assertEqual(
+            (second.change, second.window.title), ("title", "Editor - modified")
+        )
+        events.close()
+
+    def test_unsubscribes_when_the_generator_is_closed(self):
+        self.driver.scripted.append(("new", 3, "Terminal"))
+        events = self.gui.window_events(timeout=1)
+        next(events)
+        events.close()
+        self.assertEqual(len(self.connection.subscriptions), 0)
+        self.assertEqual(len(self.connection.unsubscribed), 1)
+
+    def test_a_timeout_with_nothing_arriving_ends_cleanly(self):
+        # No scripted signal, so the driver fires the timeout callback
+        # instead of delivering an event -- window_events() must end the
+        # generator, not raise.
+        self.assertEqual(list(self.gui.window_events(timeout=0.001)), [])
+
+    def test_requires_window_events(self):
+        gui = self.module.GnomeShellBackend(
+            proxy=CapturingProxy(supported=False, missing="x")
+        )
+        with mock.patch.object(
+            type(gui), "capabilities", new_callable=mock.PropertyMock
+        ) as caps:
+            caps.return_value = self.module.CapabilitySet(())
+            with self.assertRaises(CapabilityUnsupported):
+                list(gui.window_events(timeout=0.001))
+
+    def test_wait_for_window_returns_an_existing_match_without_subscribing(self):
+        found = self.gui.wait_for_window("Edit")
+        self.assertEqual(found.title, "Editor")
+        self.assertEqual(self.connection.subscriptions, {})
+
+    def test_wait_for_window_picks_up_a_new_matching_window(self):
+        self.driver.scripted.append(("new", 3, "Terminal"))
+        found = self.gui.wait_for_window("Term", timeout=1)
+        self.assertEqual(found.title, "Terminal")
+
+    def test_wait_for_window_ignores_a_close_event(self):
+        self.driver.scripted.extend([("close", 1, "Editor"), ("new", 3, "Terminal")])
+        found = self.gui.wait_for_window("Terminal", timeout=1)
+        self.assertEqual(found.title, "Terminal")
+
+    def test_wait_for_window_times_out_to_none(self):
+        self.assertIsNone(self.gui.wait_for_window("Nope", timeout=0.001))
+
+
+if __name__ == "__main__":
+    unittest.main()

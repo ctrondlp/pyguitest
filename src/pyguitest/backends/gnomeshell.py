@@ -19,7 +19,9 @@ gnome-shell-extension/README.md.
 from __future__ import annotations
 
 import os
+import re
 import tempfile
+import time
 
 from ..capabilities import Capability, CapabilitySet
 from ..errors import (
@@ -29,6 +31,7 @@ from ..errors import (
     WindowNotFound,
 )
 from .base import GUIBackend, Window
+from .windows import WindowEvent
 
 __all__ = ["GnomeShellBackend", "available"]
 
@@ -150,6 +153,14 @@ class GnomeShellBackend(GUIBackend):
         the extension captures a window's own actor and has no
         whole-screen method, so claiming it would promise something
         nothing here can deliver.
+
+        WINDOW_EVENTS, unlike WINDOW_CAPTURE, is not behind its own probe:
+        it rides on Meta.Display's `window-created` and Meta.Window's
+        `unmanaging`/`notify::title` signals, which have been stable
+        Mutter API for far longer than REQUIRED_WINDOW_METHODS' own list.
+        The extension logs (not raises) if connecting them ever fails, the
+        same as a genuinely incompatible shell would for any other API --
+        see PyguitestService.startWatching in extension.js.
         """
         capabilities = {
             Capability.WINDOW_LIST,
@@ -161,6 +172,7 @@ class GnomeShellBackend(GUIBackend):
             Capability.WINDOW_MINIMIZE,
             Capability.WINDOW_PID,
             Capability.WINDOW_AT_POINT,
+            Capability.WINDOW_EVENTS,
         }
         if self._can_capture:
             capabilities.add(Capability.WINDOW_CAPTURE)
@@ -195,6 +207,104 @@ class GnomeShellBackend(GUIBackend):
         """Every open window."""
         self.require(Capability.WINDOW_LIST)
         return [self._window(raw) for raw in self._list_windows()]
+
+    def window_events(self, timeout=None):
+        """Yield WindowEvents as the extension reports them.
+
+        The extension emits a `WindowEvent(change, id, title)` D-Bus signal
+        off Meta.Display's `window-created` and Meta.Window's `unmanaging`/
+        `notify::title` (see PyguitestService.startWatching in
+        extension.js); `change` is one of "new", "close", "title" -- the
+        same vocabulary Session.wait_for_window/wait_window_close already
+        consume from the sway/niri backends, so nothing above this needed
+        to change to gain GNOME support.
+
+        `title` travels with every event, "close" included, because by the
+        time a "close" signal reaches Python the window is already gone
+        from ListWindows -- there is nothing left here to look it up
+        against, unlike geometry() or is_window_viewable(), which can
+        always ask the extension fresh.
+
+        `timeout`, in seconds, bounds the whole subscription; the generator
+        simply ends once it expires rather than raising. None waits
+        indefinitely. Repeatedly runs a fresh iteration of a shared
+        GLib.MainLoop rather than a single blocking run(), so a `timeout`
+        can still cut the wait short between events -- the same reason
+        portalrequest.py's `request()` needs a loop per call, just several
+        of them here instead of one.
+        """
+        self.require(Capability.WINDOW_EVENTS)
+        connection = self._proxy.get_connection()
+        deadline = None if timeout is None else time.monotonic() + timeout
+        loop = self._GLib.MainLoop()
+        queue: list = []
+
+        def on_signal(_conn, _sender, _path, _iface, _signal, params, *_args):
+            queue.append(params.unpack())
+            if loop.is_running():
+                loop.quit()
+
+        subscription = connection.signal_subscribe(
+            _BUS_NAME,
+            _INTERFACE,
+            "WindowEvent",
+            _OBJECT_PATH,
+            None,
+            self._Gio.DBusSignalFlags.NONE,
+            on_signal,
+            None,
+        )
+        try:
+            while True:
+                if not queue:
+                    timeout_id = None
+                    timed_out = False
+
+                    def on_timeout():
+                        nonlocal timed_out
+                        timed_out = True
+                        loop.quit()
+                        return False
+
+                    if deadline is not None:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            return
+                        timeout_id = self._GLib.timeout_add(
+                            max(0, int(remaining * 1000)), on_timeout
+                        )
+                    loop.run()
+                    if timeout_id is not None and not timed_out:
+                        self._GLib.source_remove(timeout_id)
+                    if not queue:
+                        return
+                change, wid, title = queue.pop(0)
+                yield WindowEvent(
+                    change=change,
+                    window=Window(handle=wid, backend=self, title=title),
+                )
+        finally:
+            connection.signal_unsubscribe(subscription)
+
+    def wait_for_window(self, title, timeout=None):
+        """Block until a window whose title matches `title` (regex) appears.
+
+        Checks existing windows first, so one already open is not missed --
+        the same race a bare window_events() subscription would have.
+        `timeout`, in seconds, bounds the total wait; None blocks
+        indefinitely. Mirrors SwayBackend/NiriBackend's own override of
+        this method for the same reason: Session delegates here rather
+        than polling once WINDOW_EVENTS is supported.
+        """
+        self.require(Capability.WINDOW_EVENTS)
+        pattern = re.compile(title)
+        for existing in self.windows():
+            if pattern.search(existing.title):
+                return existing
+        for event in self.window_events(timeout=timeout):
+            if event.change in ("new", "title") and pattern.search(event.window.title):
+                return event.window
+        return None
 
     def _find(self, window):
         """This window's full raw tuple, or raise WindowNotFound."""

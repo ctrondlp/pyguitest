@@ -15,6 +15,7 @@ pyguitest/
 ├── examples/                   runnable scripts, simplest first
 ├── gnome-shell-extension/       pyguitest-window-control; opt-in, live-verified
 ├── docs/
+│   ├── README.md               index into this folder, for anyone landing here directly
 │   ├── wayland-audit.html      the audit all of this derives from
 │   ├── install.md              what each backend needs, per distribution
 │   ├── input.md                injecting input: permissions, keymaps, libei

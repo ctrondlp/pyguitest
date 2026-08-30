@@ -35,6 +35,7 @@ gets you everywhere else.
 import os
 import tempfile
 import time
+from typing import Literal
 
 from .. import png as _png
 from ..capabilities import Capability, CapabilitySet
@@ -771,7 +772,7 @@ class X11Backend(GUIBackend):
         if masks == self._DIRECT_MASKS:
             layout = self._DIRECT_LAYOUTS.get((bytes_per_pixel, big_endian))
 
-        order = "big" if big_endian else "little"
+        order: Literal["big", "little"] = "big" if big_endian else "little"
         channels = [self._shift(mask) for mask in masks]
 
         rows = []

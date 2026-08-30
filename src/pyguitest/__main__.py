@@ -255,8 +255,8 @@ def _debug(json_output: bool = False) -> int:
 
 def _scan(paths):
     """Report the migration cost of each X11::GUITest call in `paths`."""
-    hits = Counter()
-    per_file = {}
+    hits: Counter[str] = Counter()
+    per_file: dict[str, Counter[str]] = {}
 
     for path in paths:
         try:
@@ -285,7 +285,7 @@ def _scan(paths):
                 print(f"      {fn.note}")
 
     print("\nSummary")
-    by_tier = Counter()
+    by_tier: Counter[Tier] = Counter()
     for name, count in hits.items():
         by_tier[LEGACY[name].tier] += count
     for tier in Tier:

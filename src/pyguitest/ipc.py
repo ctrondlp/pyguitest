@@ -197,23 +197,28 @@ class SwayCLI:
         process = subprocess.Popen(
             argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
         )
+        # stdout=PIPE guarantees a pipe, but Popen's own type only promises
+        # one when text/bytes mode is known statically, which it is not
+        # here -- assert once rather than re-deriving "not None" every use.
+        assert process.stdout is not None
+        stdout = process.stdout
         try:
             while True:
                 if deadline is not None:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         return
-                    ready, _, _ = select.select([process.stdout], [], [], remaining)
+                    ready, _, _ = select.select([stdout], [], [], remaining)
                     if not ready:
                         return
-                line = process.stdout.readline()
+                line = stdout.readline()
                 if not line:
                     return
                 yield line
         finally:
             process.terminate()
             process.wait()
-            process.stdout.close()
+            stdout.close()
 
     def close(self):
         """Nothing to release; each call is its own process."""
@@ -416,9 +421,10 @@ class NiriSocket:
 
     def __init__(self, path=None):
         """Locate the niri socket, from `path` or $NIRI_SOCKET."""
-        self.path = path or os.environ.get("NIRI_SOCKET")
-        if not self.path:
+        resolved = path or os.environ.get("NIRI_SOCKET")
+        if not resolved:
             raise OSError("NIRI_SOCKET is not set")
+        self.path: str = resolved
 
     def close(self):
         """Nothing to release; each request opens its own socket."""

@@ -18,7 +18,7 @@ therefore declared only where those coordinates can be trusted.
 import contextlib
 import io
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..capabilities import Capability, CapabilitySet
 from ..errors import BackendUnavailable, CapabilityUnsupported
@@ -311,7 +311,12 @@ class AtspiBackend(GUIBackend):
         an accessible node like any other here.
         """
         self.require(Capability.WINDOW_STATE)
-        node = window.handle if isinstance(window, Window) else window.node
+        # `window` is a Window (its .handle is the dogtail node, typed as
+        # plain `object` since Window.handle is deliberately backend-private)
+        # or already an Element's own dogtail node -- both branches are
+        # really the same dogtail Node, which nothing here has a static type
+        # for since dogtail is an optional runtime import.
+        node: Any = window.handle if isinstance(window, Window) else window.node
         return bool(node.showing)
 
     def _state_active(self):
@@ -348,7 +353,7 @@ class AtspiBackend(GUIBackend):
             "AT-SPI screen coordinates are unreliable in a pure Wayland "
             "session; a client is not told where it is on screen",
         )
-        node = window.handle if isinstance(window, Window) else window.node
+        node: Any = window.handle if isinstance(window, Window) else window.node
         try:
             x, y = node.position
             width, height = node.size

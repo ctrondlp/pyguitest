@@ -652,7 +652,7 @@ class NiriBackend(_WindowBackend):
         rather than reported as a zero-sized screen.
         """
         self.require(Capability.SCREEN_INFO)
-        screens = []
+        screens: list[Screen] = []
         for name, output in sorted((self.transport.outputs() or {}).items()):
             logical = output.get("logical")
             if not logical:

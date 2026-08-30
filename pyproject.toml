@@ -166,3 +166,9 @@ python_version = "3.10"
 ignore_missing_imports = true
 warn_unused_configs = true
 warn_redundant_casts = true
+# Without this, a function with even one annotated parameter or return type
+# has its BODY skipped entirely -- "mypy clean" was true of files that were
+# mostly unchecked. On by default now that the backlog it uncovered (32
+# errors, mostly Optional attributes narrowed in one method but used in
+# another) is fixed; keep it on so that gap cannot quietly reopen.
+check_untyped_defs = true

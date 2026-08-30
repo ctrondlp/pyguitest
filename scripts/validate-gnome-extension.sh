@@ -73,12 +73,20 @@ for m in ListWindows; do
     && ok "$m responded" || bad "$m failed"
 done
 
+if gdbus introspect --session --dest org.gnome.Shell --object-path "$OBJ" 2>/dev/null \
+    | grep -q "WindowEvent"; then
+  ok "WindowEvent signal is in the introspected interface"
+else
+  bad "no WindowEvent signal -- shell is running an extension older than 0.3.0-events"
+fi
+
 echo "== 6. GnomeShellBackend against the live extension =="
 PYTHONPATH="$(cd "$(dirname "$0")/.." && pwd)/src" python3 - <<'PY'
 import sys
 import time
 
 from pyguitest.backends import gnomeshell
+from pyguitest.errors import WindowNotFound
 
 G = "\033[32mPASS\033[0m"; R = "\033[31mFAIL\033[0m"; Y = "\033[33m..\033[0m  "
 rc = 0
@@ -192,9 +200,49 @@ if restored != before:
 print(f"  {G if restored == before else Y} restored geometry: {restored}"
       + ("" if restored == before else f" (wanted {before})"))
 
+# Window events: WINDOW_EVENTS is declared unconditionally (see
+# gnomeshell.py's capabilities docstring), so this much is assertable
+# regardless of what happens to be open. Whether an event actually arrives
+# is not -- that depends on someone opening or closing a window during the
+# few seconds this listens, which this script cannot make happen on its
+# own -- so that part stays informational (Y), not asserted (G/R).
+from pyguitest.capabilities import Capability
+if Capability.WINDOW_EVENTS in b.capabilities:
+    print(f"  {G} WINDOW_EVENTS is declared")
+else:
+    print(f"  {R} WINDOW_EVENTS is NOT declared "
+          f"(startWatching() may have failed -- check the shell's log)"); rc = 1
+
+listen_for = 3.0
+print(f"  {Y} listening for window events for {listen_for:.0f}s -- open or "
+      f"close a window now to exercise this for real")
+seen = list(b.window_events(timeout=listen_for))
+if seen:
+    for event in seen:
+        print(f"  {G} event: {event.change} -> {event.window!r}")
+else:
+    print(f"  {Y} no events arrived (nothing was opened/closed during the "
+          f"window -- not a failure on its own)")
+
+# `wins` was captured before the listen above, which exists precisely to
+# invite opening/closing a window -- so it can no longer be trusted for
+# what follows. Refreshed rather than reused, or the hit-testing loop
+# below chases a window that closed during the listen and gets
+# WindowNotFound from a live shell for doing exactly what was asked of it.
+wins = b.windows()
+
 # Read-only checks.
 print(f"  {Y} active_window(): {b.active_window()}")
-print(f"  {Y} is_window_viewable(): {b.is_window_viewable(w)}")
+# `w` was also picked before the listen above, and the script just invited
+# closing "a window" without saying which -- if the one closed was w
+# itself (observed: the move/resize battery can land on the very window
+# someone then closes), asking about it is a legitimate WindowNotFound,
+# not a bug, the same way the hit-testing refresh above treats it.
+try:
+    print(f"  {Y} is_window_viewable(): {b.is_window_viewable(w)}")
+except WindowNotFound:
+    print(f"  {Y} is_window_viewable(): skipped -- w closed during the "
+          f"event listen above")
 # Hit-testing, checked properly rather than just printed. For each
 # window find a point inside it that lies inside no *other* window --
 # there the correct answer is unambiguous regardless of stacking, so a

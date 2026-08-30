@@ -64,8 +64,10 @@ class ToolCaptureBackend(GUIBackend):
         self._build = _COMMANDS[tool.name]
         self._runner = runner or self._run
 
+    # A read-only override of GUIBackend's plain, writable `name` attribute
+    # -- see the same note in input.py. Nothing assigns to it externally.
     @property
-    def name(self):
+    def name(self) -> str:  # type: ignore[override]
         """Identifier for this backend, e.g. 'capture:grim'."""
         return f"capture:{self.tool.name}"
 

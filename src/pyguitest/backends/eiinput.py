@@ -287,6 +287,11 @@ class LibeiBackend(GUIBackend):
         handle_token and the resulting request path itself, subscribes to
         that exact path, and only then makes the call.
         """
+        # self._Gio/self._GLib are only unset when construction was
+        # given an injected sender or device and so never negotiated a
+        # portal session (see __init__) -- which is also the only case
+        # in which this method is never called.
+        assert self._Gio is not None and self._GLib is not None
         unique_name = self._connection.get_unique_name()
         escaped_sender = unique_name[1:].replace(".", "_")
         token = uuid.uuid4().hex
@@ -333,6 +338,11 @@ class LibeiBackend(GUIBackend):
 
     def _call_for_fd(self, interface, method, session_handle):
         """Call a method that returns a fd via a GUnixFDList index."""
+        # self._Gio/self._GLib are only unset when construction was
+        # given an injected sender or device and so never negotiated a
+        # portal session (see __init__) -- which is also the only case
+        # in which this method is never called.
+        assert self._Gio is not None and self._GLib is not None
         reply, fd_list = self._connection.call_with_unix_fd_list_sync(
             _BUS_NAME,
             _OBJECT_PATH,
@@ -349,6 +359,11 @@ class LibeiBackend(GUIBackend):
         return fd_list.get(handle_index)
 
     def _remote_desktop_version(self):
+        # self._Gio/self._GLib are only unset when construction was
+        # given an injected sender or device and so never negotiated a
+        # portal session (see __init__) -- which is also the only case
+        # in which this method is never called.
+        assert self._Gio is not None and self._GLib is not None
         reply = self._connection.call_sync(
             _BUS_NAME,
             _OBJECT_PATH,
@@ -371,6 +386,11 @@ class LibeiBackend(GUIBackend):
         asking for one would make the user grant screen recording for
         nothing. See the module docstring.
         """
+        # self._Gio/self._GLib are only unset when construction was
+        # given an injected sender or device and so never negotiated a
+        # portal session (see __init__) -- which is also the only case
+        # in which this method is never called.
+        assert self._Gio is not None and self._GLib is not None
         version = self._remote_desktop_version()
         if version < _MIN_REMOTE_DESKTOP_VERSION:
             raise BackendUnavailable(

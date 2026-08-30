@@ -315,8 +315,14 @@ class ToolInputBackend(GUIBackend):
         self._timeout = timeout
         self._runner = runner or self._run
 
+    # GUIBackend.name/MODIFIER_KEYS/KEY_ALIASES are plain, writable class
+    # attributes so a subclass can just set e.g. `name = "atspi"`; overriding
+    # them with a read-only @property here is what lets this backend derive
+    # them from `self.tool` instead. Nothing assigns to them externally, so
+    # the narrowing is safe -- mypy checks it against the general case, not
+    # this codebase.
     @property
-    def name(self):
+    def name(self) -> str:  # type: ignore[override]
         """Identifier for this backend, e.g. 'input:wdotool'."""
         return f"input:{self.tool.name}"
 
@@ -353,14 +359,14 @@ class ToolInputBackend(GUIBackend):
     # on which tool this instance wraps, decided only at __init__ time.
 
     @property
-    def MODIFIER_KEYS(self):
+    def MODIFIER_KEYS(self):  # type: ignore[override]
         """send_keys()'s modifiers, in whichever vocabulary self.tool speaks."""
         if self.tool.name == "ydotool":
             return _YDOTOOL_MODIFIER_KEYS
         return GUIBackend.MODIFIER_KEYS
 
     @property
-    def KEY_ALIASES(self):
+    def KEY_ALIASES(self):  # type: ignore[override]
         """send_keys()'s `{BAC}`-style abbreviations, ditto."""
         if self.tool.name == "ydotool":
             return _YDOTOOL_KEY_ALIASES

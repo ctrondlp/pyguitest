@@ -70,6 +70,11 @@ const IFACE_XML = `
       <arg type="b" direction="out" name="ok"/>
       <arg type="s" direction="out" name="error"/>
     </method>
+    <signal name="WindowEvent">
+      <arg type="s" name="change"/>
+      <arg type="u" name="id"/>
+      <arg type="s" name="title"/>
+    </signal>
   </interface>
 </node>`;
 
@@ -77,6 +82,78 @@ class PyguitestService {
     constructor() {
         // id -> last geometry we asked Mutter for, plus when we asked.
         this._pending = new Map();
+        // id -> {window, handlerIds}, for the per-window signals watched
+        // by startWatching(). Kept so a window's own signal handlers can be
+        // disconnected exactly once, whichever comes first: the window
+        // closing (we do it ourselves) or the extension being disabled.
+        this._watched = new Map();
+        this._displayHandlerIds = [];
+        // Set by the extension once the D-Bus object is exported -- signals
+        // can only be emitted through it, and construction happens first.
+        this._dbusImpl = null;
+    }
+
+    _emitWindowEvent(change, window) {
+        if (!this._dbusImpl)
+            return;
+        this._dbusImpl.emit_signal('WindowEvent', new GLib.Variant('(sus)', [
+            change, window.get_stable_sequence(), window.get_title() ?? '',
+        ]));
+    }
+
+    _watchWindow(window) {
+        const id = window.get_stable_sequence();
+        if (this._watched.has(id))
+            return;
+        // 'unmanaging' fires once, right before Mutter actually tears the
+        // window down -- late enough that get_title() above still answers,
+        // early enough that it is unambiguously a close and not, say, a
+        // move to a different workspace.
+        const handlerIds = [
+            window.connect('unmanaging', () => {
+                this._emitWindowEvent('close', window);
+                this._unwatchWindow(id);
+            }),
+            window.connect('notify::title', () => {
+                this._emitWindowEvent('title', window);
+            }),
+        ];
+        this._watched.set(id, {window, handlerIds});
+    }
+
+    _unwatchWindow(id) {
+        const entry = this._watched.get(id);
+        if (!entry)
+            return;
+        for (const handlerId of entry.handlerIds)
+            entry.window.disconnect(handlerId);
+        this._watched.delete(id);
+    }
+
+    // Called once, after the D-Bus object is exported (see enable()) --
+    // not from the constructor, so _emitWindowEvent has somewhere to send
+    // to for every window already open at the time.
+    startWatching() {
+        for (const window of global.display.list_all_windows()) {
+            if (!window.is_override_redirect())
+                this._watchWindow(window);
+        }
+        this._displayHandlerIds.push(
+            global.display.connect('window-created', (_display, window) => {
+                if (window.is_override_redirect())
+                    return;
+                this._watchWindow(window);
+                this._emitWindowEvent('new', window);
+            })
+        );
+    }
+
+    stopWatching() {
+        for (const handlerId of this._displayHandlerIds)
+            global.display.disconnect(handlerId);
+        this._displayHandlerIds = [];
+        for (const id of [...this._watched.keys()])
+            this._unwatchWindow(id);
     }
 
     _findWindow(id) {
@@ -367,9 +444,33 @@ export default class PyguitestWindowControlExtension extends Extension {
         this._dbusImpl = Gio.DBusExportedObject.wrapJSObject(
             IFACE_XML, this._service);
         this._dbusImpl.export(Gio.DBus.session, OBJECT_PATH);
+        // Only after export: _emitWindowEvent sends through this._dbusImpl,
+        // so a window-created signal firing before it exists would be lost
+        // rather than merely late. Nothing genuinely races here since both
+        // happen synchronously within enable(), but the order still matters.
+        this._service._dbusImpl = this._dbusImpl;
+        try {
+            this._service.startWatching();
+        } catch (e) {
+            // 'window-created'/'unmanaging'/'notify::title' have been core
+            // Meta/GObject signals for far longer than this extension has
+            // existed, so this is not expected to fire in practice -- but
+            // if it ever does on some future Mutter, the rest of the
+            // interface (window listing, move, resize, capture) still
+            // works and stays exported; only WINDOW_EVENTS quietly does
+            // not, which is the same shape of degradation the rest of this
+            // package uses everywhere else. Logged, not raised: pyguitest's
+            // GnomeShellBackend already has no way to be told this failed
+            // (Capability.WINDOW_EVENTS is declared unconditionally, on
+            // the reasoning explained in gnomeshell.py's own docstring),
+            // so this is the only place the failure is visible at all.
+            logError(e, 'pyguitest-window-control: startWatching failed; ' +
+                'window events will not be delivered');
+        }
     }
 
     disable() {
+        this._service?.stopWatching();
         this._dbusImpl?.unexport();
         this._dbusImpl = null;
         this._service = null;

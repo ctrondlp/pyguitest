@@ -102,8 +102,10 @@ class CompositeBackend(GUIBackend):
         session rather than re-tried. Keyed by id() because backends are
         not required to be hashable."""
 
+    # A read-only override of GUIBackend's plain, writable `name` attribute
+    # -- see the same note in input.py. Nothing assigns to it externally.
     @property
-    def name(self):
+    def name(self) -> str:  # type: ignore[override]
         """The member names joined, e.g. 'sway+atspi'."""
         return "+".join(m.name for m in self.members)
 

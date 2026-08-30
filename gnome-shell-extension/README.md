@@ -14,8 +14,21 @@ else can do without a consent prompt — see **Window capture** below.
 found two real bugs written from the headers alone, both since fixed.
 **Window capture validated live on GNOME Shell 50.4** (2026-08-29): a real
 window was captured to a PNG through `Meta.WindowActor.get_image`, on a
-pure Wayland session where every other capture route is closed. If it
-doesn't load, `journalctl -f /usr/bin/gnome-shell` (or
+pure Wayland session where every other capture route is closed.
+
+**Window events validated live on GNOME Shell 50.4** (2026-08-30): closing
+a real `gedit` window produced a `title` event followed by a `close`
+event, both correctly attributed, over the real `WindowEvent` D-Bus
+signal -- `scripts/validate-gnome-extension.sh` exercises this at step
+5/6, and a run doing exactly that now passes all 9 checks clean. (Two
+earlier attempts each crashed the *script's own* read-only checks
+afterwards, on a stale window reference from before the close -- not a
+bug in the extension or the backend; both are fixed.) The `"new"`
+(window-created) path is still fakes-only, in `tests/test_gnomeshell.py`:
+no window happened to open during any of these runs. See **Window
+events** below for the shape of the signal.
+
+If the extension doesn't load, `journalctl -f /usr/bin/gnome-shell` (or
 `looking-glass`, `Alt+F2` then `lg`) is where GNOME Shell logs extension
 errors.
 
@@ -53,7 +66,7 @@ That is not a failure state, just an un-restarted session — and it
 presents as `UnknownMethod: No such method "CaptureWindow"` from
 pyguitest, which is why that error tells you to log out and back in.
 
-`metadata.json` carries a `version-name` (`0.2.0-capture`) so you can at
+`metadata.json` carries a `version-name` (`0.3.0-events`) so you can at
 least tell the builds apart. Be careful how much you read into it, though:
 it is not confirmed whether `gnome-extensions info` reports metadata the
 shell cached at load time or re-reads it from disk. If it is the latter,
@@ -138,3 +151,33 @@ disable it when you are not running tests:
 ```sh
 gnome-extensions disable pyguitest-window-control@pyguitest.local
 ```
+
+## Window events
+
+`WindowEvent(change: s, id: u, title: s)` is a D-Bus signal, not a method:
+the extension emits it off Meta.Display's `window-created` and Meta.Window's
+`unmanaging`/`notify::title`, and pyguitest subscribes rather than polling.
+`change` is `"new"`, `"close"`, or `"title"` -- the same vocabulary the
+sway and niri backends already use, so `Session.wait_for_window` and
+`Session.wait_window_close` work identically on GNOME with no change on
+the Python side beyond `GnomeShellBackend` declaring
+`Capability.WINDOW_EVENTS`.
+
+`title` travels with every event, `"close"` included, because by the time
+a close signal reaches a subscriber the window is already gone from
+`ListWindows` -- there is nothing left to look its title up against by
+then, unlike geometry or viewability, which can always ask fresh.
+
+This closes GNOME's biggest remaining gap against sway/niri: without it,
+`wait_for_window`/`wait_window_close` on GNOME fell back to
+`Session`'s polling loop (a fixed interval, no compositor push) even
+though window control here was otherwise fully event-capable elsewhere in
+this package.
+
+If `window-created`/`unmanaging`/`notify::title` ever fail to connect on
+some future Mutter (`startWatching()` in `extension.js`), the extension
+logs the error and keeps exporting everything else -- window listing,
+move, resize, capture -- rather than refusing to load entirely. There is
+currently no way for pyguitest to detect that from the Python side and
+withdraw `Capability.WINDOW_EVENTS`; check the shell's own log if events
+stop arriving but everything else still works.
