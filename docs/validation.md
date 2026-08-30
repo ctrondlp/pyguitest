@@ -7,6 +7,49 @@ read as a claim you cannot check.
 
 ## Run live on GNOME Shell 50.4 (Wayland)
 
+- **Input injection through XTest** (`X11Backend`'s input half, forced
+  rather than composited), with a caveat worth reading before trusting the
+  headline. A purpose-built probe -- an X11 window created with
+  python-xlib, given X-level input focus via `XSetInputFocus`, with
+  `press_key`/`type_text`/`send_keys` driven against it and its event
+  queue read back to check exactly what arrived -- scored 2 of 21 checks.
+  That was the probe's own design being wrong, not XTest: Mutter tracks
+  compositor-level focus independently of the X server's, and delivers
+  injected XTest events by *that*, the same as it would a real keyboard --
+  so events aimed at a window holding only X focus, never compositor
+  focus, went to whatever the compositor actually considered focused
+  instead (the terminal running the script), silently, with neither side
+  raising an error. `XSetInputFocus`/`wmctrl`/`xdotool windowactivate`
+  all have the identical gap: none of them move Mutter's own idea of
+  focus.
+  That accident still produced a real, live result: every event landed in
+  the terminal (Ptyxis, a native Wayland client, not an X11 one) verbatim
+  in its scrollback as `apyguitestX`, in the exact order sent --
+  `press_key`/`release_key("a")`, `type_text("pyguitest")`,
+  `type_text("X")` (the upper-case, shift-holding path), then
+  `send_keys("^(a)")`, whose Ctrl-A landed as the modifier combo readline
+  reads it as -- jump to line start -- rather than a literal `a`, itself
+  confirmation Control was delivered correctly and not just the keysym.
+  So on Mutter, a raw XTest event is not filtered by client type at
+  delivery: it reaches whatever currently holds compositor focus, native
+  Wayland windows included. What this does *not* show, and what the
+  probe's own failure demonstrates directly, is that `X11Backend` can
+  *aim* such an event at a chosen Wayland window: its `windows()`/
+  `activate_window()` only see and manipulate X11 clients ([x11.py:424,
+  552](../src/pyguitest/backends/x11.py#L424)), so there is no path from
+  "type into this specific Wayland app" to a result -- the terminal
+  received the keystrokes only because it already held focus when the
+  script ran, not because anything here put it there. The "XWayland:
+  reaches X11 clients only" note this project states in several places
+  (`session.py`, `tools.py`, `docs/input.md`, `docs/install.md`, the
+  `09_gui_spy.py` docstring) is still the accurate practical claim for
+  that reason -- `X11Backend` cannot select a Wayland target regardless of
+  what a stray event happens to reach -- and is left as-is. It remains
+  exactly true of *reading* input state (`POINTER_QUERY`/
+  `INPUT_STATE_QUERY`, both genuinely X-scoped, see the caveat below).
+  KWin and the wlroots compositors are unmeasured and may route XTest
+  differently; this result is Mutter-specific.
+
 - **`eiinput`** (opt-in) — pointer and keyboard injection over libei.
   Pointing at GNOME's Activities button and clicking it opens the overview,
   reliably, and the cursor moves.
@@ -236,7 +279,6 @@ the installed library — names, signatures and return shapes.
 
 ## Not run live
 
-- **Input injection through XTest** (the X11 backend's input half).
 - **The wlroots compositor IPC backends** — sway, Hyprland, niri. Their
   tests replay recorded output and stand-ins, on a sandbox where none of
   those are available to test against. Running them against a live

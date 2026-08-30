@@ -114,6 +114,23 @@ All notable changes to pyguitest are recorded here. The format follows
   XWayland; and `examples/09_gui_spy.py`'s `--here` is exact over an X11
   client and quietly wrong elsewhere, which had been documented there as an
   unvalidated suspicion and is now measured.
+- `docs/validation.md` records the first live run of XTest input injection
+  (`X11Backend`'s input half), the last major path in the X11::GUITest
+  lineage with no live evidence. A purpose-built probe scored 2 of 21
+  checks; the cause was the probe, not XTest -- it set X-level input focus,
+  and Mutter delivers injected XTest events by *compositor*-level focus
+  instead, which no plain X11 client (this probe, `wmctrl`, `xdotool
+  windowactivate`) can set. The run still landed real evidence by accident:
+  every event sent arrived, in order, in the terminal that already held
+  focus -- a native Wayland client, confirming XTest injection is not
+  filtered by client type at delivery on Mutter, only that `X11Backend` has
+  no way to aim it at a chosen Wayland window. The existing "XWayland:
+  reaches X11 clients only" documentation is unchanged, since it states
+  the correct practical limit (X11Backend cannot target such a window)
+  rather than the delivery mechanism this run actually measured.
+  `examples/_xtest_input_validate.py` -- the probe -- is kept and its
+  docstring now says why it fails on Mutter rather than what it was
+  written to expect.
 
 ### Fixed
 
