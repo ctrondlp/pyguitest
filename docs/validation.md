@@ -237,11 +237,14 @@ the installed library — names, signatures and return shapes.
 ## Not run live
 
 - **Input injection through XTest** (the X11 backend's input half).
-- **The wlroots compositor IPC backends** — sway, Hyprland, niri — and
-  **UinputBackend**. Their tests replay recorded output and stand-ins, on a
-  sandbox where none of those are available to test against. Running them
-  against a live sway/Hyprland/niri session is next. KWin is no longer in
-  this list: `KdotoolBackend` has since run live, above.
+- **The wlroots compositor IPC backends** — sway, Hyprland, niri. Their
+  tests replay recorded output and stand-ins, on a sandbox where none of
+  those are available to test against. Running them against a live
+  sway/Hyprland/niri session is next. Two names have left this list:
+  `KdotoolBackend` has since run live on KWin, and `UinputBackend` on both
+  KWin and GNOME — above, and in the tier-6 caveat below, where a
+  commanded move was read back off a real X client 1px out from rounding.
+  That readback is the proof the pointer physically moved.
 - **`portal`, the input half.** Its CreateSession/SelectDevices/Start
   negotiation has been run against a real xdg-desktop-portal (1.22.1) and
   completes; the keyboard, pointer and scroll methods past that point have
@@ -297,3 +300,41 @@ is happening. Working hypothesis from one diagnostic session on one machine,
 not an independently confirmed root cause or a survey of other window
 managers. Be skeptical of `geometry()` results on GNOME's XWayland until
 someone reproduces or debunks this.
+
+## Known caveat: the tier-6 queries under XWayland
+
+`X11Backend` declares `POINTER_QUERY` and `INPUT_STATE_QUERY` on an
+XWayland session, and both are real — but they answer for X's world only,
+and where they cannot answer they return a stale or idle value rather than
+an error. Confirmed live on GNOME Shell 51.beta under XWayland, driving the
+default composite (`gnomeshell` + `atspi` + `uinput` + `imagesearch` +
+`x11`).
+
+The first run looked like a flat failure: four commanded moves, and
+`POINTER_QUERY` reported the same unchanged `(960, 540)` after every one;
+a held Shift read back as unpressed throughout. Neither conclusion
+survived a control. `validation.md` listed `UinputBackend` as never driven
+live, so "X never saw the pointer move" and "the pointer never moved" were
+the same observation — the experiment could not tell them apart. Creating a
+real X11 client with python-xlib and repeating the reads against it
+separated them:
+
+- **`POINTER_QUERY`** — commanded to the probe window's centre `(960, 575)`,
+  X reported `(959, 574)`: a match to within rounding, and proof the
+  pointer physically moved. Commanded away to `(1560, 975)` over the
+  Wayland desktop, X went on reporting `(959, 574)` — the last position it
+  had any claim to know. Not an error, not a refusal: the previous answer,
+  indefinitely.
+- **`INPUT_STATE_QUERY`** — with X input focus on that same probe window, a
+  held `Shift_L` read back as pressed, idle before and after. The earlier
+  `False` was focus-dependent, not broken. Same shape as the pointer half.
+
+So the rule for both is the X client's world, not the session's: an
+XWayland pointer query is accurate over an X surface and stale over a
+native Wayland one, and a key-state query is accurate while an X client
+holds focus. What makes this worth a caveat rather than a footnote is that
+the failure is silent — a stale coordinate is a perfectly well-formed
+answer, and a test asserting on it fails somewhere else entirely, or passes
+for the wrong reason. Treat a tier-6 reading under XWayland as trustworthy
+only when you know an X client is under the pointer or holding focus; on a
+real X11 session none of this applies.

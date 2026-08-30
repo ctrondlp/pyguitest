@@ -289,6 +289,16 @@ def hints_for(
         # that ranking on any desktop that has a better option. xdotool
         # (X11, via XTest) and wtype (wlroots, typing only) are both
         # ordinarily packaged, unlike wdotool below.
+        #
+        # X11 and not XWayland, deliberately -- the one place in this
+        # package where that narrowing is not about capture. Discovery does
+        # accept xdotool under XWayland (it carries a real X connection, and
+        # it outranks ydotool), so this recommends a tool less than the
+        # composite would use. That is the point: on a Wayland session
+        # xdotool reaches only the X clients, so recommending it to someone
+        # who has no input path at all would hand them one that silently
+        # ignores every native Wayland window. ydotool is keymap-unsafe but
+        # reaches everything, and the hint says so.
         input_package: str | None
         if environment.session_type is SessionType.X11:
             input_package = "xdotool"

@@ -4,7 +4,9 @@ Input is the one area where the mechanism you get decides what your typing
 actually produces, so it is worth knowing which one you are on. In rough
 order of preference: `eiinput` (keymap-safe, needs libei), the `wdotool` /
 `wtype` CLI tools (keymap-safe, wlroots or GNOME), `uinput` and `ydotool`
-(keymap-*unsafe*), `xdotool` and XTest (X11 only).
+(keymap-*unsafe*), `xdotool` and XTest (needs an X connection, so X11 or
+XWayland -- but under XWayland it reaches only that session's X clients,
+never its native Wayland ones).
 
 What has and has not been exercised against a real desktop is recorded in
 [validation.md](validation.md).
@@ -254,6 +256,76 @@ never pointed at a real user's session. That is the same boundary
 python-libei's `eis.Eis.create_for_fd()` already draws for testing without a
 portal at all, and the boundary `tests/test_portal_dbusmock.py` works
 inside.
+
+## Motion between the two points
+
+`move_mouse()` teleports. One event goes out and the pointer is simply
+somewhere else, which is all a click needs and not enough for anything that
+watches the pointer on the way:
+
+- **Drag-and-drop.** GTK and Qt both arm on the press and begin the drag only
+  once motion afterwards crosses a threshold. Press, teleport, release is not
+  a drag — it is a click at the destination.
+- **Hover.** Enter/leave crossings, tooltips, hover-reveal buttons,
+  drop-target highlighting. A teleport *into* a widget does cross into it; a
+  teleport *through* one never happens.
+- **Velocity.** Kinetic scrolling, flick gestures and gesture recognisers all
+  derive speed from event timestamps.
+- **Approach.** Hot corners and pointer barriers fire before arrival.
+
+`glide()` sends the same move as a stream of events on a wall-clock schedule,
+and `drag()` wraps a press and a release around one:
+
+```python
+gui.move_mouse(120, 400)
+gui.glide(600, 400, duration=0.3)        # ~36 events over 300ms
+
+gui.drag((120, 400), (600, 400))         # press, glide, release
+
+gui.glide(600, 400, via=[(300, 120)])    # routed over the toolbar on the way
+```
+
+`duration` is wall-clock seconds and `rate` the points per second, so the two
+give `duration * rate` events; 120 Hz by default, which is in the range of a
+real mouse without flooding a backend that pays per event. Each pause is
+computed against the moment the glide began rather than the end of the last
+one, so a backend with real per-event cost — `eiinput` frames and pumps its
+socket every time — loses that cost from the pauses instead of adding it to
+the total. The session's `event_delay` is charged once for the whole gesture,
+not once per point.
+
+### Where the path starts
+
+Wayland has no pointer readback: `POINTER_QUERY` is tier NO_PATH on every
+compositor, and only an X connection answers it. So a `Session` remembers
+where it last *sent* the pointer and interpolates from there. A hand on the
+physical mouse invalidates that; pass `start=(x, y)` where it matters, and
+note that `drag()` always takes its start explicitly. With no history and no
+readback, `glide()` raises rather than assuming `(0, 0)` — a drag from the
+wrong corner does not fail, it succeeds at something else.
+
+Under XWayland the readback deserves the same suspicion as no readback at
+all. X answers only for the pointer over an X surface; over a native Wayland
+window it returns the last position it knew, with nothing to mark it stale
+([validation.md](validation.md)). A glide falling back to that read starts
+from the wrong place and runs anyway — the one outcome the raise above
+exists to avoid. Where both are live, prefer an explicit `start`.
+
+### On "human-like" paths
+
+The route is straight unless `via` names waypoints. Randomised, human-shaped
+wobble — Bézier control points and Gaussian jitter — is a bot-detection
+evasion technique, and there is nothing on this side of the compositor looking
+for it. In a test suite it buys only flakiness: a path that varies run to run
+is a click that occasionally grazes a tooltip and lands somewhere else.
+
+The non-straight path that *is* worth having is a deliberate one, which is
+what `via` is for — crossing a particular widget on the way, or holding the
+angle a GTK submenu's navigation triangle wants to keep the parent menu open.
+Both are reproducible. `ease` is available for the rest of the argument (a
+callable from a fraction in [0, 1] to one, clamped) and is off by default,
+because constant velocity is what a flick test wants: an ease-out decelerates
+into the target, and a flick released at zero speed does not throw.
 
 ## When injected input appears to do nothing
 

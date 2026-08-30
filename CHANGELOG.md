@@ -9,6 +9,26 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ### Added
 
+- `Session.glide()` and `Session.drag()`: pointer motion emitted as a
+  stream of events on a wall-clock schedule, rather than the single-event
+  teleport `move_mouse()` has always been. A teleport is enough to click
+  with and wrong for everything that watches the pointer on its way —
+  drag-and-drop arms on the press in both GTK and Qt and only begins once
+  later motion crosses a threshold, so press-teleport-release is a click at
+  the destination and not a drag; hover reveals and tooltips need
+  enter/leave crossings, which a teleport *through* a widget never
+  generates; kinetic scrolling and gesture recognisers derive velocity from
+  event timestamps; hot corners fire on approach. `duration` and `rate`
+  (default 120 Hz) give the event count between them, `via` routes the path
+  through waypoints, and `ease` reshapes progress but is off by default
+  because constant velocity is what a flick test wants. Randomised
+  human-shaped jitter is deliberately not offered: it is a bot-detection
+  evasion technique, nothing this side of the compositor looks for it, and
+  a path that varies run to run buys a test suite only flakiness. Since
+  `POINTER_QUERY` is tier NO_PATH everywhere but X11, `Session` now
+  remembers where it last sent the pointer to interpolate from, falling
+  back to a live read where one exists and raising — rather than assuming
+  `(0, 0)` — where neither is available. See `docs/input.md`.
 - `examples/09_gui_spy.py` gained three ways to inspect a point beyond a
   bare `X Y`: `--find IMG.png` locates a control by picture (reusing
   example 08's `IMAGE_LOCATE`) and inspects its centre, so a script can be
@@ -81,6 +101,19 @@ All notable changes to pyguitest are recorded here. The format follows
   session still gets the advice; a pure Wayland session with no X11
   connection does not, since those capabilities stay unreachable there no
   matter what is installed.
+- `docs/validation.md` records a live run of the tier-6 query capabilities
+  under XWayland on GNOME Shell 51.beta. `POINTER_QUERY` and
+  `INPUT_STATE_QUERY` both work, but only for X's world — accurate over an
+  X surface or while an X client holds focus, and silently stale (the last
+  position, an idle modifier) elsewhere, with no error either way. The same
+  run drove `UinputBackend` live on GNOME and read the commanded move back
+  off a real X client 1px out from rounding, so it is no longer listed as
+  never run live. The two places that consume a pointer readback now say so:
+  `glide()`'s origin falls back to one, and starts from the wrong place
+  rather than raising if it is stale, so prefer an explicit `start` under
+  XWayland; and `examples/09_gui_spy.py`'s `--here` is exact over an X11
+  client and quietly wrong elsewhere, which had been documented there as an
+  unvalidated suspicion and is now measured.
 
 ### Fixed
 

@@ -107,9 +107,13 @@ raises.
 | Windows | `swaymsg`, `hyprctl`, `niri msg`, `kdotool` |
 | Image search | `compare` (ImageMagick) |
 
-*Real X11 only* is stricter than *X11 only* and is about capture, not about
-which clients a tool can see. These tools screenshot by reading the X root
-window, and XWayland refuses that outright — a 1×1 read fails exactly as a
+*X11 only* means the tool needs an X connection, which XWayland carries, so
+it is selected on an XWayland session too. What limits it there is which
+clients it can see, never whether it runs.
+
+*Real X11 only* is stricter, and is about capture rather than about which
+clients a tool can see. These tools screenshot by reading the X root window,
+and XWayland refuses that outright — a 1×1 read fails exactly as a
 full-screen one does. So they are not selected on a Wayland session at all,
 XWayland included; being installed there does not make them usable, and
 `gnome-screenshot` in particular hangs for the full timeout before failing.

@@ -5,29 +5,41 @@ An element inspector: given a point on screen, report the window and
 accessible element there, so a script can be written against `role=` and
 `name=` instead of guessed at.
 
-Four ways to give it a point. Two are X11-ONLY: reading where the pointer
-is, even once, is `Capability.POINTER_QUERY` -- deliberately absent on
-every Wayland compositor, since a process that could poll it freely would
-be handing out exactly what a keylogger reads.
+Four ways to give it a point. Two NEED AN X CONNECTION: reading where the
+pointer is, even once, is `Capability.POINTER_QUERY` -- deliberately absent
+on every Wayland compositor, since a process that could poll it freely
+would be handing out exactly what a keylogger reads. XWayland carries a
+real X connection, so a Wayland session running it (`DISPLAY` set alongside
+`WAYLAND_DISPLAY`) has these too, with python-xlib installed -- but only
+for what XWayland itself tracks. That limit is now measured rather than
+suspected: over an X surface the read is right, and over a native Wayland
+window X keeps returning the last position it knew, silently and with no
+error (docs/validation.md). So `--here` under XWayland is trustworthy
+pointing at an X11 client and quietly wrong pointing anywhere else -- which
+is the worse failure, since a stale coordinate still names *some* element.
+`--watch` has the same shape: it sees the button only while an X client
+holds focus. On a real X11 session there is no such doubt.
 
-    python3 examples/09_gui_spy.py 842 612          # works on any desktop
+    python3 examples/09_gui_spy.py 842 612            # works on any desktop
     python3 examples/09_gui_spy.py --find button.png  # works on any desktop
-    python3 examples/09_gui_spy.py --here           # X11 only -- reads the pointer once
-    python3 examples/09_gui_spy.py --watch          # X11 only -- reports on every click
+    python3 examples/09_gui_spy.py --here             # X11/XWayland, one read
+    python3 examples/09_gui_spy.py --watch            # X11/XWayland, per click
 
-On GNOME, KDE, sway, Hyprland, niri: use the first or second form. Read a
-coordinate off a screenshot (example 05) or your desktop's own
-pointer-position display, or point `--find` at a cropped picture of the
-control the way example 08 does -- `--here`/`--watch` will tell you
-plainly, and immediately, that the capability is missing rather than doing
-something degraded.
+On a Wayland session with no XWayland, and on GNOME, KDE, sway, Hyprland or
+niri without python-xlib: use the first or second form. Read a coordinate
+off a screenshot (example 05) or your desktop's own pointer-position
+display, or point `--find` at a cropped picture of the control the way
+example 08 does -- `--here`/`--watch` will tell you plainly, and
+immediately, that the capability is missing rather than doing something
+degraded.
 
-`--watch` additionally needs `Capability.INPUT_STATE_QUERY` (X11-only, same
-reason) to notice a click at all, since it does not capture input itself --
-it polls whether the left button is currently held, the same readback
-`--here` uses once, just repeated. Every point it reports is one you
-visibly clicked while this was running in your own foreground terminal;
-nothing here runs unattended, hooks input, or writes anything down.
+`--watch` additionally needs `Capability.INPUT_STATE_QUERY` (same X
+connection, same reason) to notice a click at all, since it does not
+capture input itself -- it polls whether the left button is currently held,
+the same readback `--here` uses once, just repeated. Every point it reports
+is one you visibly clicked while this was running in your own foreground
+terminal; nothing here runs unattended, hooks input, or writes anything
+down.
 
 Any of the four forms also takes:
 
@@ -51,8 +63,8 @@ _USAGE = (
     "Usage:\n"
     "  python3 examples/09_gui_spy.py X Y            (works on any desktop)\n"
     "  python3 examples/09_gui_spy.py --find IMG.png (works on any desktop)\n"
-    "  python3 examples/09_gui_spy.py --here          (X11 only)\n"
-    "  python3 examples/09_gui_spy.py --watch         (X11 only)\n"
+    "  python3 examples/09_gui_spy.py --here          (X11/XWayland)\n"
+    "  python3 examples/09_gui_spy.py --watch         (X11/XWayland)\n"
     "\n"
     "Any form also takes --tree (list every element containing the point,\n"
     "not just the smallest) and --json (machine-readable output).\n"
@@ -359,8 +371,9 @@ def report_at(gui, x, y, tree=False, as_json=False):
 def watch(gui, tree=False, as_json=False):
     """Report on every left click, until Ctrl+C.
 
-    X11 only -- see the module docstring for why every other desktop has
-    no path for this at all. Polls rather than captures:
+    Needs an X connection -- X11 or XWayland; see the module docstring for
+    why a desktop without one has no path for this at all. Polls rather
+    than captures:
     `is_button_pressed`/`pointer_position` are the same readback any
     script could already call once, just repeated here to notice a
     press-then-release. Debounced on the transition from not-pressed to
@@ -405,8 +418,9 @@ def main(argv):
         ):
             sys.exit(
                 "--watch needs Capability.POINTER_QUERY and "
-                "Capability.INPUT_STATE_QUERY -- both X11-only, and this "
-                "desktop does not have them:\n"
+                "Capability.INPUT_STATE_QUERY -- both need an X connection "
+                "(X11 or XWayland, with python-xlib), and this desktop does "
+                "not have them:\n"
                 f"{gui.environment.summary()}\n\n"
                 "Pass a coordinate directly instead:\n"
                 "  python3 examples/09_gui_spy.py X Y"
@@ -419,8 +433,9 @@ def main(argv):
             sys.exit(_USAGE)
         if not gui.supports(Capability.POINTER_QUERY):
             sys.exit(
-                "--here needs Capability.POINTER_QUERY -- X11-only, and "
-                "this desktop does not have it:\n"
+                "--here needs Capability.POINTER_QUERY -- an X connection "
+                "(X11 or XWayland, with python-xlib), and this desktop does "
+                "not have it:\n"
                 f"{gui.environment.summary()}\n\n"
                 "Pass a coordinate directly instead:\n"
                 "  python3 examples/09_gui_spy.py X Y"

@@ -24,6 +24,7 @@ identically under X11 and Wayland -- the one layer with no backend matrix.
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import subprocess
@@ -144,6 +145,13 @@ class Session:
         self.environment = environment
         self.event_delay = event_delay
         self.key_delay = key_delay
+        # Where this session last commanded the pointer. Wayland has no
+        # readback -- POINTER_QUERY is tier NO_PATH wherever there is no X
+        # connection to read it from (X11 and XWayland both have one) -- so
+        # glide() and drag() need an origin to interpolate from and this is
+        # the only one available. It tracks what was *sent*, so a hand on the
+        # physical mouse invalidates it; pass start= when that is a risk.
+        self._pointer: tuple[int, int] | None = None
 
     # -- negotiation -------------------------------------------------------
 
@@ -236,8 +244,13 @@ class Session:
             time.sleep(self.event_delay)
 
     def move_mouse(self, x: int, y: int, screen: int = 0) -> None:
-        """Move the pointer to an absolute position."""
+        """Move the pointer to an absolute position.
+
+        One event: the pointer is where it was, then it is here, with
+        nothing in between. See glide() for the animated form.
+        """
         self.backend.move_mouse(x, y, screen)
+        self._pointer = (x, y)
         self._after_event()
 
     def press_button(self, button: int) -> None:
@@ -259,6 +272,215 @@ class Session:
         """Scroll by axis steps."""
         self.backend.scroll(dx, dy)
         self._after_event()
+
+    # -- pointer paths: motion the toolkit can see -------------------------
+
+    def _origin(self, start: tuple[int, int] | None) -> tuple[int, int]:
+        """Where a path begins.
+
+        An explicit `start` wins; failing that, wherever this session last
+        sent the pointer; failing that, a live read, which only an X
+        connection offers -- X11 or XWayland, never a pure Wayland session.
+        Raising beats guessing (0, 0): a drag from the wrong corner does not
+        fail, it succeeds at something else.
+
+        The live read is the weakest of the three, and under XWayland it is
+        weaker than it looks: X reports the pointer only while it is over an
+        X surface and otherwise returns the last position it knew, with no
+        error to distinguish the two (docs/validation.md). That lands the
+        path in exactly the failure this method exists to prevent -- a glide
+        from the wrong origin still runs. Pass `start` where the pointer may
+        have been over a native Wayland window, or move_mouse() first.
+        """
+        if start is not None:
+            return (int(start[0]), int(start[1]))
+        if self._pointer is not None:
+            return self._pointer
+        query = getattr(self.backend, "pointer_position", None)
+        if query is not None and self.supports(Capability.POINTER_QUERY):
+            x, y = query()
+            self._pointer = (int(x), int(y))
+            return self._pointer
+        raise PyGUITestError(
+            "the pointer's position is unknown and POINTER_QUERY is "
+            f"unavailable on {self.backend.name}; pass start=(x, y), or call "
+            "move_mouse() first to establish one"
+        )
+
+    def _route(
+        self,
+        start: tuple[int, int],
+        end: tuple[int, int],
+        via: Sequence[tuple[int, int]],
+        steps: int,
+        ease: Callable[[float], float] | None,
+    ) -> list[tuple[int, int]]:
+        """`steps` points along start -> *via -> end, spaced by distance.
+
+        By distance rather than per leg, so a route whose legs differ in
+        length holds one speed throughout instead of crawling over the short
+        one -- speed is exactly what a flick or a gesture recogniser reads.
+        The last point is always `end` exactly, whatever the arithmetic did
+        on the way.
+        """
+        points = [start, *((int(x), int(y)) for x, y in via), end]
+        legs = [math.dist(points[i], points[i + 1]) for i in range(len(points) - 1)]
+        total = sum(legs)
+        path = []
+        for step in range(1, steps + 1):
+            fraction = step / steps
+            if ease is not None:
+                # Clamped, so an overshooting curve (a "back" ease) bounded
+                # by the route rather than sending the pointer past `end`.
+                fraction = min(1.0, max(0.0, ease(fraction)))
+            if not total:
+                path.append(end)
+                continue
+            travelled = fraction * total
+            for index, leg in enumerate(legs):
+                if travelled <= leg or index == len(legs) - 1:
+                    ratio = min(1.0, travelled / leg) if leg else 1.0
+                    ax, ay = points[index]
+                    bx, by = points[index + 1]
+                    path.append(
+                        (round(ax + (bx - ax) * ratio), round(ay + (by - ay) * ratio))
+                    )
+                    break
+                travelled -= leg
+        return path
+
+    def _walk(
+        self, path: Sequence[tuple[int, int]], duration: float, screen: int
+    ) -> None:
+        """Emit `path`, spreading it over `duration` on a fixed schedule.
+
+        Each pause is computed against the time the walk began, not the time
+        the last one ended, so a backend that takes milliseconds per event --
+        eiinput frames and pumps its socket for every one -- loses that time
+        from the pauses instead of adding it to the total. Timing is the
+        point of the exercise: a compositor derives velocity from event
+        timestamps, and a path emitted as fast as the loop runs reads as one
+        instantaneous jump however many points it contains.
+
+        `event_delay` is deliberately not applied per point -- it is a pause
+        between discrete actions, and charging it 24 times for one gesture
+        would swamp the schedule. The caller applies it once, at the end.
+        """
+        began = time.monotonic()
+        for index, (x, y) in enumerate(path, 1):
+            self.backend.move_mouse(x, y, screen)
+            self._pointer = (x, y)
+            if duration:
+                remaining = began + duration * index / len(path) - time.monotonic()
+                if remaining > 0:
+                    time.sleep(remaining)
+
+    def glide(
+        self,
+        x: int,
+        y: int,
+        *,
+        duration: float = 0.2,
+        rate: float = 120.0,
+        via: Sequence[tuple[int, int]] = (),
+        start: tuple[int, int] | None = None,
+        ease: Callable[[float], float] | None = None,
+        screen: int = 0,
+    ) -> None:
+        """Move the pointer to (x, y) as a stream of events, not a jump.
+
+        move_mouse() teleports, which is enough to click with and wrong for
+        everything that watches the pointer on its way: drag-and-drop only
+        arms once motion crosses a threshold with a button down, hover
+        reveals and tooltips need enter/leave crossings, kinetic scrolling
+        and gesture recognisers read velocity off event timestamps, and hot
+        corners fire on approach rather than arrival.
+
+        The route is straight unless `via` names waypoints, and the useful
+        non-straight path is a deliberate one -- crossing a particular widget
+        on the way, holding the angle a GTK submenu's navigation triangle
+        wants -- not the randomised human-shaped wobble that bot-detection
+        evasion goes in for. That would only buy flakiness here, and nothing
+        on this side of the compositor is looking for it. Waypoints are
+        passed through rather than landed on exactly, since points are spaced
+        by distance along the whole route.
+
+        `duration` is wall-clock seconds and `rate` the points per second, so
+        the two give `duration * rate` events; the default 120 Hz is in the
+        range of a real mouse without flooding a backend that pays per event.
+        `ease` reshapes progress -- a callable from a fraction in [0, 1] to
+        one, clamped -- and is off by default because constant velocity is
+        what a flick test wants; an ease-out decelerates into the target and
+        a flick released at zero speed does not throw.
+
+        The origin is `start`, or wherever this session last put the pointer.
+        """
+        if duration < 0:
+            raise ValueError(f"duration must not be negative, got {duration!r}")
+        if rate <= 0:
+            raise ValueError(f"rate must be positive, got {rate!r}")
+        # Floors under the rate-derived count. Two, so that a glide always
+        # puts at least one event between origin and target -- a duration
+        # short enough to round down to a single point would otherwise be a
+        # silent teleport, which is the one thing this method exists not to
+        # be. And one per leg, so waypoints are still walked when the
+        # duration alone would not pay for them.
+        steps = max(2, len(via) + 1, round(duration * rate))
+        self._walk(
+            self._route(self._origin(start), (x, y), via, steps, ease), duration, screen
+        )
+        self._after_event()
+
+    def drag(
+        self,
+        start: tuple[int, int],
+        end: tuple[int, int],
+        *,
+        button: int = 1,
+        duration: float = 0.3,
+        rate: float = 120.0,
+        via: Sequence[tuple[int, int]] = (),
+        ease: Callable[[float], float] | None = None,
+        settle: float = 0.05,
+        screen: int = 0,
+    ) -> None:
+        """Press at `start`, glide to `end`, release. Drag-and-drop.
+
+        Press-teleport-release is not a drag in either GTK or Qt: both arm on
+        the press and start the operation only when motion afterwards passes
+        a threshold, so with no motion between them the sequence is a click
+        at the destination. The glide in the middle is what makes it a drag,
+        which is why this is a method and not three lines in a docstring.
+
+        `settle` pauses around the button events. The press has to reach the
+        source widget before motion arrives or there is nothing to drag, and
+        a release in the same compositor frame as the last motion is read by
+        some drop targets as a click on the target instead of a drop onto it.
+
+        Every other argument is glide()'s, and means the same thing there.
+        """
+        if settle < 0:
+            raise ValueError(f"settle must not be negative, got {settle!r}")
+        self.move_mouse(int(start[0]), int(start[1]), screen)
+        if settle:
+            time.sleep(settle)
+        self.press_button(button)
+        if settle:
+            time.sleep(settle)
+        self.glide(
+            int(end[0]),
+            int(end[1]),
+            duration=duration,
+            rate=rate,
+            via=via,
+            ease=ease,
+            screen=screen,
+        )
+        if settle:
+            time.sleep(settle)
+        self.release_button(button)
+
+    # -- keyboard ----------------------------------------------------------
 
     def press_key(self, key: str) -> None:
         """Press a key by name, without releasing it."""

@@ -266,6 +266,8 @@ plain layer over it:
 | `gui.locate_image(template_path, within=, threshold=)` | an `ImageMatch`, raising `ImageNotFound` -- for a control AT-SPI cannot see |
 | `gui.click()` / `type_text()` / `move_mouse()` | input, with the session's delays |
 | `gui.send_keys(keys)` | the `SendKeys` `{}` grammar -- modifiers, named keys, `{PAUSE}` |
+| `gui.glide(x, y, duration=, via=)` | the same move as a stream of events, for what watches the pointer on the way |
+| `gui.drag(start, end)` | press, glide, release -- a drag a toolkit actually recognises |
 
 The finders raise rather than returning `None`, so a script fails where the
 mistake is rather than several lines later on an attribute of `None`. Role

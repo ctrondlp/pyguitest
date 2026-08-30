@@ -127,6 +127,9 @@ gui.move_mouse(500, 300)
 gui.click()
 gui.type_text("Hello")
 gui.send_keys("^(a)^(c)")  # Ctrl-A, Ctrl-C
+
+# Motion the toolkit can see, for drag-and-drop and hover.
+gui.drag((120, 400), (600, 400))
 ```
 
 Matching on role and name survives the application being moved or resized,
