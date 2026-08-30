@@ -805,6 +805,14 @@ class Session:
             haystack, template, region=region, metric=metric, threshold=threshold
         )
 
+    def get_clipboard(self) -> str:
+        """The clipboard's current text content."""
+        return self.backend.get_clipboard()
+
+    def set_clipboard(self, text: str) -> None:
+        """Replace the clipboard's text content."""
+        self.backend.set_clipboard(text)
+
     # -- dynamic delegation ------------------------------------------------
 
     def __getattr__(self, attr: str) -> Any:

@@ -29,6 +29,38 @@ All notable changes to pyguitest are recorded here. The format follows
   `docs/validation.md`. `eiinput` had previously only been run against
   GNOME Shell; this confirms KDE's `xdg-desktop-portal-kde` negotiates the
   same `RemoteDesktop`+libei path.
+- `Capability.CLIPBOARD`: read and write the clipboard's text content,
+  via `Session.get_clipboard()`/`set_clipboard()`. New `ToolClipboardBackend`
+  adapts whichever clipboard tool is installed — `wl-copy`/`wl-paste` on
+  wlroots compositors and, confirmed live, KWin too (not a wlroots
+  compositor, but implements the same `wlr-data-control-unstable-v1`
+  protocol); `xclip`/`xsel` on X11. No member yet on GNOME/Mutter, which
+  implements neither that protocol nor a portal path this package can
+  reach without a `RemoteDesktop` session — closing that gap needs the
+  Shell extension this package already carries for other Mutter-shaped
+  gaps, not a new CLI adapter, and is left for later rather than shipped
+  half-working. `tools.ExternalTool` gained two fields for this:
+  `also_needs` (wl-clipboard is two binaries, not one) and
+  `mutter_incompatible` (distinct from `wlroots_only` — KWin needs the
+  former, not the latter). `examples/_clipboard_validate.py`: a
+  live-validation script, live-validated on KDE/KWin — see
+  `docs/validation.md`.
+
+### Fixed
+
+- `ToolClipboardBackend.set_clipboard()` hung for the full 15-second
+  subprocess timeout on every call. The write tools all fork into the
+  background to keep serving the clipboard after the caller returns —
+  necessary, and confirmed live independently by hand first — but
+  `subprocess.run(..., capture_output=True)` pipes stdout/stderr, and a
+  forked child inherits those pipes, so the daemonized grandchild held
+  them open long after the tracked process had already exited 0.
+  `communicate()` waits for the pipes to reach EOF as well as the process
+  exiting, so it hung on a fork that had already succeeded. Fixed by
+  giving the write call `DEVNULL` instead of `PIPE` for stdout/stderr
+  (the read call, which never forks, is unaffected); confirmed live —
+  0.07s instead of a 15s timeout. Caught before this ever shipped, by the
+  same live-validation pass that added the capability.
 
 ## [0.1.1] — 2026-08-30
 

@@ -622,6 +622,18 @@ class GUIBackend(ABC):
         )
         raise NotImplementedError
 
+    # -- clipboard (T3) ----------------------------------------------------
+
+    def get_clipboard(self) -> str:
+        """The clipboard's current text content."""
+        self.require(Capability.CLIPBOARD)
+        raise NotImplementedError
+
+    def set_clipboard(self, text: str) -> None:
+        """Replace the clipboard's text content."""
+        self.require(Capability.CLIPBOARD)
+        raise NotImplementedError
+
     # -- images (T1) -------------------------------------------------------
 
     def locate(

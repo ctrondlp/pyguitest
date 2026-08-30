@@ -159,6 +159,34 @@ read as a claim you cannot check.
   question ADR 002 and this file both left open: KDE's portal implements
   the same `RemoteDesktop`+libei path GNOME's does, at least for the
   device-capability surface this backend uses.
+- **`Capability.CLIPBOARD`** (`ToolClipboardBackend`, new this session) --
+  round trip, persistence past the call returning, and a second write
+  replacing rather than appending, all confirmed against the real KDE
+  clipboard through `examples/_clipboard_validate.py`. A by-hand spike
+  came first: `echo -n text | wl-copy` followed by `wl-paste` round-tripped
+  correctly on KWin, and the `wl-copy` process was still resident in `ps`
+  afterwards -- proof both that wl-clipboard works on KWin at all (it is
+  not a wlroots compositor, and this was previously unconfirmed) and that
+  it persists a selection by forking into the background, the way it does
+  on wlroots compositors.
+- A real bug surfaced by the very next run, through pyguitest's own code
+  rather than the by-hand spike, and fixed before ever shipping:
+  `set_clipboard()` hung for the full 15-second subprocess timeout on
+  every call. `_run` used `subprocess.run(..., capture_output=True)`
+  unconditionally, which pipes stdout/stderr -- and a forked child
+  inherits its parent's file descriptors, so the daemonized `wl-copy`
+  grandchild ended up holding the write end of those pipes open long
+  after the tracked process exited. `communicate()` waits for the pipes
+  to reach EOF as well as the process to exit, so it hung on a fork that
+  had already succeeded. The by-hand spike never hit this because a
+  shell's `|` connects `wl-copy`'s stdout/stderr to the terminal, not to
+  a pipe `communicate()` is waiting to drain -- which is exactly why the
+  easy confirmation looked clean and the first real one did not. Fixed by
+  giving the write call `DEVNULL` rather than `PIPE` for stdout/stderr
+  (the read call, which never forks, keeps `PIPE`); re-run after the fix
+  completed in 0.07s instead of timing out. The accepted cost is losing
+  stderr detail on a write failure specifically, which is the right side
+  to lose it on rather than hanging every successful write for 15 seconds.
 
 ## Run live on a real X11 session
 

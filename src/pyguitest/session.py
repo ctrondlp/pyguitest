@@ -131,6 +131,7 @@ class Environment:
     capture_tools: tuple[str, ...] = field(default_factory=tuple)
     window_tools: tuple[str, ...] = field(default_factory=tuple)
     image_tools: tuple[str, ...] = field(default_factory=tuple)
+    clipboard_tools: tuple[str, ...] = field(default_factory=tuple)
     notes: tuple[str, ...] = field(default_factory=tuple)
 
     @property
@@ -179,6 +180,17 @@ class Environment:
         return self.has_portal and self.has_pygobject
 
     @property
+    def can_use_clipboard(self) -> bool:
+        """Whether a clipboard tool is reachable on this session.
+
+        Unlike can_capture, there is currently only one route: a CLI tool.
+        Nothing in this package speaks a clipboard protocol directly, so
+        clipboard_tools is the whole answer -- see tools.CLIPBOARD_TOOLS on
+        why Mutter is the one desktop where that can come back empty.
+        """
+        return bool(self.clipboard_tools)
+
+    @property
     def preferred_input(self) -> str | None:
         """The input backend to try first.
 
@@ -205,6 +217,7 @@ class Environment:
                     + self.capture_tools
                     + self.window_tools
                     + self.image_tools
+                    + self.clipboard_tools
                 )
                 or "none found on PATH"
             ),
@@ -362,5 +375,13 @@ def detect(env: Mapping[str, str] | None = None) -> Environment:
         ),
         window_tools=tuple(t.name for t in _tools.discover(_tools.WINDOW_TOOLS)),
         image_tools=tuple(t.name for t in _tools.discover(_tools.IMAGE_TOOLS)),
+        clipboard_tools=tuple(
+            t.name
+            for t in _tools.discover(
+                _tools.CLIPBOARD_TOOLS,
+                allow_x11_only=x11_session,
+                allow_mutter_incompatible=compositor is not Compositor.MUTTER,
+            )
+        ),
         notes=tuple(notes),
     )

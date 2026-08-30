@@ -82,6 +82,8 @@ _DISPATCH = {
     "root_element": Capability.ELEMENT_TREE,
     "find_elements": Capability.ELEMENT_TREE,
     "find_element": Capability.ELEMENT_TREE,
+    "get_clipboard": Capability.CLIPBOARD,
+    "set_clipboard": Capability.CLIPBOARD,
 }
 
 

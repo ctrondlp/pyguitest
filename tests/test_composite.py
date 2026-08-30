@@ -29,6 +29,12 @@ class Fake(GUIBackend):
     def locate(self, haystack, template, **kwargs):
         return (self.marker, haystack, template)
 
+    def get_clipboard(self):
+        return self.marker
+
+    def set_clipboard(self, text):
+        self.set_clipboard_calls = text
+
     def close(self):
         self.closed = True
 
@@ -64,6 +70,13 @@ class TestComposite(unittest.TestCase):
         self.assertEqual(
             composite.locate("a.png", "b.png"), ("compare", "a.png", "b.png")
         )
+
+    def test_clipboard_routes_to_the_providing_member(self):
+        clipboard = Fake("clipboard:wl-copy", {Capability.CLIPBOARD}, marker="wl-copy")
+        composite = CompositeBackend([self.elements, self.input, clipboard])
+        self.assertEqual(composite.get_clipboard(), "wl-copy")
+        composite.set_clipboard("hello")
+        self.assertEqual(clipboard.set_clipboard_calls, "hello")
 
     def test_registration_order_decides_a_contested_capability(self):
         # A compositor IPC backend registered first should win WINDOW_GEOMETRY

@@ -13,6 +13,7 @@ from ..errors import BackendUnavailable, PyGUITestError
 from . import atspi as _atspi
 from .base import Element, GUIBackend, ImageMatch, Screen, Window
 from .capture import ToolCaptureBackend
+from .clipboard import ToolClipboardBackend
 from .composite import CompositeBackend
 from .eiinput import LibeiBackend
 from .imagesearch import ToolImageSearchBackend
@@ -29,6 +30,7 @@ __all__ = [
     "CompositeBackend",
     "ToolInputBackend",
     "ToolCaptureBackend",
+    "ToolClipboardBackend",
     "ToolImageSearchBackend",
     "LibeiBackend",
     "register",
@@ -318,10 +320,36 @@ def _image_factory(environment):
         return None
 
 
+def _clipboard_factory(environment):
+    """Build a clipboard backend from the first usable clipboard tool.
+
+    No member here on Mutter -- wl-clipboard is the only entry in
+    CLIPBOARD_TOOLS that is not x11_only, and it is excluded there by
+    mutter_incompatible. That leaves GNOME with no clipboard backend at all
+    rather than a broken one; see clipboard.py's module docstring on why.
+    """
+    from .. import tools
+    from ..session import Compositor, SessionType
+
+    x11 = environment.session_type in (SessionType.X11, SessionType.XWAYLAND)
+    usable = tools.discover(
+        tools.CLIPBOARD_TOOLS,
+        allow_x11_only=x11,
+        allow_mutter_incompatible=environment.compositor is not Compositor.MUTTER,
+    )
+    for tool in usable:
+        try:
+            return ToolClipboardBackend(tool)
+        except PyGUITestError:
+            continue
+    return None
+
+
 # Window IPC outranks AT-SPI: both can list windows, but only IPC reports
 # geometry that is trustworthy under Wayland.
 register(_window_factory, "windows", priority=95)
 register(_capture_factory, "capture", priority=60)
+register(_clipboard_factory, "clipboard", priority=58)
 register(_image_factory, "imagesearch", priority=55)
 
 

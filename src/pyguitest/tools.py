@@ -37,6 +37,7 @@ __all__ = [
     "CAPTURE_TOOLS",
     "WINDOW_TOOLS",
     "IMAGE_TOOLS",
+    "CLIPBOARD_TOOLS",
     "discover",
     "best",
 ]
@@ -95,14 +96,31 @@ class ExternalTool:
     gnome-screenshot hangs for the full subprocess timeout before giving up.
     """
 
+    mutter_incompatible: bool = False
+    """True if the tool needs a Wayland clipboard protocol Mutter does not
+    implement (wlr-data-control-unstable-v1). Distinct from wlroots_only: KWin
+    is not a wlroots compositor but does implement this protocol -- confirmed
+    live on KDE Plasma 6, where wl-copy/wl-paste round-tripped correctly and
+    wl-copy forked into the background to keep serving the selection, the
+    same way it does on a wlroots compositor. wlroots_only would incorrectly
+    exclude KWin here."""
+
+    also_needs: str = ""
+    """A second binary this tool's own operations need, checked by `present`
+    alongside `name`. wl-clipboard ships as two commands -- wl-copy to write,
+    wl-paste to read -- and a session with only one half installed cannot be
+    offered as a working clipboard backend."""
+
     def path(self) -> str | None:
         """Full path to the tool, or None if it is not on PATH."""
         return shutil.which(self.name)
 
     @property
     def present(self) -> bool:
-        """Whether the tool is installed."""
-        return self.path() is not None
+        """Whether the tool -- and its second half, if it has one -- is installed."""
+        return self.path() is not None and (
+            not self.also_needs or shutil.which(self.also_needs) is not None
+        )
 
     def version(self) -> str | None:
         """This tool's own reported version, first line only, or None.
@@ -232,12 +250,41 @@ IMAGE_TOOLS = (
     ),
 )
 
+CLIPBOARD_TOOLS = (
+    ExternalTool(
+        "wl-copy",
+        frozenset({Capability.CLIPBOARD}),
+        "wl-clipboard; wlr-data-control-unstable-v1. Works on wlroots "
+        "compositors and, confirmed live on KDE Plasma 6, KWin -- but not "
+        "Mutter, which implements neither this protocol nor a portal path "
+        "this package can reach without a RemoteDesktop session. Both "
+        "halves fork into the background to keep serving a selection after "
+        "this process exits.",
+        also_needs="wl-paste",
+        mutter_incompatible=True,
+    ),
+    ExternalTool(
+        "xclip",
+        frozenset({Capability.CLIPBOARD}),
+        "X11 selections; forks into the background on write for the same "
+        "reason wl-copy does",
+        x11_only=True,
+    ),
+    ExternalTool(
+        "xsel",
+        frozenset({Capability.CLIPBOARD}),
+        "X11 selections; same fork-on-write behavior as xclip",
+        x11_only=True,
+    ),
+)
+
 
 def discover(
     group: Sequence[ExternalTool],
     allow_x11_only: bool = True,
     allow_wlroots_only: bool = True,
     allow_x_root_only: bool = True,
+    allow_mutter_incompatible: bool = True,
 ) -> tuple[ExternalTool, ...]:
     """Every usable tool in `group`, in preference order.
 
@@ -255,6 +302,11 @@ def discover(
         anything but a real X11 session, XWayland included: the root is
         unreadable there, and the tools do not fail quickly -- one hangs for
         the whole subprocess timeout first.
+    allow_mutter_incompatible=False
+        drops tools needing a Wayland protocol Mutter does not implement.
+        Distinct from allow_wlroots_only: KWin needs this flag rather than
+        that one, since it is not a wlroots compositor but does carry the
+        protocol wl-clipboard needs.
     """
     return tuple(
         t
@@ -263,6 +315,7 @@ def discover(
         and (allow_x11_only or not t.x11_only)
         and (allow_wlroots_only or not t.wlroots_only)
         and (allow_x_root_only or not t.x_root_only)
+        and (allow_mutter_incompatible or not t.mutter_incompatible)
     )
 
 

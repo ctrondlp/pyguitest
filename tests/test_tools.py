@@ -210,3 +210,53 @@ class TestVersion(unittest.TestCase):
             mock.patch("pyguitest.tools.subprocess.run", side_effect=OSError),
         ):
             self.assertIsNone(fake.version())
+
+
+class TestDualBinaryTools(unittest.TestCase):
+    """also_needs: wl-clipboard ships as two commands, not one.
+
+    wl-copy writes, wl-paste reads. A session with only one of the two
+    cannot be offered as a working clipboard backend -- present must check
+    both, not just the primary name.
+    """
+
+    def test_wl_copy_is_flagged_with_wl_paste_as_its_second_half(self):
+        by_name = {t.name: t for t in tools.CLIPBOARD_TOOLS}
+        self.assertEqual(by_name["wl-copy"].also_needs, "wl-paste")
+        self.assertEqual(by_name["xclip"].also_needs, "")
+
+    def test_present_requires_both_binaries(self):
+        fake = tools.ExternalTool("sh", frozenset(), also_needs="definitely-not-real")
+        self.assertIsNotNone(fake.path())  # sh is real
+        self.assertFalse(fake.present)  # the second half is not
+
+    def test_present_is_unaffected_when_there_is_no_second_half(self):
+        fake = tools.ExternalTool("sh", frozenset())
+        self.assertTrue(fake.present)
+
+
+class TestMutterIncompatibleTools(unittest.TestCase):
+    """mutter_incompatible: distinct from wlroots_only.
+
+    Confirmed live on KDE Plasma 6: wl-copy/wl-paste round-trip correctly
+    on KWin, which is not a wlroots compositor. wlroots_only would wrongly
+    exclude KWin from a tool that actually works there, so wl-clipboard's
+    real constraint (Mutter lacks wlr-data-control-unstable-v1) needs its
+    own flag rather than reusing that one.
+    """
+
+    def test_wl_copy_is_flagged_mutter_incompatible_not_wlroots_only(self):
+        by_name = {t.name: t for t in tools.CLIPBOARD_TOOLS}
+        self.assertTrue(by_name["wl-copy"].mutter_incompatible)
+        self.assertFalse(by_name["wl-copy"].wlroots_only)
+        self.assertFalse(by_name["xclip"].mutter_incompatible)
+
+    def test_discover_excludes_it_only_via_its_own_flag(self):
+        fake = tools.ExternalTool("sh", frozenset(), mutter_incompatible=True)
+        self.assertEqual(
+            tools.discover([fake], allow_mutter_incompatible=True), (fake,)
+        )
+        self.assertEqual(tools.discover([fake], allow_mutter_incompatible=False), ())
+        # wlroots_only=False by default: the wlroots filter must not also
+        # catch this tool as a side effect of the other one being set.
+        self.assertEqual(tools.discover([fake], allow_wlroots_only=False), (fake,))

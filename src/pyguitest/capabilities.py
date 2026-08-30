@@ -131,6 +131,11 @@ class Capability(Enum):
         "a screen shot -- so an occluded or offscreen window still comes "
         "back whole",
     )
+    CLIPBOARD = (
+        Tier.COMPOSITOR,
+        "Read and write the clipboard's text content; a new feature, "
+        "X11::GUITest never had it",
+    )
 
     # -- T5: served by AT-SPI instead --------------------------------------
     ELEMENT_TREE = (

@@ -21,6 +21,7 @@ python3 examples/01_what_can_i_do.py
 | `_x11_validate.py` | Not numbered: a live-validation script for `X11Backend`'s window control (move/resize/minimize/hit-test/lower/title-set), forced rather than composited. Candidate for removal or promotion to a real numbered example. |
 | `_kdotool_validate.py` | Not numbered: a live-validation script for `KdotoolBackend`'s window control (list/geometry/activate/move/resize/hit-test/minimize, and the documented `is_window_viewable` refusal) on real KWin, forced rather than composited. Candidate for removal or promotion to a real numbered example. |
 | `_eiinput_validate.py` | Not numbered: a live-validation script for `LibeiBackend` (`eiinput`) -- pointer move, click, scroll, and typed text -- forced rather than composited, paired with a separately forced `windows` session for window discovery. Raises a real consent dialog on connect; click Allow. Candidate for removal or promotion to a real numbered example. |
+| `_clipboard_validate.py` | Not numbered: a live-validation script for `Capability.CLIPBOARD` -- round trip, persistence, and that a second write replaces rather than appends -- forced rather than composited. Candidate for removal or promotion to a real numbered example. |
 
 `06_a_real_test.py` is a `unittest` file rather than a top-to-bottom script,
 because that is how the library is actually used. Run it directly:
