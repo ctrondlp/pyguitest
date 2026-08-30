@@ -128,12 +128,20 @@ The version lives in exactly one place, `src/pyguitest/__init__.py`.
 `pyproject.toml` reads it from there via `[tool.setuptools.dynamic]`, so the
 wheel, `pyguitest --version` and `pyguitest.__version__` cannot drift apart.
 
+pyguitest is on PyPI: https://pypi.org/project/pyguitest/
+
 ### One-time setup
 
-**On PyPI** — the project does not exist yet, so register a *pending*
-publisher rather than uploading anything by hand:
+This is already done for this repository — recorded here for reference, or
+in case Trusted Publishing ever needs to be re-registered (e.g. after a repo
+rename or transfer).
+
+**On PyPI** — the project registered a Trusted Publisher rather than
+uploading via API token:
 
 1. pypi.org → *Your account* → *Publishing* → *Add a new pending publisher*
+   (or, once the project exists, *Manage* → *Publishing* on the project
+   itself)
 2. PyPI Project Name `pyguitest`, Owner `ctrondlp`, Repository `pyguitest`,
    Workflow name `ci.yml`, Environment name `pypi`.
 
