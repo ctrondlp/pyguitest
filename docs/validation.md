@@ -187,6 +187,39 @@ read as a claim you cannot check.
   completed in 0.07s instead of timing out. The accepted cost is losing
   stderr detail on a write failure specifically, which is the right side
   to lose it on rather than hanging every successful write for 15 seconds.
+- **`Capability.WINDOW_CURSOR_QUERY`** (`X11Backend.is_window_cursor()`,
+  the fifth tier-6 capability, previously only run against a fake Xlib) --
+  forced under XWayland on this session, through
+  `examples/_cursor_validate.py`. The protocol call itself works: it
+  returns a plain boolean for every shape queried, no error, no hang.
+  What it returns is the interesting part. Five visually distinct classic
+  cursor-font shapes (`XC_X_CURSOR`, `XC_CROSSHAIR`, `XC_HAND2`,
+  `XC_LEFT_PTR`, `XC_XTERM`) were all queried at one point of plain
+  desktop background, where an ordinary arrow was unambiguously being
+  shown -- and every single one came back `False`, `XC_LEFT_PTR`
+  included. Reading `Xlib.ext.xtest`'s source (there is no higher-level
+  documentation for `CompareCursor` to check against) shows pyguitest
+  always calls it with an explicit cursor object built from the classic X
+  core cursor font, never the `CurrentCursor` sentinel -- so this is
+  consistent with a themed desktop cursor (Xcursor/Breeze on this KDE
+  session, and the default on essentially every modern desktop) simply
+  never bitwise-matching a classic bitmap font cursor, regardless of
+  shape or what is actually on screen. Not a crash and not something a
+  code fix addresses -- matching X11::GUITest's own original `IsWindowCursor`
+  is the whole point of this backend's contract -- but a real practical
+  limitation worth being explicit about: `is_window_cursor()` should be
+  expected to read `False` on most real, modern desktops no matter what
+  cursor is actually showing.
+- Getting to that point surfaced two things outside `is_window_cursor()`
+  itself, both left as open questions rather than chased down further:
+  a plain GTK app (`gedit`) rendered as a native Wayland surface with no
+  XWayland-visible top-level at all, invisible to `X11Backend.windows()`
+  until relaunched with `GDK_BACKEND=x11` forcing it through XWayland;
+  and once visible that way, its `geometry()` came back with implausible
+  negative coordinates resembling those of KWin's own internal "Wayland
+  to X Recording bridge" window, hinting at a KWin-specific counterpart
+  to the GNOME/Mutter `geometry()` caveat below -- unconfirmed, and
+  deliberately not pursued further in this pass.
 
 ## Run live on a real X11 session
 
@@ -203,8 +236,6 @@ the installed library — names, signatures and return shapes.
 ## Not run live
 
 - **Input injection through XTest** (the X11 backend's input half).
-- **`is_window_cursor`** (WINDOW_CURSOR_QUERY), the fifth tier-6
-  capability.
 - **The compositor IPC backends** — sway, Hyprland, niri, KWin — and
   **UinputBackend**. Their tests replay recorded output and stand-ins, on a
   sandbox where none of those are available to test against. Running them

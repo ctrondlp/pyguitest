@@ -45,6 +45,19 @@ All notable changes to pyguitest are recorded here. The format follows
   former, not the latter). `examples/_clipboard_validate.py`: a
   live-validation script, live-validated on KDE/KWin — see
   `docs/validation.md`.
+- `examples/_cursor_validate.py`: a live-validation script for
+  `X11Backend.is_window_cursor()` (`WINDOW_CURSOR_QUERY`, the fifth
+  tier-6 capability, previously only exercised against a fake Xlib).
+  Live-validated on KDE/KWin (forced under XWayland) — see
+  `docs/validation.md`. The protocol call itself works cleanly, but the
+  run surfaced a real practical limitation rather than a bug: on a themed
+  (Xcursor) desktop — the default on essentially every modern one —
+  `is_window_cursor()` reads `False` regardless of shape queried or what
+  is actually on screen, because it compares against the classic X core
+  cursor font rather than the theme in use. Documented rather than
+  "fixed": matching X11::GUITest's original `IsWindowCursor` contract is
+  the point of this backend, so this is an inherent limitation of that
+  contract on a modern desktop, not a regression to correct.
 
 ### Fixed
 
