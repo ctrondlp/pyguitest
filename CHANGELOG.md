@@ -5,7 +5,7 @@ All notable changes to pyguitest are recorded here. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html) — with the usual
 0.x caveat that the API may still change between minor versions.
 
-## [Unreleased]
+## [0.1.1] — 2026-08-30
 
 ### Added
 

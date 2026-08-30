@@ -150,7 +150,9 @@ class FakeUinput(GUIBackend):
 
 
 class TestKeyNamingRoutesToTheKeyEventProvider(unittest.TestCase):
-    """send_keys() reads MODIFIER_KEYS/KEY_ALIASES/resolve_char_key straight
+    """send_keys()'s key-name tables route through the KEY_EVENT provider.
+
+    send_keys() reads MODIFIER_KEYS/KEY_ALIASES/resolve_char_key straight
     off self.backend, then hands the names it builds to press_key/
     release_key -- which dispatch to whichever member provides KEY_EVENT.
     Left unrouted, a composite would build names in its own inherited
