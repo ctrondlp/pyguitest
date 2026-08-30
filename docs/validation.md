@@ -145,6 +145,20 @@ read as a claim you cannot check.
   anything pyguitest raised itself. Fixed both examples to `wait(timeout=5)`
   after `terminate()`, falling back to `kill()` so cleanup cannot hang on
   that dialog. Re-run after the fix: no warning, `OK (skipped=1)`.
+- **`eiinput` (`LibeiBackend`)** — previously validated only on GNOME Shell
+  (below); confirmed on real KDE/KWin too, driven through
+  `examples/_eiinput_validate.py`. `connect(backend="eiinput")` negotiated
+  a `RemoteDesktop` portal session against `xdg-desktop-portal-kde`
+  successfully -- KDE's own consent dialog appeared as expected and was
+  clicked through by hand, confirming this is a real negotiation and not
+  a silently-approved no-op -- and all five capabilities it can offer came
+  back
+  (`KEY_EVENT`, `POINTER_BUTTON`, `POINTER_MOVE`, `POINTER_SCROLL`,
+  `TEXT_ENTRY`), and `move_mouse`, `click`, `scroll`, and `type_text` all
+  worked against a real `gedit` window. No bug found. This answers the
+  question ADR 002 and this file both left open: KDE's portal implements
+  the same `RemoteDesktop`+libei path GNOME's does, at least for the
+  device-capability surface this backend uses.
 
 ## Run live on a real X11 session
 

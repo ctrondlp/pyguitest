@@ -5,6 +5,31 @@ All notable changes to pyguitest are recorded here. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html) — with the usual
 0.x caveat that the API may still change between minor versions.
 
+## [Unreleased]
+
+### Added
+
+- `examples/09_gui_spy.py` gained three ways to inspect a point beyond a
+  bare `X Y`: `--find IMG.png` locates a control by picture (reusing
+  example 08's `IMAGE_LOCATE`) and inspects its centre, so a script can be
+  written against `role=`/`name=` even where AT-SPI cannot see a control's
+  location on its own; `--tree` lists every accessible element containing
+  the point instead of collapsing to the single smallest-area match,
+  for when two controls overlap and that heuristic picks the wrong one;
+  and `--json` gives one line of machine-readable output instead of the
+  formatted report, with `--watch --json` streaming one JSON object per
+  click as valid JSONL. The formatted report also gained an `ancestors`
+  breadcrumb — the element's containing chain up to the window — for
+  when the matched element itself has no name to match on but a parent
+  does.
+- `examples/_eiinput_validate.py`: a live-validation script for
+  `LibeiBackend` (`eiinput`), forced rather than composited, pairing it
+  with a separately forced `windows` session for window discovery since
+  `eiinput` is input-only. Live-validated on KDE/KWin — see
+  `docs/validation.md`. `eiinput` had previously only been run against
+  GNOME Shell; this confirms KDE's `xdg-desktop-portal-kde` negotiates the
+  same `RemoteDesktop`+libei path.
+
 ## [0.1.1] — 2026-08-30
 
 ### Added

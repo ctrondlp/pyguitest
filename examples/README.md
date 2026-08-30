@@ -17,9 +17,10 @@ python3 examples/01_what_can_i_do.py
 | `06_a_real_test.py` | **The one to copy.** pyguitest inside a `unittest` suite: skip on a missing capability, screenshot the failure while it is still on screen, wait on conditions instead of sleeping. |
 | `07_keys_and_pointer.py` | `send_keys` in X11::GUITest's own notation, escaping with `quote_for_type`, and the raw pointer calls. |
 | `08_find_by_image.py` | Find a control by a picture of it, for anything AT-SPI cannot see. |
-| `09_gui_spy.py` | Point at a screen coordinate, get back the `role=`/`name=` to script against — an element inspector. |
+| `09_gui_spy.py` | Point at a screen coordinate (or `--find` a picture of a control), get back the `role=`/`name=` to script against — an element inspector. `--tree` lists every element at that point instead of just the closest match; `--json` gives machine-readable output. |
 | `_x11_validate.py` | Not numbered: a live-validation script for `X11Backend`'s window control (move/resize/minimize/hit-test/lower/title-set), forced rather than composited. Candidate for removal or promotion to a real numbered example. |
 | `_kdotool_validate.py` | Not numbered: a live-validation script for `KdotoolBackend`'s window control (list/geometry/activate/move/resize/hit-test/minimize, and the documented `is_window_viewable` refusal) on real KWin, forced rather than composited. Candidate for removal or promotion to a real numbered example. |
+| `_eiinput_validate.py` | Not numbered: a live-validation script for `LibeiBackend` (`eiinput`) -- pointer move, click, scroll, and typed text -- forced rather than composited, paired with a separately forced `windows` session for window discovery. Raises a real consent dialog on connect; click Allow. Candidate for removal or promotion to a real numbered example. |
 
 `06_a_real_test.py` is a `unittest` file rather than a top-to-bottom script,
 because that is how the library is actually used. Run it directly:
