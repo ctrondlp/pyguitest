@@ -7,6 +7,20 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `pyguitest debug` command (plus `--json`): a pasteable diagnostic dump
+  for bug reports — package and Python versions, every environment probe
+  (not only the ones that came back true), each detected tool's own
+  `--version`, and whether the process is running inside a Flatpak,
+  toolbox, or other container.
+- `Capability.WINDOW_EVENTS` on the `gnomeshell` backend: window
+  create/close/title-change, pushed by the Shell extension over a
+  `WindowEvent` D-Bus signal rather than polled. `wait_for_window` and
+  `wait_window_close` now work the same way on GNOME as they already did
+  on sway and niri. Live-validated on GNOME Shell 50.4 — `new`, `title`
+  and `close` all confirmed over a real D-Bus connection.
+
 ## [0.1.0] — 2026-08-29
 
 First public release.

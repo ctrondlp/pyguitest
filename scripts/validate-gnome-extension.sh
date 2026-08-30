@@ -82,6 +82,10 @@ fi
 
 echo "== 6. GnomeShellBackend against the live extension =="
 PYTHONPATH="$(cd "$(dirname "$0")/.." && pwd)/src" python3 - <<'PY'
+import os
+import shutil
+import signal
+import subprocess
 import sys
 import time
 
@@ -207,20 +211,117 @@ print(f"  {G if restored == before else Y} restored geometry: {restored}"
 # few seconds this listens, which this script cannot make happen on its
 # own -- so that part stays informational (Y), not asserted (G/R).
 from pyguitest.capabilities import Capability
-if Capability.WINDOW_EVENTS in b.capabilities:
+window_events_ok = Capability.WINDOW_EVENTS in b.capabilities
+if window_events_ok:
     print(f"  {G} WINDOW_EVENTS is declared")
 else:
     print(f"  {R} WINDOW_EVENTS is NOT declared "
           f"(startWatching() may have failed -- check the shell's log)"); rc = 1
 
-listen_for = 3.0
-print(f"  {Y} listening for window events for {listen_for:.0f}s -- open or "
-      f"close a window now to exercise this for real")
-seen = list(b.window_events(timeout=listen_for))
+seen = []
+if not window_events_ok:
+    print(f"  {Y} skipping the event listen -- WINDOW_EVENTS is not "
+          f"declared, and window_events() would just raise")
+else:
+    # "new" (window-created) has never been confirmed live: every prior run
+    # of this script closed a window during the manual-interaction listen
+    # below, none opened one, since that depended on a person's timing
+    # rather than anything this script controlled. Spawning and then
+    # killing a throwaway GUI app makes both "new" and "close"
+    # deterministic instead of hoping a human acts inside a few seconds --
+    # and once spawned, letting the human listen still run: it exercises
+    # whatever this doesn't cover.
+    _SPAWN_CANDIDATES = ["gnome-text-editor", "gedit", "gnome-calculator"]
+    spawn_app = next((a for a in _SPAWN_CANDIDATES if shutil.which(a)), None)
+    if spawn_app is not None:
+        print(f"  {Y} spawning {spawn_app!r} to exercise \"new\" "
+              f"deterministically")
+        launcher = subprocess.Popen([spawn_app])
+
+        # One continuous subscription for the whole spawn-kill-close
+        # sequence, rather than a separate window_events() call before and
+        # after killing the process. Tearing one down and standing another
+        # up is not free -- signal_unsubscribe/signal_subscribe are their
+        # own D-Bus round trips -- and the first version of this script
+        # did exactly that: killed the process only *after* the "new"
+        # listen's subscription had already been torn down, then opened a
+        # fresh one afterwards. A "close" that fired in that gap would be
+        # lost with nothing to blame but bad luck; observed live as
+        # "it opened and closed it, but still errors". One subscription
+        # spanning the kill removes the gap instead of narrowing it.
+        new_window_id = None
+        target_pid = None
+        got_close = False
+        events = b.window_events(timeout=15)
+        try:
+            for event in events:
+                seen.append(event)
+                if event.change == "new" and new_window_id is None:
+                    new_window_id = event.window.handle
+                    # The process just launched is NOT necessarily the
+                    # window's owner. gnome-text-editor (and most modern
+                    # GTK/libadwaita apps) is a GApplication: running it
+                    # from the command line asks an existing, or freshly
+                    # D-Bus-activated, single-instance service to open a
+                    # window, and the launcher process this Popen'd can
+                    # exit on its own the moment that request is sent --
+                    # terminate() on it then kills nothing and leaves the
+                    # real window open. The extension's own ListWindows
+                    # already reports each window's real pid, so ask it
+                    # rather than trust what was launched.
+                    for window in b.windows():
+                        if window.handle == new_window_id:
+                            target_pid = window.pid
+                            break
+                    if target_pid:
+                        try:
+                            os.kill(target_pid, signal.SIGTERM)
+                        except ProcessLookupError:
+                            pass  # already gone -- fine, that is the goal
+                    # Whether or not that found anything, also try the
+                    # launcher -- on an app that is not single-instance
+                    # this is the real (and only) owner, and if it already
+                    # exited on its own this is a no-op.
+                    if launcher.poll() is None:
+                        launcher.terminate()
+                elif event.change == "close" and event.window.handle == new_window_id:
+                    got_close = True
+                    break  # got what this was spawned for; stop listening
+        finally:
+            events.close()
+        try:
+            launcher.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            launcher.kill()
+            launcher.wait(timeout=5)
+
+        if new_window_id is not None:
+            print(f"  {G} \"new\" event arrived for the spawned window")
+        else:
+            print(f"  {R} spawned {spawn_app!r} but no \"new\" event "
+                  f"arrived"); rc = 1
+        if new_window_id is not None and not target_pid:
+            print(f"  {Y} could not determine the window's owning pid; "
+                  f"\"close\" depends on the launcher process alone")
+        if got_close:
+            print(f"  {G} \"close\" event arrived after terminating it")
+        elif new_window_id is not None:
+            print(f"  {R} terminated {spawn_app!r} but no \"close\" event "
+                  f"arrived (a window may still be open -- close it by "
+                  f"hand)"); rc = 1
+    else:
+        print(f"  {Y} none of {_SPAWN_CANDIDATES} are installed; \"new\" "
+              f"can only be exercised by opening a window yourself below")
+
+    listen_for = 3.0
+    print(f"  {Y} listening for window events for {listen_for:.0f}s -- "
+          f"open or close a window now to exercise this for real")
+    seen += list(b.window_events(timeout=listen_for))
+
 if seen:
     for event in seen:
         print(f"  {G} event: {event.change} -> {event.window!r}")
-else:
+elif window_events_ok:
     print(f"  {Y} no events arrived (nothing was opened/closed during the "
           f"window -- not a failure on its own)")
 

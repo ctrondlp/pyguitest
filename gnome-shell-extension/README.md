@@ -16,17 +16,22 @@ found two real bugs written from the headers alone, both since fixed.
 window was captured to a PNG through `Meta.WindowActor.get_image`, on a
 pure Wayland session where every other capture route is closed.
 
-**Window events validated live on GNOME Shell 50.4** (2026-08-30): closing
-a real `gedit` window produced a `title` event followed by a `close`
-event, both correctly attributed, over the real `WindowEvent` D-Bus
-signal -- `scripts/validate-gnome-extension.sh` exercises this at step
-5/6, and a run doing exactly that now passes all 9 checks clean. (Two
-earlier attempts each crashed the *script's own* read-only checks
-afterwards, on a stale window reference from before the close -- not a
-bug in the extension or the backend; both are fixed.) The `"new"`
-(window-created) path is still fakes-only, in `tests/test_gnomeshell.py`:
-no window happened to open during any of these runs. See **Window
-events** below for the shape of the signal.
+**Window events validated live on GNOME Shell 50.4** (2026-08-30): all
+three -- `new`, `title`, `close` -- confirmed over the real `WindowEvent`
+D-Bus signal. `scripts/validate-gnome-extension.sh` spawns and kills a
+throwaway `gnome-text-editor`/`gedit`/`gnome-calculator` at step 6
+specifically to exercise `new`/`close` deterministically rather than
+depending on a person's timing, then asserts both arrived; a run doing
+exactly that passed all 9 checks clean, `new` included. Three real bugs
+surfaced getting here, all in the *script itself* rather than the
+extension or the backend, each fixed in turn: two stale-window crashes in
+the read-only checks after a window closed during the listen, and a race
+where killing the launched process happened only after that first
+listen's D-Bus subscription had already been torn down -- a `close`
+firing in that gap was lost with nothing to blame but timing. Fixed by
+using one continuous subscription across spawn, kill, and close instead
+of two separate ones. See **Window events** below for the shape of the
+signal.
 
 If the extension doesn't load, `journalctl -f /usr/bin/gnome-shell` (or
 `looking-glass`, `Alt+F2` then `lg`) is where GNOME Shell logs extension

@@ -13,18 +13,22 @@ read as a claim you cannot check.
 - **`gnomeshell`** — window control passed 8 of 8 checks, and per-window
   capture through the Shell extension produced a real PNG. That extension
   is the only prompt-free way to screenshot on this desktop.
-- **`gnomeshell`'s `WINDOW_EVENTS`** (extension `0.3.0-events`) — closing a
-  real `gedit` window during a live run produced a `title` event followed
-  by a `close` event, both correctly attributed, over the real D-Bus
-  signal. `wait_for_window`/`window_events` were exercised through this,
-  not just constructed. The first two live attempts each crashed a
-  *different* line of `validate-gnome-extension.sh`'s own read-only
-  checks — the script had captured windows before inviting one to be
-  closed, then used the stale reference afterwards (`geometry()` on a
-  window closed during the listen, then `is_window_viewable()` on one
-  closed the same way) — fixed both times by refreshing the reference or
-  tolerating `WindowNotFound` after the listen step. A subsequent run
-  passed all 9 checks clean.
+- **`gnomeshell`'s `WINDOW_EVENTS`** (extension `0.3.0-events`) — all
+  three event kinds (`new`, `title`, `close`) confirmed over the real
+  D-Bus signal. `wait_for_window`/`window_events` were exercised through
+  this, not just constructed. `new`/`close` came from
+  `validate-gnome-extension.sh` deliberately spawning and killing a
+  throwaway `gnome-text-editor` at step 6 rather than depending on a
+  person's timing; `title` came along for free as GNOME sets the window's
+  title after creation. Three real bugs surfaced getting a clean run, all
+  in the *script*, not the extension or the backend: two stale-window
+  crashes in the read-only checks after a window closed during a listen
+  (`geometry()`/`is_window_viewable()` on a handle that no longer
+  existed), and a race where the kill happened only after the first
+  listen's D-Bus subscription had already been torn down, so a `close`
+  firing in that gap was lost — fixed by using one continuous subscription
+  across spawn, kill, and close instead of two separate ones. A
+  subsequent run passed all 9 checks clean.
 - **`portalcapture`** (opt-in) — captured the whole screen correctly.
 - **`X11Backend` under XWayland** — per-window capture, which produced a
   correct image of a real window through this package's own PNG encoder.
@@ -51,10 +55,6 @@ the installed library — names, signatures and return shapes.
   **UinputBackend**. Their tests replay recorded output and stand-ins, on a
   sandbox where none of those are available to test against. Running them
   against a live sway/Hyprland/niri/KDE session is next.
-- **`gnomeshell`'s `"new"` window-created event.** The live run above
-  exercised `"title"` and `"close"` (closing a real `gedit` window); no
-  window was opened during that run, so `window-created`/`_watchWindow`'s
-  "new" path is still fakes-only, in `tests/test_gnomeshell.py`.
 - **`portal`, the input half.** Its CreateSession/SelectDevices/Start
   negotiation has been run against a real xdg-desktop-portal (1.22.1) and
   completes; the keyboard, pointer and scroll methods past that point have
