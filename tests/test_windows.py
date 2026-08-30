@@ -760,6 +760,11 @@ KDOTOOL = {
         "getwindowgeometry",
         "{aaa-1}",
     ): "Window {aaa-1}\n  Position: 100,200 (screen: 0)\n  Geometry: 800x600\n",
+    (
+        "kdotool",
+        "getwindowgeometry",
+        "{ccc-3}",
+    ): "Window {ccc-3}\n  Position: 545,274.5403238932292\n  Geometry: 911x580\n",
 }
 
 
@@ -782,6 +787,11 @@ class TestKdotool(unittest.TestCase):
 
     def test_xdotool_style_geometry_text_is_parsed(self):
         self.assertEqual(self.gui.geometry("{aaa-1}"), (100, 200, 800, 600))
+
+    def test_geometry_rounds_a_mid_animation_fractional_position(self):
+        # Live KWin can report a sub-pixel position while a window is still
+        # animating into place; confirmed against a real Konsole window.
+        self.assertEqual(self.gui.geometry("{ccc-3}"), (545, 275, 911, 580))
 
     def test_missing_geometry_is_an_error_not_a_silent_zero(self):
         with self.assertRaises(WindowNotFound):

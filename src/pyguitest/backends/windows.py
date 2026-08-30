@@ -730,6 +730,10 @@ class KdotoolBackend(_WindowBackend):
         Window {uuid}
           Position: 100,200 (screen: 0)
           Geometry: 800x600
+
+        KWin can report a position mid-animation as a fraction of a pixel
+        (confirmed live: "545,274.5403238932292"), so each component is
+        parsed as a float and rounded rather than handed straight to int().
         """
         self.require(Capability.WINDOW_GEOMETRY)
         handle = self._handle(window)
@@ -737,10 +741,10 @@ class KdotoolBackend(_WindowBackend):
         for line in self._lines(["kdotool", "getwindowgeometry", handle]):
             if line.startswith("Position:"):
                 coords = line.split(":", 1)[1].split("(")[0].strip()
-                x, y = (int(v) for v in coords.split(","))
+                x, y = (round(float(v)) for v in coords.split(","))
             elif line.startswith("Geometry:"):
                 size = line.split(":", 1)[1].strip()
-                width, height = (int(v) for v in size.split("x"))
+                width, height = (round(float(v)) for v in size.split("x"))
         if None in (x, y, width, height):
             raise WindowNotFound(f"no geometry for window {handle!r}")
         return (x, y, width, height)

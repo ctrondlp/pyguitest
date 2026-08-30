@@ -8,6 +8,7 @@ coordinates.
     python3 examples/04_drive_an_editor.py gedit
 """
 
+import subprocess
 import sys
 
 import pyguitest
@@ -48,5 +49,13 @@ try:
     gui.wait(1)
 
 finally:
+    # A bare terminate() is not enough once the document has unsaved text --
+    # gedit's response to SIGTERM there is a "Save changes?" dialog rather
+    # than exiting, confirmed live. kill() on a timeout skips that dialog.
     process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
     print("done")

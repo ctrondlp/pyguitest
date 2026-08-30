@@ -117,6 +117,37 @@ class CompositeBackend(GUIBackend):
             merged |= set(member.capabilities)
         return CapabilitySet(merged)
 
+    # -- send_keys() key-name tables ---------------------------------------
+    #
+    # Session.send_keys() reads these three straight off self.backend, then
+    # hands the names it builds to press_key/release_key -- which dispatch
+    # (below) to whichever member provides KEY_EVENT. Left as GUIBackend's
+    # plain class attributes, a composite would build names in its own
+    # inherited X11-keysym vocabulary while routing the actual key press to
+    # a member that speaks a different one (uinput's evdev names), e.g.
+    # send_keys("^(a)") pressing "Control_L" against UinputBackend, which
+    # only knows "LEFTCTRL". Confirmed live on KDE/KWin, where uinput is the
+    # composite's only KEY_EVENT provider.
+
+    @property
+    def MODIFIER_KEYS(self):  # type: ignore[override]
+        """send_keys()'s modifiers, in the KEY_EVENT provider's vocabulary."""
+        provider = self.provider(Capability.KEY_EVENT)
+        return GUIBackend.MODIFIER_KEYS if provider is None else provider.MODIFIER_KEYS
+
+    @property
+    def KEY_ALIASES(self):  # type: ignore[override]
+        """send_keys()'s `{BAC}`-style abbreviations, ditto."""
+        provider = self.provider(Capability.KEY_EVENT)
+        return GUIBackend.KEY_ALIASES if provider is None else provider.KEY_ALIASES
+
+    def resolve_char_key(self, char):
+        """The (key name, needs_shift) send_keys() uses to press one char."""
+        provider = self.provider(Capability.KEY_EVENT)
+        if provider is None:
+            return super().resolve_char_key(char)
+        return provider.resolve_char_key(char)
+
     def provider(self, capability):
         """The member that serves `capability`, or None."""
         for member in self.members:

@@ -153,7 +153,28 @@ class ToolCaptureBackend(GUIBackend):
         if region is not None and self.crops_regions:
             return self._capture_then_crop(path, region)
         self._runner(self._build(path, region))
+        self._check_written(path)
         return path
+
+    def _check_written(self, path):
+        """Raise unless `path` holds a real image, not just a name.
+
+        A tool's exit code is not proof of a screenshot: confirmed live on
+        KDE Plasma 6, `spectacle -b -n -f -o path` exited 0 and left `path`
+        at 0 bytes, silently, with nothing on stderr -- four times in a
+        row before a fifth attempt produced a real image, with no code or
+        environment change in between. Whatever KWin's screenshot service
+        was doing, spectacle itself gave no sign anything had failed.
+        Checked here, once, rather than trusted through to a caller that
+        would otherwise get a path to a corrupt image back from a call
+        that claimed to succeed.
+        """
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            raise PyGUITestError(
+                f"{self.tool.name} exited successfully but left {path!r} "
+                "empty -- the desktop's screenshot service silently failed; "
+                "try again"
+            )
 
     def _capture_then_crop(self, path, region):
         """Whole-screen capture into a temporary file, cropped onto `path`.
@@ -167,7 +188,9 @@ class ToolCaptureBackend(GUIBackend):
         os.close(descriptor)
         try:
             self._runner(self._build(full, None))
+            self._check_written(full)
             _crop.crop(full, region, path, runner=self._runner)
+            self._check_written(path)
         finally:
             if os.path.exists(full):
                 os.unlink(full)

@@ -25,12 +25,27 @@ BY_NAME = {t.name: t for t in tools.CAPTURE_TOOLS}
 REGION = (10, 20, 100, 50)
 
 
+def _write_fake_image(argv):
+    """Simulate a real tool actually writing pixels to its destination.
+
+    Every command here (screenshot or crop) ends in a destination path;
+    `capture()` now checks that path is non-empty before trusting a 0 exit
+    code, so a stub runner that never wrote anything would fail that check
+    on every call.
+    """
+    destination = argv[-1]
+    if isinstance(destination, str) and destination.endswith(".png"):
+        with open(destination, "wb") as f:
+            f.write(b"\x89PNG\r\n\x1a\n")
+
+
 class Recorder:
     def __init__(self):
         self.calls = []
 
     def __call__(self, argv):
         self.calls.append(argv)
+        _write_fake_image(argv)
         return argv
 
 
@@ -204,6 +219,7 @@ class TestCropFallback(unittest.TestCase):
 
         def runner(argv):
             created.append(argv)
+            _write_fake_image(argv)
             return argv
 
         gui = ToolCaptureBackend(BY_NAME["gnome-screenshot"], runner=runner)
@@ -220,6 +236,7 @@ class TestCropFallback(unittest.TestCase):
             seen.append(argv)
             if argv[0] in ("magick", "convert"):
                 raise PyGUITestError("crop blew up")
+            _write_fake_image(argv)
             return argv
 
         gui = ToolCaptureBackend(BY_NAME["gnome-screenshot"], runner=runner)
@@ -289,6 +306,47 @@ class TestFailuresAreActionable(unittest.TestCase):
             with self.assertRaises(PyGUITestError) as caught:
                 gui.capture(path="/tmp/shot.png")
         self.assertIn("compositor does not support wlr", str(caught.exception))
+
+
+class TestASilentEmptyResultIsCaught(unittest.TestCase):
+    """A 0 exit code is not proof of a screenshot.
+
+    Confirmed live on KDE Plasma 6: `spectacle -b -n -f -o path` exited 0
+    and left `path` at 0 bytes, with nothing on stderr, four times in a row
+    before a fifth attempt produced a real image. Nothing about the tool's
+    own reporting distinguished that from success, so it has to be checked
+    here instead of trusted.
+    """
+
+    def test_an_empty_file_is_an_actionable_error_not_a_silent_success(self):
+        def leaves_an_empty_file(argv):
+            open(argv[-1], "wb").close()
+            return argv
+
+        gui = ToolCaptureBackend(BY_NAME["grim"], runner=leaves_an_empty_file)
+        with self.assertRaises(PyGUITestError) as caught:
+            gui.capture(path="/tmp/shot.png")
+        self.assertIn("grim", str(caught.exception))
+        self.assertIn("empty", str(caught.exception))
+
+    def test_a_missing_file_is_the_same_actionable_error(self):
+        gui = ToolCaptureBackend(BY_NAME["grim"], runner=lambda argv: argv)
+        with self.assertRaises(PyGUITestError):
+            gui.capture(path="/tmp/pyguitest-never-written.png")
+
+    def test_an_empty_intermediate_is_caught_before_the_crop_even_runs(self):
+        seen = []
+
+        def leaves_an_empty_file(argv):
+            seen.append(argv)
+            open(argv[-1], "wb").close()
+            return argv
+
+        gui = ToolCaptureBackend(BY_NAME["spectacle"], runner=leaves_an_empty_file)
+        with self.assertRaises(PyGUITestError):
+            gui.capture(path="/tmp/shot.png", region=REGION)
+        # Only the screenshot ran; the crop step never got a chance to.
+        self.assertEqual(len(seen), 1)
 
 
 if __name__ == "__main__":

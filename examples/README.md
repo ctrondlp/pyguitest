@@ -19,6 +19,7 @@ python3 examples/01_what_can_i_do.py
 | `08_find_by_image.py` | Find a control by a picture of it, for anything AT-SPI cannot see. |
 | `09_gui_spy.py` | Point at a screen coordinate, get back the `role=`/`name=` to script against — an element inspector. |
 | `_x11_validate.py` | Not numbered: a live-validation script for `X11Backend`'s window control (move/resize/minimize/hit-test/lower/title-set), forced rather than composited. Candidate for removal or promotion to a real numbered example. |
+| `_kdotool_validate.py` | Not numbered: a live-validation script for `KdotoolBackend`'s window control (list/geometry/activate/move/resize/hit-test/minimize, and the documented `is_window_viewable` refusal) on real KWin, forced rather than composited. Candidate for removal or promotion to a real numbered example. |
 
 `06_a_real_test.py` is a `unittest` file rather than a top-to-bottom script,
 because that is how the library is actually used. Run it directly:

@@ -26,6 +26,60 @@ All notable changes to pyguitest are recorded here. The format follows
   directly; `--here` and `--watch` (report on every click, until Ctrl+C)
   are X11-only conveniences, since reading the pointer position or button
   state is a capability no Wayland compositor exposes.
+- `examples/_kdotool_validate.py`: a live-validation script for
+  `KdotoolBackend` on real KWin, forced rather than composited.
+
+### Fixed
+
+- `KdotoolBackend.geometry()` raised `ValueError` on a window reported
+  mid-animation, because KWin can give `getwindowgeometry` a fractional
+  position (confirmed live: `545,274.5403238932292`) and the parser assumed
+  a plain integer pair. Since a hit-test reads every open window's
+  geometry, this could crash `window_at()` over a window unrelated to the
+  one under test. Now parsed as `float` and rounded. Live-validated on KDE
+  Plasma 6 / KWin (XWayland) — see `docs/validation.md`.
+- `CompositeBackend` never overrode `MODIFIER_KEYS`/`KEY_ALIASES`/
+  `resolve_char_key`, so `send_keys()` built key names in the base class's
+  inherited X11-keysym vocabulary regardless of which member actually
+  presses them — e.g. `"Control_L"` for `^`, even when the composite's
+  `KEY_EVENT` provider is `UinputBackend`, which only knows evdev names
+  like `"LEFTCTRL"`. `send_keys("^(a)")` raised `ValueError: unknown key
+  name 'Control_L'` the moment this ran through the default composite
+  rather than a single forced backend — confirmed live on KDE/KWin, where
+  uinput is the only `KEY_EVENT` provider, but not KWin-specific: the same
+  crash can occur on any desktop where uinput ends up providing key
+  events. Fixed by routing all three to the `KEY_EVENT` provider, the same
+  way every other composite operation dispatches.
+- `examples/07_keys_and_pointer.py` used `{BKSP}` for backspace, which is
+  not a recognized `KEY_ALIASES` abbreviation (`BAC`/`BS`/`BKS`, or the
+  unabbreviated `BackSpace`) and was rejected by every backend. Fixed to
+  `{BAC}`.
+- `ToolCaptureBackend.capture()` trusted a screenshot tool's exit code
+  alone. On KDE/KWin, `spectacle` intermittently exits 0 while leaving the
+  output file empty — confirmed with pyguitest entirely out of the loop:
+  plain `spectacle -b -n -f -o path` reproduced it directly, printing
+  `KWin screenshot request failed: The process is not authorized to take a
+  screenshot` and still exiting 0. That is a KWin/spectacle bug, not a
+  pyguitest one, and left open in `docs/validation.md` — but trusting exit
+  code 0 meant callers got a path to a corrupt image under a name that
+  claimed success. Fixed by checking the destination is non-empty before
+  returning it (both stages of the capture-then-crop path too), so this
+  now raises a clear, actionable error instead.
+- `examples/06_a_real_test.py`'s `test_the_window_is_actually_showing`
+  guarded `is_window_viewable()` with `gui.supports(Capability.WINDOW_STATE)`,
+  but that capability is also declared for `active_window()`'s sake on
+  `KdotoolBackend`, which still refuses `is_window_viewable()` itself
+  (see above) — `supports()` cannot predict a per-verb refusal like that,
+  so the test errored on KDE/KWin instead of skipping. Fixed by catching
+  `CapabilityUnsupported` around the call and skipping on it.
+- `examples/04_drive_an_editor.py` and `examples/06_a_real_test.py` both
+  type text into the editor and then clean up with a bare
+  `process.terminate()`. Once the document has unsaved text, gedit's
+  response to SIGTERM is its own "Save changes?" dialog rather than
+  exiting — confirmed live: the process was still running when the
+  interpreter exited, reported as a `ResourceWarning` rather than anything
+  pyguitest raised. Fixed both to `wait(timeout=5)` after `terminate()`,
+  falling back to `kill()` so cleanup cannot hang on that dialog.
 
 ## [0.1.0] — 2026-08-29
 

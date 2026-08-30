@@ -131,6 +131,60 @@ class TestComposite(unittest.TestCase):
         self.assertIs(ctx.exception.capability, Capability.SCREEN_CAPTURE)
 
 
+class FakeUinput(GUIBackend):
+    """A KEY_EVENT provider with evdev-style names, standing in for uinput."""
+
+    name = "uinput"
+    capabilities = property(lambda self: CapabilitySet({Capability.KEY_EVENT}))
+    MODIFIER_KEYS = {"^": "LEFTCTRL"}
+    KEY_ALIASES = {"BAC": "BACKSPACE"}
+
+    def resolve_char_key(self, char):
+        return (char.upper(), False)
+
+    def press_key(self, key):
+        pass
+
+    def release_key(self, key):
+        pass
+
+
+class TestKeyNamingRoutesToTheKeyEventProvider(unittest.TestCase):
+    """send_keys() reads MODIFIER_KEYS/KEY_ALIASES/resolve_char_key straight
+    off self.backend, then hands the names it builds to press_key/
+    release_key -- which dispatch to whichever member provides KEY_EVENT.
+    Left unrouted, a composite would build names in its own inherited
+    X11-keysym vocabulary while pressing them against a member that speaks
+    a different one, e.g. send_keys("^(a)") pressing "Control_L" against a
+    backend that only knows "LEFTCTRL". Confirmed live on KDE/KWin, where
+    uinput was the composite's only KEY_EVENT provider.
+    """
+
+    def test_modifier_keys_come_from_the_key_event_provider(self):
+        composite = CompositeBackend(
+            [Fake("atspi", {Capability.ELEMENT_TREE}), FakeUinput()]
+        )
+        self.assertEqual(composite.MODIFIER_KEYS, {"^": "LEFTCTRL"})
+
+    def test_key_aliases_come_from_the_key_event_provider(self):
+        composite = CompositeBackend(
+            [Fake("atspi", {Capability.ELEMENT_TREE}), FakeUinput()]
+        )
+        self.assertEqual(composite.KEY_ALIASES, {"BAC": "BACKSPACE"})
+
+    def test_resolve_char_key_comes_from_the_key_event_provider(self):
+        composite = CompositeBackend(
+            [Fake("atspi", {Capability.ELEMENT_TREE}), FakeUinput()]
+        )
+        self.assertEqual(composite.resolve_char_key("a"), ("A", False))
+
+    def test_no_key_event_provider_falls_back_to_the_base_defaults(self):
+        composite = CompositeBackend([Fake("atspi", {Capability.ELEMENT_TREE})])
+        self.assertEqual(composite.MODIFIER_KEYS, GUIBackend.MODIFIER_KEYS)
+        self.assertEqual(composite.KEY_ALIASES, GUIBackend.KEY_ALIASES)
+        self.assertEqual(composite.resolve_char_key("a"), ("a", False))
+
+
 class TestReportReachesTheBackend(unittest.TestCase):
     def test_composite_report_is_reachable_from_a_session(self):
         # Regression: Session.report() called self.capabilities.report()

@@ -39,11 +39,12 @@ list windows it skips rather than failing.
 """
 
 import os
+import subprocess
 import sys
 import unittest
 
 import pyguitest
-from pyguitest import Capability
+from pyguitest import Capability, CapabilityUnsupported
 
 EDITOR = os.environ.get("PYGUITEST_EDITOR", "gedit")
 ARTIFACTS = os.environ.get("PYGUITEST_SCREENSHOT_DIR", "artifacts")
@@ -70,10 +71,29 @@ class EditorTest(unittest.TestCase):
         """Release the backend's resources."""
         cls.gui.close()
 
+    @staticmethod
+    def _stop(process):
+        """Terminate `process` and reap it, killing it if it won't die.
+
+        `terminate()` alone is not enough here: a test that typed into the
+        document leaves it unsaved, and gedit's response to SIGTERM in that
+        state is to raise its own "Save changes?" dialog rather than exit --
+        confirmed live, where a bare `terminate()` with no `wait()` left the
+        process still running by the time the interpreter exited (a
+        `ResourceWarning` at garbage collection said so). `kill()` on a
+        timeout skips that dialog rather than waiting on it.
+        """
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
     def setUp(self):
         """Start the editor and wait for its window."""
         self.process = self.gui.start_app([EDITOR])
-        self.addCleanup(self.process.terminate)
+        self.addCleanup(self._stop, self.process)
         window = self.gui.wait_for_window(EDITOR, timeout=STARTUP_TIMEOUT)
         if window is None:
             self.fail(f"{EDITOR} opened no window within {STARTUP_TIMEOUT}s")
@@ -83,7 +103,16 @@ class EditorTest(unittest.TestCase):
         """A window that exists is not necessarily on screen."""
         if not self.gui.supports(Capability.WINDOW_STATE):
             self.skipTest("no WINDOW_STATE on this session")
-        self.assertTrue(self.gui.is_window_viewable(self.window))
+        # supports() answers for the capability, not this one verb: kdotool
+        # declares WINDOW_STATE (active_window() needs it) but still refuses
+        # is_window_viewable() specifically, since it has no mapped/visibility
+        # query. Confirmed live on KDE/KWin -- see docs/validation.md.
+        try:
+            viewable = self.gui.is_window_viewable(self.window)
+        except CapabilityUnsupported as exc:
+            self.skipTest(str(exc))
+        else:
+            self.assertTrue(viewable)
 
     def test_typing_reaches_the_document(self):
         """Type, then assert on the accessible tree rather than a sleep."""
