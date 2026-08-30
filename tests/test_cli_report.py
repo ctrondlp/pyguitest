@@ -54,6 +54,7 @@ class TestReportAdviceGating(unittest.TestCase):
             environment,
             has_atspi=True,
             has_pygobject=True,
+            has_dogtail=True,
             capture_tools=("grim",),
             input_tools=("wdotool",),
             image_tools=("compare",),

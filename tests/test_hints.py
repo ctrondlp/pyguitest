@@ -64,6 +64,7 @@ class TestHints(unittest.TestCase):
         env = environment(
             has_atspi=True,
             has_pygobject=True,
+            has_dogtail=True,
             capture_tools=("grim",),
             input_tools=("wdotool",),
             image_tools=(),
@@ -96,6 +97,7 @@ class TestHints(unittest.TestCase):
         complete = environment(
             has_atspi=True,
             has_pygobject=True,
+            has_dogtail=True,
             capture_tools=("grim",),
             input_tools=("wdotool",),
             image_tools=("compare",),
@@ -107,6 +109,7 @@ class TestHints(unittest.TestCase):
         with_atspi = environment(
             has_atspi=True,
             has_pygobject=True,
+            has_dogtail=True,
             capture_tools=("grim",),
             input_tools=("wdotool",),
             image_tools=("compare",),
@@ -138,6 +141,7 @@ class TestInputAdvice(unittest.TestCase):
         return environment(
             has_atspi=True,
             has_pygobject=True,
+            has_dogtail=True,
             capture_tools=("grim",),
             input_tools=(),
             uinput_writable=False,
@@ -171,6 +175,7 @@ class TestInputAdvice(unittest.TestCase):
         env = environment(
             has_atspi=True,
             has_pygobject=True,
+            has_dogtail=True,
             capture_tools=("grim",),
             input_tools=(),
             uinput_writable=True,
@@ -187,6 +192,7 @@ class TestInputAdvice(unittest.TestCase):
         env = environment(
             has_atspi=True,
             has_pygobject=True,
+            has_dogtail=True,
             capture_tools=("grim",),
             input_tools=(),
             uinput_writable=True,
@@ -293,6 +299,7 @@ class TestCaptureHintFollowsEveryRoute(unittest.TestCase):
         base = {
             "has_atspi": True,
             "has_pygobject": True,
+            "has_dogtail": True,
             "capture_tools": (),
             "input_tools": ("wdotool",),
             "image_tools": ("compare",),
@@ -325,6 +332,7 @@ class TestCaptureHintFollowsEveryRoute(unittest.TestCase):
         env = environment(
             has_atspi=True,
             has_pygobject=True,
+            has_dogtail=True,
             capture_tools=(),
             has_portal=True,
             input_tools=("wdotool",),
@@ -359,6 +367,7 @@ class TestGnomeShellExtensionHint(unittest.TestCase):
         base = {
             "has_atspi": True,
             "has_pygobject": True,
+            "has_dogtail": True,
             "capture_tools": ("grim",),
             "input_tools": ("wdotool",),
             "image_tools": ("compare",),
