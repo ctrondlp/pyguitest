@@ -18,6 +18,7 @@ therefore declared only where those coordinates can be trusted.
 import contextlib
 import io
 import os
+from typing import TYPE_CHECKING
 
 from ..capabilities import Capability, CapabilitySet
 from ..errors import BackendUnavailable, CapabilityUnsupported
@@ -195,6 +196,20 @@ class Element:
 
     def __repr__(self):
         return f"Element({self.role!r}, {self.name!r})"
+
+
+if TYPE_CHECKING:
+    from .base import Element as _ElementInterface
+
+    def _conforms(element: Element) -> _ElementInterface:
+        """Check, statically only, that this Element satisfies the protocol.
+
+        Session.element and the widget finders are annotated with
+        base.Element, so this class is what makes those annotations true.
+        Renaming or dropping a member here would otherwise surface as a
+        type error in whoever called it, a module away from the cause.
+        """
+        return element
 
 
 class AtspiBackend(GUIBackend):

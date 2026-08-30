@@ -11,7 +11,7 @@ from collections.abc import Callable
 
 from ..errors import BackendUnavailable, PyGUITestError
 from . import atspi as _atspi
-from .base import GUIBackend, ImageMatch, Screen, Window
+from .base import Element, GUIBackend, ImageMatch, Screen, Window
 from .capture import ToolCaptureBackend
 from .composite import CompositeBackend
 from .eiinput import LibeiBackend
@@ -21,6 +21,7 @@ from .null import NullBackend
 
 __all__ = [
     "GUIBackend",
+    "Element",
     "Screen",
     "Window",
     "ImageMatch",

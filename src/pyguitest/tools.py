@@ -25,6 +25,7 @@ filters on that before rank is consulted.
 from __future__ import annotations
 
 import shutil
+import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -39,6 +40,22 @@ __all__ = [
     "discover",
     "best",
 ]
+
+_VERSION_TIMEOUT = 3.0
+"""Bound on version(), in seconds. Well under the 15s a real capture or
+input call tolerates -- a version probe that hangs is a diagnostic detail,
+not something worth making a caller wait on."""
+
+_VERSION_ARGS: dict[str, tuple[str, ...]] = {
+    "hyprctl": ("version",),
+}
+"""Per-tool override for the argument that prints a version.
+
+Most of these tools accept --version, which is what version() tries by
+default. hyprctl is a subcommand dispatcher and uses `version` instead of a
+flag. Anything not listed here is tried with --version; when that guess is
+wrong the tool exits nonzero or is silent, and version() reports None rather
+than raising -- an incorrect guess costs one missing line, not a failure."""
 
 
 @dataclass(frozen=True)
@@ -86,6 +103,28 @@ class ExternalTool:
     def present(self) -> bool:
         """Whether the tool is installed."""
         return self.path() is not None
+
+    def version(self) -> str | None:
+        """This tool's own reported version, first line only, or None.
+
+        Best-effort and never raises: not on PATH, an incorrect --version
+        guess, or a hang all come back as None. Nothing in this package
+        depends on this succeeding -- it exists for diagnostics, where
+        "unknown" is a fine answer and blocking a bug report on a hung
+        subprocess is not.
+        """
+        path = self.path()
+        if path is None:
+            return None
+        argv = [path, *_VERSION_ARGS.get(self.name, ("--version",))]
+        try:
+            result = subprocess.run(
+                argv, capture_output=True, text=True, timeout=_VERSION_TIMEOUT
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        output = (result.stdout or result.stderr or "").strip()
+        return output.splitlines()[0] if output else None
 
 
 _INPUT = frozenset(

@@ -13,15 +13,34 @@ backend is a valid backend -- which is the normal case, not the exception.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import NamedTuple
+from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol, TypeVar
 
-from ..capabilities import Capability
+from ..capabilities import Capability, CapabilitySet
 from ..errors import CapabilityUnsupported
 
-__all__ = ["GUIBackend", "Window", "Screen", "ImageMatch", "check_region"]
+if TYPE_CHECKING:
+    from collections.abc import Iterator, Sequence
+
+    # Imported for annotations only: windows.py imports this module, and
+    # WindowEvent is the one name from it the interface has to name.
+    from .windows import WindowEvent
+
+__all__ = [
+    "GUIBackend",
+    "Window",
+    "Screen",
+    "ImageMatch",
+    "Element",
+    "check_region",
+]
+
+_Backend = TypeVar("_Backend", bound="GUIBackend")
 
 
-def check_region(region, window=None):
+def check_region(
+    region: Sequence[float] | None,
+    window: Window | None = None,
+) -> tuple[int, int, int, int] | None:
     """Validate a capture region and return it as four ints.
 
     One place rather than four: every capture backend takes the same
@@ -82,7 +101,7 @@ class Screen:
         """The output's (width, height) in pixels."""
         return (self.width, self.height)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return (
             f"Screen({self.index}, {self.width}x{self.height}"
             f"{f'@{self.scale}x' if self.scale != 1.0 else ''}"
@@ -130,13 +149,128 @@ class Window:
         self.app_id = app_id
         self.pid = pid
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         bits = [repr(self.title)]
         if self.app_id:
             bits.append(f"app_id={self.app_id!r}")
         if self.pid:
             bits.append(f"pid={self.pid}")
         return f"Window({', '.join(bits)})"
+
+
+class Element(Protocol):
+    """One node of the accessible tree, as every backend agrees to expose it.
+
+    A Protocol rather than a base class: the concrete element belongs to
+    whichever backend produced it -- AtspiBackend's is a thin wrapper over a
+    dogtail Node and cannot usefully inherit from here -- so this states the
+    shape they agree on instead of demanding they share an ancestor.
+
+    It exists to be *named*: Session.element, Session.button and the rest are
+    annotated with it, which is what makes `gui.button("Save").click()`
+    complete and type-check in an editor. Backends stay free to offer more,
+    and AtspiBackend's Element keeps `node` for the parts this does not cover.
+    """
+
+    @property
+    def name(self) -> str:
+        """The element's accessible name, such as a button's label."""
+        ...
+
+    @property
+    def role(self) -> str:
+        """The element's accessible role, such as 'push button'."""
+        ...
+
+    @property
+    def parent(self) -> Element | None:
+        """The containing element, or None at the root."""
+        ...
+
+    @property
+    def children(self) -> list[Element]:
+        """The elements directly inside this one."""
+        ...
+
+    @property
+    def visible(self) -> bool:
+        """Whether the element is currently showing."""
+        ...
+
+    @property
+    def enabled(self) -> bool:
+        """Whether the element accepts input, rather than being greyed out."""
+        ...
+
+    @property
+    def description(self) -> str:
+        """The element's longer accessible description, often a tooltip."""
+        ...
+
+    @property
+    def text(self) -> str | None:
+        """The element's text content, for text boxes and labels."""
+        ...
+
+    @property
+    def value(self) -> float | None:
+        """The numeric value of a slider, spinner, or progress bar."""
+        ...
+
+    @property
+    def checked(self) -> bool | None:
+        """Whether a check box, radio button, or toggle is set."""
+        ...
+
+    @property
+    def selected(self) -> bool | None:
+        """Whether a list item, tab, or menu item is currently selected."""
+        ...
+
+    @property
+    def actions(self) -> list[str]:
+        """The names of the actions this element offers, e.g. 'click'."""
+        ...
+
+    def click(self) -> None:
+        """Act on the element directly -- no coordinates, no injection."""
+        ...
+
+    def focus(self) -> None:
+        """Give the element keyboard focus."""
+        ...
+
+    def set_text(self, text: str) -> None:
+        """Replace the element's text content."""
+        ...
+
+    def do_action(self, name: str) -> None:
+        """Perform a named accessible action, such as "click" or "activate"."""
+        ...
+
+    def select(self) -> None:
+        """Select this element, for a list item, tab, or menu entry."""
+        ...
+
+    def choose(self, option: str) -> None:
+        """Pick `option` from this dropdown by its visible text."""
+        ...
+
+    def options(self) -> list[Element]:
+        """The choices this dropdown or list offers, as Elements."""
+        ...
+
+    def find(self, role: str | None = None, name: str | None = None) -> list[Element]:
+        """Search this element's descendants by role and/or name."""
+        ...
+
+    def child(self, role: str | None = None, name: str | None = None) -> Element | None:
+        """Return the first descendant matching role and/or name, or None."""
+        ...
+
+    def is_ancestor_of(self, other: Element) -> bool:
+        """Whether `other` sits somewhere inside this element."""
+        ...
 
 
 _SENDKEYS_PLAIN = {
@@ -291,7 +425,7 @@ class GUIBackend(ABC):
 
     @property
     @abstractmethod
-    def capabilities(self):
+    def capabilities(self) -> CapabilitySet:
         """A CapabilitySet describing what this backend can actually do."""
 
     def supports(self, capability: Capability) -> bool:
@@ -306,56 +440,58 @@ class GUIBackend(ABC):
     def close(self) -> None:
         """Release compositor connections, portal sessions, virtual devices."""
 
-    def __enter__(self):
+    def __enter__(self: _Backend) -> _Backend:
         return self
 
-    def __exit__(self, *exc):
+    def __exit__(self, *exc: object) -> Literal[False]:
         self.close()
         return False
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"<{type(self).__name__} {self.name!r} caps={len(self.capabilities)}>"
 
     # -- screens (T2) ------------------------------------------------------
 
-    def screens(self):
+    def screens(self) -> list[Screen]:
         """Every output, in advertised order."""
         self.require(Capability.SCREEN_INFO)
         raise NotImplementedError
 
     # -- input (T4) --------------------------------------------------------
 
-    def move_mouse(self, x, y, screen=0):
+    def move_mouse(self, x: int, y: int, screen: int = 0) -> None:
         """Move the pointer to an absolute position."""
         self.require(Capability.POINTER_MOVE)
         raise NotImplementedError
 
-    def press_button(self, button):
+    def press_button(self, button: int) -> None:
         """Press a mouse button. 1 is left, 2 middle, 3 right."""
         self.require(Capability.POINTER_BUTTON)
         raise NotImplementedError
 
-    def release_button(self, button):
+    def release_button(self, button: int) -> None:
         """Release a mouse button."""
         self.require(Capability.POINTER_BUTTON)
         raise NotImplementedError
 
-    def scroll(self, dx=0, dy=0):
+    def scroll(self, dx: int = 0, dy: int = 0) -> None:
         """Scroll by axis steps. X11 buttons 4 and 5 map here, not to buttons."""
         self.require(Capability.POINTER_SCROLL)
         raise NotImplementedError
 
-    def press_key(self, key):
+    def press_key(self, key: str) -> None:
         """Press a key by name, without releasing it."""
         self.require(Capability.KEY_EVENT)
         raise NotImplementedError
 
-    def release_key(self, key):
+    def release_key(self, key: str) -> None:
         """Release a key by name."""
         self.require(Capability.KEY_EVENT)
         raise NotImplementedError
 
-    def type_text(self, text, delay=0.0, allow_keymap_unsafe=True):
+    def type_text(
+        self, text: str, delay: float = 0.0, allow_keymap_unsafe: bool = True
+    ) -> None:
         """Type `text`, pausing `delay` seconds between characters.
 
         Separate from press_key because correctness depends on the keymap: a
@@ -373,17 +509,17 @@ class GUIBackend(ABC):
 
     # -- windows (T3) ------------------------------------------------------
 
-    def windows(self):
+    def windows(self) -> list[Window]:
         """Every toplevel currently known."""
         self.require(Capability.WINDOW_LIST)
         raise NotImplementedError
 
-    def active_window(self):
+    def active_window(self) -> Window | None:
         """The currently focused window, or None."""
         self.require(Capability.WINDOW_STATE)
         raise NotImplementedError
 
-    def window_events(self, timeout=None):
+    def window_events(self, timeout: float | None = None) -> Iterator[WindowEvent]:
         """Yield WindowEvent objects as the compositor reports them.
 
         `timeout` bounds the total wait in seconds; None yields indefinitely.
@@ -394,7 +530,9 @@ class GUIBackend(ABC):
         self.require(Capability.WINDOW_EVENTS)
         raise NotImplementedError
 
-    def wait_for_window(self, title, timeout=None):
+    def wait_for_window(
+        self, title: str, timeout: float | None = None
+    ) -> Window | None:
         """Block until a window matching `title` (regex) appears, or None.
 
         Session.wait_for_window is the capability-agnostic entry point --
@@ -404,7 +542,7 @@ class GUIBackend(ABC):
         self.require(Capability.WINDOW_EVENTS)
         raise NotImplementedError
 
-    def is_window_viewable(self, window):
+    def is_window_viewable(self, window: Window) -> bool:
         """Whether `window` is currently mapped and showing.
 
         Replaces X11::GUITest's WaitWindowViewable -- a one-shot state read
@@ -415,37 +553,42 @@ class GUIBackend(ABC):
         self.require(Capability.WINDOW_STATE)
         raise NotImplementedError
 
-    def window_at(self, x, y, screen=0):
+    def window_at(self, x: int, y: int, screen: int = 0) -> Window | None:
         """The topmost window covering a screen coordinate, or None."""
         self.require(Capability.WINDOW_AT_POINT)
         raise NotImplementedError
 
-    def geometry(self, window):
+    def geometry(self, window: Window) -> tuple[int, int, int, int]:
         """(x, y, width, height). The most commonly missing capability."""
         self.require(Capability.WINDOW_GEOMETRY)
         raise NotImplementedError
 
-    def move_window(self, window, x, y):
+    def move_window(self, window: Window, x: int, y: int) -> None:
         """Move a window's top-left corner to (x, y)."""
         self.require(Capability.WINDOW_PLACEMENT)
         raise NotImplementedError
 
-    def resize_window(self, window, width, height):
+    def resize_window(self, window: Window, width: int, height: int) -> None:
         """Resize a window to `width` by `height`."""
         self.require(Capability.WINDOW_RESIZE)
         raise NotImplementedError
 
-    def activate_window(self, window):
+    def activate_window(self, window: Window) -> None:
         """Raise and focus. There is no raise-without-focus operation."""
         self.require(Capability.WINDOW_ACTIVATE)
         raise NotImplementedError
 
-    def minimize_window(self, window, minimized=True):
+    def minimize_window(self, window: Window, minimized: bool = True) -> None:
         """Minimize a window, or restore it when `minimized` is False."""
         self.require(Capability.WINDOW_MINIMIZE)
         raise NotImplementedError
 
-    def capture(self, window=None, path=None, region=None):
+    def capture(
+        self,
+        window: Window | None = None,
+        path: str | None = None,
+        region: Sequence[float] | None = None,
+    ) -> str:
         """Screenshot the whole desktop, one window, or one rectangle.
 
         Writes a PNG and returns its path; `path` names the file, and one
@@ -481,7 +624,14 @@ class GUIBackend(ABC):
 
     # -- images (T1) -------------------------------------------------------
 
-    def locate(self, haystack, template, region=None, metric="RMSE", threshold=None):
+    def locate(
+        self,
+        haystack: str,
+        template: str,
+        region: Sequence[float] | None = None,
+        metric: str = "RMSE",
+        threshold: float | None = None,
+    ) -> ImageMatch | None:
         """Find `template`'s position within `haystack`.
 
         Returns None if no match clears `threshold`. Both are paths to
@@ -496,12 +646,17 @@ class GUIBackend(ABC):
 
     # -- elements (T5) -----------------------------------------------------
 
-    def root_element(self):
+    def root_element(self) -> Element:
         """The accessible-tree root. The replacement for the X11 window tree."""
         self.require(Capability.ELEMENT_TREE)
         raise NotImplementedError
 
-    def find_elements(self, role=None, name=None, within=None):
+    def find_elements(
+        self,
+        role: str | None = None,
+        name: str | None = None,
+        within: Element | None = None,
+    ) -> list[Element]:
         """Search the accessible tree.
 
         The preferred automation entry point: unaffected by the missing
@@ -510,7 +665,12 @@ class GUIBackend(ABC):
         self.require(Capability.ELEMENT_TREE)
         raise NotImplementedError
 
-    def find_element(self, role=None, name=None, within=None):
+    def find_element(
+        self,
+        role: str | None = None,
+        name: str | None = None,
+        within: Element | None = None,
+    ) -> Element | None:
         """The first accessible element matching a role and/or name, or None."""
         self.require(Capability.ELEMENT_TREE)
         raise NotImplementedError

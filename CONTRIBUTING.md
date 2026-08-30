@@ -6,6 +6,15 @@ Everything here is about working *on* pyguitest. For using it, see
 
 Requires Python 3.10 or newer — 3.9 reached end-of-life in October 2025.
 
+## Filing a bug
+
+Run `pyguitest debug` (or `python3 -m pyguitest debug` from a checkout) and
+paste its output into the issue. It reports the package and Python versions,
+every environment probe, each detected tool's own `--version`, and whether
+the process is running inside a Flatpak, toolbox, or other container --
+which changes what every other line in that output actually describes.
+Add `--json` if you'd rather attach a file than paste text.
+
 ## Setting up
 
 ```sh

@@ -35,7 +35,7 @@ pyguitest/
 │   ├── ipc.py                  sway, Hyprland and niri socket protocols
 │   ├── png.py                  writing a PNG from raw pixels, stdlib only
 │   ├── __init__.py             public API: connect(), Session, send_keys()
-│   ├── __main__.py             the `pyguitest` command: report, doctor, migrate
+│   ├── __main__.py             the `pyguitest` command: report, doctor, debug, migrate
 │   └── backends/
 │       ├── base.py             the backend interface; send_keys()'s key tables
 │       ├── __init__.py         registry, selection, composition, opt-in gating

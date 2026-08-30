@@ -1,3 +1,4 @@
+import subprocess
 import unittest
 from unittest import mock
 
@@ -129,3 +130,83 @@ class TestRootReadingToolsNeedARealXServer(unittest.TestCase):
         with mock.patch.object(tools.ExternalTool, "present", True):
             kept = tools.discover(group, allow_x11_only=True, allow_x_root_only=False)
         self.assertEqual(kept, ())
+
+
+class TestVersion(unittest.TestCase):
+    """ExternalTool.version() -- best-effort, and never raises.
+
+    Patches shutil.which (what path() calls) and subprocess.run directly,
+    rather than ExternalTool.path itself: path is a plain method, not a
+    property, so replacing it on the class needs the same care as any
+    other patched method, and going through its own dependency is simpler.
+    """
+
+    def test_absent_tool_has_no_version(self):
+        fake = tools.ExternalTool("definitely-not-a-real-binary", frozenset())
+        self.assertIsNone(fake.version())
+
+    def test_present_tool_runs_dash_dash_version_by_default(self):
+        fake = tools.ExternalTool("wdotool", frozenset())
+        with (
+            mock.patch("pyguitest.tools.shutil.which", return_value="/bin/wdotool"),
+            mock.patch("pyguitest.tools.subprocess.run") as run,
+        ):
+            run.return_value = mock.Mock(
+                returncode=0, stdout="wdotool 1.2.3\nextra ignored line\n", stderr=""
+            )
+            self.assertEqual(fake.version(), "wdotool 1.2.3")
+            self.assertEqual(run.call_args.args[0], ["/bin/wdotool", "--version"])
+
+    def test_hyprctl_uses_its_own_version_subcommand(self):
+        fake = tools.ExternalTool("hyprctl", frozenset())
+        with (
+            mock.patch("pyguitest.tools.shutil.which", return_value="/usr/bin/hyprctl"),
+            mock.patch("pyguitest.tools.subprocess.run") as run,
+        ):
+            run.return_value = mock.Mock(
+                returncode=0, stdout="Hyprland 0.41.0\n", stderr=""
+            )
+            self.assertEqual(fake.version(), "Hyprland 0.41.0")
+            self.assertEqual(run.call_args.args[0], ["/usr/bin/hyprctl", "version"])
+
+    def test_falls_back_to_stderr_when_stdout_is_empty(self):
+        fake = tools.ExternalTool("ydotool", frozenset())
+        with (
+            mock.patch("pyguitest.tools.shutil.which", return_value="/bin/ydotool"),
+            mock.patch("pyguitest.tools.subprocess.run") as run,
+        ):
+            run.return_value = mock.Mock(
+                returncode=0, stdout="", stderr="ydotool 1.0.4\n"
+            )
+            self.assertEqual(fake.version(), "ydotool 1.0.4")
+
+    def test_no_output_at_all_reports_none(self):
+        fake = tools.ExternalTool("xdotool", frozenset())
+        with (
+            mock.patch("pyguitest.tools.shutil.which", return_value="/bin/xdotool"),
+            mock.patch("pyguitest.tools.subprocess.run") as run,
+        ):
+            run.return_value = mock.Mock(returncode=1, stdout="", stderr="")
+            self.assertIsNone(fake.version())
+
+    def test_a_hang_reports_none_rather_than_raising(self):
+        fake = tools.ExternalTool("xdotool", frozenset())
+        with (
+            mock.patch("pyguitest.tools.shutil.which", return_value="/bin/xdotool"),
+            mock.patch(
+                "pyguitest.tools.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(cmd="xdotool", timeout=3.0),
+            ),
+        ):
+            self.assertIsNone(fake.version())
+
+    def test_a_run_time_oserror_reports_none(self):
+        # path() said present, but the binary is gone or unexecutable by the
+        # time subprocess actually runs it -- not this method's job to
+        # prevent, only to survive.
+        fake = tools.ExternalTool("wtype", frozenset())
+        with (
+            mock.patch("pyguitest.tools.shutil.which", return_value="/bin/wtype"),
+            mock.patch("pyguitest.tools.subprocess.run", side_effect=OSError),
+        ):
+            self.assertIsNone(fake.version())

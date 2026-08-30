@@ -29,10 +29,11 @@ import re
 import subprocess
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING, Any, Literal
 
 from . import backends, compat
-from .backends import GUIBackend, ImageMatch, NullBackend, Screen, Window
+from .backends import Element, GUIBackend, ImageMatch, NullBackend, Screen, Window
 from .capabilities import TIERS, Capability, CapabilitySet, Tier
 from .errors import (
     BackendUnavailable,
@@ -45,6 +46,15 @@ from .errors import (
 )
 from .roles import Role
 from .session import Compositor, Environment, SessionType, detect
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from types import TracebackType
+
+    # Annotation-only: backends.windows pulls in the compositor IPC clients,
+    # and importing it here would make that eager for every user of the
+    # package, including the ones on a backend that never touches it.
+    from .backends.windows import WindowEvent
 
 __version__ = "0.1.0"
 
@@ -62,6 +72,7 @@ __all__ = [
     "SessionType",
     "Compositor",
     "GUIBackend",
+    "Element",
     "Window",
     "Screen",
     "ImageMatch",
@@ -180,12 +191,16 @@ class Session:
 
     # -- tier 1: no display server involved --------------------------------
 
-    def start_app(self, command, **kwargs):
+    def start_app(
+        self, command: str | Sequence[str], **kwargs: Any
+    ) -> subprocess.Popen[Any]:
         """Launch a program without waiting. Replaces StartApp."""
         kwargs.setdefault("shell", isinstance(command, str))
         return subprocess.Popen(command, **kwargs)
 
-    def run_app(self, command, **kwargs):
+    def run_app(
+        self, command: str | Sequence[str], **kwargs: Any
+    ) -> subprocess.CompletedProcess[Any]:
         """Run a program to completion. Replaces RunApp."""
         kwargs.setdefault("shell", isinstance(command, str))
         return subprocess.run(command, **kwargs)
@@ -196,50 +211,55 @@ class Session:
 
     # -- input, with the session's delays applied --------------------------
 
-    def _after_event(self, result):
-        """Pause for `event_delay` after an input event, then pass the result on."""
+    def _after_event(self) -> None:
+        """Pause for `event_delay` after an input event."""
         if self.event_delay:
             time.sleep(self.event_delay)
-        return result
 
-    def move_mouse(self, x, y, screen=0):
+    def move_mouse(self, x: int, y: int, screen: int = 0) -> None:
         """Move the pointer to an absolute position."""
-        return self._after_event(self.backend.move_mouse(x, y, screen))
+        self.backend.move_mouse(x, y, screen)
+        self._after_event()
 
-    def press_button(self, button):
+    def press_button(self, button: int) -> None:
         """Press a mouse button. 1 is left, 2 middle, 3 right."""
-        return self._after_event(self.backend.press_button(button))
+        self.backend.press_button(button)
+        self._after_event()
 
-    def release_button(self, button):
+    def release_button(self, button: int) -> None:
         """Release a mouse button."""
-        return self._after_event(self.backend.release_button(button))
+        self.backend.release_button(button)
+        self._after_event()
 
     def click(self, button: int = 1) -> None:
         """Press and release a mouse button. Replaces ClickMouseButton."""
         self.press_button(button)
-        return self.release_button(button)
+        self.release_button(button)
 
-    def scroll(self, dx=0, dy=0):
+    def scroll(self, dx: int = 0, dy: int = 0) -> None:
         """Scroll by axis steps."""
-        return self._after_event(self.backend.scroll(dx, dy))
+        self.backend.scroll(dx, dy)
+        self._after_event()
 
-    def press_key(self, key):
+    def press_key(self, key: str) -> None:
         """Press a key by name, without releasing it."""
-        return self._after_event(self.backend.press_key(key))
+        self.backend.press_key(key)
+        self._after_event()
 
-    def release_key(self, key):
+    def release_key(self, key: str) -> None:
         """Release a key by name."""
-        return self._after_event(self.backend.release_key(key))
+        self.backend.release_key(key)
+        self._after_event()
 
     def tap_key(self, key: str) -> None:
         """Press and release a key. Replaces PressReleaseKey."""
         self.press_key(key)
-        return self.release_key(key)
+        self.release_key(key)
 
-    def type_text(self, text, delay=None, **kwargs):
+    def type_text(self, text: str, delay: float | None = None, **kwargs: Any) -> None:
         """Type `text`, using the session's `key_delay` unless overridden."""
         delay = self.key_delay if delay is None else delay
-        return self.backend.type_text(text, delay=delay, **kwargs)
+        self.backend.type_text(text, delay=delay, **kwargs)
 
     def send_keys(self, keys: str) -> None:
         r"""Send literal text and key combinations in one string.
@@ -279,18 +299,22 @@ class Session:
         """
         modifiers = self.backend.MODIFIER_KEYS
         aliases = self.backend.KEY_ALIASES
-        shift_name = modifiers.get("+")
+        # Not .get(): every backend's MODIFIER_KEYS names a Shift key, and
+        # press_literal cannot type a shifted character without one. Missing
+        # it is a broken backend, and better reported here than as a
+        # TypeError inside its key lookup halfway through the string.
+        shift_name = modifiers["+"]
         held: list[str] = []
         grouped = False
 
-        def release_held():
+        def release_held() -> None:
             nonlocal grouped
             for name in reversed(held):
                 self.release_key(name)
             held.clear()
             grouped = False
 
-        def press_literal(char):
+        def press_literal(char: str) -> None:
             name, needs_shift = self.backend.resolve_char_key(char)
             auto_shift = needs_shift and shift_name not in held
             if auto_shift:
@@ -299,12 +323,15 @@ class Session:
             if auto_shift:
                 self.release_key(shift_name)
 
-        def process_brace(content):
+        def process_brace(content: str) -> None:
             tokens = [t for t in content.split(" ") if t]
             if not tokens:
                 raise ValueError("empty {} in send_keys")
             pending_pause = False
-            last_action = None  # (callable, key argument) for a repeat count
+            # (callable, key argument) for a repeat count. Annotated because
+            # the two callables assigned below name their parameter
+            # differently, which is enough to stop the type being inferred.
+            last_action: tuple[Callable[[str], None], str] | None = None
             for token in tokens:
                 if token.isdigit():
                     count = int(token)
@@ -482,10 +509,10 @@ class Session:
         self,
         role: str | None = None,
         name: str | None = None,
-        within: object = None,
+        within: Element | None = None,
         timeout: float | None = None,
         interval: float = 0.5,
-    ) -> object | None:
+    ) -> Element | None:
         """Block until an element matching role/name appears.
 
         Poll-based only -- unlike wait_for_window, no backend currently
@@ -508,7 +535,7 @@ class Session:
         self,
         role: str | None = None,
         name: str | None = None,
-        within: object = None,
+        within: Element | None = None,
         timeout: float | None = None,
         interval: float = 0.5,
     ) -> bool:
@@ -559,7 +586,7 @@ class Session:
         directory: str | None = None,
         name: str | None = None,
         window: Window | None = None,
-    ):
+    ) -> _CaptureOnFailure:
         """Screenshot the screen if the wrapped block raises.
 
         A GUI test that fails tells you an assertion did not hold; a
@@ -633,11 +660,21 @@ class Session:
             )
         return match
 
-    def elements(self, role=None, name=None, within=None):
+    def elements(
+        self,
+        role: str | None = None,
+        name: str | None = None,
+        within: Element | None = None,
+    ) -> list[Element]:
         """Return every accessible element matching a role and/or name."""
         return self.backend.find_elements(role=role, name=name, within=within)
 
-    def element(self, role=None, name=None, within=None):
+    def element(
+        self,
+        role: str | None = None,
+        name: str | None = None,
+        within: Element | None = None,
+    ) -> Element:
         """Return the first element matching a role and/or name.
 
         Raises ElementNotFound if nothing matches.
@@ -660,11 +697,11 @@ class Session:
     # Sugar over element(): the common widget kinds, named as a user would
     # describe them rather than by their AT-SPI role string.
 
-    def button(self, name: str, within: object = None) -> object:
+    def button(self, name: str, within: Element | None = None) -> Element:
         """Return the push button labelled `name`."""
         return self.element(role=Role.PUSH_BUTTON, name=name, within=within)
 
-    def text_field(self, name: str, within: object = None) -> object:
+    def text_field(self, name: str, within: Element | None = None) -> Element:
         """Return the text box named `name`."""
         for role in (Role.ENTRY, Role.TEXT, Role.PASSWORD_TEXT):
             found = self.elements(role=role, name=name, within=within)
@@ -672,27 +709,113 @@ class Session:
                 return found[0]
         raise ElementNotFound(f"no text field named {name!r}")
 
-    def dropdown(self, name: str, within: object = None) -> object:
+    def dropdown(self, name: str, within: Element | None = None) -> Element:
         """Return the combo box named `name`."""
         return self.element(role=Role.COMBO_BOX, name=name, within=within)
 
-    def checkbox(self, name: str, within: object = None) -> object:
+    def checkbox(self, name: str, within: Element | None = None) -> Element:
         """Return the check box named `name`."""
         return self.element(role=Role.CHECK_BOX, name=name, within=within)
 
-    def menu_item(self, name: str, within: object = None) -> object:
+    def menu_item(self, name: str, within: Element | None = None) -> Element:
         """Return the menu item named `name`."""
         return self.element(role=Role.MENU_ITEM, name=name, within=within)
 
-    def link(self, name: str, within: object = None) -> object:
+    def link(self, name: str, within: Element | None = None) -> Element:
         """Return the link named `name`."""
         return self.element(role=Role.LINK, name=name, within=within)
 
-    # -- delegation --------------------------------------------------------
+    # -- delegated to the backend ------------------------------------------
+    #
+    # Operations the backend implements and Session has nothing to add to.
+    # Written out rather than left to __getattr__ below: a dynamic forward
+    # is invisible to an editor and to a type checker, so `gui.geometry(w)`
+    # offered no completion, no signature, and no warning for a typo. Each
+    # one raises CapabilityUnsupported from the backend on a desktop that
+    # cannot do it, exactly as it did when it arrived here dynamically.
+    #
+    # Only operations with no Session-level equivalent are listed. capture,
+    # find_element and find_elements are deliberately absent: screenshot,
+    # element and elements above are those, with the same arguments.
 
-    def __getattr__(self, attr):
-        # Backend operations surface directly on the session; unsupported ones
-        # raise CapabilityUnsupported from the backend, not AttributeError.
+    def screens(self) -> list[Screen]:
+        """Every output, in advertised order."""
+        return self.backend.screens()
+
+    def active_window(self) -> Window | None:
+        """The currently focused window, or None."""
+        return self.backend.active_window()
+
+    def is_window_viewable(self, window: Window) -> bool:
+        """Whether `window` is currently mapped and showing."""
+        return self.backend.is_window_viewable(window)
+
+    def window_at(self, x: int, y: int, screen: int = 0) -> Window | None:
+        """The topmost window covering a screen coordinate, or None."""
+        return self.backend.window_at(x, y, screen)
+
+    def geometry(self, window: Window) -> tuple[int, int, int, int]:
+        """`window`'s (x, y, width, height) in screen coordinates."""
+        return self.backend.geometry(window)
+
+    def move_window(self, window: Window, x: int, y: int) -> None:
+        """Move a window's top-left corner to (x, y)."""
+        self.backend.move_window(window, x, y)
+
+    def resize_window(self, window: Window, width: int, height: int) -> None:
+        """Resize a window to `width` by `height`."""
+        self.backend.resize_window(window, width, height)
+
+    def activate_window(self, window: Window) -> None:
+        """Raise and focus. There is no raise-without-focus operation."""
+        self.backend.activate_window(window)
+
+    def minimize_window(self, window: Window, minimized: bool = True) -> None:
+        """Minimize a window, or restore it when `minimized` is False."""
+        self.backend.minimize_window(window, minimized)
+
+    def window_events(self, timeout: float | None = None) -> Iterator[WindowEvent]:
+        """Yield WindowEvents as the compositor reports them.
+
+        Needs Capability.WINDOW_EVENTS. wait_for_window and
+        wait_window_close are what most callers want instead: they consume
+        this where it exists and poll where it does not.
+        """
+        return self.backend.window_events(timeout=timeout)
+
+    def root_element(self) -> Element:
+        """The accessible-tree root. The replacement for the X11 window tree."""
+        return self.backend.root_element()
+
+    def locate(
+        self,
+        haystack: str,
+        template: str,
+        region: Sequence[float] | None = None,
+        metric: str = "RMSE",
+        threshold: float | None = None,
+    ) -> ImageMatch | None:
+        """Find `template` within the already-captured image `haystack`.
+
+        Returns None if no match clears `threshold`. Unlike locate_image,
+        this searches a file rather than the live screen, and answers with
+        None rather than raising -- no display connection is involved.
+        """
+        return self.backend.locate(
+            haystack, template, region=region, metric=metric, threshold=threshold
+        )
+
+    # -- dynamic delegation ------------------------------------------------
+
+    def __getattr__(self, attr: str) -> Any:
+        # Whatever the section above does not name: a backend's own extras
+        # (X11Backend.pointer_position, PortalBackend.restore_token) and the
+        # standard operations that already have a Session spelling. Neither
+        # is visible to an editor -- that is the cost of a dynamic forward,
+        # and why the interface itself is written out rather than left here.
+        #
+        # Unsupported operations raise CapabilityUnsupported from the
+        # backend, not AttributeError.
         #
         # Reads `backend` through object.__getattribute__ rather than
         # `self.backend`: this hook only runs when normal lookup has already
@@ -710,14 +833,14 @@ class Session:
         """Release the backend's resources."""
         self.backend.close()
 
-    def __enter__(self):
+    def __enter__(self) -> Session:
         return self
 
-    def __exit__(self, *exc):
+    def __exit__(self, *exc: object) -> Literal[False]:
         self.close()
         return False
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return (
             f"<Session backend={self.backend.name!r} "
             f"session={self.environment.session_type.value} "
@@ -734,7 +857,13 @@ class _CaptureOnFailure:
     entire behaviour here.
     """
 
-    def __init__(self, session, directory, name, window):
+    def __init__(
+        self,
+        session: Session,
+        directory: str | None,
+        name: str | None,
+        window: Window | None,
+    ) -> None:
         """Capture from `session` into `directory` when the block raises."""
         self.session = session
         self.directory = directory
@@ -742,7 +871,7 @@ class _CaptureOnFailure:
         self.window = window
         self.path: str | None = None
 
-    def _destination(self, exception):
+    def _destination(self, exception: BaseException) -> str:
         """Where to write, named after the failure and the moment it hit."""
         directory = (
             self.directory
@@ -757,24 +886,34 @@ class _CaptureOnFailure:
         stamp = time.strftime("%Y%m%d-%H%M%S")
         return os.path.join(directory, f"{stem}-{stamp}-{os.getpid()}.png")
 
-    def __enter__(self):
+    def __enter__(self) -> _CaptureOnFailure:
         return self
 
-    def __exit__(self, kind, exception, traceback):
+    def __exit__(
+        self,
+        kind: type[BaseException] | None,
+        exception: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> Literal[False]:
         if exception is None:
             return False
         try:
             self.path = self.session.screenshot(
                 path=self._destination(exception), window=self.window
             )
-            exception.screenshot = self.path
+            # Attached to the exception object, which of course declares no
+            # such attribute -- that is the whole mechanism: the runner
+            # reports the original failure and the path travels on it.
+            failure_object: Any = exception
+            failure_object.screenshot = self.path
         except Exception as failure:  # noqa: BLE001 -- see the docstring
             # Deliberately broad, and deliberately swallowed. Anything at
             # all can go wrong here -- no capture backend, an unwritable
             # directory, a display that has already gone away -- and none
             # of it is more important than the exception being reported.
-            exception.screenshot = None
-            exception.screenshot_error = failure
+            failure_object = exception
+            failure_object.screenshot = None
+            failure_object.screenshot_error = failure
         return False
 
 

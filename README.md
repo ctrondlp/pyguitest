@@ -197,10 +197,18 @@ python3 examples/06_a_real_test.py       # the one to copy: a unittest suite
 ```sh
 pyguitest                     # what this desktop can actually do
 pyguitest doctor              # what to install to unlock more
+pyguitest debug               # everything needed to diagnose a bug report
 pyguitest migrate script.pl   # what porting a Perl script involves
 ```
 
-All three also work as `python -m pyguitest …` without installing.
+All four also work as `python -m pyguitest …` without installing.
+
+`pyguitest debug` is what to paste into a bug report: package and Python
+versions, every environment probe (not only the ones that came back true),
+each detected tool's own `--version`, and whether the process is running
+inside a Flatpak, toolbox, or other container -- which changes what every
+other probe on this list actually sees. Add `--json` for a machine-readable
+form.
 
 The migration scanner reports the tier of every X11::GUITest call in a source
 file and exits non-zero if any call has no Wayland path, so a port can be gated
