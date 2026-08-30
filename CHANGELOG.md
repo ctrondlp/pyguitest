@@ -20,6 +20,12 @@ All notable changes to pyguitest are recorded here. The format follows
   `wait_window_close` now work the same way on GNOME as they already did
   on sway and niri. Live-validated on GNOME Shell 50.4 — `new`, `title`
   and `close` all confirmed over a real D-Bus connection.
+- `examples/09_gui_spy.py`: an element inspector — point at a screen
+  coordinate and get back the `role=`/`name=` to script against, plus a
+  ready-to-paste snippet. Works on any desktop by passing a coordinate
+  directly; `--here` and `--watch` (report on every click, until Ctrl+C)
+  are X11-only conveniences, since reading the pointer position or button
+  state is a capability no Wayland compositor exposes.
 
 ## [0.1.0] — 2026-08-29
 
