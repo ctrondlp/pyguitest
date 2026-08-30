@@ -26,7 +26,7 @@ tests in the same process are unaffected.
 Skips itself wherever it can't run: needs `python-dbusmock` importable,
 `dbus-daemon` on PATH, and real PyGObject (not a stub). The skip happens
 inside setUpClass via plain unittest.SkipTest, not module-level
-pytest.skip()/importorskip() -- this suite's other 404 tests run under
+pytest.skip()/importorskip() -- the rest of this suite runs under
 plain `python3 -m unittest discover` with no dependencies at all (see the
 CONTRIBUTING.md), and that runner does not understand
 pytest's collection-time skip outcome: it would report a missing

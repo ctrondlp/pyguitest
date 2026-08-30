@@ -194,14 +194,33 @@ class Session:
     def start_app(
         self, command: str | Sequence[str], **kwargs: Any
     ) -> subprocess.Popen[Any]:
-        """Launch a program without waiting. Replaces StartApp."""
+        """Launch a program without waiting. Replaces StartApp.
+
+        A string `command` runs through the shell, matching StartApp; a
+        list does not. Prefer the list form for anything built from a
+        variable -- `start_app(["editor", path])` treats `path` as one
+        argument no matter what is in it, where the string form would let
+        a space or a `;` in it become shell syntax.
+
+        `**kwargs` go to `subprocess.Popen`. Note `env=` *replaces* the
+        environment rather than adding to it, which on a GUI session drops
+        DISPLAY/WAYLAND_DISPLAY and the app never appears -- pass a merged
+        copy to override one variable:
+
+            gui.start_app(["app"], env={**os.environ, "LANG": "de_DE.UTF-8"})
+        """
         kwargs.setdefault("shell", isinstance(command, str))
         return subprocess.Popen(command, **kwargs)
 
     def run_app(
         self, command: str | Sequence[str], **kwargs: Any
     ) -> subprocess.CompletedProcess[Any]:
-        """Run a program to completion. Replaces RunApp."""
+        """Run a program to completion. Replaces RunApp.
+
+        Same shell and `env=` behaviour as :meth:`start_app`: a string runs
+        through the shell, and `env=` replaces rather than extends the
+        environment. `**kwargs` go to `subprocess.run`.
+        """
         kwargs.setdefault("shell", isinstance(command, str))
         return subprocess.run(command, **kwargs)
 

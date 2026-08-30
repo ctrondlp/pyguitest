@@ -88,10 +88,13 @@ class TestHints(unittest.TestCase):
         hint = next(iter(hints_for(environment(has_pygobject=False), distro="plan9")))
         self.assertEqual(hint.component, "AT-SPI")
         self.assertIsNone(hint.command)
-        self.assertIn(
-            "install it through your distribution",
-            advice(environment(has_pygobject=False), distro="plan9"),
-        )
+        text = advice(environment(has_pygobject=False), distro="plan9")
+        self.assertIn("install through your distribution", text)
+        # There is no package name to give on an unrecognised distribution,
+        # but the upstream project names still are: what the reader needs
+        # is something to search their own repository for, and "ask your
+        # distribution" on its own was not that.
+        self.assertIn("PyGObject", text)
 
     def test_nothing_missing_says_so(self):
         complete = environment(
@@ -250,6 +253,24 @@ class TestToolRecommendationsAreKeyedByCompositor(unittest.TestCase):
         hints = list(hints_for(self._wlroots(), distro="fedora"))
         hint = next(h for h in hints if h.component == "screenshots")
         self.assertIn("grim", hint.command)
+        self.assertNotIn("gnome-screenshot", hint.command)
+
+    def test_kwin_capture_recommends_spectacle_not_gnome_screenshot(self):
+        # Same bug as the wlroots one above, unfixed on the other side:
+        # gnome-screenshot reads the X root (tools.py's x_root_only), so on
+        # a KDE Wayland session it installs a tool that captures nothing.
+        # spectacle is KDE's own, and the distro table cannot express this
+        # because it holds one capture name per distribution, not per
+        # desktop.
+        from pyguitest.session import Compositor
+
+        env = environment(
+            compositor=Compositor.KWIN, capture_tools=(), has_portal=False
+        )
+        hint = next(
+            h for h in hints_for(env, distro="fedora") if h.component == "screenshots"
+        )
+        self.assertIn("spectacle", hint.command)
         self.assertNotIn("gnome-screenshot", hint.command)
 
     def test_wlroots_input_recommends_wtype_not_ydotool(self):
@@ -414,3 +435,140 @@ class TestGnomeShellExtensionHint(unittest.TestCase):
         self.assertIn("window control extension", text)
         self.assertIn("gnome-extensions enable", text)
         self.assertNotIn("install it through your distribution", text)
+
+
+class TestTierSixHint(unittest.TestCase):
+    """Whether python-xlib is worth recommending for tier-6 queries.
+
+    X11Backend is the only backend that serves POINTER_QUERY,
+    INPUT_STATE_QUERY, WINDOW_TITLE_SET, WINDOW_LOWER and
+    WINDOW_CURSOR_QUERY at all -- and it needs a real X11 connection, which
+    XWayland still carries even in an otherwise-native-Wayland session. On a
+    session with no X11 connection whatsoever (pure Wayland, no XWayland),
+    installing python-xlib would not help, so the hint must stay silent
+    there rather than recommending a package that cannot close the gap.
+    """
+
+    def _x11(self, **overrides):
+        base = detect({"DISPLAY": ":0", "XDG_SESSION_TYPE": "x11"})
+        self.assertIs(base.session_type, SessionType.X11)
+        return dataclasses.replace(base, **{"has_xlib": False, **overrides})
+
+    def _xwayland(self, **overrides):
+        base = detect({"WAYLAND_DISPLAY": "wayland-0", "DISPLAY": ":0"})
+        self.assertIs(base.session_type, SessionType.XWAYLAND)
+        return dataclasses.replace(base, **{"has_xlib": False, **overrides})
+
+    def _pure_wayland(self, **overrides):
+        base = detect({"WAYLAND_DISPLAY": "wayland-0", "SWAYSOCK": "/run/sway.sock"})
+        self.assertIs(base.session_type, SessionType.WAYLAND)
+        return dataclasses.replace(base, **{"has_xlib": False, **overrides})
+
+    def test_fires_on_x11_without_xlib(self):
+        found = [h.component for h in hints_for(self._x11())]
+        self.assertIn("tier-6 queries", found)
+
+    def test_fires_on_xwayland_without_xlib(self):
+        found = [h.component for h in hints_for(self._xwayland())]
+        self.assertIn("tier-6 queries", found)
+
+    def test_silent_once_xlib_is_present(self):
+        found = [h.component for h in hints_for(self._xwayland(has_xlib=True))]
+        self.assertNotIn("tier-6 queries", found)
+
+    def test_silent_on_pure_wayland_regardless_of_xlib(self):
+        # No X11 connection exists here at all, so python-xlib would not
+        # help -- these five stay NO_PATH no matter what gets installed.
+        found = [h.component for h in hints_for(self._pure_wayland())]
+        self.assertNotIn("tier-6 queries", found)
+
+    def test_recommends_pip_not_a_distro_package(self):
+        hint = next(
+            h for h in hints_for(self._x11()) if h.component == "tier-6 queries"
+        )
+        self.assertEqual(hint.command, "pip install 'pyguitest[x11]'")
+
+
+class TestAdviceIsReadable(unittest.TestCase):
+    """advice() has to survive being read in an 80-column terminal.
+
+    Each hint used to be emitted as one unbroken line, and the longest of
+    them runs to several hundred characters -- a wall of text wherever it
+    is read, and `doctor` output is routinely pasted into bug reports.
+    """
+
+    def _every_line(self, **overrides):
+        base = {
+            "has_atspi": False,
+            "capture_tools": (),
+            "input_tools": (),
+            "image_tools": (),
+            "uinput_writable": False,
+        }
+        return advice(
+            environment(**{**base, **overrides}), distro="fedora"
+        ).splitlines()
+
+    # Lines that are a command to copy, not prose. These are exempt from the
+    # width rule on purpose: the udev rule below is a single shell statement
+    # that has to survive being pasted, and breaking it to fit a terminal
+    # would produce something that does not run.
+    _COPYABLE = ("echo ", "sudo ", "ls ", "| ", "pip ")
+
+    def test_no_prose_line_overruns_a_terminal(self):
+        for line in self._every_line():
+            stripped = line.strip()
+            if stripped.startswith(self._COPYABLE) or stripped.endswith("\\"):
+                continue
+            with self.subTest(line=line):
+                self.assertLessEqual(len(line), 80)
+
+    def test_a_long_hint_really_is_wrapped_rather_than_truncated(self):
+        # Wrapping must not lose text: the tail of the longest hint has to
+        # still be there, on some later line.
+        text = advice(
+            dataclasses.replace(
+                environment(), has_xlib=False, session_type=SessionType.XWAYLAND
+            ),
+            distro="fedora",
+        )
+        self.assertIn("tier-6 queries", text)
+        self.assertIn("themed desktop", text)
+
+    def test_commands_are_never_split_across_lines(self):
+        # A command the reader is meant to copy has to survive on one line,
+        # which is why _wrap leaves long words and hyphens alone.
+        lines = self._every_line()
+        self.assertTrue(
+            any(line.strip() == "sudo dnf install ImageMagick" for line in lines),
+            f"the install command was reflowed apart: {lines}",
+        )
+
+
+class TestEveryHintNamesSomething(unittest.TestCase):
+    """No hint may say only "ask your distribution".
+
+    On an unrecognised distribution there is no package name to give, but
+    there is always a tool or project name to go looking for -- and naming
+    nothing was the least actionable thing this could print.
+    """
+
+    def test_no_hint_is_nameless_on_an_unrecognised_distribution(self):
+        env = environment(
+            has_atspi=False,
+            capture_tools=(),
+            input_tools=(),
+            image_tools=(),
+            uinput_writable=False,
+        )
+        for hint in hints_for(env, distro="plan9"):
+            with self.subTest(component=hint.component):
+                if not hint.installable:
+                    continue  # nothing exists to install; says so itself
+                # Either half satisfies this: a runnable command is already
+                # the most actionable form, and the 'input' group hint has
+                # one (usermod) while naming no package at all.
+                self.assertTrue(
+                    hint.command or hint.packages,
+                    f"{hint.component!r} names no tool and has no command",
+                )

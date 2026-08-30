@@ -299,17 +299,18 @@ dependency. Three techniques:
 PYTHONPATH=src python3 -m unittest discover -s tests
 ```
 
-**What is not tested:** sway, Hyprland, niri and KWin backends have never run
+**What is not tested:** the sway, Hyprland and niri backends have never run
 against a live session -- the sway and Hyprland JSON schemas are
 reconstructions from their documentation, and niri's is transcribed from the
 `niri-ipc` crate's serde types, all unexercised against a real compositor.
-UinputBackend has not been driven live either.
+UinputBackend has not been driven live either. KWin's `KdotoolBackend` has
+since been run live -- see [validation.md](validation.md).
 
 X11Backend largely has. On a real X11 session: whole-screen capture (the
-one capability real X11 has that XWayland does not), window control, and
-four of the five tier-6 capabilities. On XWayland: per-window capture.
-What remains untested there is XTest input *injection* and
-`is_window_cursor`.
+one capability real X11 has that XWayland does not), window control, and the
+tier-6 query capabilities. On XWayland: per-window capture, and
+`is_window_cursor` (which works, but reads `False` on a themed desktop --
+see validation.md). What remains untested there is XTest input *injection*.
 
 AT-SPI and the CLI-tool input/capture backends *have* now run live, on a real
 GNOME/XWayland desktop -- and that surfaced three real bugs no unit test

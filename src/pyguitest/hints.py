@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import textwrap
 from collections.abc import Iterator
 
 from .capabilities import Capability, CapabilitySet
@@ -52,6 +53,25 @@ _PACKAGES = {
         "imagemagick": "ImageMagick",
     },
 }
+
+# The screenshot tool that actually works on a given compositor, which the
+# per-distro `capture` entry above cannot express: it is one name per
+# distribution, but the right answer is per *desktop*. Recommending
+# gnome-screenshot on KDE or sway installs a tool that captures nothing
+# there -- it reads the X root window (see tools.py's x_root_only), so it
+# is wrong for the same reason grim was already special-cased here.
+_CAPTURE_TOOL_BY_COMPOSITOR = {
+    "wlroots": "grim",
+    "kwin": "spectacle",
+}
+
+_DEFAULT_CAPTURE_TOOL = "gnome-screenshot"
+"""Named when neither the compositor nor the distribution settles it.
+
+Only reached on an unrecognised distribution, where there is no package
+name to give -- so this is the tool to go looking for, not a command to
+run. Better than naming nothing at all, which is what a reader of an
+unrecognised distro used to get."""
 
 # os-release ID or ID_LIKE values that map onto a family above.
 _FAMILIES = {
@@ -165,6 +185,32 @@ def hints_for(
             "element automation: buttons, text boxes, dropdowns. The only "
             "backend that works on GNOME",
             command("atspi"),
+            # Upstream project names rather than package names: on an
+            # unrecognised distribution these are what to search that
+            # distribution's own repository for.
+            packages="PyGObject, pyatspi, at-spi2-core",
+        )
+    # X11Backend is the only backend that serves any of tier 6 -- it needs a
+    # real X11 connection, which XWayland still carries even though the
+    # session is otherwise native Wayland. On a session with no X11
+    # connection at all (pure Wayland, no XWayland), these five stay
+    # NO_PATH regardless of what gets installed, so there is nothing to
+    # hint there.
+    if (
+        environment.session_type in (SessionType.X11, SessionType.XWAYLAND)
+        and not environment.has_xlib
+    ):
+        yield Hint(
+            "tier-6 queries",
+            "reading the global pointer position or keyboard/button state, "
+            "rewriting another window's title, lowering a window, and "
+            "querying a window's cursor -- impossible for an ordinary "
+            "Wayland client on any compositor, but this session carries a "
+            "real X11 connection (XWayland included), where X11Backend "
+            "serves them. Pure pip, no distro package needed. (The cursor "
+            "query is the weak one: it compares against the classic X "
+            "cursor font, so it reads False on a themed desktop)",
+            "pip install 'pyguitest[x11]'",
         )
     # WINDOW_PLACEMENT is a reliable stand-in for "the extension joined the
     # composite": AT-SPI never provides it (Mutter exposes no
@@ -195,13 +241,15 @@ def hints_for(
         environment.has_xlib and environment.session_type is SessionType.X11
     )
     if not environment.can_capture:
-        # grim is the wlroots-native tool; recommending gnome-screenshot
-        # there installs a tool that captures nothing on that compositor.
-        capture_package: str | None
-        if environment.compositor is Compositor.WLROOTS:
-            capture_package = "grim"
-        else:
-            capture_package = family.get("capture")
+        # The compositor decides before the distribution does: grim on
+        # wlroots and spectacle on KWin are the tools that actually capture
+        # there, and the per-distro `capture` name is only right for a
+        # desktop with no native tool of its own.
+        capture_package: str | None = (
+            _CAPTURE_TOOL_BY_COMPOSITOR.get(environment.compositor.value)
+            or family.get("capture")
+            or _DEFAULT_CAPTURE_TOOL
+        )
         capture_command = (
             f"{installer} {capture_package}" if installer and capture_package else None
         )
@@ -232,6 +280,7 @@ def hints_for(
             "template matching",
             "locating a control by an image of it, for widgets AT-SPI cannot see",
             command("imagemagick"),
+            packages="ImageMagick",
         )
     uinput_usable = environment.uinput_writable and environment.has_evdev
     if not environment.input_tools and not uinput_usable:
@@ -248,7 +297,10 @@ def hints_for(
             input_package = "wtype"
             ydotool_is_last_resort = False
         else:
-            input_package = family.get("input")
+            # Same fallback as capture: on an unrecognised distribution
+            # there is no package name to give, but ydotool is still the
+            # tool to go looking for -- naming it beats naming nothing.
+            input_package = family.get("input") or "ydotool"
             ydotool_is_last_resort = True
         input_command = (
             f"{installer} {input_package}" if installer and input_package else None
@@ -282,6 +334,37 @@ def hints_for(
             )
 
 
+_WIDTH = 78
+"""Wrap column for a hint's prose. Fixed rather than read from the terminal:
+`doctor` output is routinely pasted into bug reports and issue comments, and
+a report that reflows to whatever width the reporter's terminal happened to
+be is harder to read than one that is always the same shape."""
+
+
+def _wrap(text: str, indent: str = "  ") -> str:
+    """Wrap one hint's prose to `_WIDTH`, indenting every line.
+
+    Long-standing readability problem this fixes: each hint was emitted as
+    one unbroken line, and the richer ones ran to several hundred
+    characters -- a wall of text in any terminal.
+
+    Continuation lines are indented four spaces past `indent` so the
+    component name at the start of the first line stays scannable when
+    several hints are listed together.
+    """
+    return textwrap.fill(
+        text,
+        width=_WIDTH,
+        initial_indent=indent,
+        subsequent_indent=indent + "    ",
+        # A hint names commands, flags and paths (`niri msg`, `pip install
+        # 'pyguitest[x11]'`, /dev/uinput). Breaking those apart would turn
+        # something the reader is meant to copy into two half-lines.
+        break_long_words=False,
+        break_on_hyphens=False,
+    )
+
+
 def advice(
     environment: Environment,
     distro: str | None = None,
@@ -294,22 +377,25 @@ def advice(
 
     lines = ["To unlock more capabilities:"]
     for hint in found:
-        lines.append(f"\n  {hint.component} -- {hint.why}")
+        lines.append("\n" + _wrap(f"{hint.component} -- {hint.why}"))
+        # Blank line first: now that the prose above wraps to several
+        # indented lines, a command at the same indent reads as one more
+        # sentence rather than as the thing to run.
         if hint.command:
-            lines.append(f"      {hint.command}")
+            lines.append(f"\n      {hint.command}")
         elif hint.installable:
             if hint.packages:
                 lines.append(
-                    f"      ({hint.packages} -- install through your distribution)"
+                    f"\n      ({hint.packages} -- install through your distribution)"
                 )
             else:
-                lines.append("      (install it through your distribution)")
+                lines.append("\n      (install it through your distribution)")
     # The "input" group hint only appears alongside the uinput/ydotool
     # recommendation (xdotool and wtype need no /dev/uinput access), so its
     # presence is the signal that this caveat -- specific to that path -- applies.
     if any(h.component == "membership of the 'input' group" for h in found):
         lines.append(
-            "\n  For input, python3-evdev needs no daemon -- pyguitest drives "
+            "\n  For input, python3-evdev needs no daemon -- pyguitest drives"
             "\n  /dev/uinput itself. ydotool is the alternative, and needs "
             "ydotoold running."
             "\n  Neither is keymap-safe. The only keymap-safe option on GNOME "

@@ -1,5 +1,5 @@
-# The suite needs no dependencies and no display: 578 tests that import only
-# the standard library, because every display-server mechanism this package
+# The suite needs no dependencies and no display: every test imports only the
+# standard library, because every display-server mechanism this package
 # drives is probed at runtime and stands in as a fake under test. That is
 # what makes the matrix below cheap enough to run on every push.
 #
@@ -65,8 +65,12 @@ jobs:
 
       - run: pip install ruff mypy
 
-      - run: ruff check src tests
-      - run: ruff format --check src tests
+      # examples/ and scripts/ are linted too, not just the package. They
+      # are the code a reader copies from, and being outside this check is
+      # how scripts/diagnose-x11-capture.py drifted out of format without
+      # anything noticing.
+      - run: ruff check src tests examples scripts
+      - run: ruff format --check src tests examples scripts
 
       # Type-checks src/pyguitest per [tool.mypy] in pyproject.toml.
       # ignore_missing_imports is set there because the optional backends

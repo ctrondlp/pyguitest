@@ -74,8 +74,59 @@ All notable changes to pyguitest are recorded here. The format follows
   instead comes from the capability set a live `connect()` already
   assembled — passed through by `pyguitest.__main__` and the example,
   rather than adding a second, redundant probe.
+- A `doctor` hint for the `x11` extra: on an X11 or XWayland session with
+  no python-xlib installed, `X11Backend` — the only backend serving the
+  tier-6 query capabilities at all — never joins the composite, and
+  nothing said so. XWayland counts here, so a mostly-native Wayland
+  session still gets the advice; a pure Wayland session with no X11
+  connection does not, since those capabilities stay unreachable there no
+  matter what is installed.
 
 ### Fixed
+
+- `hints.advice()` emitted each hint as one unbroken line, running to
+  several hundred characters for the longer ones — a wall of text in any
+  terminal, and `doctor` output is routinely pasted into bug reports. Now
+  wrapped to a fixed width, with the command set off on its own line.
+  Commands are never reflowed apart: long words and hyphens are left
+  alone so a `pip install 'pyguitest[x11]'` stays copyable.
+- The screenshot hint recommended `gnome-screenshot` on KDE, which cannot
+  capture there — it reads the X root window (`tools.py`'s `x_root_only`),
+  so on a KDE Wayland session it installs a tool that captures nothing.
+  This was the same bug already fixed for wlroots/grim, left unfixed on
+  the other side; the per-distro package table cannot express it, holding
+  one capture name per distribution where the right answer is per desktop.
+  KWin now gets `spectacle`.
+- Hints on an unrecognised distribution said only "install it through your
+  distribution", naming nothing to go looking for, even though the tool or
+  project name was already known — the compositor decides `grim` vs.
+  `spectacle` before the distro lookup runs, and ImageMagick and the
+  AT-SPI stack have upstream names regardless of packaging. Every hint now
+  names either a command or something to search for, which a test pins.
+- `Session.start_app`/`run_app` documented neither that a string `command`
+  runs through the shell (a list does not) nor that `env=` *replaces* the
+  environment rather than extending it — the latter silently drops
+  `DISPLAY`/`WAYLAND_DISPLAY` on a GUI session, so the launched app never
+  appears. Both are now in the docstrings, with the merged-copy form.
+- Documentation corrections found by auditing prose against the code:
+  the README claimed the package was unpublished because `pyproject.toml`
+  carries a `Private :: Do Not Upload` classifier — it carries no such
+  classifier, and `CONTRIBUTING.md` says the package is on PyPI, so every
+  reader was sent to a checkout install for no reason; `docs/validation.md`
+  listed KWin under "not run live" in the same file that documents running
+  `KdotoolBackend` live against KDE Plasma 6; `docs/structure.md` repeated
+  that and also called `is_window_cursor` untested after it had been
+  validated; and `docs/install.md` said `doctor` cannot report the GNOME
+  Shell extension, which it now does.
+- CI linted `src` and `tests` only, which is how `scripts/` drifted out of
+  format unnoticed. `examples/` and `scripts/` — the code readers copy
+  from — are now checked too.
+- Removed hardcoded counts that had already gone stale (a test count in the
+  CI header and another in `test_portal_dbusmock.py`, both roughly half the
+  current figure) and the "four of the five tier-6 capabilities" phrasing in
+  two documents. The audit distribution table in the README keeps its
+  numbers: `tests/test_compat.py` pins those against `LEGACY`, so unlike
+  the others they cannot drift silently.
 
 - `hints.advice()`'s screen-capture hint said `(install it through your
   distribution)` even in the one case where nothing can be installed at

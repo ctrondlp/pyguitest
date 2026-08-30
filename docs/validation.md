@@ -227,8 +227,9 @@ read as a claim you cannot check.
   XWayland does not.
 - Window control: move, resize, minimize, lower, retitle, hit-test,
   geometry and viewability.
-- Four of the five tier-6 capabilities: reading the pointer position, and
-  the keyboard and button state.
+- The tier-6 query capabilities: reading the pointer position, and the
+  keyboard and button state. (`is_window_cursor` was validated separately,
+  under XWayland on KDE/KWin — see the themed-cursor limitation above.)
 
 Every python-xlib call the X11 backend makes has also been checked against
 the installed library — names, signatures and return shapes.
@@ -236,10 +237,11 @@ the installed library — names, signatures and return shapes.
 ## Not run live
 
 - **Input injection through XTest** (the X11 backend's input half).
-- **The compositor IPC backends** — sway, Hyprland, niri, KWin — and
+- **The wlroots compositor IPC backends** — sway, Hyprland, niri — and
   **UinputBackend**. Their tests replay recorded output and stand-ins, on a
   sandbox where none of those are available to test against. Running them
-  against a live sway/Hyprland/niri/KDE session is next.
+  against a live sway/Hyprland/niri session is next. KWin is no longer in
+  this list: `KdotoolBackend` has since run live, above.
 - **`portal`, the input half.** Its CreateSession/SelectDevices/Start
   negotiation has been run against a real xdg-desktop-portal (1.22.1) and
   completes; the keyboard, pointer and scroll methods past that point have

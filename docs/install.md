@@ -59,10 +59,13 @@ PNGs itself, so it needs no screenshot tool either.
 | Screenshots with no tool installed at all, deliberately | `pip install '.[atspi]'` for PyGObject, then `connect(backend="portalcapture")` — the only capture path that works inside a Flatpak sandbox |
 
 `pyguitest doctor` reports which of these you have and names what is missing
-— except the GNOME Shell extension and portal rows, neither of which it can
-detect without making a D-Bus call session detection deliberately avoids
-(see `session.detect()`'s own docstring); both are opt-in, not autodetected,
-and `portal` doubly so — see
+— including the GNOME Shell extension, which it infers from the capabilities
+`connect()` actually assembled rather than by probing for it, since detecting
+it directly needs a D-Bus call session detection deliberately avoids (see
+`session.detect()`'s own docstring).
+
+The `portal` row is the exception: `doctor` says nothing about it, because it
+is opt-in and never autodetected — see
 [Backend registry](structure.md#backend-registry) for why `connect()` never
 reaches it on its own.
 

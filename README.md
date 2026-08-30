@@ -72,21 +72,24 @@ set through the same API. Discovering which one you are on is what
 
 ## Install
 
-Requires Python 3.10 or newer. Not published yet —
-`pyproject.toml` carries the `Private :: Do Not Upload` classifier, which
-PyPI rejects — so for now installation is from a checkout:
+Requires Python 3.10 or newer.
+
+```sh
+pip install pyguitest              # core; no dependencies
+pip install 'pyguitest[atspi]'     # + element automation
+```
+
+Or from a checkout, which is the same thing with a path instead of a name:
 
 ```sh
 git clone https://github.com/ctrondlp/pyguitest.git
 cd pyguitest
-pip install .                # core; no dependencies
-pip install '.[atspi]'       # + element automation
+pip install .
+pip install '.[atspi]'
 ```
 
-Once published, that becomes `pip install pyguitest` and
-`pip install 'pyguitest[atspi]'`. You do not need `-e`; that flag is for
-developing *this package*, and is covered in
-[CONTRIBUTING.md](CONTRIBUTING.md).
+You do not need `-e`; that flag is for developing *this package*, and is
+covered in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 **None are required.** The package imports and runs with nothing else
 installed. What you add depends on which backend has to serve your desktop
