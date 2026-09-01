@@ -219,7 +219,8 @@ All notable changes to pyguitest are recorded here. The format follows
   `ConnectToEIS` sequence — about 190 lines of Gio Request/Response
   plumbing, including the fd-returning `ConnectToEIS` call that needs
   `call_with_unix_fd_list_sync` — now lives in python-libei as
-  `libei.portal`, released there as 0.3.0, and `eiinput.py` calls
+  `libei.portal`, released there as 0.3.0 and live-validated end to end on
+  both GNOME/Mutter and KDE/KWin before this landed, and `eiinput.py` calls
   `RemoteDesktopSession.negotiate()` and translates that library's
   failures into pyguitest's own (`PortalDeniedError` → `PermissionRequired`,
   a too-old portal or any other portal-side failure → `BackendUnavailable`,
@@ -239,6 +240,19 @@ All notable changes to pyguitest are recorded here. The format follows
   unavailable there — accurately, since there is no longer any negotiation
   code in this package for it to fall back on — until python-libei is
   upgraded to 0.3.0.
+- `Application`, returned by `start_app()` in place of a bare
+  `subprocess.Popen`: `with gui.start_app([EDITOR]) as app:` terminates the
+  program on the way out and kills it if that does not take, plus
+  `is_running()` and `restart()`. Stopping a GUI program properly is four
+  steps — terminate, bounded wait, kill, wait again — and the fourth is not
+  decorative: an editor holding unsaved text answers SIGTERM by opening a
+  "Save changes?" dialog instead of exiting, so a bare `terminate()` leaves
+  it running. That dance was copied by hand into five example scripts here,
+  two of which never got past `terminate()`; all five now delegate. Nothing
+  breaks — `Application` forwards the members callers actually used (`pid`,
+  `wait`, `terminate`, `kill`, `poll`, `returncode`, the pipes), so existing
+  scripts and every documented snippet keep working, and `app.process` is
+  the `Popen` itself. Only `isinstance(x, subprocess.Popen)` would notice.
 - `connect(backend=[...])`: a sequence of backend names composes exactly
   those, in the caller's order. Forcing a backend by name used to give you
   only that one, so anything wanting an opt-in input backend *and* element

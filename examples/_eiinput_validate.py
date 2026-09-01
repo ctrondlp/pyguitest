@@ -34,7 +34,6 @@ that injection failed silently.
 """
 
 import shutil
-import subprocess
 import sys
 import time
 
@@ -65,7 +64,7 @@ print(f"forced backend: {gui.backend.name}")
 eiinput_backend = gui.backend.member("eiinput")
 print("capabilities offered:", sorted(c.name for c in eiinput_backend.capabilities))
 
-process = windows_gui.start_app(["gedit", "--new-window"])
+app = windows_gui.start_app(["gedit", "--new-window"])
 try:
     window = windows_gui.wait_for_window("gedit", timeout=10)
     if window is None:
@@ -109,10 +108,5 @@ try:
     print("\nall calls completed without raising")
 
 finally:
-    process.terminate()
-    try:
-        process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait()
+    app.stop()
     print("done")

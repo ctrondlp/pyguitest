@@ -32,6 +32,7 @@ pyguitest/
 │   ├── compat.py               the X11::GUITest exports, as data
 │   ├── errors.py               typed failures
 │   ├── session.py              runtime environment detection
+│   ├── app.py                  a launched program, and stopping it again
 │   ├── tools.py                external CLI registry, ranked
 │   ├── ipc.py                  sway, Hyprland and niri socket protocols
 │   ├── png.py                  writing a PNG from raw pixels, stdlib only

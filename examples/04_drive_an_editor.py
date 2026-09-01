@@ -8,7 +8,6 @@ coordinates.
     python3 examples/04_drive_an_editor.py gedit
 """
 
-import subprocess
 import sys
 
 import pyguitest
@@ -23,9 +22,12 @@ if not gui.supports(Capability.WINDOW_LIST):
     sys.exit("This desktop cannot list windows; see example 01.")
 
 print(f"starting {editor}")
-process = gui.start_app([editor])
 
-try:
+# `with` rather than try/finally: start_app returns an Application, and
+# leaving the block terminates the editor -- killing it if it will not go,
+# which matters here because a document with unsaved text answers SIGTERM
+# with a "Save changes?" dialog rather than exiting. Confirmed live.
+with gui.start_app([editor]) as app:
     # wait_for_window is event-driven where the compositor supports it
     # (sway today), and polls find_windows everywhere else -- either way, a
     # single fixed sleep would just be a race against however long this
@@ -48,14 +50,4 @@ try:
 
     gui.wait(1)
 
-finally:
-    # A bare terminate() is not enough once the document has unsaved text --
-    # gedit's response to SIGTERM there is a "Save changes?" dialog rather
-    # than exiting, confirmed live. kill() on a timeout skips that dialog.
-    process.terminate()
-    try:
-        process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait()
-    print("done")
+print("done")

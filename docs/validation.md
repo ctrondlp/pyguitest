@@ -153,6 +153,24 @@ read as a claim you cannot check.
 
 ## Run live on KDE Plasma 6 / KWin (XWayland)
 
+- **`eiinput` after its negotiation moved into python-libei** (2026-09-01),
+  the same `examples/_eiinput_portal_validate.py` run as the GNOME entry
+  above, and it passed here too. Both portal implementations therefore
+  behave the same through `libei.portal` as they did through the in-tree
+  copy this package used to carry, which is what the cutover needed
+  established and the last thing that was outstanding about it.
+- **AT-SPI on KDE needs `toolkit-accessibility` turned on**, found while
+  doing that run, and worth knowing because *nothing reports it*. GTK
+  applications load their AT-SPI bridge only when the GNOME setting
+  `org.gnome.desktop.interface toolkit-accessibility` is true. It is on by
+  default in a GNOME session and off in a KDE one, and with it off the
+  failure is silent in every direction: the packages are installed, `doctor`
+  reports AT-SPI present, dogtail connects without complaint, and element
+  queries just return nothing — indistinguishable from an application that
+  genuinely has no widgets. `gsettings set org.gnome.desktop.interface
+  toolkit-accessibility true` fixed it immediately. Written up in
+  [install.md](install.md); `doctor` does not detect it yet, since what it
+  checks is whether AT-SPI is importable, and it is.
 - **`KdotoolBackend`** — `windows()`, `geometry()`, `active_window()`,
   `activate_window()`, `move_window()`, `resize_window()`, `window_at()`
   (hit and miss), `minimize_window()`/restore, and `is_window_viewable()`'s
@@ -353,15 +371,6 @@ the installed library — names, signatures and return shapes.
 
 ## Not run live
 
-- **`eiinput` on KDE since the negotiation moved into python-libei.** The
-  GNOME half of that question is closed — see the 2026-09-01 entry at the
-  top of this file, which ran the whole cutover live there. The KDE result
-  below predates the swap and has not been re-run, so what is unverified is
-  narrow: whether `xdg-desktop-portal-kde` behaves the same through
-  `libei.portal` as it did through the in-tree copy. Nothing about the
-  conversation on the wire changed, and the same script
-  (`examples/_eiinput_portal_validate.py`) is what would answer it, needing
-  a person at a KDE desktop to click Allow.
 - **The wlroots compositor IPC backends** — sway, Hyprland, niri. Their
   tests replay recorded output and stand-ins, on a sandbox where none of
   those are available to test against. Running them against a live

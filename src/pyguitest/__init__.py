@@ -35,6 +35,7 @@ from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, Literal
 
 from . import backends, compat, inspect
+from .app import Application
 from .backends import Element, GUIBackend, ImageMatch, NullBackend, Screen, Window
 from .capabilities import TIERS, Capability, CapabilitySet, Tier
 from .errors import (
@@ -64,6 +65,7 @@ __version__ = "0.1.1"
 __all__ = [
     "connect",
     "Session",
+    "Application",
     "detect",
     "quote_for_type",
     "Role",
@@ -241,10 +243,22 @@ class Session:
 
     # -- tier 1: no display server involved --------------------------------
 
-    def start_app(
-        self, command: str | Sequence[str], **kwargs: Any
-    ) -> subprocess.Popen[Any]:
+    def start_app(self, command: str | Sequence[str], **kwargs: Any) -> Application:
         """Launch a program without waiting. Replaces StartApp.
+
+        Returns an `Application`: a `subprocess.Popen` plus the lifecycle
+        the bare one leaves to the caller. Use it as a context manager when
+        the program should not outlive the block, which is almost always --
+        it terminates, and kills if that does not take:
+
+            with gui.start_app([EDITOR, path]) as app:
+                window = gui.wait_for_window("Editor", timeout=10)
+                ...
+
+        Everything a `Popen` answered still works (`pid`, `wait`,
+        `terminate`, `poll`, `returncode`, ...), so code written before this
+        returned an `Application` needs no change; `app.process` is the
+        `Popen` itself.
 
         A string `command` runs through the shell, matching StartApp; a
         list does not. Prefer the list form for anything built from a
@@ -259,8 +273,16 @@ class Session:
 
             gui.start_app(["app"], env={**os.environ, "LANG": "de_DE.UTF-8"})
         """
-        kwargs.setdefault("shell", isinstance(command, str))
-        return subprocess.Popen(command, **kwargs)
+
+        def launch() -> subprocess.Popen[Any]:
+            # Built fresh on every call rather than closing over a mutated
+            # dict, so restart() runs the same command the same way instead
+            # of inheriting whatever the first launch left behind.
+            options = dict(kwargs)
+            options.setdefault("shell", isinstance(command, str))
+            return subprocess.Popen(command, **options)
+
+        return Application(launch(), command, launch)
 
     def run_app(
         self, command: str | Sequence[str], **kwargs: Any

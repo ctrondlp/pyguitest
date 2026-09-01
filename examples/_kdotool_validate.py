@@ -36,7 +36,7 @@ if shutil.which("gedit") is None:
 gui = pyguitest.connect(backend="windows")
 print(f"forced backend: {gui.backend.name}")
 
-process = gui.start_app(["gedit", "--new-window"])
+app = gui.start_app(["gedit", "--new-window"])
 try:
     window = gui.wait_for_window("gedit", timeout=10)
     if window is None:
@@ -94,5 +94,7 @@ try:
     print("\nall calls completed without raising")
 
 finally:
-    process.terminate()
+    # stop() rather than a bare terminate(): it waits, and kills past the
+    # timeout, so the script cannot exit leaving the app alive.
+    app.stop()
     print("done")

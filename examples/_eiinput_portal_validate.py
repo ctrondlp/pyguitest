@@ -59,7 +59,6 @@ import os
 import pathlib
 import shlex
 import shutil
-import subprocess
 import sys
 import tempfile
 import time
@@ -234,7 +233,7 @@ class Editor:
     def __init__(self, gui, command: list[str]) -> None:
         self.gui = gui
         self.command = command
-        self.process: subprocess.Popen | None = None
+        self.app = None
         self.before: set[str] = set()
         self.before_frames: set[str] = set()
         self.window = None
@@ -248,7 +247,7 @@ class Editor:
         self.document = pathlib.Path(path)
         self.before = {w.title for w in self.gui.windows()}
         self.before_frames = frame_names(self.gui)
-        self.process = self.gui.start_app([*self.command, str(self.document)])
+        self.app = self.gui.start_app([*self.command, str(self.document)])
         try:
             self.window = wait_for_new_window(self.gui, self.before)
         except BaseException:
@@ -261,16 +260,12 @@ class Editor:
         return self
 
     def __exit__(self, *_exc: object) -> bool:
-        if self.process is not None:
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                # An editor holding unsaved text can answer SIGTERM with a
-                # "Save changes?" dialog instead of exiting -- see
-                # validation.md.
-                self.process.kill()
-                self.process.wait()
+        # The process half is `Application.stop()` -- terminate, bounded
+        # wait, kill past it. This class only still exists for what that
+        # does not cover: the throwaway document, and the window and frame
+        # snapshots the injection step needs.
+        if self.app is not None:
+            self.app.stop()
         if self.document is not None:
             self.document.unlink(missing_ok=True)
             self.document = None

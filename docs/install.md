@@ -52,7 +52,7 @@ PNGs itself, so it needs no screenshot tool either.
 | sway / Hyprland / niri | `pip install .` — nothing else |
 | GNOME | `pip install '.[atspi]'` + three distribution packages |
 | GNOME, pure Wayland (no XWayland) | as GNOME, plus the [pyguitest-window-control extension](../gnome-shell-extension/README.md) for window placement/minimize |
-| KDE | as GNOME, plus `kdotool` for windows |
+| KDE | as GNOME, plus `kdotool` for windows, and `gsettings set org.gnome.desktop.interface toolkit-accessibility true` or no application publishes any elements — [see below](#on-kde-one-more-step-that-is-not-a-package) |
 | X11 | `pip install '.[x11]'` |
 | Any portal-supporting desktop, deliberately | `pip install '.[atspi]'` for PyGObject, then `connect(backend="portal")` and click Allow (once, if you opt into `persist_mode`) |
 | Keymap-safe input over libei, deliberately | `pip install '.[eiinput]'` + your distribution's `libei`, then `connect(backend="eiinput")` |
@@ -75,6 +75,24 @@ The `atspi` extra is **not self-sufficient**: dogtail declares no
 dependencies, and PyGObject does not build from source cleanly. `pyatspi` is
 used by the AT-SPI backend but appears in no extra, for exactly the same
 reason.
+
+### On KDE, one more step that is not a package
+
+GTK applications load their AT-SPI bridge only when the GNOME setting
+`toolkit-accessibility` is on. A GNOME session has it on already; a KDE one
+does not, and **the symptom is not an error**. Everything reports healthy —
+the packages are installed, `doctor` lists AT-SPI as present, dogtail
+connects — and element queries simply come back empty, as though the
+application had no widgets. Confirmed live on KDE (2026-09-01), where the
+`eiinput` validation could not read back a single element until:
+
+```sh
+gsettings set org.gnome.desktop.interface toolkit-accessibility true
+```
+
+`doctor` cannot yet tell you this: it checks that AT-SPI is importable,
+which it is. If elements are invisible on KDE and nothing is complaining,
+check that setting first.
 
 <!-- generated from pyguitest.hints._PACKAGES; tests/test_docs.py pins it -->
 
