@@ -133,8 +133,20 @@ gui.drag((120, 400), (600, 400))
 ```
 
 Matching on role and name survives the application being moved or resized,
-unlike clicking at `(842, 612)`. Ask before depending on anything that varies
-by desktop:
+unlike clicking at `(842, 612)`. `elements()`/`element()` take more than
+role and name -- `enabled`/`visible` filter on state, `name`/`description`
+take a compiled regex instead of an exact string, and `predicate` is an
+escape hatch for anything else (an ancestor/descendant check, say):
+
+```python
+from pyguitest import Role
+
+gui.elements(role=Role.PUSH_BUTTON, enabled=True)
+gui.element(name=re.compile(r"^Save"))
+gui.element(role=Role.CHECK_BOX, within=gui.window_element("Preferences"))
+```
+
+Ask before depending on anything that varies by desktop:
 
 ```python
 from pyguitest import Capability
@@ -204,10 +216,11 @@ python3 examples/06_a_real_test.py       # the one to copy: a unittest suite
 pyguitest                     # what this desktop can actually do
 pyguitest doctor              # what to install to unlock more
 pyguitest debug               # everything needed to diagnose a bug report
+pyguitest inspect             # the accessible tree of every open window
 pyguitest migrate script.pl   # what porting a Perl script involves
 ```
 
-All four also work as `python -m pyguitest …` without installing.
+All five also work as `python -m pyguitest …` without installing.
 
 `pyguitest debug` is what to paste into a bug report: package and Python
 versions, every environment probe (not only the ones that came back true),
@@ -215,6 +228,13 @@ each detected tool's own `--version`, and whether the process is running
 inside a Flatpak, toolbox, or other container -- which changes what every
 other probe on this list actually sees. Add `--json` for a machine-readable
 form.
+
+`pyguitest inspect` walks the accessible tree of every open window and
+prints it, grouped by application -- the tool for seeing what `gui.button(...)`
+or `gui.element(role=..., name=...)` actually has to match against, without
+writing a script first. `--window TITLE_REGEX` narrows it to one application;
+`--json` gives the same tree as machine-readable data, the same split
+`debug` uses.
 
 The migration scanner reports the tier of every X11::GUITest call in a source
 file and exits non-zero if any call has no Wayland path, so a port can be gated

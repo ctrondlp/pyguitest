@@ -12,6 +12,7 @@ backend is a valid backend -- which is the normal case, not the exception.
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol, TypeVar
 
@@ -19,7 +20,7 @@ from ..capabilities import Capability, CapabilitySet
 from ..errors import CapabilityUnsupported
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Callable, Iterator, Sequence
 
     # Imported for annotations only: windows.py imports this module, and
     # WindowEvent is the one name from it the interface has to name.
@@ -219,12 +220,34 @@ class Element(Protocol):
 
     @property
     def checked(self) -> bool | None:
-        """Whether a check box, radio button, or toggle is set."""
+        """Whether a check box, radio button, or toggle is set.
+
+        A real boolean everywhere, not only where `checkable` is true --
+        read that first to know whether this value means anything.
+        """
+        ...
+
+    @property
+    def checkable(self) -> bool:
+        """Whether the element has a check box, radio button, or toggle."""
         ...
 
     @property
     def selected(self) -> bool | None:
-        """Whether a list item, tab, or menu item is currently selected."""
+        """Whether a list item, tab, or menu item is currently selected.
+
+        Same caveat as `checked`: read `selectable` first.
+        """
+        ...
+
+    @property
+    def selectable(self) -> bool:
+        """Whether the element can be a list item, tab, or menu selection."""
+        ...
+
+    @property
+    def focused(self) -> bool:
+        """Whether the element currently has keyboard focus."""
         ...
 
     @property
@@ -666,13 +689,19 @@ class GUIBackend(ABC):
     def find_elements(
         self,
         role: str | None = None,
-        name: str | None = None,
+        name: str | re.Pattern | None = None,
         within: Element | None = None,
+        enabled: bool | None = None,
+        visible: bool | None = None,
+        description: str | re.Pattern | None = None,
+        predicate: Callable[[Element], bool] | None = None,
     ) -> list[Element]:
         """Search the accessible tree.
 
         The preferred automation entry point: unaffected by the missing
         geometry and input capabilities, and identical under X11 and Wayland.
+        `name`/`description` take a plain string (exact match) or a compiled
+        regex (`.search()`); `predicate` is an escape hatch for anything else.
         """
         self.require(Capability.ELEMENT_TREE)
         raise NotImplementedError
@@ -680,9 +709,13 @@ class GUIBackend(ABC):
     def find_element(
         self,
         role: str | None = None,
-        name: str | None = None,
+        name: str | re.Pattern | None = None,
         within: Element | None = None,
+        enabled: bool | None = None,
+        visible: bool | None = None,
+        description: str | re.Pattern | None = None,
+        predicate: Callable[[Element], bool] | None = None,
     ) -> Element | None:
-        """The first accessible element matching a role and/or name, or None."""
+        """The first accessible element matching, or None."""
         self.require(Capability.ELEMENT_TREE)
         raise NotImplementedError

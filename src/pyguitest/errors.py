@@ -65,5 +65,13 @@ class WindowNotFound(PyGUITestError):
     """No window matched, or a handle refers to a window that has closed."""
 
 
+class FocusMismatch(PyGUITestError):
+    """The wrong element (or nothing) has keyboard focus.
+
+    Raised by assert_focused/assert_tab_order -- unlike ElementNotFound, the
+    element usually does exist; it simply is not the focused one.
+    """
+
+
 class ImageNotFound(PyGUITestError):
     """No match for the template image cleared the similarity threshold."""

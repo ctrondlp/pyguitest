@@ -131,6 +131,86 @@ All notable changes to pyguitest are recorded here. The format follows
   `examples/_xtest_input_validate.py` -- the probe -- is kept and its
   docstring now says why it fails on Mutter rather than what it was
   written to expect.
+- `pyguitest inspect` (plus `--json` and `--window TITLE_REGEX`): the
+  accessible tree of every open window, grouped by application, as an
+  indented tree or machine-readable data. The tool for seeing what
+  `gui.button(...)` or `gui.element(role=..., name=...)` actually has to
+  match against without writing a script first — `doctor` answers "what
+  can this desktop do" and `debug` answers "what does this machine look
+  like", and neither could answer "what is actually in front of me".
+  `src/pyguitest/inspect.py` holds `tree_data`/`format_tree` as a pair,
+  the same single-source-of-truth split `debug` already uses so the two
+  output formats cannot disagree; it is a module rather than CLI-local
+  code so the failure bundle below can call `tree_data` directly. It
+  reaches windows the way the AT-SPI backend's own `windows()` does —
+  `elements(role=...)` for each of `Role.WINDOW_ROLES`, then each match's
+  parent is the owning application — rather than through `Window.handle`,
+  which is documented backend-private.
+- A real locator language on `Session.elements()`/`element()`, which
+  previously filtered on `role`/`name` alone: `enabled`, `visible` and
+  `description` filters, `name`/`description` accepting a compiled regex
+  as well as an exact string (the same `.search()` convention
+  `find_window` already used for titles), and `predicate`, an arbitrary
+  `Element -> bool`. `predicate` is the escape hatch that makes a
+  dedicated relation syntax unnecessary for now: `Element.parent`,
+  `.children` and `.is_ancestor_of` already exist, so an
+  ancestor/descendant query is `elements(predicate=lambda e:
+  label.is_ancestor_of(e))` today. Implemented as a single closure passed
+  to dogtail's `findChildren`, which already accepts a plain function as
+  readily as its own `GenericPredicate` — so this replaced the old
+  predicate construction rather than adding a second code path. Also
+  `Session.window_element(title)`, returning the `Element` for a window
+  rather than the `Window` handle `find_window` gives, so a search can be
+  scoped to one window through the existing `within=`.
+- `capture_on_failure` now captures a failure bundle rather than a lone
+  screenshot: the accessibility tree, the active window and the focused
+  element land beside it, each attached to the exception under its own
+  name (`accessibility_tree`, `active_window`, `focused_element`) as a
+  file path, or `None` plus `<name>_error` when it could not be taken.
+  Each artifact is attempted independently, so one unsupported mechanism
+  no longer costs the others — confirmed live on a GNOME Wayland session
+  with no capture backend, which produced a full tree/window/focus bundle
+  while the screenshot alone failed. The files share the screenshot's
+  stem, timestamp and pid rather than moving into a subdirectory, so the
+  existing `.screenshot` path contract is unchanged.
+- `Session.wait_for_file()`, `wait_for_process()` and `wait_for_idle()`,
+  completing the "synchronise against observable state, not against
+  time" family that `wait_until`/`wait_for_window`/`wait_for_element`
+  already formed. `wait_for_process` matches a regex against a process's
+  full `/proc/<pid>/cmdline`, not `comm`, which Linux truncates at 15
+  characters and which would therefore silently fail to match most real
+  application names. `wait_for_idle` means *CPU*-idle — sampled from
+  `/proc/<pid>/stat`'s utime+stime across consecutive polls — and its
+  docstring says so plainly, because the "wait until the UI stops
+  changing" reading it invites cannot be honoured: no backend here has an
+  AT-SPI event stream to watch for that, and inventing one is a
+  subsystem, not a convenience method.
+- Focus as a first-class concept: `Session.focused()`, `assert_focused()`
+  (taking the same filter set as `elements()`), `press_tab()` and
+  `assert_tab_order()`, plus a new `FocusMismatch` error for the case the
+  existing `*NotFound` errors do not cover — the element exists, it
+  simply is not the focused one. `assert_tab_order` focuses the first
+  name directly (no injection needed for that step), presses Tab for the
+  rest, and waits for focus to settle after each step rather than reading
+  it the instant the key is sent, since a focus change is not guaranteed
+  to be synchronous with the event causing it.
+- `Session.focus_tracking_works()`: a live probe for whether this desktop
+  publishes per-widget keyboard focus at all, reported by `pyguitest
+  debug` too. It exists because of a negative result recorded in
+  `docs/validation.md` — on GNOME Shell 50.4 (Wayland), AT-SPI's FOCUSED
+  state was carried by exactly one element on the whole desktop, the
+  shell's own toplevel, and by no widget in any application, across
+  Ptyxis/VTE, gnome-text-editor/GTK4 and zenity/GTK3, whichever window
+  was active and whether or not it had been activated first. The three
+  focus methods above are therefore correct and unit-tested but cannot
+  match a real widget there, and a caller who does not know that reads
+  `FocusMismatch` as a test failure rather than as the
+  unsupported-desktop answer it is. Deliberately a method and not a
+  `Capability`: capabilities are static, per-backend facts, and this one
+  can only be answered by looking at the tree at that moment.
+  `active_window()` is unaffected throughout — it reads STATE_ACTIVE on
+  frames, a different mechanism, and stayed correct while no widget
+  anywhere reported focus.
 
 ### Fixed
 
@@ -206,6 +286,35 @@ All notable changes to pyguitest are recorded here. The format follows
   (the read call, which never forks, is unaffected); confirmed live —
   0.07s instead of a 15s timeout. Caught before this ever shipped, by the
   same live-validation pass that added the capability.
+- `Element.checked`/`.selected` were documented as returning `None` where
+  the state does not apply, and callers filtering on that got nothing
+  filtered: AT-SPI reports both as real booleans on *every* element, unset
+  (`False`) on a plain panel exactly as on an unchecked check box, so the
+  `None` the docstrings promised never arrives in practice. Caught by the
+  first live run of `pyguitest inspect`, which rendered `[unchecked,
+  unselected]` against every panel in the tree and buried the annotations
+  that meant something. `Element.checkable`/`.selectable` were added —
+  AT-SPI's separate CHECKABLE/SELECTABLE states, which is what "does this
+  apply here" actually asks — and the docstrings now say to read those
+  first. Note this reflects what the accessibility bus reports rather
+  than papering over it: GNOME Shell's own toggle buttons do not set
+  CHECKABLE, so `inspect` prints no checked/unchecked annotation for
+  them, which is accurate rather than a gap to fill with a heuristic.
+- `backends/base.py`'s `Element` protocol — the typed contract the
+  concrete AT-SPI `Element` is statically checked against — was missing
+  `checkable`/`selectable` after those were added to the class, so the
+  protocol and its one implementation had silently diverged. Both are
+  declared now, along with the new `focused`.
+- `docs/validation.md` records a second negative result found while
+  investigating the focus one: `window_element()` cannot see an
+  Electron/VS Code window that `windows()` lists. The two AT-SPI
+  traversal paths disagree for Chromium clients — `windows()` walks
+  `root.applications()` and each application's own children, while a
+  recursive descendant search from the tree root does not return that
+  window at all — so `window_element("Visual Studio Code")` raised
+  `WindowNotFound` for a window that was open, active and listed. Not yet
+  root-caused, and recorded as such rather than left for the next person
+  to rediscover.
 
 ## [0.1.1] — 2026-08-30
 

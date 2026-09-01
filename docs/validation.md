@@ -76,6 +76,32 @@ read as a claim you cannot check.
 - **`X11Backend` under XWayland** — per-window capture, which produced a
   correct image of a real window through this package's own PNG encoder.
 - **AT-SPI, and the CLI-tool input and capture backends.**
+- **Per-widget keyboard focus is not published at all**, which is a
+  negative result worth as much as the positive ones. AT-SPI's FOCUSED
+  state is what `focused()`, `assert_focused()` and `assert_tab_order()`
+  read. Across the whole desktop, exactly one element ever carried it —
+  GNOME Shell's own `Main stage` toplevel — and no widget in any
+  application did, across three separate toolkits (Ptyxis/VTE,
+  gnome-text-editor/GTK4, zenity/GTK3), whichever window was active and
+  whether or not it had been activated first. `active_window()` was
+  unaffected and stayed correct throughout: it reads STATE_ACTIVE on
+  frames, a different mechanism, and it correctly named the real active
+  window while no widget anywhere reported focus. So the three focus
+  methods are exercised only by their unit tests; on this desktop they
+  cannot match a real widget however the application behaves, and
+  `Session.focus_tracking_works()` exists to say so at runtime rather
+  than leaving a caller to read it as a test failure. `pyguitest debug`
+  reports the same probe's answer.
+- **`window_element()` cannot see an Electron window** that `windows()`
+  can. Found while investigating the above: `gui.windows()` listed a
+  running VS Code window (it walks `root.applications()` then each
+  application's own children), while `gui.elements(role=FRAME/WINDOW/
+  DIALOG)` — a recursive descendant search from the tree root, which
+  `window_element()` uses — did not return it at all, so
+  `window_element("Visual Studio Code")` raised WindowNotFound for a
+  window that was open, active, and listed by `windows()`. The two
+  traversal paths disagree for Chromium/Electron clients specifically.
+  Not yet root-caused.
 
 ## Run live on KDE Plasma 6 / KWin (XWayland)
 

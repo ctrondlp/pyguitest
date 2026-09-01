@@ -123,6 +123,25 @@ class TestDebugData(unittest.TestCase):
         self.assertEqual(data["pyguitest_version"], pyguitest.__version__)
         self.assertIn("fake backend report", data["backend_report"])
 
+    def test_focus_tracking_is_probed_and_reported(self):
+        gui = _FakeGui(_environment())
+        gui.focus_tracking_works = lambda: True
+        self.assertIs(_debug_data(gui)["focus_tracking"], True)
+        gui.focus_tracking_works = lambda: False
+        self.assertIs(_debug_data(gui)["focus_tracking"], False)
+
+    def test_focus_tracking_is_none_when_the_probe_cannot_run(self):
+        # A backend with no element tree cannot answer the question at all,
+        # which is a different report from "asked, and focus is not
+        # published" -- the diagnostic must not fail either way.
+        gui = _FakeGui(_environment())
+
+        def explode():
+            raise RuntimeError("no element tree here")
+
+        gui.focus_tracking_works = explode
+        self.assertIsNone(_debug_data(gui)["focus_tracking"])
+
     def test_environment_lists_every_field_true_and_false(self):
         # Regression risk this guards against: summary() only prints
         # mechanisms that are True, which is exactly wrong for a bug

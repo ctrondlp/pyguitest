@@ -18,6 +18,7 @@ therefore declared only where those coordinates can be trusted.
 import contextlib
 import io
 import os
+import re
 from typing import TYPE_CHECKING, Any
 
 from ..capabilities import Capability, CapabilitySet
@@ -126,13 +127,37 @@ class Element:
 
     @property
     def checked(self):
-        """Whether a check box, radio button, or toggle is set."""
+        """Whether a check box, radio button, or toggle is set.
+
+        Reports a real (non-None) boolean for every element, not only the
+        checkable ones -- AT-SPI's checked state is just unset elsewhere.
+        Read `checkable` first to know whether this value means anything.
+        """
         return getattr(self.node, "checked", None)
 
     @property
+    def checkable(self):
+        """Whether the element has a check box, radio button, or toggle."""
+        return getattr(self.node, "checkable", False)
+
+    @property
     def selected(self):
-        """Whether a list item, tab, or menu item is currently selected."""
+        """Whether a list item, tab, or menu item is currently selected.
+
+        Same caveat as `checked`: this is a real boolean everywhere, not
+        only on selectable elements. Read `selectable` first.
+        """
         return getattr(self.node, "selected", None)
+
+    @property
+    def selectable(self):
+        """Whether the element can be a list item, tab, or menu selection."""
+        return getattr(self.node, "selectable", False)
+
+    @property
+    def focused(self):
+        """Whether the element currently has keyboard focus."""
+        return getattr(self.node, "focused", False)
 
     @property
     def actions(self):
@@ -212,6 +237,48 @@ if TYPE_CHECKING:
         return element
 
 
+def _matches_text(value, wanted):
+    """Whether `value` satisfies `wanted`.
+
+    Exact match for a plain string, `.search()` for a compiled pattern --
+    mirrors the regex convention Session.find_window already uses for
+    window titles.
+    """
+    if isinstance(wanted, re.Pattern):
+        return wanted.search(value or "") is not None
+    return value == wanted
+
+
+def _build_predicate(role, name, enabled, visible, description, predicate):
+    """A `node -> bool` function for `Node.findChildren`.
+
+    dogtail's find_all_descendants accepts a plain function exactly like a
+    GenericPredicate instance (checked via isinstance(..., LambdaType), and
+    an ordinary `def` satisfies that same check) -- this replaces the old
+    GenericPredicate(roleName=role, name=name) call with one that also knows
+    about state and arbitrary caller logic, without needing two code paths.
+    """
+
+    def matches(node):
+        if role is not None and node.roleName != role:
+            return False
+        if name is not None and not _matches_text(node.name, name):
+            return False
+        if enabled is not None and bool(getattr(node, "sensitive", True)) != enabled:
+            return False
+        if visible is not None and bool(node.showing) != visible:
+            return False
+        if description is not None and not _matches_text(
+            getattr(node, "description", "") or "", description
+        ):
+            return False
+        if predicate is not None:
+            return predicate(Element(node))
+        return True
+
+    return matches
+
+
 class AtspiBackend(GUIBackend):
     """Element automation over the accessibility bus."""
 
@@ -259,16 +326,49 @@ class AtspiBackend(GUIBackend):
         self.require(Capability.ELEMENT_TREE)
         return Element(self._tree.root)
 
-    def find_elements(self, role=None, name=None, within=None):
-        """Search the accessible tree by role and/or name."""
+    def find_elements(
+        self,
+        role=None,
+        name=None,
+        within=None,
+        enabled=None,
+        visible=None,
+        description=None,
+        predicate=None,
+    ):
+        """Search the accessible tree.
+
+        `name`/`description` take a plain string (exact match) or a compiled
+        regex (`.search()`). `enabled`/`visible` filter on element state.
+        `predicate` is an arbitrary `Element -> bool` for anything else --
+        combined with `Element.parent`/`.children`/`.is_ancestor_of`, it
+        covers ancestor/descendant queries without a dedicated relation API.
+        """
         self.require(Capability.ELEMENT_TREE)
         node = within.node if within is not None else self._tree.root
-        pred = self._predicate.GenericPredicate(roleName=role, name=name)
+        pred = _build_predicate(role, name, enabled, visible, description, predicate)
         return [Element(n) for n in node.findChildren(pred)]
 
-    def find_element(self, role=None, name=None, within=None):
+    def find_element(
+        self,
+        role=None,
+        name=None,
+        within=None,
+        enabled=None,
+        visible=None,
+        description=None,
+        predicate=None,
+    ):
         """The first match, or None."""
-        matches = self.find_elements(role=role, name=name, within=within)
+        matches = self.find_elements(
+            role=role,
+            name=name,
+            within=within,
+            enabled=enabled,
+            visible=visible,
+            description=description,
+            predicate=predicate,
+        )
         return matches[0] if matches else None
 
     # -- windows -----------------------------------------------------------

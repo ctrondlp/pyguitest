@@ -1,7 +1,10 @@
 """The user-facing convenience layer on Session."""
 
+import json
 import os
+import re
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -9,6 +12,7 @@ import pyguitest
 from pyguitest import (
     Capability,
     ElementNotFound,
+    FocusMismatch,
     ImageMatch,
     ImageNotFound,
     Role,
@@ -19,17 +23,43 @@ from pyguitest.capabilities import CapabilitySet
 
 
 class FakeElement:
-    def __init__(self, role, name):
+    def __init__(
+        self,
+        role,
+        name,
+        *,
+        enabled=True,
+        visible=True,
+        description="",
+        checkable=False,
+        selectable=False,
+        focused=False,
+        actions=(),
+        parent=None,
+        children=(),
+    ):
         self.role = role
         self.name = name
         self.clicked = False
         self.text = None
         self.chosen = None
         self.checked = False
-        self.enabled = True
+        self.enabled = enabled
+        self.visible = visible
+        self.description = description
+        self.checkable = checkable
+        self.selected = False
+        self.selectable = selectable
+        self.focused = focused
+        self.actions = list(actions)
+        self.parent = parent
+        self.children = list(children)
 
     def click(self):
         self.clicked = True
+
+    def focus(self):
+        self.focused = True
 
     def set_text(self, text):
         self.text = text
@@ -44,10 +74,14 @@ class FakeBackend(GUIBackend):
     def __init__(self):
         self.elements = [
             FakeElement(Role.PUSH_BUTTON, "OK"),
-            FakeElement(Role.PUSH_BUTTON, "Cancel"),
+            FakeElement(Role.PUSH_BUTTON, "Cancel", enabled=False),
             FakeElement(Role.ENTRY, "Name"),
             FakeElement(Role.COMBO_BOX, "Country"),
             FakeElement(Role.CHECK_BOX, "Remember me"),
+            FakeElement(
+                Role.PUSH_BUTTON, "Save", visible=False, description="Save the file"
+            ),
+            FakeElement(Role.FRAME, "Preferences"),
         ]
         self._windows = [
             Window("a", self, title="Document - Editor"),
@@ -58,11 +92,30 @@ class FakeBackend(GUIBackend):
     def capabilities(self):
         return CapabilitySet({Capability.ELEMENT_TREE, Capability.WINDOW_LIST})
 
-    def find_elements(self, role=None, name=None, within=None):
+    def find_elements(
+        self,
+        role=None,
+        name=None,
+        within=None,
+        enabled=None,
+        visible=None,
+        description=None,
+        predicate=None,
+    ):
+        def matches_text(value, wanted):
+            if hasattr(wanted, "search"):
+                return wanted.search(value or "") is not None
+            return value == wanted
+
         return [
             e
             for e in self.elements
-            if (role is None or e.role == role) and (name is None or e.name == name)
+            if (role is None or e.role == role)
+            and (name is None or matches_text(e.name, name))
+            and (enabled is None or e.enabled == enabled)
+            and (visible is None or e.visible == visible)
+            and (description is None or matches_text(e.description, description))
+            and (predicate is None or predicate(e))
         ]
 
     def windows(self):
@@ -342,6 +395,86 @@ class FakeImageBackend(GUIBackend):
         return self._match
 
 
+class TestWaitForFile(unittest.TestCase):
+    def test_returns_true_immediately_when_the_file_already_exists(self):
+        descriptor, path = tempfile.mkstemp()
+        os.close(descriptor)
+        self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
+        self.assertTrue(session().wait_for_file(path, timeout=1, interval=0.01))
+
+    def test_returns_false_on_timeout_when_it_never_appears(self):
+        directory = tempfile.mkdtemp()
+        self.addCleanup(lambda: os.rmdir(directory))
+        path = os.path.join(directory, "never-written")
+        self.assertFalse(session().wait_for_file(path, timeout=0.05, interval=0.01))
+
+
+class TestWaitForProcess(unittest.TestCase):
+    def test_finds_a_running_process_by_cmdline(self):
+        gui = session()
+        proc = gui.start_app(["sleep", "0.3"])
+        try:
+            pid = gui.wait_for_process("sleep", timeout=1, interval=0.01)
+            self.assertEqual(pid, proc.pid)
+        finally:
+            proc.wait(timeout=2)
+
+    def test_returns_none_on_timeout_when_nothing_matches(self):
+        gui = session()
+        self.assertIsNone(
+            gui.wait_for_process("no-such-process-xyz", timeout=0.05, interval=0.01)
+        )
+
+
+class TestWaitForIdle(unittest.TestCase):
+    """Driven entirely against a mocked _process_cpu_seconds.
+
+    Real CPU load would make this slow and flaky, and the streak/threshold
+    logic does not need a real process to exercise it.
+    """
+
+    def test_a_pid_that_has_already_exited_is_immediately_idle(self):
+        with mock.patch("pyguitest._process_cpu_seconds", return_value=None):
+            self.assertTrue(session().wait_for_idle(99999, timeout=1))
+
+    def test_becomes_idle_once_consecutive_samples_show_no_cpu_growth(self):
+        # Two big jumps (busy), then three readings essentially unchanged
+        # (idle) -- idle only once the streak of `samples` (default 3)
+        # flat readings is reached.
+        readings = [0.0, 5.0, 10.0, 10.000001, 10.000002, 10.000003]
+        with mock.patch("pyguitest._process_cpu_seconds", side_effect=readings):
+            self.assertTrue(
+                session().wait_for_idle(1234, timeout=5, interval=0.01, samples=3)
+            )
+
+    def test_times_out_while_still_busy(self):
+        # Reporting wall-clock time as "CPU seconds consumed" simulates a
+        # process pinned at ~100% CPU -- always well over the 1% threshold.
+        with mock.patch(
+            "pyguitest._process_cpu_seconds", side_effect=lambda pid: time.monotonic()
+        ):
+            self.assertFalse(session().wait_for_idle(1234, timeout=0.05, interval=0.01))
+
+
+class TestProcHelpers(unittest.TestCase):
+    """The /proc readers wait_for_process/wait_for_idle are built on."""
+
+    def test_process_cpu_seconds_reads_the_current_process(self):
+        self.assertIsInstance(pyguitest._process_cpu_seconds(os.getpid()), float)
+
+    def test_process_cpu_seconds_is_none_for_a_pid_that_does_not_exist(self):
+        self.assertIsNone(pyguitest._process_cpu_seconds(2**30))
+
+    def test_process_cmdline_reads_the_current_process(self):
+        self.assertIn("python", pyguitest._process_cmdline(os.getpid()).lower())
+
+    def test_process_cmdline_is_empty_for_a_pid_that_does_not_exist(self):
+        self.assertEqual(pyguitest._process_cmdline(2**30), "")
+
+    def test_proc_pids_includes_the_current_process(self):
+        self.assertIn(os.getpid(), set(pyguitest._proc_pids()))
+
+
 class TestLocateImage(unittest.TestCase):
     def test_raises_when_nothing_matches(self):
         backend = FakeImageBackend(match=None)
@@ -410,8 +543,180 @@ class TestWidgetFinders(unittest.TestCase):
             self.gui.text_field("Absent")
 
     def test_elements_returns_a_list_rather_than_raising(self):
-        self.assertEqual(len(self.gui.elements(role=Role.PUSH_BUTTON)), 2)
+        self.assertEqual(len(self.gui.elements(role=Role.PUSH_BUTTON)), 3)
         self.assertEqual(self.gui.elements(role=Role.SLIDER), [])
+
+    def test_elements_filters_by_enabled(self):
+        found = self.gui.elements(role=Role.PUSH_BUTTON, enabled=False)
+        self.assertEqual([e.name for e in found], ["Cancel"])
+
+    def test_elements_filters_by_visible(self):
+        found = self.gui.elements(role=Role.PUSH_BUTTON, visible=False)
+        self.assertEqual([e.name for e in found], ["Save"])
+
+    def test_elements_filters_by_description_exact_and_regex(self):
+        self.assertEqual(
+            [e.name for e in self.gui.elements(description="Save the file")],
+            ["Save"],
+        )
+        self.assertEqual(
+            [e.name for e in self.gui.elements(description=re.compile("^Save"))],
+            ["Save"],
+        )
+        self.assertEqual(self.gui.elements(description="no such text"), [])
+
+    def test_elements_name_accepts_a_compiled_regex(self):
+        found = self.gui.elements(name=re.compile("^Ca"))
+        self.assertEqual([e.name for e in found], ["Cancel"])
+
+    def test_elements_filters_by_predicate(self):
+        found = self.gui.elements(predicate=lambda e: e.role == Role.PUSH_BUTTON)
+        self.assertEqual({e.name for e in found}, {"OK", "Cancel", "Save"})
+
+    def test_element_combines_named_filters_and_predicate(self):
+        found = self.gui.element(
+            role=Role.PUSH_BUTTON, predicate=lambda e: not e.enabled
+        )
+        self.assertEqual(found.name, "Cancel")
+
+
+class TestWindowElement(unittest.TestCase):
+    def setUp(self):
+        self.gui = session()
+
+    def test_finds_the_window_element_by_title_regex(self):
+        element = self.gui.window_element("Prefer")
+        self.assertEqual(element.name, "Preferences")
+
+    def test_raises_when_nothing_matches(self):
+        with self.assertRaises(WindowNotFound):
+            self.gui.window_element("No Such Window")
+
+
+class TestFocused(unittest.TestCase):
+    def setUp(self):
+        self.gui = session()
+
+    def test_returns_none_when_nothing_has_focus(self):
+        self.assertIsNone(self.gui.focused())
+
+    def test_finds_the_one_focused_element(self):
+        self.gui.backend.elements[2].focused = True  # "Name"
+        found = self.gui.focused()
+        self.assertEqual(found.name, "Name")
+
+
+class TestFocusTrackingWorks(unittest.TestCase):
+    """The live probe for desktops that never publish per-widget focus.
+
+    Measured on GNOME Wayland: the only element carrying AT-SPI's FOCUSED
+    state was the shell's own toplevel, so a focus assertion could never
+    match a widget there -- see docs/validation.md.
+    """
+
+    def setUp(self):
+        self.gui = session()
+
+    def test_false_when_nothing_has_focus(self):
+        self.assertFalse(self.gui.focus_tracking_works())
+
+    def test_true_when_a_real_widget_has_focus(self):
+        self.gui.backend.elements[2].focused = True  # "Name", an ENTRY
+        self.assertTrue(self.gui.focus_tracking_works())
+
+    def test_false_when_only_a_toplevel_window_reports_focus(self):
+        # The GNOME Wayland shape: a window-role element is focused and no
+        # widget is, which is exactly the case the probe exists to catch.
+        self.gui.backend.elements[6].focused = True  # "Preferences", a FRAME
+        self.assertFalse(self.gui.focus_tracking_works())
+
+
+class TestAssertFocused(unittest.TestCase):
+    def setUp(self):
+        self.gui = session()
+
+    def test_passes_and_returns_the_element_when_it_matches(self):
+        self.gui.backend.elements[2].focused = True  # "Name"
+        found = self.gui.assert_focused(name="Name")
+        self.assertEqual(found.name, "Name")
+
+    def test_raises_when_nothing_has_focus(self):
+        with self.assertRaises(FocusMismatch) as caught:
+            self.gui.assert_focused(name="Name")
+        self.assertIn("nothing", str(caught.exception))
+        self.assertIn("Name", str(caught.exception))
+
+    def test_raises_when_the_wrong_element_has_focus(self):
+        self.gui.backend.elements[0].focused = True  # "OK"
+        with self.assertRaises(FocusMismatch) as caught:
+            self.gui.assert_focused(name="Name")
+        self.assertIn("'OK'", str(caught.exception))
+        self.assertIn("Name", str(caught.exception))
+
+    def test_role_filter_applies_alongside_focus(self):
+        self.gui.backend.elements[2].focused = True  # "Name", an ENTRY
+        self.gui.assert_focused(name="Name", role=Role.ENTRY)
+        with self.assertRaises(FocusMismatch):
+            self.gui.assert_focused(name="Name", role=Role.PUSH_BUTTON)
+
+    def test_predicate_is_anded_with_the_focus_check(self):
+        self.gui.backend.elements[2].focused = True  # "Name", an ENTRY
+        self.gui.assert_focused(predicate=lambda e: e.role == Role.ENTRY)
+        with self.assertRaises(FocusMismatch):
+            self.gui.assert_focused(predicate=lambda e: e.role == Role.COMBO_BOX)
+
+
+class TestPressTab(unittest.TestCase):
+    def setUp(self):
+        self.gui = session()
+
+    def test_default_presses_tab(self):
+        with mock.patch.object(self.gui, "send_keys") as send_keys:
+            self.gui.press_tab()
+        send_keys.assert_called_once_with("{TAB}")
+
+    def test_reverse_presses_shift_tab(self):
+        with mock.patch.object(self.gui, "send_keys") as send_keys:
+            self.gui.press_tab(reverse=True)
+        send_keys.assert_called_once_with("+({TAB})")
+
+
+class TestAssertTabOrder(unittest.TestCase):
+    def setUp(self):
+        self.gui = session()
+
+    def _advance_focus_along(self, order):
+        """Patch press_tab to move .focused from each name to the next.
+
+        Simulates what a real Tab press would do, in `order`.
+        """
+        by_name = {e.name: e for e in self.gui.backend.elements}
+        state = {"index": 0}
+
+        def fake_press_tab(reverse=False):
+            by_name[order[state["index"]]].focused = False
+            state["index"] += 1
+            by_name[order[state["index"]]].focused = True
+
+        return mock.patch.object(self.gui, "press_tab", side_effect=fake_press_tab)
+
+    def test_walks_the_whole_order_without_raising(self):
+        order = ["OK", "Name", "Country", "Remember me"]
+        with self._advance_focus_along(order):
+            self.gui.assert_tab_order(order, timeout=1, interval=0.01)
+        self.assertTrue(self.gui.backend.elements[4].focused)  # "Remember me"
+
+    def test_empty_list_is_a_no_op(self):
+        self.gui.assert_tab_order([], timeout=1, interval=0.01)
+
+    def test_raises_when_a_stop_lands_on_the_wrong_element(self):
+        # press_tab always lands on "OK" instead of advancing -- the second
+        # expected name is never actually reached.
+        with mock.patch.object(self.gui, "press_tab"):
+            with self.assertRaises(FocusMismatch):
+                self.gui.assert_tab_order(
+                    ["OK", "Name"], timeout=0.1, interval=0.01
+                )
 
 
 class TestRoleVocabulary(unittest.TestCase):
@@ -631,3 +936,55 @@ class TestCaptureOnFailure(unittest.TestCase):
         self.assertEqual(str(caught.exception), "the real problem")
         self.assertIsNone(caught.exception.screenshot)
         self.assertIsInstance(caught.exception.screenshot_error, Exception)
+
+    def test_accessibility_tree_is_captured_when_elements_are_supported(self):
+        # FakeBackend has ELEMENT_TREE but no capture backend -- the
+        # opposite coverage from FakeImageBackend above, together showing
+        # each artifact really is attempted independently of the others.
+        gui = pyguitest.Session(FakeBackend(), pyguitest.detect())
+        with self.assertRaises(ValueError) as caught:
+            with gui.capture_on_failure(self.directory):
+                raise ValueError("nope")
+        self.assertIsNotNone(caught.exception.accessibility_tree)
+        self.assertTrue(os.path.exists(caught.exception.accessibility_tree))
+        with open(caught.exception.accessibility_tree) as handle:
+            tree = json.load(handle)
+        self.assertIsInstance(tree, list)
+
+    def test_active_window_error_is_recorded_when_unsupported(self):
+        gui = pyguitest.Session(FakeBackend(), pyguitest.detect())
+        with self.assertRaises(ValueError) as caught:
+            with gui.capture_on_failure(self.directory):
+                raise ValueError("nope")
+        self.assertIsNone(caught.exception.active_window)
+        self.assertIsInstance(caught.exception.active_window_error, Exception)
+
+    def test_focused_element_is_written_even_when_nothing_is_focused(self):
+        gui = pyguitest.Session(FakeBackend(), pyguitest.detect())
+        with self.assertRaises(ValueError) as caught:
+            with gui.capture_on_failure(self.directory):
+                raise ValueError("nope")
+        self.assertIsNotNone(caught.exception.focused_element)
+        with open(caught.exception.focused_element) as handle:
+            self.assertIsNone(json.load(handle))
+
+    def test_focused_element_names_the_focused_element(self):
+        backend = FakeBackend()
+        backend.elements[2].focused = True  # "Name"
+        gui = pyguitest.Session(backend, pyguitest.detect())
+        with self.assertRaises(ValueError) as caught:
+            with gui.capture_on_failure(self.directory):
+                raise ValueError("nope")
+        with open(caught.exception.focused_element) as handle:
+            self.assertEqual(json.load(handle)["name"], "Name")
+
+    def test_one_failing_artifact_does_not_block_the_others(self):
+        # FakeBackend: no capture backend (screenshot fails) but ELEMENT_TREE
+        # is present (tree and focused_element succeed).
+        gui = pyguitest.Session(FakeBackend(), pyguitest.detect())
+        with self.assertRaises(ValueError) as caught:
+            with gui.capture_on_failure(self.directory):
+                raise ValueError("nope")
+        self.assertIsNone(caught.exception.screenshot)
+        self.assertIsNotNone(caught.exception.accessibility_tree)
+        self.assertIsNotNone(caught.exception.focused_element)

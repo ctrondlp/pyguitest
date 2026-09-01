@@ -24,6 +24,7 @@ identically under X11 and Wayland -- the one layer with no backend matrix.
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import re
@@ -33,13 +34,14 @@ import time
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, Literal
 
-from . import backends, compat
+from . import backends, compat, inspect
 from .backends import Element, GUIBackend, ImageMatch, NullBackend, Screen, Window
 from .capabilities import TIERS, Capability, CapabilitySet, Tier
 from .errors import (
     BackendUnavailable,
     CapabilityUnsupported,
     ElementNotFound,
+    FocusMismatch,
     ImageNotFound,
     PermissionRequired,
     PyGUITestError,
@@ -82,6 +84,7 @@ __all__ = [
     "BackendUnavailable",
     "CapabilityUnsupported",
     "ElementNotFound",
+    "FocusMismatch",
     "ImageNotFound",
     "PermissionRequired",
     "WindowNotFound",
@@ -118,6 +121,45 @@ could be found at all. Capability.IMAGE_LOCATE is tier-PORTABLE for the same
 needs `compare` on PATH, so unlike these two it is not always available and
 stays backend-provided.
 """
+
+
+def _proc_pids() -> Iterator[int]:
+    """Every currently-visible pid, from /proc's numeric entries."""
+    for entry in os.listdir("/proc"):
+        if entry.isdigit():
+            yield int(entry)
+
+
+def _process_cmdline(pid: int) -> str:
+    """`pid`'s full command line, space-joined, or "" if already gone.
+
+    Reads cmdline rather than /proc/<pid>/comm, which truncates at 15
+    characters on Linux and would silently fail to match most real
+    application names.
+    """
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as handle:
+            raw = handle.read()
+    except OSError:
+        return ""
+    return " ".join(part.decode(errors="replace") for part in raw.split(b"\0") if part)
+
+
+def _process_cpu_seconds(pid: int) -> float | None:
+    """Total CPU time `pid` has accumulated, in seconds.
+
+    None if it no longer exists.
+    """
+    try:
+        with open(f"/proc/{pid}/stat") as handle:
+            stat = handle.read()
+    except OSError:
+        return None
+    # comm (field 2) can itself contain spaces/parens, so split after its
+    # closing ')' rather than on whitespace from the start of the line.
+    fields = stat[stat.rindex(")") + 2 :].split()
+    utime, stime = int(fields[11]), int(fields[12])  # fields 14/15, 1-indexed
+    return (utime + stime) / os.sysconf("SC_CLK_TCK")
 
 
 class Session:
@@ -637,6 +679,16 @@ class Session:
             if not grouped:
                 release_held()
 
+    def press_tab(self, reverse: bool = False) -> None:
+        """Press Tab (or Shift+Tab if `reverse`), advancing keyboard focus.
+
+        Sugar over send_keys -- needs real key injection
+        (Capability.KEY_EVENT), unlike focused()/Element.focus(), which
+        only read or set AT-SPI state directly and need no injection
+        permission.
+        """
+        self.send_keys("+({TAB})" if reverse else "{TAB}")
+
     # -- finding things ----------------------------------------------------
 
     def windows(self) -> list[Window]:
@@ -658,6 +710,25 @@ class Session:
         if not found:
             raise WindowNotFound(f"no window with a title matching {title!r}")
         return found[0]
+
+    def window_element(self, title: str) -> Element:
+        """The accessible Element for the window matching the `title` regex.
+
+        Scopes an element search to one window via `within=`:
+
+            gui.element(role=Role.CHECK_BOX, name="Enable",
+                        within=gui.window_element("Preferences"))
+
+        Distinct from find_window, which returns a Window -- the backend-
+        agnostic handle used for geometry and placement, not element search.
+        Raises WindowNotFound if nothing matches, matching find_window.
+        """
+        pattern = re.compile(title)
+        for role in Role.WINDOW_ROLES:
+            for candidate in self.elements(role=role):
+                if pattern.search(candidate.name or ""):
+                    return candidate
+        raise WindowNotFound(f"no window with a title matching {title!r}")
 
     def wait_for_window(
         self, title: str, timeout: float | None = None, interval: float = 0.5
@@ -795,6 +866,80 @@ class Session:
                 return False
             time.sleep(interval)
 
+    def wait_for_file(
+        self, path: str, timeout: float | None = None, interval: float = 0.5
+    ) -> bool:
+        """Block until `path` exists, or timeout. Returns whether it appeared.
+
+        For a process under test writing output somewhere -- an export, a
+        log file -- rather than polling os.path.exists in a hand-rolled loop.
+        """
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            if os.path.exists(path):
+                return True
+            if deadline is not None and time.monotonic() >= deadline:
+                return False
+            time.sleep(interval)
+
+    def wait_for_process(
+        self,
+        name: str | re.Pattern[str],
+        timeout: float | None = None,
+        interval: float = 0.5,
+    ) -> int | None:
+        """Block until a process matching `name` is running, or timeout.
+
+        `name` is `.search()`ed against the full command line, the same way
+        Session.find_window matches window titles. Returns the matched
+        process's pid, or None on timeout.
+        """
+        pattern = re.compile(name) if isinstance(name, str) else name
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            for pid in _proc_pids():
+                if pattern.search(_process_cmdline(pid)):
+                    return pid
+            if deadline is not None and time.monotonic() >= deadline:
+                return None
+            time.sleep(interval)
+
+    def wait_for_idle(
+        self,
+        pid: int,
+        timeout: float | None = None,
+        interval: float = 0.2,
+        samples: int = 3,
+        cpu_threshold: float = 0.01,
+    ) -> bool:
+        """Block until `pid` looks CPU-idle, or timeout.
+
+        "Idle" means its CPU usage stayed under `cpu_threshold` (a fraction
+        of one core) across `samples` consecutive polls -- CPU-idle, not
+        "the UI stopped changing"; no backend here has an event stream to
+        watch for the latter (see docs/wayland-audit.html for what Wayland
+        actually exposes). Useful after e.g. clicking "Export" and waiting
+        for the exporting process to stop working before checking its
+        output. A pid that has already exited counts as idle immediately.
+        """
+        deadline = None if timeout is None else time.monotonic() + timeout
+        previous = _process_cpu_seconds(pid)
+        streak = 0
+        while True:
+            if previous is None:
+                return True
+            if deadline is not None and time.monotonic() >= deadline:
+                return False
+            time.sleep(interval)
+            current = _process_cpu_seconds(pid)
+            if current is None:
+                return True
+            idle_now = (current - previous) / interval <= cpu_threshold
+            streak = streak + 1 if idle_now else 0
+            previous = current
+            if streak >= samples:
+                return True
+
     # -- capture -----------------------------------------------------------
 
     def screenshot(
@@ -828,32 +973,37 @@ class Session:
         name: str | None = None,
         window: Window | None = None,
     ) -> _CaptureOnFailure:
-        """Screenshot the screen if the wrapped block raises.
+        """Capture a failure bundle if the wrapped block raises.
 
         A GUI test that fails tells you an assertion did not hold; a
-        screenshot taken at that moment tells you what was actually on
-        screen, which is usually the whole diagnosis. Capturing it after
-        the fact is too late -- by then the app has been torn down -- so it
-        has to happen while the exception is still propagating:
+        screenshot, the accessible tree, the active window, and whatever had
+        keyboard focus at that moment usually tell you the whole diagnosis.
+        Capturing it after the fact is too late -- by then the app has been
+        torn down -- so it has to happen while the exception is still
+        propagating:
 
             with gui.capture_on_failure("artifacts"):
                 gui.click_button("Save")
                 assert gui.element(name="Saved")
 
-        The path is attached to the exception as a `screenshot` attribute
-        and the exception is re-raised untouched, so a test runner reports
-        the original failure and the file is there to look at. Nothing is
-        captured on success.
+        Each artifact is attached to the exception under its own name --
+        `screenshot`, `accessibility_tree`, `active_window`,
+        `focused_element` -- as a file path, or `None` if it could not be
+        captured. The exception is re-raised untouched either way, so a test
+        runner reports the original failure and the files are there to look
+        at. Nothing is captured on success.
 
-        A failing capture never replaces the failure it was trying to
-        document: if the screenshot itself raises -- no capture backend, a
-        session already gone -- that error is recorded on the exception as
-        `screenshot_error` and swallowed. The original exception is what
-        the caller needs to see.
+        Each artifact is attempted independently, and a failing one never
+        replaces the failure it was trying to document, nor blocks the
+        others: a desktop with no AT-SPI still gets a screenshot; a session
+        with no capture backend still gets the tree. Whatever goes wrong for
+        one artifact is recorded on the exception as `<name>_error` and
+        swallowed -- the original exception is what the caller needs to see.
 
         `directory` defaults to $PYGUITEST_SCREENSHOT_DIR, then the
-        system temporary directory. `window` narrows the capture the same
-        way it does for :meth:`screenshot`.
+        system temporary directory. `window` narrows the screenshot the same
+        way it does for :meth:`screenshot`; the other artifacts are never
+        window-scoped.
         """
         return _CaptureOnFailure(self, directory, name, window)
 
@@ -904,23 +1054,67 @@ class Session:
     def elements(
         self,
         role: str | None = None,
-        name: str | None = None,
+        name: str | re.Pattern[str] | None = None,
         within: Element | None = None,
+        enabled: bool | None = None,
+        visible: bool | None = None,
+        description: str | re.Pattern[str] | None = None,
+        predicate: Callable[[Element], bool] | None = None,
     ) -> list[Element]:
-        """Return every accessible element matching a role and/or name."""
-        return self.backend.find_elements(role=role, name=name, within=within)
+        """Return every accessible element matching every given filter.
+
+        `name`/`description` take a plain string (exact match) or a compiled
+        regex, matched with `.search()` -- the same convention find_window
+        uses for titles:
+
+            gui.elements(role=Role.PUSH_BUTTON, enabled=True)
+            gui.elements(name=re.compile(r"^Save"))
+
+        `predicate` is an escape hatch for anything the named filters do not
+        cover, such as an ancestor/descendant relationship:
+
+            gui.elements(predicate=lambda e: some_label.is_ancestor_of(e))
+        """
+        # Only the filters actually asked for are passed on, so a backend
+        # (or a test fake) that predates these parameters keeps working for
+        # a plain role/name query -- it never sees a keyword it does not
+        # recognize unless the caller actually asked for that filter.
+        extra: dict[str, Any] = {
+            key: value
+            for key, value in (
+                ("enabled", enabled),
+                ("visible", visible),
+                ("description", description),
+                ("predicate", predicate),
+            )
+            if value is not None
+        }
+        return self.backend.find_elements(role=role, name=name, within=within, **extra)
 
     def element(
         self,
         role: str | None = None,
-        name: str | None = None,
+        name: str | re.Pattern[str] | None = None,
         within: Element | None = None,
+        enabled: bool | None = None,
+        visible: bool | None = None,
+        description: str | re.Pattern[str] | None = None,
+        predicate: Callable[[Element], bool] | None = None,
     ) -> Element:
-        """Return the first element matching a role and/or name.
+        """Return the first element matching every given filter.
 
-        Raises ElementNotFound if nothing matches.
+        Raises ElementNotFound if nothing matches. See elements() for what
+        each filter accepts.
         """
-        found = self.elements(role=role, name=name, within=within)
+        found = self.elements(
+            role=role,
+            name=name,
+            within=within,
+            enabled=enabled,
+            visible=visible,
+            description=description,
+            predicate=predicate,
+        )
         if not found:
             wanted = ", ".join(
                 part
@@ -932,6 +1126,141 @@ class Session:
             )
             raise ElementNotFound(f"no element with {wanted}")
         return found[0]
+
+    def focus_tracking_works(self) -> bool:
+        """Whether this desktop actually publishes per-widget keyboard focus.
+
+        AT-SPI's FOCUSED state is what focused(), assert_focused() and
+        assert_tab_order() read, and some desktops never set it on
+        individual widgets. Measured live on GNOME Shell 50.4 (Wayland):
+        the only element carrying it anywhere on the desktop was the
+        shell's own toplevel, across three separate toolkits (VTE, GTK4,
+        GTK3), whichever window was active -- so a focus assertion there
+        can never match a real widget, however the application behaves.
+        See docs/validation.md.
+
+        Deliberately not a Capability: those are static, per-backend facts,
+        and this one can only be answered by looking at the tree right now.
+        Ask before depending on the three methods above:
+
+            if gui.focus_tracking_works():
+                gui.assert_focused(name="Password")
+
+        A live probe of this moment, not a permanent verdict -- it is
+        False when nothing at all currently has focus, which on a healthy
+        desktop usually means an active window with nothing focused in it
+        rather than a desktop that cannot report focus.
+        """
+        focused = self.focused()
+        return focused is not None and focused.role not in Role.WINDOW_ROLES
+
+    def focused(self) -> Element | None:
+        """The accessible element that currently has keyboard focus, or None.
+
+        Searches the whole desktop, not one window. On a desktop that does
+        not publish per-widget focus this returns the shell's own toplevel
+        (or None) rather than a widget -- focus_tracking_works() is the
+        check for that, and is worth asking first.
+        """
+        found = self.elements(predicate=lambda e: e.focused)
+        return found[0] if found else None
+
+    def assert_focused(
+        self,
+        name: str | re.Pattern[str] | None = None,
+        role: str | None = None,
+        enabled: bool | None = None,
+        visible: bool | None = None,
+        description: str | re.Pattern[str] | None = None,
+        predicate: Callable[[Element], bool] | None = None,
+    ) -> Element:
+        """Raise FocusMismatch unless the focus matches every given filter.
+
+        Filters mean the same as elements()'s. Returns the focused Element
+        on success, so a caller can chain into it the same way element()
+        does.
+
+        Ask focus_tracking_works() first on an unknown desktop: where
+        per-widget focus is not published at all (GNOME Wayland, measured
+        -- see docs/validation.md) this raises for every element, which
+        reads as a test failure rather than the unsupported-desktop
+        answer it actually is.
+        """
+
+        def is_focused_and_matches(e: Element) -> bool:
+            return e.focused and (predicate is None or predicate(e))
+
+        found = self.elements(
+            role=role,
+            name=name,
+            enabled=enabled,
+            visible=visible,
+            description=description,
+            predicate=is_focused_and_matches,
+        )
+        if found:
+            return found[0]
+        actual = self.focused()
+        got = f"{actual.role!r} {actual.name!r}" if actual is not None else "nothing"
+        wanted = ", ".join(
+            part
+            for part in (
+                f"role={role!r}" if role else "",
+                f"name={name!r}" if name else "",
+                f"enabled={enabled!r}" if enabled is not None else "",
+                f"visible={visible!r}" if visible is not None else "",
+                f"description={description!r}" if description else "",
+                "predicate=<custom>" if predicate else "",
+            )
+            if part
+        ) or "any element"
+        raise FocusMismatch(f"expected focus on {wanted}; actual focus: {got}")
+
+    def assert_tab_order(
+        self,
+        names: Sequence[str],
+        timeout: float | None = 1.0,
+        interval: float = 0.05,
+    ) -> None:
+        """Raise FocusMismatch unless Tab visits `names` in order.
+
+        Focuses `names[0]` directly (Element.focus(), no key injection
+        needed for that step), then presses Tab once per remaining name.
+        After each step, waits for focus to actually settle on the
+        expected element rather than checking the instant the key is sent
+        -- Linux desktop applications are highly asynchronous, and a focus
+        change is not guaranteed to be synchronous with the key event that
+        caused it.
+
+        Needs both key injection (Capability.KEY_EVENT, for the Tab
+        presses) and a desktop that publishes per-widget focus -- ask
+        focus_tracking_works() first, for the reason assert_focused's
+        docstring gives.
+        """
+        if not names:
+            return
+        first, rest = names[0], names[1:]
+        self.element(name=first).focus()
+        self._settle_focus_on(first, timeout, interval)
+        for expected in rest:
+            self.press_tab()
+            self._settle_focus_on(expected, timeout, interval)
+
+    def _settle_focus_on(
+        self, name: str, timeout: float | None, interval: float
+    ) -> None:
+        """Wait for `name` to become focused, then confirm it landed.
+
+        assert_focused makes the actual pass/fail decision and builds the
+        message either way, so it is built in exactly one place regardless
+        of whether the wait below succeeded or timed out.
+        """
+        self.wait_until(
+            lambda: (f := self.focused()) is not None and f.name == name,
+            timeout=timeout,
+            interval=interval,
+        )
+        self.assert_focused(name=name)
 
     # -- finding things by what they are -----------------------------------
     #
@@ -1097,6 +1426,28 @@ class Session:
         )
 
 
+def _window_fields(window: Window | None) -> dict[str, Any] | None:
+    """A `Window` as a JSON-safe dict, or None.
+
+    `handle`/`backend` are backend-private and left out -- see Window's own
+    docstring.
+    """
+    if window is None:
+        return None
+    return {"title": window.title, "app_id": window.app_id, "pid": window.pid}
+
+
+def _element_fields(element: Element | None) -> dict[str, Any] | None:
+    """One element's own fields as a JSON-safe dict, or None.
+
+    No children -- the accessibility_tree artifact already covers the whole
+    tree.
+    """
+    if element is None:
+        return None
+    return inspect._node_fields(element)
+
+
 class _CaptureOnFailure:
     """The context manager Session.capture_on_failure returns.
 
@@ -1118,10 +1469,15 @@ class _CaptureOnFailure:
         self.directory = directory
         self.name = name
         self.window = window
-        self.path: str | None = None
 
-    def _destination(self, exception: BaseException) -> str:
-        """Where to write, named after the failure and the moment it hit."""
+    def _destination(
+        self, exception: BaseException, suffix: str = "", extension: str = "png"
+    ) -> str:
+        """Where to write one artifact, named after the failure and the moment it hit.
+
+        `suffix` distinguishes it from the others in the same bundle, e.g.
+        "-tree".
+        """
         directory = (
             self.directory
             or os.environ.get("PYGUITEST_SCREENSHOT_DIR")
@@ -1133,7 +1489,32 @@ class _CaptureOnFailure:
         # fails the same assertion in several cases would otherwise have
         # each failure overwrite the last, leaving only the final one.
         stamp = time.strftime("%Y%m%d-%H%M%S")
-        return os.path.join(directory, f"{stem}-{stamp}-{os.getpid()}.png")
+        filename = f"{stem}-{stamp}-{os.getpid()}{suffix}.{extension}"
+        return os.path.join(directory, filename)
+
+    def _write_json(self, path: str, data: object) -> str:
+        with open(path, "w") as handle:
+            json.dump(data, handle, indent=2)
+        return path
+
+    def _attempt(
+        self, failure_object: Any, attr: str, produce: Callable[[], str]
+    ) -> None:
+        """Set `attr` to `produce()`'s result, or `None` plus `<attr>_error`.
+
+        Deliberately broad, and deliberately swallowed. Anything at all can
+        go wrong here -- no capture backend, no AT-SPI, an unwritable
+        directory, a display that has already gone away -- and none of it
+        is more important than the exception being reported. Attached to
+        the exception object, which of course declares no such attribute --
+        that is the whole mechanism: the runner reports the original
+        failure and each artifact's path travels on it.
+        """
+        try:
+            setattr(failure_object, attr, produce())
+        except Exception as failure:  # noqa: BLE001 -- see above
+            setattr(failure_object, attr, None)
+            setattr(failure_object, f"{attr}_error", failure)
 
     def __enter__(self) -> _CaptureOnFailure:
         return self
@@ -1146,23 +1527,38 @@ class _CaptureOnFailure:
     ) -> Literal[False]:
         if exception is None:
             return False
-        try:
-            self.path = self.session.screenshot(
+        failure_object: Any = exception
+        self._attempt(
+            failure_object,
+            "screenshot",
+            lambda: self.session.screenshot(
                 path=self._destination(exception), window=self.window
-            )
-            # Attached to the exception object, which of course declares no
-            # such attribute -- that is the whole mechanism: the runner
-            # reports the original failure and the path travels on it.
-            failure_object: Any = exception
-            failure_object.screenshot = self.path
-        except Exception as failure:  # noqa: BLE001 -- see the docstring
-            # Deliberately broad, and deliberately swallowed. Anything at
-            # all can go wrong here -- no capture backend, an unwritable
-            # directory, a display that has already gone away -- and none
-            # of it is more important than the exception being reported.
-            failure_object = exception
-            failure_object.screenshot = None
-            failure_object.screenshot_error = failure
+            ),
+        )
+        self._attempt(
+            failure_object,
+            "accessibility_tree",
+            lambda: self._write_json(
+                self._destination(exception, "-tree", "json"),
+                inspect.tree_data(self.session),
+            ),
+        )
+        self._attempt(
+            failure_object,
+            "active_window",
+            lambda: self._write_json(
+                self._destination(exception, "-window", "json"),
+                _window_fields(self.session.active_window()),
+            ),
+        )
+        self._attempt(
+            failure_object,
+            "focused_element",
+            lambda: self._write_json(
+                self._destination(exception, "-focused", "json"),
+                _element_fields(self.session.focused()),
+            ),
+        )
         return False
 
 

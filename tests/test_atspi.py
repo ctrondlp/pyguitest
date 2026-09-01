@@ -5,6 +5,7 @@ adapter's own logic: capability gating, the Wayland coordinate refusal, and
 frame filtering.
 """
 
+import re
 import sys
 import types
 import unittest
@@ -34,6 +35,8 @@ class FakeNode:
         position=(0, 0),
         size=(0, 0),
         active=False,
+        sensitive=True,
+        description="",
     ):
         self.name = name
         self.roleName = role
@@ -45,6 +48,8 @@ class FakeNode:
         self.clicked = False
         self.focused = False
         self._active = active
+        self.sensitive = sensitive
+        self.description = description
         for child in self.children:
             child.parent = self
 
@@ -58,9 +63,14 @@ class FakeNode:
         return FakeState({"STATE_ACTIVE"} if self._active else set())
 
     def findChildren(self, pred):
+        # Real dogtail accepts a GenericPredicate (has .matches) or a plain
+        # node -> bool function -- see AccessibleObject.find_all_descendants.
+        # find_elements now builds the latter, so this fake needs to accept
+        # both, exactly like the real thing.
+        test = pred.matches if hasattr(pred, "matches") else pred
         out = []
         for child in self.children:
-            if pred.matches(child):
+            if test(child):
                 out.append(child)
             out.extend(child.findChildren(pred))
         return out
@@ -92,7 +102,22 @@ class FakePredicate:
 
 def build_tree():
     button = FakeNode("OK", "push button", position=(10, 20), size=(80, 30))
-    frame = FakeNode("Document - Editor", "frame", [button], (0, 0), (800, 600))
+    # Additional children of `frame`, not of `app` -- windows() only counts
+    # an application's direct children, so these cannot change window counts
+    # or geometry in tests that only look at gui.windows().
+    cancel = FakeNode("Cancel", "push button", sensitive=False)
+    notifications = FakeNode(
+        "Enable notifications",
+        "check box",
+        description="Turn notifications on or off",
+    )
+    frame = FakeNode(
+        "Document - Editor",
+        "frame",
+        [button, cancel, notifications],
+        (0, 0),
+        (800, 600),
+    )
     palette = FakeNode("Tools", "tool bar", [])
     app = FakeNode("gedit", "application", [frame, palette])
     return FakeNode("desktop", "desktop frame", [app]), frame, button
@@ -270,7 +295,7 @@ class TestElements(AtspiTestCase):
     def test_find_elements_by_role(self):
         gui = self.backend()
         found = gui.find_elements(role="push button")
-        self.assertEqual([e.name for e in found], ["OK"])
+        self.assertEqual([e.name for e in found], ["OK", "Cancel"])
 
     def test_find_element_returns_none_when_absent(self):
         gui = self.backend()
@@ -281,6 +306,13 @@ class TestElements(AtspiTestCase):
         gui.find_element(name="OK").click()
         self.assertTrue(self.button.clicked)
 
+    def test_focused_reads_the_node_s_focus_state(self):
+        gui = self.backend()
+        button = gui.find_element(name="OK")
+        self.assertFalse(button.focused)
+        button.focus()
+        self.assertTrue(button.focused)
+
     def test_element_exposes_role_name_and_ancestry(self):
         gui = self.backend()
         button = gui.find_element(name="OK")
@@ -288,6 +320,41 @@ class TestElements(AtspiTestCase):
         self.assertEqual(button.parent.name, "Document - Editor")
         self.assertTrue(button.parent.is_ancestor_of(button))
         self.assertFalse(button.is_ancestor_of(button.parent))
+
+    def test_find_elements_filters_by_enabled(self):
+        gui = self.backend()
+        found = gui.find_elements(role="push button", enabled=False)
+        self.assertEqual([e.name for e in found], ["Cancel"])
+
+    def test_find_elements_filters_by_visible(self):
+        gui = self.backend()
+        self.frame.children[0].showing = False  # the "OK" button
+        found = gui.find_elements(role="push button", visible=False)
+        self.assertEqual([e.name for e in found], ["OK"])
+
+    def test_find_elements_name_accepts_a_compiled_regex(self):
+        gui = self.backend()
+        found = gui.find_elements(name=re.compile("^Ca"))
+        self.assertEqual([e.name for e in found], ["Cancel"])
+
+    def test_find_elements_filters_by_description_exact_and_regex(self):
+        gui = self.backend()
+        exact = gui.find_elements(description="Turn notifications on or off")
+        self.assertEqual([e.name for e in exact], ["Enable notifications"])
+        pattern = gui.find_elements(description=re.compile("^Turn"))
+        self.assertEqual([e.name for e in pattern], ["Enable notifications"])
+
+    def test_find_elements_predicate_receives_a_real_element(self):
+        gui = self.backend()
+        found = gui.find_elements(
+            role="push button", predicate=lambda e: not e.enabled
+        )
+        self.assertEqual([e.name for e in found], ["Cancel"])
+
+    def test_find_elements_combines_filters(self):
+        gui = self.backend()
+        found = gui.find_elements(role="push button", name="OK", enabled=False)
+        self.assertEqual(found, [])
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@
     pyguitest                    what this desktop can actually do
     pyguitest doctor             what to install to unlock more
     pyguitest debug              everything needed to diagnose a bug report
+    pyguitest inspect            the accessible tree of every open window
     pyguitest migrate script.pl  what porting that script involves
 
 Also runnable as `python -m pyguitest` when the package is on the path but the
@@ -24,10 +25,11 @@ import sys
 from collections import Counter
 from enum import Enum
 
-from . import __version__, connect, tools
+from . import Capability, __version__, connect, tools
 from .capabilities import TIERS, Tier
 from .compat import LEGACY
 from .hints import advice, detect_distro, hints_for
+from .inspect import format_tree, tree_data
 
 _CALL = re.compile(r"\b(" + "|".join(sorted(LEGACY, key=len, reverse=True)) + r")\b")
 
@@ -183,7 +185,22 @@ def _debug_data(gui) -> dict:
         "capabilities": sorted(c.name for c in gui.capabilities),
         "capabilities_report": gui.capabilities.report(),
         "backend_report": backend_report() if callable(backend_report) else None,
+        "focus_tracking": _focus_tracking(gui),
     }
+
+
+def _focus_tracking(gui) -> bool | None:
+    """Whether per-widget focus is readable here, or None if unknowable.
+
+    A live probe rather than a declared capability -- see
+    Session.focus_tracking_works. None means the question could not be
+    asked at all (no element tree on this desktop), which is a different
+    answer from "asked, and focus is not published".
+    """
+    try:
+        return gui.focus_tracking_works()
+    except Exception:  # noqa: BLE001 -- diagnostics never fail the report
+        return None
 
 
 def _format_debug(data: dict) -> str:
@@ -227,6 +244,16 @@ def _format_debug(data: dict) -> str:
 
     lines.append("")
     lines.append(f"backend      {data['backend']}")
+    focus = data["focus_tracking"]
+    lines.append(
+        "focus        "
+        + {
+            True: "per-widget focus is published and readable",
+            False: "NOT published on this desktop -- assert_focused/"
+            "assert_tab_order cannot match a widget here",
+            None: "not probed (no element tree on this desktop)",
+        }[focus]
+    )
     if data["backend_report"]:
         lines.append("")
         lines.append(data["backend_report"])
@@ -250,6 +277,22 @@ def _debug(json_output: bool = False) -> int:
     with connect() as gui:
         data = _debug_data(gui)
     print(json.dumps(data, indent=2) if json_output else _format_debug(data))
+    return 0
+
+
+def _inspect(json_output: bool = False, window: str | None = None) -> int:
+    """Print the accessible tree of every open window.
+
+    Needs Capability.ELEMENT_TREE -- printed as install advice rather than
+    a traceback when it is missing, the same way every other capability gap
+    in this file is reported.
+    """
+    with connect() as gui:
+        if not gui.supports(Capability.ELEMENT_TREE):
+            print(advice(gui.environment, capabilities=gui.capabilities))
+            return 1
+        data = tree_data(gui, window=window)
+    print(json.dumps(data, indent=2) if json_output else format_tree(data))
     return 0
 
 
@@ -314,6 +357,15 @@ def main(argv=None):
         "debug", help="everything needed to diagnose a bug report, pasteable as-is"
     )
     debug.add_argument("--json", action="store_true", help="machine-readable output")
+    inspect_parser = sub.add_parser(
+        "inspect", help="the accessible tree of every open window"
+    )
+    inspect_parser.add_argument(
+        "--json", action="store_true", help="machine-readable output"
+    )
+    inspect_parser.add_argument(
+        "--window", help="only windows whose title matches this regex"
+    )
     migrate = sub.add_parser("migrate", help="scan Perl sources for X11::GUITest calls")
     migrate.add_argument("paths", nargs="+")
 
@@ -324,6 +376,8 @@ def main(argv=None):
         return _doctor()
     if args.command == "debug":
         return _debug(json_output=args.json)
+    if args.command == "inspect":
+        return _inspect(json_output=args.json, window=args.window)
     return _report()
 
 
