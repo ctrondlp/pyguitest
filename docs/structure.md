@@ -171,6 +171,36 @@ effect no caller should hit from ordinary automatic detection. Passing
 entirely while leaving it reachable by name, `connect(backend="portal")`, the
 only way to reach it deliberately.
 
+### Naming several backends
+
+`backend` also takes a sequence, which composes exactly those and nothing
+else — the way to pair an opt-in backend with the element and window access a
+plain `connect()` would have given you, in one session rather than two:
+
+```python
+gui = connect(
+    backend=["eiinput", "atspi"],
+    backend_options={"eiinput": {"persist_mode": 2}},
+)
+save_somewhere(gui.backend.member("eiinput").restore_token)
+```
+
+**There are two precedence rules, and which applies depends on who chose the
+order.** Automatic composition orders by registry priority, because nobody
+expressed a preference — that is what the table above is for. A named
+sequence is in the caller's order, so `["x11", "atspi"]` and `["atspi",
+"x11"]` are different requests and the first member holding a capability
+serves it.
+
+Two more differences, both because naming a backend is a *request* rather
+than a survey of what happens to be installed: a named backend that cannot
+build raises `BackendUnavailable` instead of being quietly skipped, and
+`backend_options` is keyed by backend name, since a flat dict cannot say
+which backend an option was meant for. `session.backend` is then the
+composite, so one member's own extras are reached through
+`member("eiinput")` — which takes the registry name even for the backends
+that report the tool they found (`imagesearch:compare`, `input:wtype`).
+
 `eiinput` shares that priority and that reasoning -- it raises the same
 consent dialog -- so it is registered `opt_in=True` too, and the shared 80
 is harmless precisely because neither is ever consulted during automatic

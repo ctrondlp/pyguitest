@@ -30,7 +30,7 @@ rather than an error.
 | `gnomeshell` | window control and prompt-free per-window capture on GNOME | — | PyGObject | — (plus the [Shell extension](../gnome-shell-extension/README.md), installed by hand) |
 | `input` | pointer and keyboard through a CLI tool | — | — | `wdotool`, `wtype`, `ydotool` or `xdotool` |
 | `uinput` | in-process pointer and keyboard | `[uinput]` (evdev) | — | — (needs `/dev/uinput` access) |
-| `eiinput` *(opt-in)* | keymap-safe input over libei | `[eiinput]` (python-libei) | `libei`, PyGObject | — |
+| `eiinput` *(opt-in)* | keymap-safe input over libei | `[eiinput]` (`python-libei[portal]`, which brings PyGObject with it) | `libei`, gobject-introspection | — |
 | `portal` *(opt-in)* | keyboard and pointer buttons/scroll via the RemoteDesktop portal | — | PyGObject | — |
 | `capture` | screenshots | — | — | `grim`, `gnome-screenshot`, `spectacle` or `import` |
 | `portalcapture` *(opt-in)* | screenshots via the Screenshot portal, no tool needed | — | PyGObject | — |
@@ -55,7 +55,7 @@ PNGs itself, so it needs no screenshot tool either.
 | KDE | as GNOME, plus `kdotool` for windows |
 | X11 | `pip install '.[x11]'` |
 | Any portal-supporting desktop, deliberately | `pip install '.[atspi]'` for PyGObject, then `connect(backend="portal")` and click Allow (once, if you opt into `persist_mode`) |
-| Keymap-safe input over libei, deliberately | `pip install '.[atspi,eiinput]'` + your distribution's `libei`, then `connect(backend="eiinput")` |
+| Keymap-safe input over libei, deliberately | `pip install '.[eiinput]'` + your distribution's `libei`, then `connect(backend="eiinput")` |
 | Screenshots with no tool installed at all, deliberately | `pip install '.[atspi]'` for PyGObject, then `connect(backend="portalcapture")` — the only capture path that works inside a Flatpak sandbox |
 
 `pyguitest doctor` reports which of these you have and names what is missing

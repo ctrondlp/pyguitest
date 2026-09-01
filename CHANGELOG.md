@@ -212,8 +212,93 @@ All notable changes to pyguitest are recorded here. The format follows
   frames, a different mechanism, and stayed correct while no widget
   anywhere reported focus.
 
+### Changed
+
+- The `eiinput` backend no longer negotiates the RemoteDesktop portal
+  itself. The whole `CreateSession` → `SelectDevices` → `Start` →
+  `ConnectToEIS` sequence — about 190 lines of Gio Request/Response
+  plumbing, including the fd-returning `ConnectToEIS` call that needs
+  `call_with_unix_fd_list_sync` — now lives in python-libei as
+  `libei.portal`, released there as 0.3.0, and `eiinput.py` calls
+  `RemoteDesktopSession.negotiate()` and translates that library's
+  failures into pyguitest's own (`PortalDeniedError` → `PermissionRequired`,
+  a too-old portal or any other portal-side failure → `BackendUnavailable`,
+  `PortalTimeoutError` → `PortalTimeout`). No behaviour changes for
+  callers: `persist_mode`/`restore_token` worked before this and work now.
+  What changes is who owns the code — the two hard-won fixes in it (the
+  subscribe-before-call race, and the `session_handle_token` workaround for
+  the xdg-desktop-portal 1.22.1 SIGABRT) are now available to anything
+  using python-libei rather than being pyguitest's private copy, and this
+  package's `eiinput` extra can declare the PyGObject dependency it always
+  had (see Fixed). `portalrequest.py` stays exactly where it is: the
+  `portal` and `screenshot` backends talk to xdg-desktop-portal with no
+  libei involvement at all, so routing them through a libei dependency to
+  share one request helper would be backwards. One consequence worth
+  knowing before upgrading: an existing install pinned to python-libei
+  0.1/0.2 has no `libei.portal`, so `eiinput` now reports itself
+  unavailable there — accurately, since there is no longer any negotiation
+  code in this package for it to fall back on — until python-libei is
+  upgraded to 0.3.0.
+- `connect(backend=[...])`: a sequence of backend names composes exactly
+  those, in the caller's order. Forcing a backend by name used to give you
+  only that one, so anything wanting an opt-in input backend *and* element
+  or window access had to open two sessions and remember which answered
+  what — `connect(backend=["eiinput", "atspi"])` is one session that
+  injects through the first and finds elements through the second. Three
+  things follow from a name being a request rather than a survey of what
+  happens to be installed: the caller's order is the precedence (automatic
+  composition still orders by registry priority, because nobody expressed a
+  preference), a named backend that cannot build raises `BackendUnavailable`
+  instead of being quietly skipped, and `backend_options` is keyed by
+  backend name — `{"eiinput": {"persist_mode": 2}}` — since a flat dict
+  cannot say which backend an option was for. A single name keeps every one
+  of its old behaviours, flat options included.
+- `examples/_eiinput_validate.py` now uses that form —
+  `connect(backend=["eiinput", "windows"])` in place of the two separate
+  sessions it opened to pair an input backend with window discovery.
+  `_eiinput_portal_validate.py` deliberately keeps two: what it wants is
+  "whatever this desktop composes automatically, plus `eiinput`", and a
+  fixed list would pin it to one desktop, since `gnomeshell` declines off
+  Mutter and a named backend that cannot build raises.
+- `CompositeBackend.member(name)`: reach one member's own extras through a
+  composite — `gui.backend.member("eiinput").restore_token`, the composed
+  spelling of the `gui.backend.restore_token` that `connect()` documents for
+  a single named backend. It takes the registry name even for the four
+  backends that report the tool they found (`imagesearch:compare`,
+  `input:wtype`, `capture:grim`, `clipboard:wl-paste`), so reaching one does
+  not mean knowing which tool the machine had. Deliberately explicit rather
+  than a `__getattr__` forwarding unknown attributes to whichever member
+  happens to have one, which would answer `restore_token` from whichever
+  backend came first in the list.
+- `examples/_eiinput_portal_validate.py`: the live re-validation for the
+  change above — a fresh negotiation, typed text read back through AT-SPI
+  (proof the characters reached a native Wayland client, not just that no
+  exception was raised), and a second negotiation presenting the
+  `restore_token`, which must raise no dialog. `--preflight` verifies the
+  cutover with no D-Bus traffic at all, and `--rehearse` runs the
+  window/typing half through the default session, so a consent dialog is
+  only spent once everything around it is known to work.
+- `LibeiBackend.close()` now closes the portal session it negotiated.
+  Nothing did before: a portal session lives in xdg-desktop-portal until
+  `Session.Close()` or until the D-Bus connection that created it drops,
+  and that connection is GLib's shared session-bus singleton, which
+  outlives any one session. A long-running process that connected
+  repeatedly accumulated live portal sessions until it exited. A
+  construction that fails *after* negotiating — the reachable case being
+  `_wait_for_devices()` giving up when no device resumes within
+  `_DEVICE_TIMEOUT` — now closes that session too, rather than stranding an
+  approved session, and the standing input grant it carries, for the life
+  of the process: `close()` is never reached on an object a constructor
+  never returned.
+
 ### Fixed
 
+- `pip install pyguitest[eiinput]` produced a backend that could not
+  construct. The extra pulled in python-libei but never declared
+  PyGObject, which `eiinput` needed directly to negotiate the portal — it
+  worked only where the unrelated `atspi` extra happened to have installed
+  it. The extra is now `python-libei[portal]>=0.3.0`, and that library
+  declares PyGObject for the module that actually uses it.
 - Every portal request could hang the calling thread forever. The wait for
   a `Response` signal ran an unbounded `GLib.MainLoop`, so a portal that
   accepted the call and then stopped answering — a crash mid-request, or a

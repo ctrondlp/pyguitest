@@ -91,9 +91,11 @@ and *above* keymap-unsafe ones:
 
 ## Update — 2026-08-29: the libei gap is closed
 
-The `eiinput` backend is that transport. It negotiates a RemoteDesktop portal
-session over D-Bus itself and injects through libei, using
-[python-libei](https://pypi.org/project/python-libei/) for the bindings —
+The `eiinput` backend is that transport. It injects through libei over a
+RemoteDesktop portal session negotiated on D-Bus, using
+[python-libei](https://pypi.org/project/python-libei/) for both the bindings
+and (since its 0.3.0, where this package's own negotiation was upstreamed as
+`libei.portal`) the negotiation —
 written for this purpose, verified live on 2026-08-26 (GNOME 50.4), and
 published to PyPI on 2026-08-28, which is what closes the maturity objection
 the original bullet raised. It is the `eiinput` extra; `pip install pyguitest`

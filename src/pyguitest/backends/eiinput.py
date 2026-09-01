@@ -49,36 +49,46 @@ pointer actually did -- `libinput debug-events --device /dev/input/eventN`
 shows whether events reach libinput at all, and `loginctl seat-status
 seat0` shows whether the device is attached to the session's seat.
 
-Bypasses `libei.oeffis`, which wraps this same negotiation: doing it
-directly over Gio drops a native dependency (python-libei's own README
-calls liboeffis the least reliable part of that stack in live testing) and
-keeps the session handle available for future work such as
-`persist_mode`/`restore_token`, which oeffis does not expose. The cost is
-~100 lines of Request/Response plumbing, including `RemoteDesktop.ConnectToEIS`
--- a `v2+`-only method returning a fd via
-`Gio.DBusConnection.call_with_unix_fd_list_sync` (a `GUnixFDList` index, not
-a raw fd number) rather than the plain `call_sync` `portal.py` uses for
-everything else.
+The portal negotiation itself lives in python-libei, not here:
+`libei.portal.RemoteDesktopSession.negotiate()` runs the whole
+`CreateSession` -> `SelectDevices` -> `Start` -> `ConnectToEIS` sequence
+over D-Bus and hands back an EIS fd, and this module only translates its
+failures into pyguitest's own error vocabulary. That code started life
+here -- ~100 lines of Request/Response plumbing, including
+`RemoteDesktop.ConnectToEIS`, a `v2+`-only method returning a fd via
+`Gio.DBusConnection.call_with_unix_fd_list_sync` (a `GUnixFDList` index,
+not a raw fd number) rather than the plain `call_sync` `portal.py` uses
+for everything else -- and moved upstream in python-libei 0.3.0 so every
+consumer of that library gets it rather than just this one. Both hard-won
+fixes went with it: the subscribe-before-call race described below, and
+the `session_handle_token` crash workaround `portal.py`'s docstring
+records.
 
-Deliberately not sharing negotiation code with `portal.py`, despite the
-similar shape: `portal.py`'s negotiation is already live-verified and
-carries a hard-won crash workaround (`session_handle_token` -- see its own
-docstring); refactoring it to share code with this newer, still-settling
-negotiation risks that already-working path for a modest amount of
-duplication.
+`libei.oeffis` still cannot do this job, which is why python-libei grew a
+D-Bus path beside its liboeffis wrapper rather than this module using the
+wrapper: `oeffis_create_session()` takes only a device-type bitmask, so it
+exposes neither `persist_mode`/`restore_token` nor the session handle.
+Upstream libei's own documentation points the same way -- "liboeffis is
+intentionally kept simple, any more complex needs should be handled by an
+application talking to DBus directly".
 
-Bug found and fixed while building this: subscribing to a portal Request's
+pyguitest keeps `portalrequest.py` regardless. `portal.py` and
+`screenshot.py` talk to RemoteDesktop and Screenshot with no libei
+involvement at all, so routing them through a libei dependency for the
+sake of sharing one request helper would be backwards. The duplication is
+one request helper on each side of a library boundary, deliberately.
+
+Bug found and fixed while building this, and now carried in both
+`libei.portal` and `portalrequest.py`: subscribing to a portal Request's
 `Response` signal only *after* the method call that returns its handle is a
 real race, not a hypothetical one -- a fast, non-interactive response (no
 consent dialog involved, e.g. `SelectDevices`/`SelectSources`) can arrive
 and be delivered before the subscription is registered, hanging forever on
 a signal that already came and went. Reproduced live (intermittent hangs at
-both `SelectDevices` and `SelectSources`). Fixed here by choosing the
-`handle_token` ourselves, computing the resulting request object path up
-front, and subscribing to that exact path *before* making the call at all
--- the pattern xdg-desktop-portal's own documentation describes. `portal.py`
-does not do this yet and may share the same latent race; out of scope to
-fix here since it has not been observed to hang in practice there.
+both `SelectDevices` and `SelectSources`). The fix is the pattern
+xdg-desktop-portal's own documentation describes: choose the `handle_token`
+yourself, compute the resulting request object path up front, and subscribe
+to that exact path *before* making the call at all.
 
 Keyboard input is keymap-*safe* here, which is the one thing neither
 `uinput.py` nor ydotool can offer. `Device.keyboard_key()` takes a raw
@@ -106,7 +116,6 @@ from __future__ import annotations
 import mmap
 import select
 import time
-import uuid
 
 from .. import xkb as _xkb
 from ..capabilities import Capability, CapabilitySet
@@ -120,21 +129,11 @@ from .base import GUIBackend
 
 __all__ = ["LibeiBackend", "available"]
 
-_BUS_NAME = "org.freedesktop.portal.Desktop"
-_OBJECT_PATH = "/org/freedesktop/portal/desktop"
-_REMOTE_DESKTOP = "org.freedesktop.portal.RemoteDesktop"
-_REQUEST_INTERFACE = "org.freedesktop.portal.Request"
-
-_MIN_REMOTE_DESKTOP_VERSION = 2  # ConnectToEIS needs v2+
-
-# AvailableDeviceTypes / SelectDevices bitmask, per the RemoteDesktop XML --
-# the same numbering portal.py's own _DEVICE_POINTER already uses.
-_DEVICE_TYPE_KEYBOARD = 1
-_DEVICE_TYPE_POINTER = 2
-
 # SelectDevices `persist_mode`, per the RemoteDesktop XML. Same values and
-# same meaning as portal.py's; see PortalBackend.__init__ for the rationale
-# on never storing the token here.
+# same meaning as portal.py's and as libei.portal.PersistMode, which these
+# are converted to before the call; kept as plain ints here because that
+# enum lives behind an optional import. See PortalBackend.__init__ for the
+# rationale on never storing the token here.
 PERSIST_NONE = 0
 PERSIST_WHILE_RUNNING = 1
 PERSIST_UNTIL_REVOKED = 2
@@ -143,9 +142,10 @@ _PORTAL_TIMEOUT = 60
 """Seconds to wait for the consent dialog -- generous, since a human has to
 see and answer it, but bounded: a portal that accepts the call and then dies
 sends no Response and no error, and an unbounded `loop.run()` waits on that
-forever with no fd to poll and nothing to interrupt it. Matches
-portalrequest.py's DEFAULT_TIMEOUT, which caps the same wait for the other
-portal backends."""
+forever with no fd to poll and nothing to interrupt it. Passed to
+libei.portal, which caps each round trip of the negotiation with it, and
+matches portalrequest.py's DEFAULT_TIMEOUT, which caps the same wait for the
+other portal backends."""
 
 _DEVICE_TIMEOUT = 15
 """Seconds to wait for a device to reach DEVICE_RESUMED once the fd is live.
@@ -160,16 +160,24 @@ the one wanted; an absolute device returns immediately."""
 _BUTTONS = {1: 0x110, 2: 0x112, 3: 0x111}  # BTN_LEFT, BTN_MIDDLE, BTN_RIGHT
 
 
-def _gio():
-    """Import Gio and GLib, or return None. Same dependency portal.py needs."""
-    try:
-        import gi
+def _portal():
+    """Import libei.portal, or return None if it cannot negotiate here.
 
-        gi.require_version("Gio", "2.0")
-        from gi.repository import Gio, GLib
+    Returns None both when python-libei is too old to have the module and
+    when PyGObject is missing, which is what `is_available()` reports -- the
+    module imports fine without it, since the Gio import is deferred exactly
+    as `_libei()` describes for the native library.
+    """
+    try:
+        from libei import portal
     except Exception:
         return None
-    return Gio, GLib
+    try:
+        if not portal.is_available():
+            return None
+    except Exception:
+        return None
+    return portal
 
 
 def _libei():
@@ -193,7 +201,7 @@ def _libei():
 
 def available():
     """Whether PyGObject and python-libei (with its native library) are usable."""
-    return _gio() is not None and _libei() is not None
+    return _portal() is not None and _libei() is not None
 
 
 class LibeiBackend(GUIBackend):
@@ -215,9 +223,9 @@ class LibeiBackend(GUIBackend):
 
         Passing `device` directly skips both the portal round-trip and the
         seat/device negotiation loop entirely -- the seam most tests use.
-        `connection` can be injected to exercise the real negotiation against
-        a fake Gio connection (see tests/test_eiinput.py) without a real
-        portal.
+        `connection` is handed straight to
+        `libei.portal.RemoteDesktopSession.negotiate()`, which opens a
+        session-bus connection of its own when it is None.
 
         `persist_mode`/`restore_token` avoid re-prompting on every launch,
         exactly as in `PortalBackend`: ask for persistence, read
@@ -228,20 +236,24 @@ class LibeiBackend(GUIBackend):
         2026-09-01 on GNOME: the same token comes back each restore. That
         is one portal's behaviour, not a guarantee.) Nothing is written to
         disk here -- the token is a standing grant of input injection, so
-        storing it is the caller's decision. This is also the reason this
-        backend negotiates the portal itself instead of using
-        `libei.oeffis`, whose
-        `oeffis_create_session()` takes only a device-type bitmask and
+        storing it is the caller's decision. This is also the reason
+        negotiation goes through `libei.portal` rather than `libei.oeffis`,
+        whose `oeffis_create_session()` takes only a device-type bitmask and
         exposes neither options nor the session handle.
+
+        Passing a `restore_token` while leaving `persist_mode` at
+        PERSIST_NONE raises ValueError rather than quietly spending the
+        token: the portal answers such a request with no token at all, so a
+        caller following the save-every-run rule above would write None over
+        the token it just used up.
         """
         # PyGObject is deliberately NOT required here. It is needed only to
         # negotiate the portal session, and the branch below already says
-        # so about the bus: an injected sender or device means there is
-        # nothing to negotiate. Demanding it up front contradicted that and
-        # refused a construction that needs nothing from it -- which is
-        # exactly how the integration test fails on a machine that has
-        # python-libei but not PyGObject.
-        self._Gio = self._GLib = None
+        # so: an injected sender or device means there is nothing to
+        # negotiate. Demanding it up front contradicted that and refused a
+        # construction that needs nothing from it -- which is exactly how
+        # the integration test fails on a machine that has python-libei but
+        # not PyGObject.
         ei = _libei()
         if ei is None:
             raise BackendUnavailable(
@@ -253,6 +265,7 @@ class LibeiBackend(GUIBackend):
         self._ei = ei
 
         self._connection = connection
+        self._session = None
         self._persist_mode = persist_mode
         self._restore_token = restore_token
         self.restore_token = None
@@ -264,224 +277,97 @@ class LibeiBackend(GUIBackend):
         self._keyboard = keyboard
         self._keymap = keymap
         if device is None:
-            if sender is None:
-                gio_modules = _gio()
-                if gio_modules is None:
-                    raise BackendUnavailable(
-                        "PyGObject is not installed; pip install "
-                        "'pyguitest[atspi]' pulls in the same dependency "
-                        "this needs (see README)"
-                    )
-                self._Gio, self._GLib = gio_modules
-                # The bus is only needed to negotiate; an injected sender or
-                # device means there is nothing to negotiate, so do not open
-                # a session bus that a test (or a headless run) may not have.
-                if self._connection is None:
-                    try:
-                        self._connection = self._Gio.bus_get_sync(
-                            self._Gio.BusType.SESSION, None
-                        )
-                    except Exception as exc:
+            try:
+                if sender is None:
+                    # The portal (and so PyGObject, and so the session bus)
+                    # is only needed to negotiate; an injected sender or
+                    # device means there is nothing to negotiate, so nothing
+                    # here is imported or opened on that path.
+                    portal = _portal()
+                    if portal is None:
                         raise BackendUnavailable(
-                            f"cannot reach the session bus: {exc}"
-                        ) from exc
-                eis_fd = self._negotiate_eis_fd()
-                self._sender = ei.Sender.create_for_fd(eis_fd, name="pyguitest")
-            self._device, self._keyboard = self._wait_for_devices()
-            self._keymap = self._compile_keymap(self._keyboard)
+                            "libei.portal is unusable: negotiating a portal "
+                            "session needs python-libei 0.3.0+ and PyGObject, "
+                            "and one of them is missing; `pip install "
+                            "'pyguitest[eiinput]'` supplies both (see README)"
+                        )
+                    self._session = self._negotiate(portal)
+                    # Reading eis_fd transfers the fd to the Sender, which
+                    # owns and closes it from here on; the session's own
+                    # close() then has only the D-Bus half left to do. See
+                    # libei.portal.RemoteDesktopSession.
+                    #
+                    # If create_for_fd itself raises, that one descriptor
+                    # leaks: it has already left the session (so its close()
+                    # will not close it), and whether libei closed it before
+                    # failing is not knowable from here -- `ei_setup_backend_fd`
+                    # takes ownership on success and documents nothing about
+                    # its error path. Closing it on a guess risks closing a
+                    # since-reused fd number belonging to something else,
+                    # which is far worse than leaking one fd while a
+                    # construction is already failing.
+                    self._sender = ei.Sender.create_for_fd(
+                        self._session.eis_fd, name="pyguitest"
+                    )
+                self._device, self._keyboard = self._wait_for_devices()
+                self._keymap = self._compile_keymap(self._keyboard)
+            except BaseException:
+                # Nothing else can close a session negotiated by a
+                # constructor that then raised: close() is never reached on
+                # an object that was never returned, and the session lives
+                # in xdg-desktop-portal until Session.Close() regardless of
+                # what happens in this process. The reachable case is not
+                # exotic -- _wait_for_devices() raises BackendUnavailable
+                # whenever no device resumes within _DEVICE_TIMEOUT -- and
+                # leaving it would strand an approved session, and the
+                # standing input-injection grant it carries, until exit.
+                # BaseException so that a Ctrl-C during that 15s wait
+                # cleans up too.
+                if self._session is not None:
+                    self._session.close()
+                    self._session = None
+                raise
 
-    # -- portal request/response plumbing ----------------------------------
+    # -- portal negotiation ------------------------------------------------
 
-    def _request(self, interface, method, signature, leading_args, options):
-        """Call a Request-returning method, racelessly.
+    def _negotiate(self, portal):
+        """Negotiate a RemoteDesktop session, in this package's error vocabulary.
 
-        Subscribing to the Response signal only after the call returns its
-        handle is a real race (see the module docstring); this computes the
-        handle_token and the resulting request path itself, subscribes to
-        that exact path, and only then makes the call.
+        The sequence itself (CreateSession -> SelectDevices -> Start ->
+        ConnectToEIS, raceless Request/Response handling, the
+        `session_handle_token` crash workaround) belongs to
+        `libei.portal`; see the module docstring for why it lives there.
+        What is left here is the translation, because a caller of pyguitest
+        should not have to catch a second library's exception hierarchy to
+        find out that a consent dialog was declined.
+
+        No ScreenCast source is requested -- `libei.portal` never asks for
+        one, which is what this backend needs: an absolute-pointer device
+        carries its own region, verified live, so asking would make the
+        user grant screen recording for nothing. See the module docstring.
         """
-        # self._Gio/self._GLib are only unset when construction was
-        # given an injected sender or device and so never negotiated a
-        # portal session (see __init__) -- which is also the only case
-        # in which this method is never called.
-        assert self._Gio is not None and self._GLib is not None
-        unique_name = self._connection.get_unique_name()
-        escaped_sender = unique_name[1:].replace(".", "_")
-        token = uuid.uuid4().hex
-        options = dict(options)
-        options["handle_token"] = self._GLib.Variant("s", token)
-        expected_path = (
-            f"/org/freedesktop/portal/desktop/request/{escaped_sender}/{token}"
-        )
-
-        loop = self._GLib.MainLoop()
-        result = {}
-        timed_out = False
-
-        def on_response(_conn, _sender, _path, _iface, _signal, params, *_a):
-            result["code"], result["results"] = params.unpack()
-            loop.quit()
-
-        def on_timeout():
-            # Recorded rather than inferred from an empty `result`: a
-            # Response carrying no results is legitimate (SelectDevices
-            # answers with an empty dict), so "did this end because it
-            # timed out" has to be a fact, not a deduction.
-            nonlocal timed_out
-            timed_out = True
-            loop.quit()
-            return False  # one-shot; GLib drops the source when False
-
-        subscription = self._connection.signal_subscribe(
-            _BUS_NAME,
-            _REQUEST_INTERFACE,
-            "Response",
-            expected_path,
-            None,
-            self._Gio.DBusSignalFlags.NONE,
-            on_response,
-            None,
-        )
         try:
-            parameters = self._GLib.Variant(signature, (*leading_args, options))
-            self._connection.call_sync(
-                _BUS_NAME,
-                _OBJECT_PATH,
-                interface,
-                method,
-                parameters,
-                None,
-                self._Gio.DBusCallFlags.NONE,
-                -1,
-                None,
+            session = portal.RemoteDesktopSession.negotiate(
+                connection=self._connection,
+                devices=portal.DeviceType.KEYBOARD | portal.DeviceType.POINTER,
+                persist_mode=portal.PersistMode(self._persist_mode),
+                restore_token=self._restore_token,
+                timeout=_PORTAL_TIMEOUT,
             )
-            # `if not result` because a synchronous answer (a fake
-            # connection, or a fast non-interactive Response) can arrive
-            # during call_sync, before run() is reached -- and quit() before
-            # run() does not stop the loop, so running it then would block
-            # with nothing left to deliver. The same guard portalrequest.py
-            # carries, for the same reason.
-            if not result:
-                source = self._GLib.timeout_add_seconds(_PORTAL_TIMEOUT, on_timeout)
-                try:
-                    loop.run()
-                finally:
-                    # A fired one-shot is already gone; a live one would
-                    # hold this closure and fire into a dead loop later.
-                    self._GLib.source_remove(source)
-        finally:
-            self._connection.signal_unsubscribe(subscription)
-        if timed_out:
-            raise PortalTimeout(method, _PORTAL_TIMEOUT)
-        return result["code"], result["results"]
-
-    def _call_for_fd(self, interface, method, session_handle):
-        """Call a method that returns a fd via a GUnixFDList index."""
-        # self._Gio/self._GLib are only unset when construction was
-        # given an injected sender or device and so never negotiated a
-        # portal session (see __init__) -- which is also the only case
-        # in which this method is never called.
-        assert self._Gio is not None and self._GLib is not None
-        reply, fd_list = self._connection.call_with_unix_fd_list_sync(
-            _BUS_NAME,
-            _OBJECT_PATH,
-            interface,
-            method,
-            self._GLib.Variant("(oa{sv})", (session_handle, {})),
-            self._GLib.VariantType.new("(h)"),
-            self._Gio.DBusCallFlags.NONE,
-            -1,
-            None,
-            None,
-        )
-        (handle_index,) = reply.unpack()
-        return fd_list.get(handle_index)
-
-    def _remote_desktop_version(self):
-        # self._Gio/self._GLib are only unset when construction was
-        # given an injected sender or device and so never negotiated a
-        # portal session (see __init__) -- which is also the only case
-        # in which this method is never called.
-        assert self._Gio is not None and self._GLib is not None
-        reply = self._connection.call_sync(
-            _BUS_NAME,
-            _OBJECT_PATH,
-            "org.freedesktop.DBus.Properties",
-            "Get",
-            self._GLib.Variant("(ss)", (_REMOTE_DESKTOP, "version")),
-            None,
-            self._Gio.DBusCallFlags.NONE,
-            -1,
-            None,
-        )
-        (version,) = reply.unpack()
-        return int(version)
-
-    def _negotiate_eis_fd(self):
-        """CreateSession, SelectDevices, Start, ConnectToEIS.
-
-        No ScreenCast source is selected: verified live that it is not
-        needed for an absolute-pointer device with a real region, and
-        asking for one would make the user grant screen recording for
-        nothing. See the module docstring.
-        """
-        # self._Gio/self._GLib are only unset when construction was
-        # given an injected sender or device and so never negotiated a
-        # portal session (see __init__) -- which is also the only case
-        # in which this method is never called.
-        assert self._Gio is not None and self._GLib is not None
-        version = self._remote_desktop_version()
-        if version < _MIN_REMOTE_DESKTOP_VERSION:
-            raise BackendUnavailable(
-                f"RemoteDesktop version {version} is too old for ConnectToEIS "
-                f"(need {_MIN_REMOTE_DESKTOP_VERSION}+)"
-            )
-
-        # session_handle_token is a *different* token from the handle_token
-        # _request() injects itself: omitting it crashes xdg-desktop-portal
-        # 1.22.1 outright (SIGABRT, taking the portal down system-wide) --
-        # see portal.py's own docstring for the reproduction. Not optional.
-        code, results = self._request(
-            _REMOTE_DESKTOP,
-            "CreateSession",
-            "(a{sv})",
-            (),
-            {"session_handle_token": self._GLib.Variant("s", uuid.uuid4().hex)},
-        )
-        if code != 0:
+        except portal.PortalTimeoutError as exc:
+            raise PortalTimeout(exc.step, exc.timeout) from exc
+        except portal.PortalDeniedError as exc:
             raise PermissionRequired(
-                Capability.POINTER_MOVE, self.name, "CreateSession was not approved"
-            )
-        session_handle = results["session_handle"]
-
-        options = {
-            "types": self._GLib.Variant(
-                "u", _DEVICE_TYPE_KEYBOARD | _DEVICE_TYPE_POINTER
-            )
-        }
-        if self._persist_mode != PERSIST_NONE:
-            options["persist_mode"] = self._GLib.Variant("u", self._persist_mode)
-        if self._restore_token is not None:
-            options["restore_token"] = self._GLib.Variant("s", self._restore_token)
-        code, _results = self._request(
-            _REMOTE_DESKTOP, "SelectDevices", "(oa{sv})", (session_handle,), options
-        )
-        if code != 0:
-            raise PermissionRequired(
-                Capability.POINTER_MOVE, self.name, "SelectDevices was not approved"
-            )
-
-        code, results = self._request(
-            _REMOTE_DESKTOP, "Start", "(osa{sv})", (session_handle, ""), {}
-        )
-        if code != 0:
-            raise PermissionRequired(
-                Capability.POINTER_MOVE,
-                self.name,
-                "the user declined the remote-control consent dialog",
-            )
-        self.restore_token = results.get("restore_token")
-        return self._call_for_fd(_REMOTE_DESKTOP, "ConnectToEIS", session_handle)
+                Capability.POINTER_MOVE, self.name, str(exc)
+            ) from exc
+        except portal.PortalError as exc:
+            # PortalVersionError (RemoteDesktop too old for ConnectToEIS),
+            # an unreachable session bus, and any other portal-side failure:
+            # all "this backend cannot run here", none of them the user
+            # having said no.
+            raise BackendUnavailable(str(exc)) from exc
+        self.restore_token = session.restore_token
+        return session
 
     def _wait_for_devices(self):
         """Bind what this backend needs and collect the resulting devices.
@@ -626,7 +512,16 @@ class LibeiBackend(GUIBackend):
         return CapabilitySet(provided)
 
     def close(self):
-        """End emulation on both devices, and release everything held."""
+        """End emulation on both devices, and release everything held.
+
+        The portal session goes last, and only if this backend negotiated
+        one: closing it is what tears the EIS connection down, so the
+        devices have to stop emulating first. Nothing closed it before this
+        module delegated to `libei.portal` -- a portal session outlives the
+        object that created it, living in xdg-desktop-portal until
+        `Session.Close()` or the D-Bus connection drops, and that
+        connection is GLib's shared session-bus singleton, which does not.
+        """
         if self._emulation_started and self._device is not None:
             self._device.stop_emulating()
             self._emulation_started = False
@@ -639,6 +534,9 @@ class LibeiBackend(GUIBackend):
         self._device = None
         self._keyboard = None
         self._sender = None
+        if self._session is not None:
+            self._session.close()
+            self._session = None
         self._connection = None
 
     def _button_code(self, button):

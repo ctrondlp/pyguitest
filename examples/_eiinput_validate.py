@@ -13,12 +13,16 @@ appears; this script cannot do that for you, and there is no way around
 it (see docs/adr-002-transports.md on why `eiinput` is opt-in and never
 auto-selected).
 
-`LibeiBackend` is input-only -- it has no window-management capabilities
-of its own, unlike `KdotoolBackend` or `gnomeshell` -- so window discovery
-and activation here go through a second, separately forced `windows`
-session. That mirrors how the default composite pairs an input backend
-with a window backend internally; it is done by hand here to keep
-`eiinput` isolated, the same way `_kdotool_validate.py` isolates kdotool.
+`LibeiBackend` is input-only -- it has no window-management capabilities of
+its own, unlike `KdotoolBackend` or `gnomeshell` -- so window discovery and
+activation come from `windows`, named alongside it in one session:
+`connect(backend=["eiinput", "windows"])`. The order is the precedence, so
+`eiinput` serves every capability it has and `windows` fills in the rest.
+That still keeps `eiinput` isolated the way `_kdotool_validate.py` isolates
+kdotool -- nothing is composed automatically, both members are named -- and
+it is what this script wanted all along: it previously opened two separate
+sessions and remembered which one to ask for what, because naming a backend
+gave you only that one.
 
 Only touches the gedit window this script opens itself. If the pointer
 does not visibly move once connected, this is very likely a VirtualBox
@@ -45,13 +49,21 @@ if shutil.which("gedit") is None:
 
 print("connecting to eiinput -- a consent dialog may appear; click Allow")
 try:
-    input_gui = pyguitest.connect(backend="eiinput")
+    # One session naming both backends, in precedence order: `eiinput`
+    # serves every injected event, `windows` serves the window discovery and
+    # activation it has none of. This used to be two separate sessions,
+    # because naming a backend gave you only that one -- see the note below
+    # on why they were paired by hand.
+    gui = pyguitest.connect(backend=["eiinput", "windows"])
 except (BackendUnavailable, PermissionRequired) as exc:
     sys.exit(f"eiinput unavailable: {exc}")
-print(f"forced backend: {input_gui.backend.name}")
-print("capabilities offered:", sorted(c.name for c in input_gui.backend.capabilities))
-
-windows_gui = pyguitest.connect(backend="windows")
+input_gui = windows_gui = gui
+print(f"forced backend: {gui.backend.name}")
+# eiinput's own capabilities, not the session's union: what this script is
+# here to report is what *libei* offered, and the union would fold in the
+# window capabilities that came from the other member.
+eiinput_backend = gui.backend.member("eiinput")
+print("capabilities offered:", sorted(c.name for c in eiinput_backend.capabilities))
 
 process = windows_gui.start_app(["gedit", "--new-window"])
 try:

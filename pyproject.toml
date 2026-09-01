@@ -66,9 +66,19 @@ atspi = ["dogtail>=2.0"]        # element automation. NB: dogtail declares no
                                 # the distro. See README INSTALL.
 x11   = ["python-xlib>=0.33"]   # X11 backend, incl. FreeBSD/Solaris
 uinput = ["evdev>=1.9"]         # last-resort input where no tool is installed
-eiinput = ["python-libei>=0.1.0"]  # libei input backend (opt-in). Needs the
-                                   # native libei library from the distro too;
-                                   # pip cannot supply that. See README.
+eiinput = ["python-libei[portal]>=0.3.0"]
+                                   # libei input backend (opt-in). The
+                                   # [portal] extra is PyGObject, which
+                                   # libei.portal needs to negotiate the
+                                   # RemoteDesktop session -- previously this
+                                   # backend needed it directly and never
+                                   # declared it, so `pip install
+                                   # pyguitest[eiinput]` alone produced a
+                                   # backend that failed at construction
+                                   # unless the atspi extra happened to have
+                                   # pulled PyGObject in. Needs the native
+                                   # libei library from the distro too; pip
+                                   # cannot supply that. See README.
 dev   = ["pytest>=7", "ruff>=0.6", "mypy>=1.11",
          "python-dbusmock>=0.30"]  # tests/test_portal_dbusmock.py: PortalBackend
                                    # against a real, private D-Bus session bus.

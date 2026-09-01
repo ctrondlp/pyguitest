@@ -5,7 +5,11 @@ from unittest import mock
 
 from pyguitest import Capability, backends, connect, tools
 from pyguitest.backends import NullBackend, available, select
-from pyguitest.errors import BackendUnavailable, CapabilityUnsupported
+from pyguitest.errors import (
+    BackendUnavailable,
+    CapabilityUnsupported,
+    PyGUITestError,
+)
 from pyguitest.session import Compositor, SessionType, detect
 
 
@@ -119,6 +123,179 @@ class TestSelection(unittest.TestCase):
 
         self.assertTrue(first.closed)
         self.assertTrue(second.closed)
+
+
+class TestNamedComposition(unittest.TestCase):
+    """`select(env, ["a", "b"])` -- composing exactly the backends named.
+
+    The case this exists for: pairing an opt-in input backend with the
+    element and window access a plain connect() would have given you.
+    Automatic composition skips opt-in factories so a consent dialog is
+    never raised by surprise, which used to leave callers opening two
+    sessions and remembering which one answered what.
+    """
+
+    def setUp(self):
+        from pyguitest import backends
+
+        self.backends = backends
+        original = list(backends._REGISTRY)
+        backends._REGISTRY.clear()
+        self.addCleanup(backends._REGISTRY.extend, original)
+        self.addCleanup(backends._REGISTRY.clear)
+        self.built: dict = {}
+
+    def _fake(self, name, caps=(), builds=True, reports=None):
+        """Register a fake backend, and hand back the instances it builds.
+
+        `reports` is the name the backend gives for itself when that differs
+        from the name it is registered under -- the `imagesearch:compare`
+        convention four real backends follow.
+        """
+        from pyguitest.backends.base import GUIBackend
+        from pyguitest.capabilities import CapabilitySet
+
+        class Fake(GUIBackend):
+            def __init__(self, **options):
+                self._name = reports or name
+                self.options = options
+                self.closed = False
+
+            name = property(lambda self: self._name)
+            capabilities = property(lambda self: CapabilitySet(set(caps)))
+
+            def close(self):
+                self.closed = True
+
+        def factory(environment, **options):
+            if not builds:
+                return None
+            self.built[name] = Fake(**options)
+            return self.built[name]
+
+        return factory
+
+    def _register(self, *entries):
+        """Register (name, priority, kwargs-for-_fake) in the given order."""
+        for name, priority, kwargs in entries:
+            self.backends.register(self._fake(name, **kwargs), name, priority=priority)
+
+    def test_a_named_list_composes_exactly_those_backends(self):
+        self._register(("a", 90, {}), ("b", 80, {}), ("c", 70, {}))
+        backend = select(detect(), ["a", "c"])
+        self.assertEqual([m.name for m in backend.members], ["a", "c"])
+
+    def test_the_callers_order_is_the_precedence_not_the_registry_priority(self):
+        # The whole point of naming an order: "b" is registered lower than
+        # "a" and would lose this capability under automatic composition.
+        self._register(
+            ("a", 90, {"caps": (Capability.WINDOW_LIST,)}),
+            ("b", 10, {"caps": (Capability.WINDOW_LIST,)}),
+        )
+        first = select(detect(), ["b", "a"])
+        self.assertEqual(first.provider(Capability.WINDOW_LIST).name, "b")
+        second = select(detect(), ["a", "b"])
+        self.assertEqual(second.provider(Capability.WINDOW_LIST).name, "a")
+
+    def test_automatic_composition_still_orders_by_priority(self):
+        self._register(
+            ("a", 90, {"caps": (Capability.WINDOW_LIST,)}),
+            ("b", 10, {"caps": (Capability.WINDOW_LIST,)}),
+        )
+        self.assertEqual(select(detect()).provider(Capability.WINDOW_LIST).name, "a")
+
+    def test_one_name_in_a_list_is_the_backend_itself_not_a_composite(self):
+        # Same object select(env, "a") hands back: a composite of one only
+        # adds a layer of dispatch to reach the only member there is.
+        self._register(("a", 90, {}))
+        self.assertIs(type(select(detect(), ["a"])), type(select(detect(), "a")))
+
+    def test_a_named_backend_that_cannot_build_raises(self):
+        # Where automatic composition reads None as "not applicable here"
+        # and moves on, a name is a request: dropping it would hand back a
+        # session missing the capability that motivated asking for it.
+        self._register(("a", 90, {}), ("gone", 80, {"builds": False}))
+        with self.assertRaises(BackendUnavailable) as ctx:
+            select(detect(), ["a", "gone"])
+        self.assertIn("gone", str(ctx.exception))
+        self.assertIsInstance(select(detect()), object)  # automatic still fine
+
+    def test_an_earlier_member_is_closed_when_a_later_one_fails(self):
+        self._register(("a", 90, {}), ("gone", 80, {"builds": False}))
+        with self.assertRaises(BackendUnavailable):
+            select(detect(), ["a", "gone"])
+        self.assertTrue(self.built["a"].closed)
+
+    def test_an_unknown_name_in_a_list_is_an_error(self):
+        self._register(("a", 90, {}))
+        with self.assertRaises(BackendUnavailable) as ctx:
+            select(detect(), ["a", "no-such-backend"])
+        self.assertIn("no-such-backend", str(ctx.exception))
+
+    def test_a_repeated_name_is_an_error(self):
+        self._register(("a", 90, {}))
+        with self.assertRaises(ValueError) as ctx:
+            select(detect(), ["a", "a"])
+        self.assertIn("repeat", str(ctx.exception))
+
+    def test_an_empty_sequence_is_an_error_rather_than_automatic_detection(self):
+        with self.assertRaises(ValueError) as ctx:
+            select(detect(), [])
+        self.assertIn("empty", str(ctx.exception))
+
+    def test_options_are_keyed_by_backend_name(self):
+        self._register(("a", 90, {}), ("b", 80, {}))
+        select(detect(), ["a", "b"], {"b": {"persist_mode": 2}})
+        self.assertEqual(self.built["a"].options, {})
+        self.assertEqual(self.built["b"].options, {"persist_mode": 2})
+
+    def test_a_flat_options_dict_with_a_list_is_refused_not_guessed(self):
+        # Guessing would hand persist_mode to whichever factory happened to
+        # accept it, which is the wrong backend half the time and silent.
+        self._register(("a", 90, {}), ("b", 80, {}))
+        with self.assertRaises(ValueError) as ctx:
+            select(detect(), ["a", "b"], {"persist_mode": 2})
+        self.assertIn("keyed by backend name", str(ctx.exception))
+
+    def test_a_single_name_still_takes_a_flat_dict_even_of_dicts(self):
+        # Regression guard: the keyed form must not be inferred from the
+        # contents, or an option whose value is itself a dict would be read
+        # as a per-backend mapping and rejected.
+        self._register(("a", 90, {}))
+        select(detect(), "a", {"config": {"nested": True}})
+        self.assertEqual(self.built["a"].options, {"config": {"nested": True}})
+
+    def test_member_reaches_one_backends_own_extras(self):
+        self._register(("a", 90, {}), ("b", 80, {}))
+        backend = select(detect(), ["a", "b"])
+        self.assertIs(backend.member("b"), self.built["b"])
+
+    def test_member_takes_the_registry_name_of_a_tool_backed_backend(self):
+        # Four backends report the tool they found as part of their name --
+        # imagesearch:compare, input:wtype, capture:grim, clipboard:wl-paste
+        # -- so asking for them by the name you selected them with must work
+        # without knowing which tool the machine happened to have.
+        self._register(
+            ("a", 90, {}),
+            ("imagesearch", 80, {"reports": "imagesearch:compare"}),
+        )
+        backend = select(detect(), ["a", "imagesearch"])
+        found = self.built["imagesearch"]
+        self.assertIs(backend.member("imagesearch"), found)
+        self.assertIs(backend.member("imagesearch:compare"), found)
+
+    def test_member_names_what_is_actually_there_when_it_misses(self):
+        self._register(("a", 90, {}), ("b", 80, {}))
+        backend = select(detect(), ["a", "b"])
+        with self.assertRaises(PyGUITestError) as ctx:
+            backend.member("eiinput")
+        self.assertIn("a, b", str(ctx.exception))
+
+    def test_connect_accepts_a_list_end_to_end(self):
+        self._register(("a", 90, {"caps": (Capability.WINDOW_LIST,)}), ("b", 80, {}))
+        with connect(backend=["b", "a"]) as gui:
+            self.assertEqual(gui.backend.name, "b+a")
+            self.assertTrue(gui.supports(Capability.WINDOW_LIST))
 
 
 class TestSessionFacade(unittest.TestCase):

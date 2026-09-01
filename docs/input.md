@@ -154,16 +154,21 @@ your distribution (`libei libeis` on Fedora and openSUSE, `libei1 libeis1`
 on Debian/Ubuntu, `libei` on Arch), then the bindings:
 
 ```sh
-pip install '.[eiinput]'     # or: pip install python-libei
+pip install '.[eiinput]'     # or: pip install 'python-libei[portal]'
 ```
 
 The two halves are separate on purpose — `python-libei` is pure ctypes and
 its wheel carries no `.so`, so pip installs the bindings and the
-distribution supplies the library they `dlopen`. `liboeffis` is not needed:
-`eiinput` negotiates the RemoteDesktop session itself over D-Bus rather than
-through that library (see `backends/eiinput.py`'s module docstring for why);
-`libeis` is only needed to run `tests/test_eiinput_libei.py`, not at
-runtime.
+distribution supplies the library they `dlopen`. `liboeffis` is not needed
+and is not used: the RemoteDesktop session is negotiated over D-Bus by
+python-libei's own `libei.portal` module, because `oeffis_create_session()`
+takes only a device-type bitmask and so cannot express `persist_mode` or
+`restore_token` (see `backends/eiinput.py`'s module docstring, and
+upstream's own note that liboeffis is "intentionally kept simple"). That
+negotiation lived in this package until it was upstreamed in python-libei
+0.3.0, which is the version the `eiinput` extra now requires; the extra also
+pulls in PyGObject, which that module needs. `libeis` is only needed to run
+`tests/test_eiinput_libei.py`, not at runtime.
 
 This is the only backend here that is **keymap-safe by construction**.
 `Device.keyboard_key()` takes a raw Linux keycode and the compositor
@@ -231,6 +236,19 @@ gui = connect(
     },
 )
 save_it_yourself(gui.backend.restore_token)  # save every run; replaces `saved`
+```
+
+Forcing an input backend by name gives you *only* that backend, and neither
+`portal` nor `eiinput` can find an element or list a window. To get both in
+one session, name both — the options are then keyed by backend, and the
+token is read off that member:
+
+```python
+gui = connect(
+    backend=["eiinput", "atspi"],
+    backend_options={"eiinput": {"persist_mode": 2, "restore_token": saved}},
+)
+save_it_yourself(gui.backend.member("eiinput").restore_token)
 ```
 
 pyguitest deliberately never writes the token anywhere itself — see the

@@ -198,185 +198,97 @@ def _always_ready():
     )
 
 
-# -- Gio-side fakes: the RemoteDesktop portal negotiation. --------------
+# -- portal-side fakes: what libei.portal hands back, and how it fails. --
+#
+# eiinput.py no longer negotiates anything itself -- libei.portal does (see
+# its module docstring). So these stand in for that module rather than for
+# Gio: the D-Bus plumbing they used to fake is tested in python-libei's own
+# tests/test_portal.py, and what is left to prove here is the orchestration
+# around it. TestTheFakePortalMatchesTheRealApiShape checks these against
+# the real module wherever it is installed.
 
 
-class FakeVariant:
-    def __init__(self, signature, value):
-        self.signature = signature
-        self.value = value
+class FakePortalError(Exception):
+    """Stands in for libei.portal.PortalError, the base of the hierarchy."""
 
 
-class FakeReply:
-    def __init__(self, value):
-        self._value = value
-
-    def unpack(self):
-        return self._value
+class FakePortalVersionError(FakePortalError):
+    pass
 
 
-class FakeUnixFDList:
-    def __init__(self, fd):
-        self._fd = fd
+class FakePortalDeniedError(FakePortalError):
+    def __init__(self, step, message=None):
+        super().__init__(message or f"{step} was not approved")
+        self.step = step
+        self.message = message
 
-    def get(self, _index):
-        return self._fd
+
+class FakePortalTimeoutError(FakePortalError):
+    def __init__(self, step, timeout):
+        super().__init__(f"{step} did not answer within {timeout:g}s")
+        self.step = step
+        self.timeout = timeout
 
 
-class FakeMainLoop:
-    """quit() is normally called synchronously, before run() is reached.
+class FakeDeviceType(enum.IntFlag):
+    ALL_DEVICES = 0
+    KEYBOARD = 1
+    POINTER = 2
+    TOUCHSCREEN = 4
 
-    `pending_timeout` is the escape hatch for the timeout test: a loop whose
-    quit() was never called fires whatever `GLib.timeout_add_seconds`
-    registered, standing in for real GLib firing the source once the clock
-    passes it. Without it, a fake that simply raised on an unquit run()
-    could not tell "hung forever" from "timed out cleanly".
+
+class FakePersistMode(enum.IntEnum):
+    NONE = 0
+    WHILE_RUNNING = 1
+    UNTIL_REVOKED = 2
+
+
+class FakeSession:
+    """A negotiated session: an EIS fd, a token, and something to close."""
+
+    def __init__(self, eis_fd=12, restore_token=None):
+        self._eis_fd = eis_fd
+        self.restore_token = restore_token
+        self.eis_fd_reads = 0
+        self.closed = False
+
+    @property
+    def eis_fd(self):
+        # A property because reading it is what transfers ownership of the
+        # fd in the real thing -- so a test can tell that it was read once,
+        # by the Sender, rather than stashed and reused.
+        self.eis_fd_reads += 1
+        return self._eis_fd
+
+    def close(self):
+        self.closed = True
+
+
+def install_fake_portal(session=None, error=None):
+    """Patch _portal() to return a stand-in libei.portal module.
+
+    Patching the probe rather than sys.modules keeps `from libei import
+    portal` out of it entirely: TestPortalProbe covers that import on its
+    own, and everything else here only cares what negotiate() returns.
     """
+    portal = types.ModuleType("libei.portal")
+    portal.DeviceType = FakeDeviceType
+    portal.PersistMode = FakePersistMode
+    portal.PortalError = FakePortalError
+    portal.PortalVersionError = FakePortalVersionError
+    portal.PortalDeniedError = FakePortalDeniedError
+    portal.PortalTimeoutError = FakePortalTimeoutError
+    portal.is_available = lambda: True
+    portal.calls = []
 
-    pending_timeout = None
+    def negotiate(**kwargs):
+        portal.calls.append(kwargs)
+        if error is not None:
+            raise error
+        return session if session is not None else FakeSession()
 
-    def __init__(self):
-        self._quit = False
-
-    def run(self):
-        if self._quit:
-            return
-        callback = FakeMainLoop.pending_timeout
-        if callback is not None:
-            FakeMainLoop.pending_timeout = None
-            callback()
-            return
-        raise AssertionError("run() called before a synchronous quit()")
-
-    def quit(self):
-        self._quit = True
-
-
-class FakeConnection:
-    """Stands in for a Gio.DBusConnection bound to the session bus.
-
-    Unlike test_portal.py's FakeConnection, signal_subscribe happens
-    *before* call_sync here (the raceless pattern eiinput.py uses) -- so
-    call_sync itself must compute the request path from the handle_token in
-    its own parameters and fire whichever subscription is already
-    registered for it, rather than the other way around.
-    """
-
-    def __init__(
-        self, responses=None, version=2, fd_responses=None, unique_name=":1.99"
-    ):
-        self.responses = responses or {
-            "CreateSession": (0, {"session_handle": "/session/1"}),
-            "SelectDevices": (0, {}),
-            "Start": (0, {"devices": 2}),
-        }
-        self.version = version
-        self.fd_responses = fd_responses or {"ConnectToEIS": 12}
-        self.calls = []
-        self._unique_name = unique_name
-        self._subscriptions = {}
-
-    def get_unique_name(self):
-        return self._unique_name
-
-    def _escaped_sender(self):
-        return self._unique_name[1:].replace(".", "_")
-
-    def call_sync(
-        self,
-        bus_name,
-        object_path,
-        interface,
-        method,
-        parameters,
-        reply_type,
-        flags,
-        timeout,
-        cancellable,
-    ):
-        self.calls.append((method, parameters.value))
-        if method == "Get":
-            return FakeReply((self.version,))
-        *_leading, options = parameters.value
-        token = options["handle_token"].value
-        path = (
-            f"/org/freedesktop/portal/desktop/request/{self._escaped_sender()}/{token}"
-        )
-        code, results = self.responses.get(method, (0, {}))
-        callback = self._subscriptions.get(path)
-        if callback is not None:
-            callback(None, None, path, None, "Response", FakeReply((code, results)))
-        return FakeReply(())
-
-    def signal_subscribe(
-        self, bus_name, iface, signal, path, arg0, flags, callback, user_data
-    ):
-        self._subscriptions[path] = callback
-        return 1
-
-    def signal_unsubscribe(self, subscription_id):
-        pass
-
-    def call_with_unix_fd_list_sync(
-        self,
-        bus_name,
-        object_path,
-        interface,
-        method,
-        parameters,
-        reply_type,
-        flags,
-        timeout,
-        fd_list,
-        cancellable,
-    ):
-        self.calls.append((method, parameters.value))
-        return FakeReply((0,)), FakeUnixFDList(self.fd_responses[method])
-
-
-def install_fake_gi(connection=None):
-    gi = types.ModuleType("gi")
-    gi.require_version = lambda *a, **kw: None
-    repository = types.ModuleType("gi.repository")
-
-    Gio = types.ModuleType("gi.repository.Gio")
-    Gio.BusType = types.SimpleNamespace(SESSION=1)
-    Gio.DBusCallFlags = types.SimpleNamespace(NONE=0)
-    Gio.DBusSignalFlags = types.SimpleNamespace(NONE=0)
-    Gio.bus_get_sync = lambda *a, **kw: connection or FakeConnection()
-
-    GLib = types.ModuleType("gi.repository.GLib")
-    GLib.Variant = FakeVariant
-    GLib.MainLoop = FakeMainLoop
-    GLib.VariantType = types.SimpleNamespace(new=lambda sig: sig)
-
-    # timeout_add_seconds stashes the callback rather than scheduling it;
-    # only the timeout test, which never quit()s the loop, lets it fire.
-    def timeout_add_seconds(_seconds, callback):
-        FakeMainLoop.pending_timeout = callback
-        return 1
-
-    def source_remove(_source_id):
-        # Mirrors real GLib: a removed source cannot fire afterwards. Since
-        # _request() always removes in a finally, this also stops a stashed
-        # callback leaking from one test into the next.
-        FakeMainLoop.pending_timeout = None
-
-    GLib.timeout_add_seconds = timeout_add_seconds
-    GLib.source_remove = source_remove
-
-    repository.Gio = Gio
-    repository.GLib = GLib
-    gi.repository = repository
-    return mock.patch.dict(
-        sys.modules,
-        {
-            "gi": gi,
-            "gi.repository": repository,
-            "gi.repository.Gio": Gio,
-            "gi.repository.GLib": GLib,
-        },
-    )
+    portal.RemoteDesktopSession = types.SimpleNamespace(negotiate=negotiate)
+    return mock.patch("pyguitest.backends.eiinput._portal", return_value=portal), portal
 
 
 class LibeiTestCase(unittest.TestCase):
@@ -386,9 +298,9 @@ class LibeiTestCase(unittest.TestCase):
         ei_patcher = install_fake_ei()
         ei_patcher.start()
         self.addCleanup(ei_patcher.stop)
-        gi_patcher = install_fake_gi()
-        gi_patcher.start()
-        self.addCleanup(gi_patcher.stop)
+        portal_patcher, self.portal = install_fake_portal()
+        portal_patcher.start()
+        self.addCleanup(portal_patcher.stop)
         from pyguitest.backends.eiinput import LibeiBackend
 
         self.device = FakeDevice()
@@ -400,17 +312,17 @@ class TestAvailability(unittest.TestCase):
         ei_patcher = install_fake_ei()
         ei_patcher.start()
         self.addCleanup(ei_patcher.stop)
-        gi_patcher = install_fake_gi()
-        gi_patcher.start()
-        self.addCleanup(gi_patcher.stop)
+        portal_patcher, _portal = install_fake_portal()
+        portal_patcher.start()
+        self.addCleanup(portal_patcher.stop)
         from pyguitest.backends import eiinput
 
         self.assertTrue(eiinput.available())
 
     def test_missing_libei_refuses_with_an_install_hint(self):
-        gi_patcher = install_fake_gi()
-        gi_patcher.start()
-        self.addCleanup(gi_patcher.stop)
+        portal_patcher, _portal = install_fake_portal()
+        portal_patcher.start()
+        self.addCleanup(portal_patcher.stop)
         with mock.patch.dict(sys.modules, {"libei": None}):
             from pyguitest.backends.eiinput import LibeiBackend
 
@@ -419,15 +331,19 @@ class TestAvailability(unittest.TestCase):
             self.assertIn("libei", str(ctx.exception))
 
     def test_missing_pygobject_refuses_with_an_install_hint(self):
+        # _portal() reports None for a missing PyGObject just as it does for
+        # a python-libei too old to have the module -- from here the two are
+        # indistinguishable, so the message has to name both.
         ei_patcher = install_fake_ei()
         ei_patcher.start()
         self.addCleanup(ei_patcher.stop)
-        with mock.patch.dict(sys.modules, {"gi": None}):
+        with mock.patch("pyguitest.backends.eiinput._portal", return_value=None):
             from pyguitest.backends.eiinput import LibeiBackend
 
             with self.assertRaises(BackendUnavailable) as ctx:
                 LibeiBackend()
             self.assertIn("PyGObject", str(ctx.exception))
+            self.assertIn("python-libei", str(ctx.exception))
 
 
 class TestCapabilities(LibeiTestCase):
@@ -531,9 +447,9 @@ class TestKeyboard(unittest.TestCase):
         ei_patcher = install_fake_ei()
         ei_patcher.start()
         self.addCleanup(ei_patcher.stop)
-        gi_patcher = install_fake_gi()
-        gi_patcher.start()
-        self.addCleanup(gi_patcher.stop)
+        portal_patcher, _portal = install_fake_portal()
+        portal_patcher.start()
+        self.addCleanup(portal_patcher.stop)
         from pyguitest.backends.eiinput import LibeiBackend
 
         self.keyboard = FakeDevice() if keyboard is self._DEFAULT else keyboard
@@ -613,91 +529,99 @@ class TestClose(LibeiTestCase):
 
 
 class TestNegotiation(unittest.TestCase):
-    def _backend(self, connection, sender=None):
+    """What is left here after libei.portal took the D-Bus plumbing.
+
+    The Request/Response sequence itself -- CreateSession, SelectDevices,
+    Start, ConnectToEIS, the raceless subscribe-first pattern, the
+    session_handle_token workaround -- is python-libei's, and is tested in
+    its own tests/test_portal.py. What this backend still owns, and what
+    these cover: what it asks that library for, how it translates that
+    library's failures into pyguitest's, and everything after the fd
+    arrives.
+    """
+
+    def _backend(self, session=None, error=None, sender=None):
+        self.sender_calls = []
         sender_class = (
-            types.SimpleNamespace(create_for_fd=lambda fd, name=None: sender)
+            types.SimpleNamespace(
+                create_for_fd=lambda fd, name=None: (
+                    self.sender_calls.append((fd, name)) or sender
+                )
+            )
             if sender is not None
             else None
         )
         ei_patcher = install_fake_ei(sender=sender_class)
         ei_patcher.start()
         self.addCleanup(ei_patcher.stop)
-        gi_patcher = install_fake_gi(connection=connection)
-        gi_patcher.start()
-        self.addCleanup(gi_patcher.stop)
+        portal_patcher, portal = install_fake_portal(session=session, error=error)
+        portal_patcher.start()
+        self.addCleanup(portal_patcher.stop)
         from pyguitest.backends.eiinput import LibeiBackend
 
-        return LibeiBackend
+        return LibeiBackend, portal
 
-    def test_successful_negotiation_calls_every_step_in_order(self):
-        connection = FakeConnection()
-        seat = FakeSeat(
-            offered=(
-                FakeDeviceCapability.POINTER
-                | FakeDeviceCapability.POINTER_ABSOLUTE
-                | FakeDeviceCapability.BUTTON
-                | FakeDeviceCapability.SCROLL
-            )
-        )
-        device = FakeDevice()
-        sender = FakeSender(
+    def _one_absolute_device(self, device=None):
+        """A sender scripted to resume a single absolute pointer."""
+        seat = FakeSeat(offered=FakeDeviceCapability.POINTER_ABSOLUTE)
+        return FakeSender(
             event_batches=[
                 [FakeEvent(FakeEventType.SEAT_ADDED, seat=seat)],
-                [FakeEvent(FakeEventType.DEVICE_RESUMED, device=device)],
+                [
+                    FakeEvent(
+                        FakeEventType.DEVICE_RESUMED,
+                        device=device if device is not None else FakeDevice(),
+                    )
+                ],
             ]
         )
-        LibeiBackend = self._backend(connection, sender=sender)
+
+    def test_asks_for_a_keyboard_and_a_pointer_and_nothing_else(self):
+        # Not ALL_DEVICES: a touchscreen is not something this backend can
+        # drive, and asking for one would widen the grant the user is shown
+        # for no gain. (libei.portal reads ALL_DEVICES, which is literally
+        # 0, as every type -- so this has to be explicit, not left blank.)
+        session = FakeSession()
+        LibeiBackend, portal = self._backend(
+            session=session, sender=self._one_absolute_device()
+        )
         with _always_ready():
             gui = LibeiBackend()
 
-        methods = [c[0] for c in connection.calls]
+        (call,) = portal.calls
         self.assertEqual(
-            methods,
-            ["Get", "CreateSession", "SelectDevices", "Start", "ConnectToEIS"],
+            call["devices"], FakeDeviceType.KEYBOARD | FakeDeviceType.POINTER
         )
-        self.assertIs(gui._device, device)
+        self.assertIsNone(call["connection"])
+        self.assertIs(gui._session, session)
 
-    def test_no_screencast_source_is_ever_requested(self):
-        # Verified live that an absolute-pointer device with a real region
-        # needs no ScreenCast source; asking for one would make the user
-        # grant screen recording for nothing. See eiinput.py's docstring.
-        connection = FakeConnection()
-        seat = FakeSeat(offered=FakeDeviceCapability.POINTER_ABSOLUTE)
-        sender = FakeSender(
-            event_batches=[
-                [FakeEvent(FakeEventType.SEAT_ADDED, seat=seat)],
-                [FakeEvent(FakeEventType.DEVICE_RESUMED, device=FakeDevice())],
-            ]
+    def test_the_negotiated_fd_is_read_once_and_handed_to_the_sender(self):
+        # Reading eis_fd is what transfers ownership of the descriptor in
+        # the real session object, so reading it twice would leave two
+        # owners for one fd -- and the Sender closes what it is given.
+        session = FakeSession(eis_fd=77)
+        LibeiBackend, _portal = self._backend(
+            session=session, sender=self._one_absolute_device()
         )
-        LibeiBackend = self._backend(connection, sender=sender)
         with _always_ready():
             LibeiBackend()
-        methods = [c[0] for c in connection.calls]
-        self.assertNotIn("SelectSources", methods)
-        self.assertNotIn("OpenPipeWireRemote", methods)
+        self.assertEqual(self.sender_calls, [(77, "pyguitest")])
+        self.assertEqual(session.eis_fd_reads, 1)
 
-    def test_old_remote_desktop_version_is_refused(self):
-        connection = FakeConnection(version=1)
-        LibeiBackend = self._backend(connection)
-        with self.assertRaises(BackendUnavailable):
-            LibeiBackend()
-        # Refused before ever calling CreateSession.
-        self.assertEqual(
-            connection.calls,
-            [("Get", ("org.freedesktop.portal.RemoteDesktop", "version"))],
-        )
+    def test_an_injected_connection_is_passed_through(self):
+        connection = object()
+        LibeiBackend, portal = self._backend(sender=self._one_absolute_device())
+        with _always_ready():
+            LibeiBackend(connection=connection)
+        self.assertIs(portal.calls[0]["connection"], connection)
 
-    def test_declined_start_raises_permission_required(self):
-        connection = FakeConnection(
-            responses={
-                "CreateSession": (0, {"session_handle": "/session/1"}),
-                "SelectDevices": (0, {}),
-                "Start": (1, {}),  # 1 == user cancelled, per the portal spec
-            }
-        )
-        LibeiBackend = self._backend(connection)
-        with self.assertRaises(PermissionRequired):
+    def test_each_round_trip_is_bounded_by_the_portal_timeout(self):
+        from pyguitest.backends import eiinput
+
+        LibeiBackend, portal = self._backend(sender=self._one_absolute_device())
+        with _always_ready():
             LibeiBackend()
+        self.assertEqual(portal.calls[0]["timeout"], eiinput._PORTAL_TIMEOUT)
 
     def test_absolute_device_wins_over_a_relative_one_that_resumed_first(self):
         # Regression, and the real bug behind a long run of "identical code,
@@ -705,7 +629,6 @@ class TestNegotiation(unittest.TestCase):
         # on one seat, relative and absolute, in no guaranteed order.
         # Returning the first one to resume is a coin flip -- when the
         # relative one won, move_mouse silently did nothing.
-        connection = FakeConnection()
         seat = FakeSeat(offered=FakeDeviceCapability.POINTER)
         relative = FakeDevice(
             capabilities=(FakeDeviceCapability.POINTER | FakeDeviceCapability.BUTTON)
@@ -722,7 +645,7 @@ class TestNegotiation(unittest.TestCase):
                 [FakeEvent(FakeEventType.DEVICE_RESUMED, device=absolute)],
             ]
         )
-        LibeiBackend = self._backend(connection, sender=sender)
+        LibeiBackend, _portal = self._backend(sender=sender)
         with _always_ready():
             gui = LibeiBackend()
         self.assertIs(gui._device, absolute)
@@ -731,7 +654,6 @@ class TestNegotiation(unittest.TestCase):
     def test_a_relative_only_device_is_still_returned_after_settling(self):
         # Degrades to a partial backend rather than no backend: button and
         # scroll still work, and capabilities reports no POINTER_MOVE.
-        connection = FakeConnection()
         seat = FakeSeat(offered=FakeDeviceCapability.POINTER)
         relative = FakeDevice(
             capabilities=(FakeDeviceCapability.POINTER | FakeDeviceCapability.BUTTON)
@@ -742,7 +664,7 @@ class TestNegotiation(unittest.TestCase):
                 [FakeEvent(FakeEventType.DEVICE_RESUMED, device=relative)],
             ]
         )
-        LibeiBackend = self._backend(connection, sender=sender)
+        LibeiBackend, _portal = self._backend(sender=sender)
         with (
             _always_ready(),
             mock.patch("pyguitest.backends.eiinput._SIBLING_SETTLE", 0.05),
@@ -753,77 +675,92 @@ class TestNegotiation(unittest.TestCase):
         self.assertIn(Capability.POINTER_BUTTON, gui.capabilities)
 
     def test_no_persist_options_are_sent_by_default(self):
-        connection = FakeConnection()
-        seat = FakeSeat(offered=FakeDeviceCapability.POINTER_ABSOLUTE)
-        sender = FakeSender(
-            event_batches=[
-                [FakeEvent(FakeEventType.SEAT_ADDED, seat=seat)],
-                [FakeEvent(FakeEventType.DEVICE_RESUMED, device=FakeDevice())],
-            ]
-        )
-        LibeiBackend = self._backend(connection, sender=sender)
+        LibeiBackend, portal = self._backend(sender=self._one_absolute_device())
         with _always_ready():
             gui = LibeiBackend()
-        select = next(c for c in connection.calls if c[0] == "SelectDevices")
-        self.assertNotIn("persist_mode", select[1][-1])
-        self.assertNotIn("restore_token", select[1][-1])
+        (call,) = portal.calls
+        self.assertEqual(call["persist_mode"], FakePersistMode.NONE)
+        self.assertIsNone(call["restore_token"])
         self.assertIsNone(gui.restore_token)
 
     def test_persist_mode_and_restore_token_round_trip(self):
-        connection = FakeConnection(
-            responses={
-                "CreateSession": (0, {"session_handle": "/session/1"}),
-                "SelectDevices": (0, {}),
-                "Start": (0, {"devices": 2, "restore_token": "tok-next"}),
-            }
+        session = FakeSession(restore_token="tok-next")
+        LibeiBackend, portal = self._backend(
+            session=session, sender=self._one_absolute_device()
         )
-        seat = FakeSeat(offered=FakeDeviceCapability.POINTER_ABSOLUTE)
-        sender = FakeSender(
-            event_batches=[
-                [FakeEvent(FakeEventType.SEAT_ADDED, seat=seat)],
-                [FakeEvent(FakeEventType.DEVICE_RESUMED, device=FakeDevice())],
-            ]
-        )
-        LibeiBackend = self._backend(connection, sender=sender)
         with _always_ready():
             gui = LibeiBackend(
                 restore_token="tok-old",
                 persist_mode=2,  # PERSIST_UNTIL_REVOKED
             )
-        select = next(c for c in connection.calls if c[0] == "SelectDevices")
-        self.assertEqual(select[1][-1]["persist_mode"].value, 2)
-        self.assertEqual(select[1][-1]["restore_token"].value, "tok-old")
-        # Whatever Start() answers with replaces the token we presented --
-        # a portal may hand back a different one, so the caller must store
-        # the reply rather than keep reusing the original.
+        (call,) = portal.calls
+        self.assertEqual(call["persist_mode"], FakePersistMode.UNTIL_REVOKED)
+        self.assertEqual(call["restore_token"], "tok-old")
+        # Whatever the portal answered with replaces the token we presented
+        # -- it may hand back a different one, so the caller must store the
+        # reply rather than keep reusing the original.
         self.assertEqual(gui.restore_token, "tok-next")
 
+    def test_a_plain_int_persist_mode_still_reaches_the_library_as_its_enum(self):
+        # PERSIST_* stay plain ints here because PersistMode lives behind an
+        # optional import; the conversion is this module's job, and passing
+        # the int straight through would be a silent API mismatch.
+        LibeiBackend, portal = self._backend(sender=self._one_absolute_device())
+        with _always_ready():
+            LibeiBackend(persist_mode=1)
+        self.assertIsInstance(portal.calls[0]["persist_mode"], FakePersistMode)
+        self.assertEqual(portal.calls[0]["persist_mode"], FakePersistMode.WHILE_RUNNING)
+
+    def test_a_declined_dialog_becomes_permission_required(self):
+        LibeiBackend, _portal = self._backend(
+            error=FakePortalDeniedError(
+                "Start", "the user declined the remote-control consent dialog"
+            )
+        )
+        with self.assertRaises(PermissionRequired) as ctx:
+            LibeiBackend()
+        self.assertIn("declined", str(ctx.exception))
+        self.assertEqual(ctx.exception.capability, Capability.POINTER_MOVE)
+
+    def test_an_old_remote_desktop_becomes_backend_unavailable(self):
+        # A portal too old for ConnectToEIS is "this cannot run here", not
+        # "the user said no" -- the distinction a caller skips or fails on.
+        LibeiBackend, _portal = self._backend(
+            error=FakePortalVersionError(
+                "RemoteDesktop version 1 is too old for ConnectToEIS (need 2+)"
+            )
+        )
+        with self.assertRaises(BackendUnavailable) as ctx:
+            LibeiBackend()
+        self.assertIn("too old", str(ctx.exception))
+
+    def test_any_other_portal_failure_becomes_backend_unavailable(self):
+        LibeiBackend, _portal = self._backend(
+            error=FakePortalError("cannot reach the session bus: no such bus")
+        )
+        with self.assertRaises(BackendUnavailable) as ctx:
+            LibeiBackend()
+        self.assertIn("session bus", str(ctx.exception))
+
     def test_a_portal_that_never_answers_times_out(self):
-        # The failure an unbounded loop.run() cannot recover from: the call
-        # is accepted, no Response ever fires, and there is no fd to poll
-        # and nothing to interrupt the wait. _PORTAL_TIMEOUT existed for
-        # exactly this and was never actually wired up.
+        # The failure an unbounded wait cannot recover from: the call is
+        # accepted, no Response ever fires, and there is no fd to poll and
+        # nothing to interrupt the wait. libei.portal raises its own timeout
+        # for it; this backend must present it as pyguitest's, distinct from
+        # a decline.
         from pyguitest.errors import PortalTimeout
 
-        class SilentConnection(FakeConnection):
-            def call_sync(self, *args, **kwargs):
-                method = args[3]
-                self.calls.append((method, args[4].value))
-                if method == "Get":
-                    return FakeReply((self.version,))
-                return FakeReply(())  # accepted; no Response ever delivered
-
-        connection = SilentConnection()
-        LibeiBackend = self._backend(connection)
-        self.addCleanup(setattr, FakeMainLoop, "pending_timeout", None)
+        LibeiBackend, _portal = self._backend(
+            error=FakePortalTimeoutError("CreateSession", 60)
+        )
         with self.assertRaises(PortalTimeout) as ctx:
             LibeiBackend()
         self.assertEqual(ctx.exception.method, "CreateSession")
+        self.assertEqual(ctx.exception.timeout, 60)
 
     def test_device_wait_timeout_raises_backend_unavailable(self):
-        connection = FakeConnection()
         sender = FakeSender(event_batches=[])
-        LibeiBackend = self._backend(connection, sender=sender)
+        LibeiBackend, _portal = self._backend(sender=sender)
         with (
             _always_ready(),
             mock.patch("pyguitest.backends.eiinput._DEVICE_TIMEOUT", 0.05),
@@ -831,9 +768,131 @@ class TestNegotiation(unittest.TestCase):
             with self.assertRaises(BackendUnavailable):
                 LibeiBackend()
 
+    def test_close_ends_the_portal_session(self):
+        # Nothing closed it before this module delegated: a portal session
+        # lives in xdg-desktop-portal until Session.Close(), and the D-Bus
+        # connection that would otherwise end it is GLib's shared singleton.
+        session = FakeSession()
+        LibeiBackend, _portal = self._backend(
+            session=session, sender=self._one_absolute_device()
+        )
+        with _always_ready():
+            gui = LibeiBackend()
+        self.assertFalse(session.closed)
+        gui.close()
+        self.assertTrue(session.closed)
+        self.assertIsNone(gui._session)
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_a_failed_construction_closes_the_session_it_negotiated(self):
+        # The reachable leak: negotiation succeeds, the consent has been
+        # granted, and then no device resumes within _DEVICE_TIMEOUT. The
+        # object never reaches a caller, so nothing will ever call close()
+        # on it -- but the portal session is already live in
+        # xdg-desktop-portal and stays there, grant and all, until the
+        # process exits.
+        session = FakeSession()
+        LibeiBackend, _portal = self._backend(
+            session=session, sender=FakeSender(event_batches=[])
+        )
+        with (
+            _always_ready(),
+            mock.patch("pyguitest.backends.eiinput._DEVICE_TIMEOUT", 0.05),
+        ):
+            with self.assertRaises(BackendUnavailable):
+                LibeiBackend()
+        self.assertTrue(session.closed)
+
+    def test_a_sender_that_cannot_take_the_fd_closes_the_session_too(self):
+        session = FakeSession()
+        ei_patcher = install_fake_ei(
+            sender=types.SimpleNamespace(
+                create_for_fd=mock.Mock(side_effect=OSError("bad fd"))
+            )
+        )
+        ei_patcher.start()
+        self.addCleanup(ei_patcher.stop)
+        portal_patcher, _portal = install_fake_portal(session=session)
+        portal_patcher.start()
+        self.addCleanup(portal_patcher.stop)
+        from pyguitest.backends.eiinput import LibeiBackend
+
+        with self.assertRaises(OSError):
+            LibeiBackend()
+        self.assertTrue(session.closed)
+
+    def test_an_interrupt_during_the_device_wait_closes_the_session(self):
+        # BaseException, not Exception: Ctrl-C during the 15s device wait is
+        # exactly when a caller is least likely to clean up by hand.
+        session = FakeSession()
+        sender = FakeSender(event_batches=[])
+        sender.dispatch = mock.Mock(side_effect=KeyboardInterrupt)
+        LibeiBackend, _portal = self._backend(session=session, sender=sender)
+        with _always_ready():
+            with self.assertRaises(KeyboardInterrupt):
+                LibeiBackend()
+        self.assertTrue(session.closed)
+
+    def test_close_is_safe_with_no_session_to_close(self):
+        LibeiBackend, _portal = self._backend()
+        gui = LibeiBackend(device=FakeDevice())
+        gui.close()  # an injected device negotiated nothing
+        self.assertIsNone(gui._session)
+
+
+class TestPortalProbe(unittest.TestCase):
+    """_portal() must fail closed, exactly as _libei() does.
+
+    Both reasons it can fail look the same from the caller's side -- a
+    python-libei too old to have the module, and a PyGObject that is not
+    installed -- and neither is an error worth propagating: the backend
+    registry probes availability on desktops where this backend is simply
+    not usable.
+    """
+
+    def _install(self, portal_module):
+        libei_pkg = types.ModuleType("libei")
+        mapping = {"libei": libei_pkg}
+        if portal_module is not None:
+            libei_pkg.portal = portal_module
+            mapping["libei.portal"] = portal_module
+        patcher = mock.patch.dict(sys.modules, mapping)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        if portal_module is None:
+            # patch.dict restores the whole mapping on exit, so removing a
+            # real installation's submodule here is safe.
+            sys.modules.pop("libei.portal", None)
+
+    def _portal(self):
+        from pyguitest.backends import eiinput
+
+        return eiinput._portal()
+
+    def test_a_python_libei_without_the_module_reports_unavailable(self):
+        self._install(None)
+        self.assertIsNone(self._portal())
+
+    def test_an_unavailable_portal_module_reports_unavailable(self):
+        module = types.ModuleType("libei.portal")
+        module.is_available = lambda: False  # PyGObject missing
+        self._install(module)
+        self.assertIsNone(self._portal())
+
+    def test_an_is_available_that_raises_reports_unavailable(self):
+        module = types.ModuleType("libei.portal")
+
+        def boom():
+            raise RuntimeError("gi blew up on import")
+
+        module.is_available = boom
+        self._install(module)
+        self.assertIsNone(self._portal())
+
+    def test_a_usable_module_is_returned(self):
+        module = types.ModuleType("libei.portal")
+        module.is_available = lambda: True
+        self._install(module)
+        self.assertIs(self._portal(), module)
 
 
 class TestTheFakeMatchesTheRealApiShape(unittest.TestCase):
@@ -890,15 +949,108 @@ class TestTheFakeMatchesTheRealApiShape(unittest.TestCase):
         self.assertEqual(FakeSeat(given).capabilities, given)
 
 
+def _real_portal():
+    """The installed libei.portal, or None. Never fails the import."""
+    try:
+        from libei import portal
+    except Exception:
+        return None
+    return portal
+
+
+@unittest.skipUnless(
+    _real_portal() is not None, "python-libei with libei.portal is not installed"
+)
+class TestTheFakePortalMatchesTheRealApiShape(unittest.TestCase):
+    """The stand-in portal must have the shape the real module has.
+
+    Same reasoning as the class above, one library further out: everything
+    this backend now does with a portal goes through a fake here, so a fake
+    that drifts from libei.portal would keep passing while the real call
+    fails. CI has neither library and skips this; a developer machine with
+    python-libei installed is where the drift gets caught.
+
+    Deliberately shape only -- names, kwargs, exception hierarchy. What
+    those calls actually do to a portal is python-libei's own test suite's
+    job, and re-asserting it here would be testing the dependency.
+    """
+
+    def setUp(self):
+        self.real = _real_portal()
+
+    def test_negotiate_accepts_every_keyword_this_backend_passes(self):
+        import inspect
+
+        signature = inspect.signature(self.real.RemoteDesktopSession.negotiate)
+        for keyword in (
+            "connection",
+            "devices",
+            "persist_mode",
+            "restore_token",
+            "timeout",
+        ):
+            with self.subTest(keyword=keyword):
+                self.assertIn(keyword, signature.parameters)
+
+    def test_the_error_hierarchy_matches(self):
+        # _negotiate() catches PortalError last as the catch-all, so the
+        # specific ones being subclasses is what makes the order meaningful.
+        for fake, real in (
+            (FakePortalVersionError, self.real.PortalVersionError),
+            (FakePortalDeniedError, self.real.PortalDeniedError),
+            (FakePortalTimeoutError, self.real.PortalTimeoutError),
+        ):
+            with self.subTest(error=real.__name__):
+                self.assertTrue(issubclass(real, self.real.PortalError))
+                self.assertTrue(issubclass(fake, FakePortalError))
+
+    def test_a_timeout_error_carries_the_step_and_the_timeout(self):
+        # Both are read straight through into pyguitest's PortalTimeout.
+        real = self.real.PortalTimeoutError("CreateSession", 60)
+        fake = FakePortalTimeoutError("CreateSession", 60)
+        self.assertEqual((real.step, real.timeout), (fake.step, fake.timeout))
+
+    def test_the_device_and_persist_enums_agree_member_for_member(self):
+        for name in ("KEYBOARD", "POINTER"):
+            with self.subTest(member=name):
+                self.assertEqual(
+                    int(getattr(self.real.DeviceType, name)),
+                    int(getattr(FakeDeviceType, name)),
+                )
+        for name in ("NONE", "WHILE_RUNNING", "UNTIL_REVOKED"):
+            with self.subTest(member=name):
+                self.assertEqual(
+                    int(getattr(self.real.PersistMode, name)),
+                    int(getattr(FakePersistMode, name)),
+                )
+
+    def test_a_session_exposes_what_this_backend_reads(self):
+        for attribute in ("eis_fd", "close"):
+            with self.subTest(attribute=attribute):
+                self.assertTrue(hasattr(self.real.RemoteDesktopSession, attribute))
+                self.assertTrue(hasattr(FakeSession, attribute))
+
+    def test_a_session_carries_a_restore_token(self):
+        # Checked through __init__ rather than with hasattr: it is an
+        # instance attribute on both, and instantiating the real session
+        # here would hand __del__ a fabricated fd number to close.
+        import inspect
+
+        for cls in (self.real.RemoteDesktopSession, FakeSession):
+            with self.subTest(cls=cls.__name__):
+                signature = inspect.signature(cls.__init__)
+                self.assertIn("restore_token", signature.parameters)
+
+
 class TestPyGObjectIsOnlyNeededToNegotiate(unittest.TestCase):
     """Constructing with an injected sender must not demand PyGObject.
 
-    The backend needs Gio to negotiate a portal session and for nothing
-    else, and the code says as much where it declines to open a session
-    bus: "an injected sender or device means there is nothing to
-    negotiate". The import check sat above that branch and fired first, so
-    a machine with python-libei and no PyGObject could not construct the
-    backend even when handing it a ready-made sender.
+    PyGObject is needed to negotiate a portal session and for nothing else
+    -- now one level down, inside libei.portal -- and the code says as much
+    where it declines to reach for it: "an injected sender or device means
+    there is nothing to negotiate". The import check sat above that branch
+    and fired first, so a machine with python-libei and no PyGObject could
+    not construct the backend even when handing it a ready-made sender.
 
     That is not hypothetical -- it is the shape of a developer venv, and
     it made tests/test_eiinput_libei.py error there rather than run. CI
@@ -906,7 +1058,7 @@ class TestPyGObjectIsOnlyNeededToNegotiate(unittest.TestCase):
     """
 
     def setUp(self):
-        """Install the fake ei module, but deliberately not the fake gi."""
+        """Install the fake ei module, but deliberately not a fake portal."""
         patcher = install_fake_ei()
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -915,9 +1067,9 @@ class TestPyGObjectIsOnlyNeededToNegotiate(unittest.TestCase):
         self.LibeiBackend = LibeiBackend
 
     def _backend(self, **kwargs):
-        # _gio() returning None is exactly what a machine without
+        # _portal() returning None is exactly what a machine without
         # PyGObject looks like from inside the backend.
-        with mock.patch("pyguitest.backends.eiinput._gio", return_value=None):
+        with mock.patch("pyguitest.backends.eiinput._portal", return_value=None):
             return self.LibeiBackend(**kwargs)
 
     def test_an_injected_device_constructs_without_pygobject(self):
@@ -956,3 +1108,7 @@ class TestPyGObjectIsOnlyNeededToNegotiate(unittest.TestCase):
         with self.assertRaises(BackendUnavailable) as caught:
             self._backend()
         self.assertIn("PyGObject", str(caught.exception))
+
+
+if __name__ == "__main__":
+    unittest.main()

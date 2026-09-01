@@ -157,6 +157,36 @@ class CompositeBackend(GUIBackend):
                 return member
         return None
 
+    def member(self, name):
+        """The member backend called `name`.
+
+        How a caller reaches one backend's own extras through a composite --
+        `session.backend.member("eiinput").restore_token`, the composed
+        spelling of the `session.backend.restore_token` that `connect()`
+        documents for a single named backend.
+
+        Deliberately explicit rather than a `__getattr__` that forwards
+        unknown attributes to whichever member happens to have one. Every
+        other route through this class is capability-routed and written out
+        (see this module's docstring on `capture`); a catch-all would answer
+        `restore_token` from whichever backend was first in the list, which
+        is exactly the kind of quiet wrong answer the rest of the class is
+        built to avoid.
+
+        The registry name is enough: a tool-backed backend reports which
+        tool it found in its own name (`imagesearch:compare`,
+        `input:wtype`, `capture:grim`, `clipboard:wl-paste`), and asking for
+        `member("imagesearch")` should not require knowing which one was
+        installed. The full name matches too, for a caller that has one.
+        """
+        for member in self.members:
+            if member.name == name or member.name.split(":", 1)[0] == name:
+                return member
+        raise PyGUITestError(
+            f"no member backend named {name!r}; this composite has "
+            f"{', '.join(m.name for m in self.members)}"
+        )
+
     def providers(self):
         """A capability -> backend name map, for diagnostics."""
         return {

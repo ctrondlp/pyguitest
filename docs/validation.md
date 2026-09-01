@@ -7,6 +7,36 @@ read as a claim you cannot check.
 
 ## Run live on GNOME Shell 50.4 (Wayland)
 
+- **`eiinput` after its negotiation moved into python-libei** (2026-09-01,
+  python-libei 0.3.0, driven by `examples/_eiinput_portal_validate.py`,
+  18/18). The whole reason for the run: `LibeiBackend` no longer speaks
+  D-Bus itself, it calls `libei.portal.RemoteDesktopSession.negotiate()`,
+  and the GNOME and KDE results below exercised the old in-tree copy. End
+  to end on this host, with nothing stubbed:
+  - **Fresh negotiation** raised a real consent dialog and completed in
+    5.76s once answered (4.73s on a second run), offering all five input
+    capabilities the backend can serve -- `KEY_EVENT`, `TEXT_ENTRY`,
+    `POINTER_MOVE`, `POINTER_BUTTON`, `POINTER_SCROLL` -- and issuing a
+    22-character `restore_token`.
+  - **Typed text reached a native Wayland client and was read back**
+    through AT-SPI from a GTK4 `gnome-text-editor`: not "nothing raised",
+    the characters were found in the document. The marker is unique per
+    run and the editor's text is read *before* typing too, because
+    GNOME Text Editor restores unsaved drafts and an earlier version of
+    the script would have passed on the previous run's text without
+    injecting anything.
+  - **`close()` released the portal session** -- the `Session.Close()`
+    that nothing sent before this change.
+  - **Restore presenting the token took 0.37s with no dialog** (0.45s on
+    the second run), and answered with the *same* token both times, which
+    matches what `eiinput.py`'s own docstring records for this portal and
+    is still that portal's behaviour rather than a guarantee.
+
+  `move_mouse`/`click`/`scroll` were commanded successfully but are not
+  verified: this session has no `POINTER_QUERY` to read the pointer back
+  with. Everything above went through the composed `gnomeshell+atspi+
+  uinput+imagesearch` session for windows and elements, and the forced
+  `eiinput` session for every injected event.
 - **Input injection through XTest** (`X11Backend`'s input half, forced
   rather than composited), with a caveat worth reading before trusting the
   headline. A purpose-built probe -- an X11 window created with
@@ -102,6 +132,24 @@ read as a claim you cannot check.
   window that was open, active, and listed by `windows()`. The two
   traversal paths disagree for Chromium/Electron clients specifically.
   Not yet root-caused.
+- **`windows()` and the accessibility tree disagree about *titles* too**,
+  not only about membership (2026-09-01, GNOME Shell, `gnomeshell+atspi+
+  uinput` composed session). Writing the `eiinput` re-validation script
+  turned this up twice in one run. `windows()` is served by `gnomeshell`
+  (priority 93, above `atspi`), and after `gnome-text-editor` renamed its
+  own window from "New Document (Draft) - Text Editor" to the first line of
+  the text just typed into it, `windows()` still reported the *old* title
+  while the AT-SPI frame carried the new one. A `window_element()` lookup
+  keyed on a title from `windows()` therefore searched for a name that no
+  longer existed — and the miss is expensive rather than quick, because the
+  lookup walks every window role on the desktop before raising. The same
+  run also had the `Window` handle itself go stale: `geometry(window)`
+  raised "no window with id 106" for a window the list had just returned.
+  The lesson for a caller is a general one, and worth stating plainly:
+  **a title from `windows()` is not a key into the element tree.** Track a
+  window within one source — re-scan `elements(role="frame")` for the frame
+  that was not there before — or re-resolve the `Window` immediately before
+  using it for geometry. `examples/_eiinput_portal_validate.py` does both.
 
 ## Run live on KDE Plasma 6 / KWin (XWayland)
 
@@ -305,6 +353,15 @@ the installed library — names, signatures and return shapes.
 
 ## Not run live
 
+- **`eiinput` on KDE since the negotiation moved into python-libei.** The
+  GNOME half of that question is closed — see the 2026-09-01 entry at the
+  top of this file, which ran the whole cutover live there. The KDE result
+  below predates the swap and has not been re-run, so what is unverified is
+  narrow: whether `xdg-desktop-portal-kde` behaves the same through
+  `libei.portal` as it did through the in-tree copy. Nothing about the
+  conversation on the wire changed, and the same script
+  (`examples/_eiinput_portal_validate.py`) is what would answer it, needing
+  a person at a KDE desktop to click Allow.
 - **The wlroots compositor IPC backends** — sway, Hyprland, niri. Their
   tests replay recorded output and stand-ins, on a sandbox where none of
   those are available to test against. Running them against a live

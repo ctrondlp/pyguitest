@@ -1566,7 +1566,7 @@ class _CaptureOnFailure:
 
 
 def connect(
-    backend: str | None = None,
+    backend: str | Sequence[str] | None = None,
     environment: Environment | None = None,
     backend_options: dict | None = None,
     **kwargs: float,
@@ -1589,6 +1589,24 @@ def connect(
             "restore_token": saved,   # None on the first run
         })
         save_somewhere(gui.backend.restore_token)
+
+    `backend` also takes a *sequence* of names, which composes exactly those
+    -- the way to pair an opt-in input backend with the element and window
+    access a plain `connect()` would have given you, in one session instead
+    of two:
+
+        gui = connect(
+            backend=["eiinput", "atspi"],
+            backend_options={"eiinput": {"persist_mode": 2}},
+        )
+        save_somewhere(gui.backend.member("eiinput").restore_token)
+
+    Three things differ in that form, all deliberate: the caller's order is
+    the precedence (the first member that has a capability serves it), a
+    named backend that cannot build raises instead of being quietly skipped,
+    and `backend_options` is keyed by backend name because a flat dict could
+    not say who an option was for. Reading a value back off one member goes
+    through `member()`, since `session.backend` is then the composite.
     """
     environment = detect() if environment is None else environment
     chosen = backends.select(environment, backend, backend_options)

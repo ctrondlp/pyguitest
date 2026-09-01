@@ -63,27 +63,120 @@ def available():
     return [name for _, name, _, _ in _REGISTRY]
 
 
-def select(environment, name=None, options=None):
-    """Pick a backend for `environment`, or the one called `name`.
+def _factory_for(name):
+    """The registered factory called `name`, or raise naming what exists."""
+    for _, candidate, factory, _opt_in in _REGISTRY:
+        if candidate == name:
+            return factory
+    raise BackendUnavailable(
+        f"unknown backend {name!r}; available: {', '.join(available()) or 'none'}"
+    )
 
-    `options` is forwarded to the named factory as keyword arguments, and is
-    only meaningful with `name`: automatic composition builds every factory,
-    so there would be no way to say which one an option was meant for. Not
-    every factory accepts extras -- passing options a factory has no
-    parameter for is a TypeError, which is the right outcome, since the
-    alternative is silently ignoring what the caller asked for.
+
+def _combine(members):
+    """One member as itself, several as a composite, closing all on failure.
+
+    A single member is returned bare rather than wrapped: `select(env, "x")`
+    and `select(env, ["x"])` should hand back the same object, and a
+    composite of one adds a layer of dispatch that routes everything to the
+    only member there is.
     """
+    if len(members) == 1:
+        return members[0]
+    try:
+        return CompositeBackend(members)
+    except BaseException:
+        # Every already-built member -- an open X display, a uinput device,
+        # a live IPC socket -- would otherwise be dropped without close() if
+        # composing them failed.
+        for member in members:
+            member.close()
+        raise
+
+
+def _named_options(names, options):
+    """`options` keyed by backend name, or raise if it cannot be read that way.
+
+    Only for the sequence form. The shape of `backend` decides the shape of
+    `backend_options`: one name takes the flat dict it always took, several
+    names require the keyed form, and neither is inferred from the contents
+    -- a flat dict says nothing about which backend an option was meant for,
+    and guessing would hand `persist_mode` to whichever factory happened to
+    accept it. A key naming a backend that was not asked for is reported
+    rather than ignored, since it is otherwise a silently dropped request.
+    """
+    if not options:
+        return {name: {} for name in names}
+    unknown = [key for key in options if key not in names]
+    if unknown:
+        raise ValueError(
+            f"backend_options names {', '.join(map(repr, unknown))}, which "
+            f"{'is' if len(unknown) == 1 else 'are'} not among the backends "
+            f"asked for ({', '.join(names)}). With a sequence of backends, "
+            'options are keyed by backend name: {"eiinput": {"persist_mode": 2}}'
+        )
+    return {name: dict(options.get(name) or {}) for name in names}
+
+
+def _build_named(environment, names, options):
+    """Build each named backend in order, closing them all if one fails."""
+    built = []
+    try:
+        for name in names:
+            backend = _factory_for(name)(environment, **options[name])
+            if backend is None:
+                # Unlike automatic composition below, which reads None as
+                # "not applicable to this desktop" and moves on: a name is a
+                # request, and quietly dropping it would return a session
+                # missing the very capability that motivated asking.
+                raise BackendUnavailable(f"backend {name!r} cannot drive this session")
+            built.append(backend)
+    except BaseException:
+        for backend in built:
+            backend.close()
+        raise
+    return built
+
+
+def select(environment, name=None, options=None):
+    """Pick a backend for `environment`, or compose the ones named.
+
+    `name` is one backend name, or a sequence of them. A sequence composes
+    exactly those, **in the order given** -- the caller's order is the
+    precedence, so `["x11", "atspi"]` and `["atspi", "x11"]` are different
+    requests, and the first member that has a capability serves it. That is
+    the opposite of automatic composition below, which orders by registry
+    priority because nobody expressed a preference.
+
+    Naming backends is also the only way to compose an `opt_in` one, which
+    is the point: automatic composition skips those so a consent dialog is
+    never raised by surprise, and naming one *is* the caller asking for it.
+
+    A named backend that cannot build raises rather than being skipped --
+    see `_build_named`. `options` is forwarded to the factories as keyword
+    arguments: a flat dict for a single name, keyed by backend name for
+    several (see `_named_options`). Not every factory accepts extras --
+    passing options a factory has no parameter for is a TypeError, which is
+    the right outcome, since the alternative is silently ignoring what the
+    caller asked for.
+    """
+    if isinstance(name, str):
+        return _combine(_build_named(environment, [name], {name: dict(options or {})}))
+
     if name is not None:
-        for _, candidate, factory, _opt_in in _REGISTRY:
-            if candidate == name:
-                backend = factory(environment, **(options or {}))
-                if backend is None:
-                    raise BackendUnavailable(
-                        f"backend {name!r} cannot drive this session"
-                    )
-                return backend
-        raise BackendUnavailable(
-            f"unknown backend {name!r}; available: {', '.join(available()) or 'none'}"
+        names = list(name)
+        if not names:
+            raise ValueError(
+                "backend was an empty sequence; pass None to detect "
+                "automatically, or name at least one backend"
+            )
+        duplicates = {n for n in names if names.count(n) > 1}
+        if duplicates:
+            # A second copy could never win a capability the first already
+            # serves, so this is a mistake rather than a preference.
+            raise ValueError(f"backend names repeat: {', '.join(sorted(duplicates))}")
+        return _combine(
+            _build_named(environment, names, _named_options(names, options))
         )
 
     # Compose every applicable, non-opt-in backend: no single mechanism
@@ -95,18 +188,8 @@ def select(environment, name=None, options=None):
         for b in (f(environment) for _, _, f, opt_in in _REGISTRY if not opt_in)
         if b is not None
     ]
-    if len(members) == 1:
-        return members[0]
     if members:
-        try:
-            return CompositeBackend(members)
-        except Exception:
-            # Every already-built member -- an open X display, a uinput
-            # device, a live IPC socket -- would otherwise be dropped
-            # without close() if composing them failed.
-            for member in members:
-                member.close()
-            raise
+        return _combine(members)
 
     return NullBackend(
         f"no backend for a {environment.session_type.value} session "
