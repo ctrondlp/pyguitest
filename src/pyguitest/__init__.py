@@ -49,6 +49,7 @@ from .errors import (
     WindowNotFound,
 )
 from .roles import Role
+from .sendkeys import KeySender
 from .session import Compositor, Environment, SessionType, detect
 
 if TYPE_CHECKING:
@@ -602,104 +603,7 @@ class Session:
         static key mapping (see GUIBackend.resolve_char_key), for malformed
         `{}` syntax, and for a `{}` key name this backend does not resolve.
         """
-        modifiers = self.backend.MODIFIER_KEYS
-        aliases = self.backend.KEY_ALIASES
-        # Not .get(): every backend's MODIFIER_KEYS names a Shift key, and
-        # press_literal cannot type a shifted character without one. Missing
-        # it is a broken backend, and better reported here than as a
-        # TypeError inside its key lookup halfway through the string.
-        shift_name = modifiers["+"]
-        held: list[str] = []
-        grouped = False
-
-        def release_held() -> None:
-            nonlocal grouped
-            for name in reversed(held):
-                self.release_key(name)
-            held.clear()
-            grouped = False
-
-        def press_literal(char: str) -> None:
-            name, needs_shift = self.backend.resolve_char_key(char)
-            auto_shift = needs_shift and shift_name not in held
-            if auto_shift:
-                self.press_key(shift_name)
-            self.tap_key(name)
-            if auto_shift:
-                self.release_key(shift_name)
-
-        def process_brace(content: str) -> None:
-            tokens = [t for t in content.split(" ") if t]
-            if not tokens:
-                raise ValueError("empty {} in send_keys")
-            pending_pause = False
-            # (callable, key argument) for a repeat count. Annotated because
-            # the two callables assigned below name their parameter
-            # differently, which is enough to stop the type being inferred.
-            last_action: tuple[Callable[[str], None], str] | None = None
-            for token in tokens:
-                if token.isdigit():
-                    count = int(token)
-                    if count <= 0:
-                        raise ValueError(
-                            f"non-positive repeat count {token!r} in send_keys"
-                        )
-                    if pending_pause:
-                        self.wait(count / 1000)
-                        pending_pause = False
-                    elif last_action is not None:
-                        action, arg = last_action
-                        for _ in range(count - 1):
-                            action(arg)
-                    else:
-                        raise ValueError(
-                            f"repeat count {token!r} with no preceding key"
-                        )
-                    continue
-                if token.upper() == "PAUSE":
-                    pending_pause = True
-                    continue
-                pending_pause = False
-                if len(token) == 1:
-                    last_action = (press_literal, token)
-                else:
-                    last_action = (self.tap_key, aliases.get(token.upper(), token))
-                last_action[0](last_action[1])
-
-        i, n = 0, len(keys)
-        while i < n:
-            ch = keys[i]
-            if ch == "{":
-                end = keys.find("}", i + 1)
-                if end == -1:
-                    raise ValueError(f"unterminated '{{' in send_keys at position {i}")
-                if keys[end + 1 : end + 2] == "}":
-                    end += 1
-                process_brace(keys[i + 1 : end])
-                i = end + 1
-                continue
-            if ch == "~":
-                self.tap_key(aliases["ENT"])
-            elif ch in modifiers:
-                name = modifiers[ch]
-                if i + 1 < n and keys[i + 1] == "(":
-                    self.press_key(name)
-                    held.append(name)
-                    grouped = True
-                    i += 2
-                    continue
-                self.tap_key(name)
-            elif ch == "(":
-                grouped = True
-            elif ch == ")":
-                release_held()
-                i += 1
-                continue
-            else:
-                press_literal(ch)
-            i += 1
-            if not grouped:
-                release_held()
+        KeySender(self).send(keys)
 
     def press_tab(self, reverse: bool = False) -> None:
         """Press Tab (or Shift+Tab if `reverse`), advancing keyboard focus.

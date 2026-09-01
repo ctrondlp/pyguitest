@@ -122,10 +122,8 @@ def keysym_of(screen_display, keycode, state=0):
     return screen_display.keycode_to_keysym(keycode, index)
 
 
-def main(dry_run=False):
-    screen_display = display.Display()
-    screen = screen_display.screen()
-
+def _open_probe(screen_display, screen):
+    """Create, name and map the probe window; return it and its centre."""
     left = (screen.width_in_pixels - WIDTH) // 2
     top = (screen.height_in_pixels - HEIGHT) // 2
     probe = screen.root.create_window(
@@ -150,9 +148,199 @@ def main(dry_run=False):
     probe.set_wm_name("pyguitest-xtest-probe")
     probe.map()
     screen_display.sync()
-
     centre = (left + WIDTH // 2, top + HEIGHT // 2)
     print(f"probe window at ({left}, {top}) {WIDTH}x{HEIGHT}, centre {centre}")
+    return probe, centre
+
+
+def _close_probe(probe, screen_display):
+    """Tear the probe down, ignoring anything that goes wrong doing it."""
+    with contextlib.suppress(Exception):
+        probe.destroy()
+        screen_display.sync()
+        screen_display.close()
+
+
+def _release_everything(gui, held_keys, held_buttons, restore_to):
+    """Let go of anything still held, and put the pointer back.
+
+    Unconditional: anything still held here outlives the script and makes
+    the whole desktop feel broken.
+    """
+    for button in list(held_buttons):
+        with contextlib.suppress(Exception):
+            gui.release_button(button)
+    for key in list(held_keys):
+        with contextlib.suppress(Exception):
+            gui.release_key(key)
+    for modifier in ("Shift_L", "Control_L", "Alt_L", "Super_L"):
+        with contextlib.suppress(Exception):
+            gui.release_key(modifier)
+    if restore_to is not None:
+        with contextlib.suppress(Exception):
+            gui.move_mouse(*restore_to)
+
+
+def _validate_pointer_move(gui, screen_display, centre):
+    """Absolute motion: delivered as MotionNotify, and read back."""
+    print("\nmove_mouse:")
+    for dx, dy in ((-120, -80), (120, 80), (0, 0)):
+        target = (centre[0] + dx, centre[1] + dy)
+        gui.move_mouse(*target)
+        time.sleep(0.15)
+        motion = [e for e in drain(screen_display) if e.type == X.MotionNotify]
+        check(
+            f"motion delivered for {target}",
+            bool(motion),
+            f"{len(motion)} MotionNotify",
+        )
+        if gui.supports(Capability.POINTER_QUERY):
+            got = gui.pointer_position()
+            check(
+                f"pointer_position reads back {target}",
+                got == target,
+                f"read {got}",
+            )
+
+
+def _validate_buttons(gui, screen_display, centre, held_buttons):
+    """Button press/release/click, and the state query for each."""
+    print("\npress_button / release_button, and click:")
+    gui.move_mouse(*centre)
+    time.sleep(0.15)
+    drain(screen_display)
+
+    held_buttons.append(1)
+    gui.press_button(1)
+    time.sleep(0.15)
+    pressed = [e for e in drain(screen_display) if e.type == X.ButtonPress]
+    check("ButtonPress delivered", bool(pressed))
+    check(
+        "it is button 1",
+        bool(pressed) and pressed[0].detail == 1,
+        f"detail {pressed[0].detail}" if pressed else "",
+    )
+    if gui.supports(Capability.INPUT_STATE_QUERY):
+        check("is_button_pressed sees it held", gui.is_button_pressed(1))
+
+    gui.release_button(1)
+    held_buttons.remove(1)
+    time.sleep(0.15)
+    released = [e for e in drain(screen_display) if e.type == X.ButtonRelease]
+    check("ButtonRelease delivered", bool(released))
+    if gui.supports(Capability.INPUT_STATE_QUERY):
+        check("is_button_pressed sees it let go", not gui.is_button_pressed(1))
+
+    gui.click()
+    time.sleep(0.15)
+    events = drain(screen_display)
+    check(
+        "click() is a press and a release, in that order",
+        [e.type for e in events if e.type in (X.ButtonPress, X.ButtonRelease)]
+        == [X.ButtonPress, X.ButtonRelease],
+    )
+
+
+def _validate_keys(gui, screen_display, held_keys):
+    """press_key/release_key, the keysym delivered, and the state query."""
+    print("\npress_key / release_key:")
+    held_keys.append("a")
+    gui.press_key("a")
+    time.sleep(0.15)
+    key_presses = [e for e in drain(screen_display) if e.type == X.KeyPress]
+    check("KeyPress delivered", bool(key_presses))
+    if key_presses:
+        got = keysym_of(screen_display, key_presses[0].detail)
+        check(
+            "the keysym delivered is 'a'",
+            got == XK.string_to_keysym("a"),
+            f"got {screen_display.lookup_string(got)!r}",
+        )
+    if gui.supports(Capability.INPUT_STATE_QUERY):
+        check("is_key_pressed sees it held", gui.is_key_pressed("a"))
+
+    gui.release_key("a")
+    held_keys.remove("a")
+    time.sleep(0.15)
+    check(
+        "KeyRelease delivered",
+        any(e.type == X.KeyRelease for e in drain(screen_display)),
+    )
+    if gui.supports(Capability.INPUT_STATE_QUERY):
+        check("is_key_pressed sees it let go", not gui.is_key_pressed("a"))
+
+
+def _validate_text(gui, screen_display):
+    """type_text, including the shift path an uppercase letter needs."""
+    print(f"\ntype_text({TYPED_TEXT!r}):")
+    drain(screen_display)
+    gui.type_text(TYPED_TEXT)
+    time.sleep(0.3)
+    typed = [e for e in drain(screen_display) if e.type == X.KeyPress]
+    received = "".join(
+        chr(keysym_of(screen_display, e.detail, e.state) & 0xFF) for e in typed
+    )
+    check(
+        "every character arrived, in order",
+        received == TYPED_TEXT,
+        f"received {received!r}",
+    )
+
+    # The shift path is the half most likely to be wrong: an uppercase
+    # character needs a modifier pressed around the keycode, and getting
+    # it backwards still delivers a key, just the wrong one.
+    print("\ntype_text('X') -- the shift path:")
+    drain(screen_display)
+    gui.type_text("X")
+    time.sleep(0.2)
+    shifted = [e for e in drain(screen_display) if e.type == X.KeyPress]
+    letters = [
+        e for e in shifted if keysym_of(screen_display, e.detail, e.state) == XK.XK_X
+    ]
+    check("an uppercase X was delivered", bool(letters))
+    check(
+        "it arrived with Shift in its modifier state",
+        bool(letters) and bool(letters[0].state & X.ShiftMask),
+        f"state {letters[0].state:#x}" if letters else "",
+    )
+
+
+def _validate_send_keys(gui, screen_display):
+    """send_keys modifier notation: ^(a) must arrive with Control set."""
+    print("\nsend_keys('^(a)') -- modifier notation:")
+    drain(screen_display)
+    gui.send_keys("^(a)")
+    time.sleep(0.2)
+    combo = [e for e in drain(screen_display) if e.type == X.KeyPress]
+    target = [
+        e
+        for e in combo
+        if keysym_of(screen_display, e.detail) == XK.string_to_keysym("a")
+    ]
+    check("the 'a' of ^(a) was delivered", bool(target))
+    check(
+        "it arrived with Control in its modifier state",
+        bool(target) and bool(target[0].state & X.ControlMask),
+        f"state {target[0].state:#x}" if target else "",
+    )
+
+
+def _summary():
+    """Print the tally and return the exit status."""
+    failed = [label for label, passed in results if not passed]
+    print(f"\n{len(results) - len(failed)}/{len(results)} checks passed")
+    if failed:
+        print("failed:")
+        for label in failed:
+            print(f"  - {label}")
+    return 1 if failed else 0
+
+
+def main(dry_run=False):
+    """Open a probe window and drive every XTest path against it."""
+    screen_display = display.Display()
+    screen = screen_display.screen()
+    probe, centre = _open_probe(screen_display, screen)
 
     gui = pyguitest.connect(backend="x11")
     print(f"forced backend: {gui.backend.name}")
@@ -176,10 +364,7 @@ def main(dry_run=False):
             "every capability needed is present.\nNothing was injected and "
             "focus was left alone. Re-run without --dry-run to validate."
         )
-        with contextlib.suppress(Exception):
-            probe.destroy()
-            screen_display.sync()
-            screen_display.close()
+        _close_probe(probe, screen_display)
         return 0
 
     print("\nStarting in 3 seconds -- do not touch the mouse or keyboard.")
@@ -199,169 +384,16 @@ def main(dry_run=False):
         focus = screen_display.get_input_focus().focus
         print(f"\ninput focus is the probe window: {focus.id == probe.id}")
 
-        # -- POINTER_MOVE ---------------------------------------------------
-        print("\nmove_mouse:")
-        for dx, dy in ((-120, -80), (120, 80), (0, 0)):
-            target = (centre[0] + dx, centre[1] + dy)
-            gui.move_mouse(*target)
-            time.sleep(0.15)
-            motion = [e for e in drain(screen_display) if e.type == X.MotionNotify]
-            check(
-                f"motion delivered for {target}",
-                bool(motion),
-                f"{len(motion)} MotionNotify",
-            )
-            if gui.supports(Capability.POINTER_QUERY):
-                got = gui.pointer_position()
-                check(
-                    f"pointer_position reads back {target}",
-                    got == target,
-                    f"read {got}",
-                )
-
-        # -- POINTER_BUTTON -------------------------------------------------
-        print("\npress_button / release_button, and click:")
-        gui.move_mouse(*centre)
-        time.sleep(0.15)
-        drain(screen_display)
-
-        held_buttons.append(1)
-        gui.press_button(1)
-        time.sleep(0.15)
-        pressed = [e for e in drain(screen_display) if e.type == X.ButtonPress]
-        check("ButtonPress delivered", bool(pressed))
-        check(
-            "it is button 1",
-            bool(pressed) and pressed[0].detail == 1,
-            f"detail {pressed[0].detail}" if pressed else "",
-        )
-        if gui.supports(Capability.INPUT_STATE_QUERY):
-            check("is_button_pressed sees it held", gui.is_button_pressed(1))
-
-        gui.release_button(1)
-        held_buttons.remove(1)
-        time.sleep(0.15)
-        released = [e for e in drain(screen_display) if e.type == X.ButtonRelease]
-        check("ButtonRelease delivered", bool(released))
-        if gui.supports(Capability.INPUT_STATE_QUERY):
-            check("is_button_pressed sees it let go", not gui.is_button_pressed(1))
-
-        gui.click()
-        time.sleep(0.15)
-        events = drain(screen_display)
-        check(
-            "click() is a press and a release, in that order",
-            [e.type for e in events if e.type in (X.ButtonPress, X.ButtonRelease)]
-            == [X.ButtonPress, X.ButtonRelease],
-        )
-
-        # -- KEY_EVENT ------------------------------------------------------
-        print("\npress_key / release_key:")
-        held_keys.append("a")
-        gui.press_key("a")
-        time.sleep(0.15)
-        key_presses = [e for e in drain(screen_display) if e.type == X.KeyPress]
-        check("KeyPress delivered", bool(key_presses))
-        if key_presses:
-            got = keysym_of(screen_display, key_presses[0].detail)
-            check(
-                "the keysym delivered is 'a'",
-                got == XK.string_to_keysym("a"),
-                f"got {screen_display.lookup_string(got)!r}",
-            )
-        if gui.supports(Capability.INPUT_STATE_QUERY):
-            check("is_key_pressed sees it held", gui.is_key_pressed("a"))
-
-        gui.release_key("a")
-        held_keys.remove("a")
-        time.sleep(0.15)
-        check(
-            "KeyRelease delivered",
-            any(e.type == X.KeyRelease for e in drain(screen_display)),
-        )
-        if gui.supports(Capability.INPUT_STATE_QUERY):
-            check("is_key_pressed sees it let go", not gui.is_key_pressed("a"))
-
-        # -- TEXT_ENTRY -----------------------------------------------------
-        print(f"\ntype_text({TYPED_TEXT!r}):")
-        drain(screen_display)
-        gui.type_text(TYPED_TEXT)
-        time.sleep(0.3)
-        typed = [e for e in drain(screen_display) if e.type == X.KeyPress]
-        received = "".join(
-            chr(keysym_of(screen_display, e.detail, e.state) & 0xFF) for e in typed
-        )
-        check(
-            "every character arrived, in order",
-            received == TYPED_TEXT,
-            f"received {received!r}",
-        )
-
-        # The shift path is the half most likely to be wrong: an uppercase
-        # character needs a modifier pressed around the keycode, and getting
-        # it backwards still delivers a key, just the wrong one.
-        print("\ntype_text('X') -- the shift path:")
-        drain(screen_display)
-        gui.type_text("X")
-        time.sleep(0.2)
-        shifted = [e for e in drain(screen_display) if e.type == X.KeyPress]
-        letters = [
-            e
-            for e in shifted
-            if keysym_of(screen_display, e.detail, e.state) == XK.XK_X
-        ]
-        check("an uppercase X was delivered", bool(letters))
-        check(
-            "it arrived with Shift in its modifier state",
-            bool(letters) and bool(letters[0].state & X.ShiftMask),
-            f"state {letters[0].state:#x}" if letters else "",
-        )
-
-        # -- send_keys ------------------------------------------------------
-        print("\nsend_keys('^(a)') -- modifier notation:")
-        drain(screen_display)
-        gui.send_keys("^(a)")
-        time.sleep(0.2)
-        combo = [e for e in drain(screen_display) if e.type == X.KeyPress]
-        target = [
-            e
-            for e in combo
-            if keysym_of(screen_display, e.detail) == XK.string_to_keysym("a")
-        ]
-        check("the 'a' of ^(a) was delivered", bool(target))
-        check(
-            "it arrived with Control in its modifier state",
-            bool(target) and bool(target[0].state & X.ControlMask),
-            f"state {target[0].state:#x}" if target else "",
-        )
-
+        _validate_pointer_move(gui, screen_display, centre)
+        _validate_buttons(gui, screen_display, centre, held_buttons)
+        _validate_keys(gui, screen_display, held_keys)
+        _validate_text(gui, screen_display)
+        _validate_send_keys(gui, screen_display)
     finally:
-        # Unconditional: anything still held here outlives the script and
-        # makes the whole desktop feel broken.
-        for button in list(held_buttons):
-            with contextlib.suppress(Exception):
-                gui.release_button(button)
-        for key in list(held_keys):
-            with contextlib.suppress(Exception):
-                gui.release_key(key)
-        for modifier in ("Shift_L", "Control_L", "Alt_L", "Super_L"):
-            with contextlib.suppress(Exception):
-                gui.release_key(modifier)
-        if restore_to is not None:
-            with contextlib.suppress(Exception):
-                gui.move_mouse(*restore_to)
-        with contextlib.suppress(Exception):
-            probe.destroy()
-            screen_display.sync()
-            screen_display.close()
+        _release_everything(gui, held_keys, held_buttons, restore_to)
+        _close_probe(probe, screen_display)
 
-    failed = [label for label, passed in results if not passed]
-    print(f"\n{len(results) - len(failed)}/{len(results)} checks passed")
-    if failed:
-        print("failed:")
-        for label in failed:
-            print(f"  - {label}")
-    return 1 if failed else 0
+    return _summary()
 
 
 if __name__ == "__main__":

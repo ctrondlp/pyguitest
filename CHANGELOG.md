@@ -7,6 +7,35 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- `send_keys`'s grammar moved to a new `sendkeys.py` as `KeySender`, with
+  no change to what the grammar does. It was one method holding three
+  closures over four pieces of shared mutable state, scoring 26 on
+  cyclomatic complexity -- the worst in the package, and the reason the
+  new `C901` ceiling exists. `Session.send_keys` keeps the documentation,
+  since that is where a caller looks for it; the 31 grammar tests pass
+  unchanged, which is what makes the move safe to claim as behaviour-
+  preserving. `examples/09_gui_spy.py` and
+  `examples/_xtest_input_validate.py` were split the same way, each mode
+  and each validated capability becoming its own function.
+
+### Added
+
+- `doctor` warns when KDE's GTK applications cannot publish elements, and
+  `debug` reports the setting behind it on every desktop
+  (`toolkit_accessibility()` in `session.py`). GTK loads its AT-SPI bridge
+  only when `org.gnome.desktop.interface toolkit-accessibility` is true;
+  with it off on KDE, element queries come back empty and *nothing* else
+  reports a problem — packages present, `can_use_atspi` true, dogtail
+  connecting happily. Scoped to KWin on purpose: measured the same day, a
+  GNOME session had the setting off with AT-SPI working perfectly, so "off"
+  alone is not evidence of a fault and a hint that fired on it would be
+  wrong on GNOME. The probe is a function rather than an `Environment`
+  field because reading the value means importing PyGObject, and `detect()`
+  deliberately imports nothing — it uses `find_spec` throughout, so a plain
+  `connect()` still pulls in no GNOME stack it was not already using.
+
 ## [0.2.0] — 2026-09-01
 
 ### Added

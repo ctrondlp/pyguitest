@@ -5,8 +5,10 @@ how many events, in what order, spaced how far apart in wall-clock time --
 because that is the whole difference between these and move_mouse().
 """
 
+import contextlib
 import time
 import unittest
+from unittest import mock
 
 from pyguitest import Capability, CapabilityUnsupported, PyGUITestError, Session
 from pyguitest.backends.base import GUIBackend
@@ -18,15 +20,60 @@ POINTER = CapabilitySet(
 )
 
 
+class FakeClock:
+    """A monotonic clock that moves only when something asks it to.
+
+    Duck-types the two functions of `time` that Session's scheduling uses,
+    so it can stand in for the module wholesale.
+
+    Here because an *upper* bound on wall-clock duration is a coin flip on a
+    busy machine: two tests below asserted one and failed on a developer's
+    desktop at 0.255s against a 0.2s bound, having passed twenty consecutive
+    runs on an idle one. No delta fixes that -- an arbitrarily loaded
+    machine overshoots any bound eventually. The properties they check are
+    structural rather than temporal (backend cost comes out of the pauses
+    instead of being added to the total; event_delay is charged once per
+    gesture, not per point), so a clock that only advances when this code
+    advances it checks them exactly, on any machine, in no time at all.
+
+    Lower bounds stay on the real clock deliberately -- "the events were
+    spread out at all" is a claim load can only make more true.
+    """
+
+    def __init__(self, now: float = 1000.0) -> None:
+        self.now = now
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+@contextlib.contextmanager
+def driving(clock):
+    """Run the body with `clock` standing in for Session's use of `time`."""
+    with (
+        mock.patch("pyguitest.time.monotonic", clock.monotonic),
+        mock.patch("pyguitest.time.sleep", clock.sleep),
+    ):
+        yield clock
+
+
 class RecordingBackend(GUIBackend):
     """Records every input event with the moment it arrived."""
 
     name = "recording"
 
-    def __init__(self, capabilities=POINTER, cost=0.0):
+    def __init__(self, capabilities=POINTER, cost=0.0, clock=time):
         self.events = []
         self._capabilities = capabilities
         self._cost = cost
+        # `time` itself by default; a FakeClock when a test needs the cost
+        # to be simulated rather than actually waited out.
+        self._clock = clock
 
     @property
     def capabilities(self):
@@ -34,8 +81,8 @@ class RecordingBackend(GUIBackend):
 
     def _record(self, event):
         if self._cost:
-            time.sleep(self._cost)
-        self.events.append((event, time.monotonic()))
+            self._clock.sleep(self._cost)
+        self.events.append((event, self._clock.monotonic()))
 
     def move_mouse(self, x, y, screen=0):
         self.require(Capability.POINTER_MOVE)
@@ -212,20 +259,34 @@ class TestTiming(unittest.TestCase):
 
     def test_a_slow_backend_does_not_stretch_the_total(self):
         # 5ms an event over 9 events is 45ms of backend cost inside a 100ms
-        # budget: the schedule should absorb it, not append it.
-        gui = session(RecordingBackend(cost=0.005))
-        gui.move_mouse(0, 0)
-        began = time.monotonic()
-        gui.glide(100, 0, duration=0.1, rate=90)
-        self.assertLess(time.monotonic() - began, 0.2)
+        # budget: the schedule should absorb it, not append it. Measured on
+        # a clock this test drives, so "absorbed" is exact rather than a
+        # bound some other machine's load can breach -- appending would put
+        # this at 0.145 and absorbing puts it at 0.1, which no plausible
+        # delta confuses.
+        clock = FakeClock()
+        gui = session(RecordingBackend(cost=0.005, clock=clock))
+        with driving(clock):
+            gui.move_mouse(0, 0)
+            began = clock.now
+            gui.glide(100, 0, duration=0.1, rate=90)
+            elapsed = clock.now - began
+        self.assertAlmostEqual(elapsed, 0.1, delta=0.01)
 
     def test_event_delay_is_charged_once_for_the_whole_gesture(self):
         # Per point it would be charged twenty times and swamp the schedule.
-        gui = session(event_delay=0.01)
-        gui.move_mouse(0, 0)
-        began = time.monotonic()
-        gui.glide(100, 0, duration=0.01, rate=2000)
-        self.assertLess(time.monotonic() - began, 0.1)
+        clock = FakeClock()
+        gui = session(RecordingBackend(clock=clock), event_delay=0.01)
+        with driving(clock):
+            gui.move_mouse(0, 0)
+            clock.sleeps.clear()  # drop that move's own event_delay
+            began = clock.now
+            gui.glide(100, 0, duration=0.01, rate=2000)
+            elapsed = clock.now - began
+        # The 20-point schedule (0.01) plus exactly one event_delay (0.01).
+        # Charged per point it would be 0.21.
+        self.assertAlmostEqual(elapsed, 0.02, delta=0.005)
+        self.assertEqual(clock.sleeps.count(0.01), 1)
 
 
 class TestTheOrigin(unittest.TestCase):

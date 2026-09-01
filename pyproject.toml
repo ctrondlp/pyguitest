@@ -132,6 +132,7 @@ select = [
     "SIM",      # simplification
     "RET",      # return consistency
     "ARG",      # unused arguments
+    "C901",     # cyclomatic complexity
 ]
 ignore = [
     "D203",    # incompatible with D211; keep no blank line before class docstring
@@ -140,6 +141,13 @@ ignore = [
     "B027",    # GUIBackend.close is an intentional optional hook, not abstract
     "D105",    # __enter__/__exit__ and friends document themselves
 ]
+
+[tool.ruff.lint.mccabe]
+# A ceiling on what gets added, not a claim the tree is already under it.
+# 15 clears everything except send_keys (26), the hand-written X11::GUITest
+# key-string tokenizer -- the one function this is meant to catch, left
+# failing on purpose rather than suppressed. Ratchet down as it is split.
+max-complexity = 15
 
 [tool.ruff.lint.pydocstyle]
 convention = "pep257"

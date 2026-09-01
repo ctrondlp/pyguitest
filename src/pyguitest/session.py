@@ -16,13 +16,27 @@ import ctypes.util
 import importlib.util
 import os
 import shutil
+import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 
 from . import tools as _tools
 
-__all__ = ["SessionType", "Compositor", "Environment", "detect"]
+__all__ = [
+    "SessionType",
+    "Compositor",
+    "Environment",
+    "detect",
+    "toolkit_accessibility",
+]
+
+_INTERFACE_SCHEMA = "org.gnome.desktop.interface"
+_TOOLKIT_ACCESSIBILITY_KEY = "toolkit-accessibility"
+_GSETTINGS_TIMEOUT = 5
+"""Seconds to wait for `gsettings get`. Bounded because this runs inside
+`doctor`/`debug`, and a diagnostic that hangs is worse than one that says
+it could not tell."""
 
 
 class SessionType(Enum):
@@ -295,6 +309,59 @@ def _compositor(env: Mapping[str, str], session_type: SessionType) -> Compositor
     if haystack.strip() or env.get("WAYLAND_DISPLAY"):
         return Compositor.OTHER
     return Compositor.NONE
+
+
+def toolkit_accessibility() -> bool | None:
+    """Whether GTK's AT-SPI bridge is switched on, or None if unknowable.
+
+    A GTK application only loads its accessibility bridge when the GNOME
+    setting `org.gnome.desktop.interface toolkit-accessibility` is true. A
+    GNOME session sets it; a KDE one does not, and with it off **nothing
+    reports a problem**: the packages are installed, `can_use_atspi` is
+    true, dogtail connects, and element queries simply return nothing --
+    indistinguishable from an application that genuinely has no widgets.
+    Confirmed live on KDE (2026-09-01); see docs/validation.md.
+
+    Read by running `gsettings`, not by importing Gio and asking GSettings
+    in this process, and that is not a stylistic choice. An in-process
+    GSettings read goes through dconf, which opens a session-bus
+    connection -- and GDBus *caches* the session bus for the lifetime of
+    the process, ignoring any later change to
+    `$DBUS_SESSION_BUS_ADDRESS`. That is fatal to
+    tests/test_portal_dbusmock.py, which swaps that variable for a private
+    dbus-daemon: once anything has cached the real bus, those tests
+    negotiate against the real xdg-desktop-portal instead of their mock --
+    raising real consent dialogs on the developer's desktop, and failing
+    only when the whole suite runs in order. Measured, not guessed: adding
+    the in-process version made exactly that happen. A subprocess has no
+    such reach.
+
+    Deliberately a function rather than an `Environment` field, so
+    `detect()` -- and therefore every `connect()` -- does not pay for it.
+
+    Three answers, not two. None means the question could not be asked:
+    no `gsettings` binary, or no GNOME schemas installed, which is the
+    normal state of a minimal or non-GNOME box and is not a fault.
+    """
+    try:
+        result = subprocess.run(
+            ["gsettings", "get", _INTERFACE_SCHEMA, _TOOLKIT_ACCESSIBILITY_KEY],
+            capture_output=True,
+            text=True,
+            timeout=_GSETTINGS_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        # Non-zero means the schema is not installed, which is a real and
+        # ordinary answer ("cannot ask"), not an error worth raising.
+        return None
+    answer = (result.stdout or "").strip()
+    if answer == "true":
+        return True
+    if answer == "false":
+        return False
+    return None
 
 
 def detect(env: Mapping[str, str] | None = None) -> Environment:

@@ -169,8 +169,14 @@ read as a claim you cannot check.
   queries just return nothing — indistinguishable from an application that
   genuinely has no widgets. `gsettings set org.gnome.desktop.interface
   toolkit-accessibility true` fixed it immediately. Written up in
-  [install.md](install.md); `doctor` does not detect it yet, since what it
-  checks is whether AT-SPI is importable, and it is.
+  [install.md](install.md), and `doctor` now warns about it — but only on
+  KWin. Measuring the same setting on the GNOME host above found it **off
+  there too, with AT-SPI working perfectly**, so "off" is not by itself
+  evidence of anything; the mechanism is unconfirmed (plausibly GNOME's
+  session registers GTK applications with the accessibility bus regardless). The
+  warning is therefore scoped to the one desktop where the failure was
+  actually seen, and `pyguitest debug` reports the raw value everywhere,
+  which is what would show it mattering somewhere else.
 - **`KdotoolBackend`** — `windows()`, `geometry()`, `active_window()`,
   `activate_window()`, `move_window()`, `resize_window()`, `window_at()`
   (hit and miss), `minimize_window()`/restore, and `is_window_viewable()`'s

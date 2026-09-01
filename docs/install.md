@@ -90,9 +90,12 @@ application had no widgets. Confirmed live on KDE (2026-09-01), where the
 gsettings set org.gnome.desktop.interface toolkit-accessibility true
 ```
 
-`doctor` cannot yet tell you this: it checks that AT-SPI is importable,
-which it is. If elements are invisible on KDE and nothing is complaining,
-check that setting first.
+`doctor` now says so on KDE, and `debug` reports the raw value on every
+desktop. Both are scoped deliberately narrowly: the setting being off is
+*not* on its own evidence of a problem — a GNOME session measured the same
+day had it off with AT-SPI working perfectly — so the warning fires only
+where the failure was actually observed, rather than wherever the value
+looks wrong.
 
 <!-- generated from pyguitest.hints._PACKAGES; tests/test_docs.py pins it -->
 

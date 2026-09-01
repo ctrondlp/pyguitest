@@ -30,6 +30,7 @@ from .capabilities import TIERS, Tier
 from .compat import LEGACY
 from .hints import advice, detect_distro, hints_for
 from .inspect import format_tree, tree_data
+from .session import toolkit_accessibility
 
 _CALL = re.compile(r"\b(" + "|".join(sorted(LEGACY, key=len, reverse=True)) + r")\b")
 
@@ -66,9 +67,22 @@ def _report() -> int:
         # package -- so gating on it printed a table full of [ no] followed
         # by advice() truthfully saying nothing installable is missing.
         # hints_for() is what actually reasons about installed components.
-        if list(hints_for(gui.environment, capabilities=gui.capabilities)):
+        bridge = toolkit_accessibility()
+        if list(
+            hints_for(
+                gui.environment,
+                capabilities=gui.capabilities,
+                toolkit_accessibility=bridge,
+            )
+        ):
             print()
-            print(advice(gui.environment, capabilities=gui.capabilities))
+            print(
+                advice(
+                    gui.environment,
+                    capabilities=gui.capabilities,
+                    toolkit_accessibility=bridge,
+                )
+            )
     return 0
 
 
@@ -77,7 +91,13 @@ def _doctor() -> int:
     with connect() as gui:
         print(gui.environment.summary())
         print()
-        print(advice(gui.environment, capabilities=gui.capabilities))
+        print(
+            advice(
+                gui.environment,
+                capabilities=gui.capabilities,
+                toolkit_accessibility=toolkit_accessibility(),
+            )
+        )
     return 0
 
 
@@ -186,6 +206,13 @@ def _debug_data(gui) -> dict:
         "capabilities_report": gui.capabilities.report(),
         "backend_report": backend_report() if callable(backend_report) else None,
         "focus_tracking": _focus_tracking(gui),
+        # Reported on every desktop, not only where a hint fires for it.
+        # `doctor` warns about this on KDE alone, because that is the only
+        # place it was observed to break anything (see hints.py) -- but the
+        # value is a fact, and a fact is what a pasted diagnostic is for. If
+        # it turns out to matter on some other desktop, this line is what
+        # will show it.
+        "toolkit_accessibility": toolkit_accessibility(),
     }
 
 
@@ -254,6 +281,16 @@ def _format_debug(data: dict) -> str:
             None: "not probed (no element tree on this desktop)",
         }[focus]
     )
+    lines.append(
+        "toolkit      "
+        + {
+            True: "toolkit-accessibility on",
+            False: "toolkit-accessibility OFF -- harmless on GNOME, but on "
+            "KDE no GTK application publishes elements",
+            None: "toolkit-accessibility not readable (no PyGObject, or no "
+            "GNOME schemas installed)",
+        }[data["toolkit_accessibility"]]
+    )
     if data["backend_report"]:
         lines.append("")
         lines.append(data["backend_report"])
@@ -289,7 +326,16 @@ def _inspect(json_output: bool = False, window: str | None = None) -> int:
     """
     with connect() as gui:
         if not gui.supports(Capability.ELEMENT_TREE):
-            print(advice(gui.environment, capabilities=gui.capabilities))
+            # Threaded here too so every advice() in this file reports
+            # the same set of hints; an unthreaded call silently drops
+            # the accessibility-bridge one.
+            print(
+                advice(
+                    gui.environment,
+                    capabilities=gui.capabilities,
+                    toolkit_accessibility=toolkit_accessibility(),
+                )
+            )
             return 1
         data = tree_data(gui, window=window)
     print(json.dumps(data, indent=2) if json_output else format_tree(data))

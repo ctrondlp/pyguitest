@@ -18,7 +18,11 @@ import textwrap
 from collections.abc import Iterator
 
 from .capabilities import Capability, CapabilitySet
-from .session import Environment
+from .session import (
+    _INTERFACE_SCHEMA,
+    _TOOLKIT_ACCESSIBILITY_KEY,
+    Environment,
+)
 
 __all__ = ["Hint", "detect_distro", "hints_for", "advice"]
 
@@ -160,6 +164,7 @@ def hints_for(
     environment: Environment,
     distro: str | None = None,
     capabilities: CapabilitySet | None = None,
+    toolkit_accessibility: bool | None = None,
 ) -> Iterator[Hint]:
     """Yield a Hint for each capability the environment is missing.
 
@@ -169,6 +174,18 @@ def hints_for(
     Environment/detect() deliberately makes none, so this is the one hint
     below that reasons from the connection already made rather than from
     `environment` alone. Passing None just skips that one hint.
+
+    `toolkit_accessibility` is `toolkit_accessibility()`'s answer, passed in for the
+    same reason and one more. Calling it here would make this function do
+    I/O -- and not innocent I/O: reading a GSetting goes through dconf,
+    which opens a session-bus connection that GLib then caches for the
+    process. In a test run that cached connection outlives the swap
+    tests/test_portal_dbusmock.py makes to DBUS_SESSION_BUS_ADDRESS, so
+    those tests negotiate against the *real* portal instead of their
+    private fake one -- which raises real consent dialogs on the
+    developer's desktop and fails only when the whole suite runs in order.
+    Keeping this function pure is what makes that impossible rather than
+    merely unlikely. None means "not asked", and no hint fires for it.
     """
     from .session import Compositor, SessionType
 
@@ -189,6 +206,30 @@ def hints_for(
             # unrecognised distribution these are what to search that
             # distribution's own repository for.
             packages="PyGObject, pyatspi, at-spi2-core",
+        )
+    elif environment.compositor is Compositor.KWIN and toolkit_accessibility is False:
+        # Scoped to KWin on purpose, and narrowly. The setting being off is
+        # NOT evidence of a problem by itself: measured 2026-09-01, a GNOME
+        # Shell session had `toolkit-accessibility` false while AT-SPI
+        # worked perfectly -- every element query in that day's validation
+        # runs succeeded. On KDE, the same setting being off made elements
+        # invisible until it was turned on. The mechanism is not confirmed
+        # (plausibly GNOME's session registers GTK applications with the
+        # accessibility bus regardless), so this fires only where the failure was
+        # actually observed rather than wherever the value looks wrong.
+        # `debug` reports the raw value on every desktop, which is where a
+        # wlroots user would see it if it turns out to matter there too.
+        #
+        # `is False` rather than `not ...`: the probe returns None when the
+        # question cannot be asked at all, and that is not a fault.
+        yield Hint(
+            "the GTK accessibility bridge",
+            "AT-SPI is installed and reachable, but on KDE a GTK "
+            "application publishes nothing to it while "
+            "toolkit-accessibility is off -- element queries come back "
+            "empty, exactly as though the application had no widgets, and "
+            "nothing else reports a problem",
+            f"gsettings set {_INTERFACE_SCHEMA} {_TOOLKIT_ACCESSIBILITY_KEY} true",
         )
     # X11Backend is the only backend that serves any of tier 6 -- it needs a
     # real X11 connection, which XWayland still carries even though the
@@ -379,9 +420,20 @@ def advice(
     environment: Environment,
     distro: str | None = None,
     capabilities: CapabilitySet | None = None,
+    toolkit_accessibility: bool | None = None,
 ) -> str:
-    """Render the hints as text, or say that nothing is missing."""
-    found = list(hints_for(environment, distro, capabilities=capabilities))
+    """Render the hints as text, or say that nothing is missing.
+
+    `toolkit_accessibility` is threaded through rather than probed -- see hints_for.
+    """
+    found = list(
+        hints_for(
+            environment,
+            distro,
+            capabilities=capabilities,
+            toolkit_accessibility=toolkit_accessibility,
+        )
+    )
     if not found:
         return "Nothing missing: every capability this desktop can offer is available."
 

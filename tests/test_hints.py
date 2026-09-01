@@ -1,11 +1,18 @@
 """Install advice: distribution detection and what it recommends."""
 
 import dataclasses
+import subprocess
 import unittest
+from unittest import mock
 
 from pyguitest.capabilities import Capability, CapabilitySet
 from pyguitest.hints import advice, detect_distro, hints_for
-from pyguitest.session import Compositor, SessionType, detect
+from pyguitest.session import (
+    Compositor,
+    SessionType,
+    detect,
+    toolkit_accessibility,
+)
 
 
 def environment(**overrides):
@@ -128,8 +135,128 @@ class TestHints(unittest.TestCase):
         self.assertIn("pip install 'pyguitest[atspi]'", text)
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestToolkitAccessibilityHint(unittest.TestCase):
+    """The GTK accessibility bridge hint, and where it must stay quiet.
+
+    The setting being off is not evidence of a problem on its own -- the
+    machine this was written on is a GNOME session with it off and AT-SPI
+    working perfectly -- so most of these assert silence. A hint that fires
+    where nothing is wrong costs more than one that never fires at all: it
+    teaches people to skim past `doctor`.
+    """
+
+    def _hints(self, compositor, probe, **overrides):
+        # Passed in, not mocked: hints_for is pure by design -- calling the
+        # probe from inside it would make every hint test open a session-bus
+        # connection through dconf. See hints_for's own docstring for what
+        # that did to tests/test_portal_dbusmock.py.
+        env = environment(compositor=compositor, **overrides)
+        return list(hints_for(env, distro="fedora", toolkit_accessibility=probe))
+
+    def _fired(self, hints):
+        return [h for h in hints if h.component == "the GTK accessibility bridge"]
+
+    def _usable_atspi(self):
+        return {"has_atspi": True, "has_pygobject": True, "has_dogtail": True}
+
+    def test_it_fires_on_kde_when_the_setting_is_off(self):
+        hints = self._hints(Compositor.KWIN, False, **self._usable_atspi())
+        (hint,) = self._fired(hints)
+        self.assertIn("gsettings set", hint.command)
+        self.assertIn("toolkit-accessibility", hint.command)
+
+    def test_it_stays_quiet_on_gnome_with_the_setting_off(self):
+        # The false positive this scoping exists to avoid: measured live,
+        # GNOME has it off and AT-SPI works.
+        self.assertEqual(
+            self._fired(self._hints(Compositor.MUTTER, False, **self._usable_atspi())),
+            [],
+        )
+
+    def test_it_stays_quiet_on_wlroots_where_nothing_was_observed(self):
+        self.assertEqual(
+            self._fired(self._hints(Compositor.WLROOTS, False, **self._usable_atspi())),
+            [],
+        )
+
+    def test_it_stays_quiet_when_the_setting_is_on(self):
+        self.assertEqual(
+            self._fired(self._hints(Compositor.KWIN, True, **self._usable_atspi())), []
+        )
+
+    def test_it_stays_quiet_when_the_question_could_not_be_asked(self):
+        # None is "unknowable", not "off": no PyGObject, or no GNOME schemas
+        # installed at all, which is the normal state of a minimal box.
+        self.assertEqual(
+            self._fired(self._hints(Compositor.KWIN, None, **self._usable_atspi())), []
+        )
+
+    def test_it_defers_to_the_install_hint_when_atspi_is_not_usable_at_all(self):
+        # Telling someone to flip a setting for a bridge they have not
+        # installed is noise; the AT-SPI hint already covers that case.
+        hints = self._hints(Compositor.KWIN, False, has_dogtail=False)
+        self.assertEqual(self._fired(hints), [])
+        self.assertTrue([h for h in hints if h.component == "AT-SPI"])
+
+
+class TestTheProbeItself(unittest.TestCase):
+    """`gsettings get`, and every way it can decline to answer.
+
+    The probe shells out rather than reading GSettings in-process, which is
+    not a style preference: an in-process read goes through dconf, which
+    opens a session-bus connection that GDBus then caches for the whole
+    process -- and that cached connection survives the
+    DBUS_SESSION_BUS_ADDRESS swap tests/test_portal_dbusmock.py makes, so
+    those tests end up negotiating against the real portal and raising real
+    consent dialogs. That is measured, not theoretical: it happened.
+    """
+
+    def _run(self, **result):
+        completed = subprocess.CompletedProcess(
+            args=["gsettings"],
+            returncode=result.get("returncode", 0),
+            stdout=result.get("stdout", ""),
+            stderr="",
+        )
+        return mock.patch("subprocess.run", return_value=completed)
+
+    def test_true_and_false_are_read(self):
+        with self._run(stdout="true\n"):
+            self.assertIs(toolkit_accessibility(), True)
+        with self._run(stdout="false\n"):
+            self.assertIs(toolkit_accessibility(), False)
+
+    def test_a_missing_schema_reports_none_rather_than_false(self):
+        # gsettings exits non-zero when the schema is not installed, which
+        # is "cannot ask" -- reporting it as False would make every machine
+        # without GNOME schemas look misconfigured.
+        with self._run(returncode=1, stdout=""):
+            self.assertIsNone(toolkit_accessibility())
+
+    def test_a_missing_gsettings_binary_reports_none(self):
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError):
+            self.assertIsNone(toolkit_accessibility())
+
+    def test_a_hanging_gsettings_reports_none_rather_than_hanging(self):
+        # doctor and debug call this; a diagnostic that hangs is worse than
+        # one that says it could not tell.
+        with mock.patch(
+            "subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="gsettings", timeout=5),
+        ):
+            self.assertIsNone(toolkit_accessibility())
+
+    def test_unexpected_output_reports_none(self):
+        with self._run(stdout="something else entirely"):
+            self.assertIsNone(toolkit_accessibility())
+
+    def test_it_never_imports_gi(self):
+        # The property the subprocess exists to provide, pinned so a future
+        # "simplification" back to Gio.Settings fails here rather than in
+        # two unrelated portal tests a week later.
+        with self._run(stdout="true\n") as run:
+            toolkit_accessibility()
+        self.assertEqual(run.call_args.args[0][0], "gsettings")
 
 
 class TestInputAdvice(unittest.TestCase):
@@ -572,3 +699,7 @@ class TestEveryHintNamesSomething(unittest.TestCase):
                     hint.command or hint.packages,
                     f"{hint.component!r} names no tool and has no command",
                 )
+
+
+if __name__ == "__main__":
+    unittest.main()

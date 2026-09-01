@@ -400,6 +400,88 @@ def watch(gui, tree=False, as_json=False):
         print("\nstopped", file=sys.stderr)
 
 
+def _watch_mode(gui, args, tree, as_json):
+    """--watch: follow the pointer, reporting on each click."""
+    if len(args) != 1:
+        sys.exit(_USAGE)
+    if not (
+        gui.supports(Capability.POINTER_QUERY)
+        and gui.supports(Capability.INPUT_STATE_QUERY)
+    ):
+        sys.exit(
+            "--watch needs Capability.POINTER_QUERY and "
+            "Capability.INPUT_STATE_QUERY -- both need an X connection "
+            "(X11 or XWayland, with python-xlib), and this desktop does "
+            "not have them:\n"
+            f"{gui.environment.summary()}\n\n"
+            "Pass a coordinate directly instead:\n"
+            "  python3 examples/09_gui_spy.py X Y"
+        )
+    watch(gui, tree=tree, as_json=as_json)
+
+
+def _here(gui, args, as_json):
+    """--here: the point the pointer is on right now."""
+    if len(args) != 1:
+        sys.exit(_USAGE)
+    if not gui.supports(Capability.POINTER_QUERY):
+        sys.exit(
+            "--here needs Capability.POINTER_QUERY -- an X connection "
+            "(X11 or XWayland, with python-xlib), and this desktop does "
+            "not have it:\n"
+            f"{gui.environment.summary()}\n\n"
+            "Pass a coordinate directly instead:\n"
+            "  python3 examples/09_gui_spy.py X Y"
+        )
+    x, y = gui.pointer_position()
+    if not as_json:
+        print(f"pointer is at ({x}, {y})\n")
+    return x, y
+
+
+def _find(gui, args, as_json):
+    """--find: locate a template image and inspect its centre."""
+    if len(args) != 2:
+        sys.exit(
+            "--find needs exactly one template image:\n"
+            "  python3 examples/09_gui_spy.py --find button.png"
+        )
+    template = args[1]
+    for capability in (Capability.SCREEN_CAPTURE, Capability.IMAGE_LOCATE):
+        if not gui.supports(capability):
+            sys.exit(
+                f"{capability.name} is unavailable. Template matching "
+                "needs both a way to capture the screen and ImageMagick's "
+                "`compare` -- run `pyguitest doctor` for what to install."
+            )
+    try:
+        match = gui.locate_image(template)
+    except ImageNotFound:
+        sys.exit(
+            f"{template} was not found on screen.\n\n"
+            "Usually the template, not the search: it must be cropped "
+            "from this machine, at this scaling and theme. See example 08."
+        )
+    # Aim at the middle rather than the corner: the top-left of a match
+    # sits on the control's edge, where the click a suggested snippet
+    # would make could land on a border or just outside.
+    x, y = match.x + match.width // 2, match.y + match.height // 2
+    if not as_json:
+        print(
+            f"found {template!r} at {match.x},{match.y} "
+            f"(score {match.score}); inspecting its centre ({x}, {y})\n"
+        )
+    return x, y
+
+
+def _coordinates(args):
+    """A literal `X Y` pair."""
+    try:
+        return int(args[0]), int(args[1])
+    except ValueError:
+        sys.exit(f"X and Y must be integers, got {args[0]!r} {args[1]!r}")
+
+
 def main(argv):
     """Parse `argv`, then report on the point(s) it names."""
     args = argv[1:]
@@ -409,76 +491,17 @@ def main(argv):
 
     gui = pyguitest.connect()
 
+    # Each mode works out which point to inspect; --watch is the exception,
+    # since it inspects many over time and reports as it goes.
     if args[:1] == ["--watch"]:
-        if len(args) != 1:
-            sys.exit(_USAGE)
-        if not (
-            gui.supports(Capability.POINTER_QUERY)
-            and gui.supports(Capability.INPUT_STATE_QUERY)
-        ):
-            sys.exit(
-                "--watch needs Capability.POINTER_QUERY and "
-                "Capability.INPUT_STATE_QUERY -- both need an X connection "
-                "(X11 or XWayland, with python-xlib), and this desktop does "
-                "not have them:\n"
-                f"{gui.environment.summary()}\n\n"
-                "Pass a coordinate directly instead:\n"
-                "  python3 examples/09_gui_spy.py X Y"
-            )
-        watch(gui, tree=tree, as_json=as_json)
+        _watch_mode(gui, args, tree=tree, as_json=as_json)
         return
-
     if args[:1] == ["--here"]:
-        if len(args) != 1:
-            sys.exit(_USAGE)
-        if not gui.supports(Capability.POINTER_QUERY):
-            sys.exit(
-                "--here needs Capability.POINTER_QUERY -- an X connection "
-                "(X11 or XWayland, with python-xlib), and this desktop does "
-                "not have it:\n"
-                f"{gui.environment.summary()}\n\n"
-                "Pass a coordinate directly instead:\n"
-                "  python3 examples/09_gui_spy.py X Y"
-            )
-        x, y = gui.pointer_position()
-        if not as_json:
-            print(f"pointer is at ({x}, {y})\n")
+        x, y = _here(gui, args, as_json)
     elif args[:1] == ["--find"]:
-        if len(args) != 2:
-            sys.exit(
-                "--find needs exactly one template image:\n"
-                "  python3 examples/09_gui_spy.py --find button.png"
-            )
-        template = args[1]
-        for capability in (Capability.SCREEN_CAPTURE, Capability.IMAGE_LOCATE):
-            if not gui.supports(capability):
-                sys.exit(
-                    f"{capability.name} is unavailable. Template matching "
-                    "needs both a way to capture the screen and ImageMagick's "
-                    "`compare` -- run `pyguitest doctor` for what to install."
-                )
-        try:
-            match = gui.locate_image(template)
-        except ImageNotFound:
-            sys.exit(
-                f"{template} was not found on screen.\n\n"
-                "Usually the template, not the search: it must be cropped "
-                "from this machine, at this scaling and theme. See example 08."
-            )
-        # Aim at the middle rather than the corner: the top-left of a match
-        # sits on the control's edge, where the click a suggested snippet
-        # would make could land on a border or just outside.
-        x, y = match.x + match.width // 2, match.y + match.height // 2
-        if not as_json:
-            print(
-                f"found {template!r} at {match.x},{match.y} "
-                f"(score {match.score}); inspecting its centre ({x}, {y})\n"
-            )
+        x, y = _find(gui, args, as_json)
     elif len(args) == 2:
-        try:
-            x, y = int(args[0]), int(args[1])
-        except ValueError:
-            sys.exit(f"X and Y must be integers, got {args[0]!r} {args[1]!r}")
+        x, y = _coordinates(args)
     else:
         sys.exit(_USAGE)
 

@@ -23,6 +23,35 @@ from pyguitest.__main__ import (
 )
 from pyguitest.capabilities import Capability, CapabilitySet
 
+_probe_patch = None
+
+
+def setUpModule():
+    """Never let these unit tests run the live GSettings probe.
+
+    Two reasons, and the second is the one that bites. It is a unit test
+    against a fake session, so reading the developer's real desktop
+    settings would make the result depend on the machine. And the probe
+    imports PyGObject: importing Gio anywhere in the test process
+    initialises GLib and caches its session-bus connection, which then
+    breaks tests/test_portal_dbusmock.py -- those swap
+    DBUS_SESSION_BUS_ADDRESS for a private dbus-daemon and get handed the
+    cached connection to the *real* bus instead. That failure surfaces as
+    two unrelated portal tests failing only when the whole suite runs in
+    order, which is a genuinely nasty thing to debug; hence pinning it
+    here at the source.
+    """
+    global _probe_patch
+    _probe_patch = mock.patch(
+        "pyguitest.__main__.toolkit_accessibility", return_value=None
+    )
+    _probe_patch.start()
+
+
+def tearDownModule():
+    if _probe_patch is not None:
+        _probe_patch.stop()
+
 
 class _FakeBackend:
     name = "fake"
@@ -142,6 +171,19 @@ class TestDebugData(unittest.TestCase):
         gui.focus_tracking_works = explode
         self.assertIsNone(_debug_data(gui)["focus_tracking"])
 
+    def test_toolkit_accessibility_is_reported_whatever_it_says(self):
+        # All three answers reach the dump. None is "could not ask" -- no
+        # PyGObject, or no GNOME schemas -- and is not the same report as
+        # "asked, and it is off", which is what makes elements invisible on
+        # KDE. setUpModule pins the probe, so each value is set explicitly.
+        gui = _FakeGui(_environment())
+        for value in (True, False, None):
+            with self.subTest(value=value):
+                with mock.patch(
+                    "pyguitest.__main__.toolkit_accessibility", return_value=value
+                ):
+                    self.assertIs(_debug_data(gui)["toolkit_accessibility"], value)
+
     def test_environment_lists_every_field_true_and_false(self):
         # Regression risk this guards against: summary() only prints
         # mechanisms that are True, which is exactly wrong for a bug
@@ -199,6 +241,22 @@ class TestFormatDebug(unittest.TestCase):
         self.assertIn("environment", text)
         self.assertIn("has_uinput", text)
         self.assertIn("fake backend report", text)
+
+    def test_toolkit_accessibility_renders_all_three_answers(self):
+        # And renders "off" without calling it a fault: off is normal on
+        # GNOME, where AT-SPI works anyway. The text has to carry that,
+        # because someone reading a pasted report cannot ask.
+        data = self._data()
+        for value, expected in (
+            (True, "toolkit-accessibility on"),
+            (False, "OFF"),
+            (None, "not readable"),
+        ):
+            with self.subTest(value=value):
+                data["toolkit_accessibility"] = value
+                self.assertIn(expected, _format_debug(data))
+        data["toolkit_accessibility"] = False
+        self.assertIn("harmless on GNOME", _format_debug(data))
 
     def test_sandbox_and_host_distro_are_reported_when_present(self):
         data = self._data()
