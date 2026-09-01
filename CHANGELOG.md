@@ -7,6 +7,8 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-09-01
+
 ### Added
 
 - `Session.glide()` and `Session.drag()`: pointer motion emitted as a
@@ -530,5 +532,7 @@ First public release.
 - A `pyguitest` command-line entry point.
 - PEP 561 type information (`py.typed`); no hard runtime dependencies.
 
-[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/ctrondlp/pyguitest/compare/v0.1.1...v0.2.0
+[0.1.1]: https://github.com/ctrondlp/pyguitest/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/ctrondlp/pyguitest/tree/v0.1.0
