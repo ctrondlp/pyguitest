@@ -346,9 +346,7 @@ class TestElements(AtspiTestCase):
 
     def test_find_elements_predicate_receives_a_real_element(self):
         gui = self.backend()
-        found = gui.find_elements(
-            role="push button", predicate=lambda e: not e.enabled
-        )
+        found = gui.find_elements(role="push button", predicate=lambda e: not e.enabled)
         self.assertEqual([e.name for e in found], ["Cancel"])
 
     def test_find_elements_combines_filters(self):

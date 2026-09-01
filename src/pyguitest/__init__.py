@@ -1202,18 +1202,21 @@ class Session:
             return found[0]
         actual = self.focused()
         got = f"{actual.role!r} {actual.name!r}" if actual is not None else "nothing"
-        wanted = ", ".join(
-            part
-            for part in (
-                f"role={role!r}" if role else "",
-                f"name={name!r}" if name else "",
-                f"enabled={enabled!r}" if enabled is not None else "",
-                f"visible={visible!r}" if visible is not None else "",
-                f"description={description!r}" if description else "",
-                "predicate=<custom>" if predicate else "",
+        wanted = (
+            ", ".join(
+                part
+                for part in (
+                    f"role={role!r}" if role else "",
+                    f"name={name!r}" if name else "",
+                    f"enabled={enabled!r}" if enabled is not None else "",
+                    f"visible={visible!r}" if visible is not None else "",
+                    f"description={description!r}" if description else "",
+                    "predicate=<custom>" if predicate else "",
+                )
+                if part
             )
-            if part
-        ) or "any element"
+            or "any element"
+        )
         raise FocusMismatch(f"expected focus on {wanted}; actual focus: {got}")
 
     def assert_tab_order(

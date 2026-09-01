@@ -210,9 +210,12 @@ carries a `restore_token`. Passing that token back into a later
 `SelectDevices` call lets the portal recognize the previously-approved
 session and skip straight to `Start()` — the same mechanism every
 screen-sharing and remote-desktop app uses to avoid re-prompting on every
-launch, not a bypass of it. The token is single-use: each successful restore
-returns a *new* token in its own `Start()` reply, which the caller must save
-in place of the old one.
+launch, not a bypass of it. Each successful restore returns a token in its
+own `Start()` reply, and the caller must save that one in place of the old:
+the portal is free to answer with a different token, and code that keeps
+reusing the original would eventually present a stale one. (Measured
+2026-09-01 on GNOME: the same token comes back on every restore. That is one
+portal's behaviour, not a guarantee to rely on.)
 
 This is implemented, on both `portal` and `eiinput`, and is opt-in: a plain
 `connect(backend="portal")` sends neither option and prompts every time, so
@@ -227,7 +230,7 @@ gui = connect(
         "restore_token": saved,  # None on the first run
     },
 )
-save_it_yourself(gui.backend.restore_token)  # single-use: replaces `saved`
+save_it_yourself(gui.backend.restore_token)  # save every run; replaces `saved`
 ```
 
 pyguitest deliberately never writes the token anywhere itself — see the

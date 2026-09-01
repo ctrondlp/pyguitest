@@ -224,14 +224,29 @@ class FakeUnixFDList:
 
 
 class FakeMainLoop:
-    """quit() is always called synchronously, before run() is reached."""
+    """quit() is normally called synchronously, before run() is reached.
+
+    `pending_timeout` is the escape hatch for the timeout test: a loop whose
+    quit() was never called fires whatever `GLib.timeout_add_seconds`
+    registered, standing in for real GLib firing the source once the clock
+    passes it. Without it, a fake that simply raised on an unquit run()
+    could not tell "hung forever" from "timed out cleanly".
+    """
+
+    pending_timeout = None
 
     def __init__(self):
         self._quit = False
 
     def run(self):
-        if not self._quit:
-            raise AssertionError("run() called before a synchronous quit()")
+        if self._quit:
+            return
+        callback = FakeMainLoop.pending_timeout
+        if callback is not None:
+            FakeMainLoop.pending_timeout = None
+            callback()
+            return
+        raise AssertionError("run() called before a synchronous quit()")
 
     def quit(self):
         self._quit = True
@@ -334,6 +349,21 @@ def install_fake_gi(connection=None):
     GLib.Variant = FakeVariant
     GLib.MainLoop = FakeMainLoop
     GLib.VariantType = types.SimpleNamespace(new=lambda sig: sig)
+
+    # timeout_add_seconds stashes the callback rather than scheduling it;
+    # only the timeout test, which never quit()s the loop, lets it fire.
+    def timeout_add_seconds(_seconds, callback):
+        FakeMainLoop.pending_timeout = callback
+        return 1
+
+    def source_remove(_source_id):
+        # Mirrors real GLib: a removed source cannot fire afterwards. Since
+        # _request() always removes in a finally, this also stops a stashed
+        # callback leaking from one test into the next.
+        FakeMainLoop.pending_timeout = None
+
+    GLib.timeout_add_seconds = timeout_add_seconds
+    GLib.source_remove = source_remove
 
     repository.Gio = Gio
     repository.GLib = GLib
@@ -763,8 +793,32 @@ class TestNegotiation(unittest.TestCase):
         select = next(c for c in connection.calls if c[0] == "SelectDevices")
         self.assertEqual(select[1][-1]["persist_mode"].value, 2)
         self.assertEqual(select[1][-1]["restore_token"].value, "tok-old")
-        # Single-use: the fresh token replaces the one we presented.
+        # Whatever Start() answers with replaces the token we presented --
+        # a portal may hand back a different one, so the caller must store
+        # the reply rather than keep reusing the original.
         self.assertEqual(gui.restore_token, "tok-next")
+
+    def test_a_portal_that_never_answers_times_out(self):
+        # The failure an unbounded loop.run() cannot recover from: the call
+        # is accepted, no Response ever fires, and there is no fd to poll
+        # and nothing to interrupt the wait. _PORTAL_TIMEOUT existed for
+        # exactly this and was never actually wired up.
+        from pyguitest.errors import PortalTimeout
+
+        class SilentConnection(FakeConnection):
+            def call_sync(self, *args, **kwargs):
+                method = args[3]
+                self.calls.append((method, args[4].value))
+                if method == "Get":
+                    return FakeReply((self.version,))
+                return FakeReply(())  # accepted; no Response ever delivered
+
+        connection = SilentConnection()
+        LibeiBackend = self._backend(connection)
+        self.addCleanup(setattr, FakeMainLoop, "pending_timeout", None)
+        with self.assertRaises(PortalTimeout) as ctx:
+            LibeiBackend()
+        self.assertEqual(ctx.exception.method, "CreateSession")
 
     def test_device_wait_timeout_raises_backend_unavailable(self):
         connection = FakeConnection()

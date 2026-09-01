@@ -20,11 +20,33 @@ from __future__ import annotations
 
 import uuid
 
-__all__ = ["gio", "available", "BUS_NAME", "OBJECT_PATH", "call", "request"]
+from ..errors import PortalTimeout
+
+__all__ = [
+    "gio",
+    "available",
+    "BUS_NAME",
+    "OBJECT_PATH",
+    "DEFAULT_TIMEOUT",
+    "call",
+    "request",
+]
 
 BUS_NAME = "org.freedesktop.portal.Desktop"
 OBJECT_PATH = "/org/freedesktop/portal/desktop"
 REQUEST_INTERFACE = "org.freedesktop.portal.Request"
+
+DEFAULT_TIMEOUT = 60
+"""Seconds to wait for a Response before giving up, for requests that can
+show UI -- generous, since a human has to see and answer the dialog.
+
+Bounded at all because the alternative is worse than a late answer: a portal
+that accepts the call and then dies (or a Response delivered to a path
+nobody is listening on) sends nothing, and an unbounded `loop.run()` then
+blocks the calling thread forever, with no fd to poll and no way to
+interrupt it. A caller who genuinely wants to wait indefinitely can pass
+`timeout=None`.
+"""
 
 
 def gio():
@@ -65,7 +87,9 @@ def call(modules, connection, interface, method, signature, args):
     )
 
 
-def request(modules, connection, interface, method, signature, args):
+def request(
+    modules, connection, interface, method, signature, args, timeout=DEFAULT_TIMEOUT
+):
     """Call a method that returns a Request handle, and await its reply.
 
     `args` must end with the options dict; a `handle_token` is added to it
@@ -77,6 +101,11 @@ def request(modules, connection, interface, method, signature, args):
     portal is free to hand back something else, and the fake in
     tests/test_portal_dbusmock.py does exactly that. Listening on both is
     strictly safer than trusting either alone.
+
+    Waits at most `timeout` seconds for the Response, raising
+    `PortalTimeout` if none arrives; `timeout=None` waits indefinitely,
+    which is what this did unconditionally before -- see DEFAULT_TIMEOUT for
+    why that is no longer the default.
 
     Returns `(code, results)`: the portal's own response code (0 is
     success) and its results dictionary.
@@ -92,12 +121,23 @@ def request(modules, connection, interface, method, signature, args):
     loop = GLib.MainLoop()
     result: dict = {}
     subscriptions: list = []
+    timed_out = False
 
     def on_response(_conn, _sender, _path, _iface, _signal, params, *_):
         if result:  # both subscriptions may fire; first reply wins
             return
         result["code"], result["results"] = params.unpack()
         loop.quit()
+
+    def on_timeout():
+        # Recorded rather than inferred from an empty `result` afterwards: a
+        # Response carrying no results is legitimate (SelectDevices answers
+        # with an empty dict), so "did this end because it timed out" has to
+        # be a fact, not a deduction.
+        nonlocal timed_out
+        timed_out = True
+        loop.quit()
+        return False  # one-shot; GLib drops the source when this is False
 
     def subscribe(path):
         subscriptions.append(
@@ -124,8 +164,20 @@ def request(modules, connection, interface, method, signature, args):
         # reached; running the loop then would block with nothing left to
         # deliver it.
         if not result:
-            loop.run()
+            source = None
+            if timeout is not None:
+                source = GLib.timeout_add_seconds(timeout, on_timeout)
+            try:
+                loop.run()
+            finally:
+                # Removing an already-fired one-shot source is harmless;
+                # leaving a live one holds a reference to this closure and
+                # fires it into a dead loop on some later request.
+                if source is not None:
+                    GLib.source_remove(source)
     finally:
         for subscription in subscriptions:
             connection.signal_unsubscribe(subscription)
+    if timed_out:
+        raise PortalTimeout(method, timeout)
     return result["code"], result["results"]

@@ -135,8 +135,6 @@ def format_tree(data):
         windows = app["windows"]
         for w_index, window in enumerate(windows):
             lines.extend(
-                _format_node(
-                    window, "", w_index == len(windows) - 1, top_level=True
-                )
+                _format_node(window, "", w_index == len(windows) - 1, top_level=True)
             )
     return "\n".join(lines)

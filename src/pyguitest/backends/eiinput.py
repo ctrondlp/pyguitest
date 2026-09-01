@@ -110,7 +110,12 @@ import uuid
 
 from .. import xkb as _xkb
 from ..capabilities import Capability, CapabilitySet
-from ..errors import BackendUnavailable, PermissionRequired, PyGUITestError
+from ..errors import (
+    BackendUnavailable,
+    PermissionRequired,
+    PortalTimeout,
+    PyGUITestError,
+)
 from .base import GUIBackend
 
 __all__ = ["LibeiBackend", "available"]
@@ -136,8 +141,11 @@ PERSIST_UNTIL_REVOKED = 2
 
 _PORTAL_TIMEOUT = 60
 """Seconds to wait for the consent dialog -- generous, since a human has to
-see and answer it, same reasoning as portal.py's Start() having no bound at
-all; this at least caps it."""
+see and answer it, but bounded: a portal that accepts the call and then dies
+sends no Response and no error, and an unbounded `loop.run()` waits on that
+forever with no fd to poll and nothing to interrupt it. Matches
+portalrequest.py's DEFAULT_TIMEOUT, which caps the same wait for the other
+portal backends."""
 
 _DEVICE_TIMEOUT = 15
 """Seconds to wait for a device to reach DEVICE_RESUMED once the fd is live.
@@ -213,11 +221,16 @@ class LibeiBackend(GUIBackend):
 
         `persist_mode`/`restore_token` avoid re-prompting on every launch,
         exactly as in `PortalBackend`: ask for persistence, read
-        `self.restore_token` afterwards, and hand it back next time. Each
-        restore mints a new token. Nothing is written to disk here -- the
-        token is a standing grant of input injection, so storing it is the
-        caller's decision. This is also the reason this backend negotiates
-        the portal itself instead of using `libei.oeffis`, whose
+        `self.restore_token` afterwards, and hand it back next time. Save
+        whatever comes back on every run rather than only the first: the
+        portal may answer with a different token, and a caller keeping only
+        the original would eventually present a stale one. (Measured
+        2026-09-01 on GNOME: the same token comes back each restore. That
+        is one portal's behaviour, not a guarantee.) Nothing is written to
+        disk here -- the token is a standing grant of input injection, so
+        storing it is the caller's decision. This is also the reason this
+        backend negotiates the portal itself instead of using
+        `libei.oeffis`, whose
         `oeffis_create_session()` takes only a device-type bitmask and
         exposes neither options nor the session handle.
         """
@@ -303,10 +316,21 @@ class LibeiBackend(GUIBackend):
 
         loop = self._GLib.MainLoop()
         result = {}
+        timed_out = False
 
         def on_response(_conn, _sender, _path, _iface, _signal, params, *_a):
             result["code"], result["results"] = params.unpack()
             loop.quit()
+
+        def on_timeout():
+            # Recorded rather than inferred from an empty `result`: a
+            # Response carrying no results is legitimate (SelectDevices
+            # answers with an empty dict), so "did this end because it
+            # timed out" has to be a fact, not a deduction.
+            nonlocal timed_out
+            timed_out = True
+            loop.quit()
+            return False  # one-shot; GLib drops the source when False
 
         subscription = self._connection.signal_subscribe(
             _BUS_NAME,
@@ -331,9 +355,24 @@ class LibeiBackend(GUIBackend):
                 -1,
                 None,
             )
-            loop.run()
+            # `if not result` because a synchronous answer (a fake
+            # connection, or a fast non-interactive Response) can arrive
+            # during call_sync, before run() is reached -- and quit() before
+            # run() does not stop the loop, so running it then would block
+            # with nothing left to deliver. The same guard portalrequest.py
+            # carries, for the same reason.
+            if not result:
+                source = self._GLib.timeout_add_seconds(_PORTAL_TIMEOUT, on_timeout)
+                try:
+                    loop.run()
+                finally:
+                    # A fired one-shot is already gone; a live one would
+                    # hold this closure and fire into a dead loop later.
+                    self._GLib.source_remove(source)
         finally:
             self._connection.signal_unsubscribe(subscription)
+        if timed_out:
+            raise PortalTimeout(method, _PORTAL_TIMEOUT)
         return result["code"], result["results"]
 
     def _call_for_fd(self, interface, method, session_handle):

@@ -37,17 +37,31 @@ class FakeReply:
 class FakeMainLoop:
     """Stands in for GLib.MainLoop.
 
-    quit() is always called synchronously, from within signal_subscribe,
+    quit() is normally called synchronously, from within signal_subscribe,
     before run() is reached in these tests -- there is no real event loop
     backing this, so run() never actually has anything to wait for.
+
+    `pending_timeout` covers the one case that is not like that: a request
+    nobody ever answers. Such a loop fires whatever
+    `GLib.timeout_add_seconds` registered, standing in for real GLib firing
+    the source once the clock passes it -- which is how a test can tell
+    "would have hung forever" from "timed out cleanly".
     """
+
+    pending_timeout = None
 
     def __init__(self):
         self._quit = False
 
     def run(self):
-        if not self._quit:
-            raise AssertionError("run() called before a synchronous quit()")
+        if self._quit:
+            return
+        callback = FakeMainLoop.pending_timeout
+        if callback is not None:
+            FakeMainLoop.pending_timeout = None
+            callback()
+            return
+        raise AssertionError("run() called before a synchronous quit()")
 
     def quit(self):
         self._quit = True
@@ -137,6 +151,21 @@ def install_fake_gi():
     GLib = types.ModuleType("gi.repository.GLib")
     GLib.Variant = FakeVariant
     GLib.MainLoop = FakeMainLoop
+
+    # timeout_add_seconds stashes the callback rather than scheduling it;
+    # only a test that never quit()s the loop lets it fire.
+    def timeout_add_seconds(_seconds, callback):
+        FakeMainLoop.pending_timeout = callback
+        return 1
+
+    def source_remove(_source_id):
+        # Mirrors real GLib: a removed source cannot fire afterwards, which
+        # also stops a stashed callback leaking between tests, since
+        # request() always removes in a finally.
+        FakeMainLoop.pending_timeout = None
+
+    GLib.timeout_add_seconds = timeout_add_seconds
+    GLib.source_remove = source_remove
 
     repository.Gio = Gio
     repository.GLib = GLib
@@ -356,7 +385,9 @@ class TestNegotiation(unittest.TestCase):
         self.assertEqual(select[1][-1]["restore_token"].value, "tok-abc")
 
     def test_a_new_restore_token_is_exposed_after_start(self):
-        # Single-use: the caller must save this one in place of the old.
+        # The caller must save this one in place of the old: a portal may
+        # answer with a different token, and reusing the original would
+        # eventually present a stale one.
         connection = FakeConnection(
             responses={
                 "CreateSession": (0, {"session_handle": "/session/1"}),
@@ -392,6 +423,97 @@ class TestNegotiation(unittest.TestCase):
             with self.assertRaises(BackendUnavailable) as ctx:
                 self.module.PortalBackend()
             self.assertIn("PyGObject", str(ctx.exception))
+
+
+class TestRequestTimeout(unittest.TestCase):
+    """A portal that accepts a call and then never answers must not hang.
+
+    This is the failure an unbounded `loop.run()` cannot recover from: no
+    Response, no error, no fd to poll, and nothing to interrupt the wait.
+    """
+
+    def setUp(self):
+        patcher = install_fake_gi()
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(setattr, FakeMainLoop, "pending_timeout", None)
+        from pyguitest.backends import portalrequest
+
+        self.portalrequest = portalrequest
+
+    def _silent_connection(self):
+        """A connection whose calls are accepted but never answered."""
+
+        class SilentConnection(FakeConnection):
+            def call_sync(self, *args, **kwargs):
+                # Returns the handle, as a real portal does, but fires no
+                # Response against any subscription.
+                return FakeReply(("/org/freedesktop/portal/desktop/request/x/y",))
+
+        return SilentConnection()
+
+    def test_a_request_that_is_never_answered_times_out(self):
+        from pyguitest.errors import PortalTimeout
+
+        connection = self._silent_connection()
+        modules = (
+            sys.modules["gi.repository"].Gio,
+            sys.modules["gi.repository"].GLib,
+        )
+        with self.assertRaises(PortalTimeout) as ctx:
+            self.portalrequest.request(
+                modules,
+                connection,
+                "org.freedesktop.portal.RemoteDesktop",
+                "Start",
+                "(oa{sv})",
+                ("/session/1", {}),
+                timeout=1,
+            )
+        self.assertEqual(ctx.exception.method, "Start")
+        self.assertEqual(ctx.exception.timeout, 1)
+
+    def test_timeout_none_still_waits_indefinitely(self):
+        # The old unconditional behaviour stays reachable for a caller that
+        # genuinely wants it -- with no timeout source registered, the fake
+        # loop has nothing to fire and reports the would-be hang.
+        connection = self._silent_connection()
+        modules = (
+            sys.modules["gi.repository"].Gio,
+            sys.modules["gi.repository"].GLib,
+        )
+        with self.assertRaises(AssertionError) as ctx:
+            self.portalrequest.request(
+                modules,
+                connection,
+                "org.freedesktop.portal.RemoteDesktop",
+                "Start",
+                "(oa{sv})",
+                ("/session/1", {}),
+                timeout=None,
+            )
+        self.assertIn("run() called before a synchronous quit()", str(ctx.exception))
+
+    def test_a_normal_answer_is_unaffected_by_the_timeout(self):
+        # The timeout must not disturb the ordinary path: the canned
+        # response still arrives, and the source is removed rather than
+        # left live to fire into a later request's loop.
+        connection = FakeConnection(responses={"Start": (0, {"devices": 2})})
+        modules = (
+            sys.modules["gi.repository"].Gio,
+            sys.modules["gi.repository"].GLib,
+        )
+        code, results = self.portalrequest.request(
+            modules,
+            connection,
+            "org.freedesktop.portal.RemoteDesktop",
+            "Start",
+            "(oa{sv})",
+            ("/session/1", {}),
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(results, {"devices": 2})
+        self.assertIsNone(FakeMainLoop.pending_timeout)
 
 
 if __name__ == "__main__":

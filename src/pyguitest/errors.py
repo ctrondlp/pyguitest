@@ -52,6 +52,26 @@ class PermissionRequired(CapabilityUnsupported):
     """
 
 
+class PortalTimeout(PyGUITestError):
+    """A portal request was accepted but never answered.
+
+    Distinct from PermissionRequired, which means the user actively declined:
+    here the portal took the call and no Response signal ever arrived. The
+    ordinary cause is a consent dialog nobody answered; the one that makes
+    this a typed error rather than a hang is a portal that died mid-request,
+    leaving a caller waiting on a signal that can never come.
+    """
+
+    def __init__(self, method: str, timeout: float) -> None:
+        """Record which portal method timed out, and after how long."""
+        self.method = method
+        self.timeout = timeout
+        super().__init__(
+            f"the portal did not answer {method} within {timeout:g}s "
+            "(an unanswered consent dialog, or a portal that stopped responding)"
+        )
+
+
 class ElementNotFound(PyGUITestError):
     """No accessible element matched the search.
 

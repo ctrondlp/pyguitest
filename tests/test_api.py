@@ -714,9 +714,7 @@ class TestAssertTabOrder(unittest.TestCase):
         # expected name is never actually reached.
         with mock.patch.object(self.gui, "press_tab"):
             with self.assertRaises(FocusMismatch):
-                self.gui.assert_tab_order(
-                    ["OK", "Name"], timeout=0.1, interval=0.01
-                )
+                self.gui.assert_tab_order(["OK", "Name"], timeout=0.1, interval=0.01)
 
 
 class TestRoleVocabulary(unittest.TestCase):

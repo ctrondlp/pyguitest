@@ -300,9 +300,12 @@ class PortalBackend(GUIBackend):
                 self.name,
                 "the user declined the remote-control consent dialog",
             )
-        # Single-use: each restore mints a fresh token, so a caller that
-        # keeps reusing the original will be prompted again once it is
-        # spent. Absent whenever no persist_mode was asked for.
+        # Save this in place of the token that was presented: the portal may
+        # answer with a different one, and a caller that keeps reusing the
+        # original would eventually present a stale token and be prompted
+        # again. (On GNOME the same token comes back each restore -- one
+        # portal's behaviour, not a guarantee.) Absent whenever no
+        # persist_mode was asked for.
         self.restore_token = results.get("restore_token")
         return session_handle
 

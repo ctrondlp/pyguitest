@@ -214,6 +214,24 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ### Fixed
 
+- Every portal request could hang the calling thread forever. The wait for
+  a `Response` signal ran an unbounded `GLib.MainLoop`, so a portal that
+  accepted the call and then stopped answering — a crash mid-request, or a
+  `Response` delivered to a path nobody was listening on — left the caller
+  blocked with no fd to poll and nothing to interrupt it. Both copies of
+  that wait are now bounded and raise the new `PortalTimeout` (60s default,
+  overridable; `timeout=None` restores the old unbounded behaviour for a
+  caller who wants it). This affected `portalrequest.py`, and so the
+  RemoteDesktop *and* Screenshot backends that share it, as well as
+  `eiinput.py`'s own copy — where `_PORTAL_TIMEOUT = 60` had been defined
+  with a docstring explaining the cap, and then never actually referenced,
+  so the constant read as protection that was not there.
+- `eiinput.py` ran its main loop unconditionally after issuing a portal
+  call, where `portalrequest.py` guards with `if not result`. A response
+  that arrives synchronously — during `call_sync`, before `run()` is
+  reached — calls `quit()` on a loop that is not running yet, which does
+  not stop the subsequent `run()`; the loop then blocked with the reply
+  already delivered and nothing left to wake it. Now guarded the same way.
 - `hints.advice()` emitted each hint as one unbroken line, running to
   several hundred characters for the longer ones — a wall of text in any
   terminal, and `doctor` output is routinely pasted into bug reports. Now
