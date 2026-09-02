@@ -7,8 +7,62 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- A backend factory can now raise `BackendUnavailable` from construction,
+  with the real reason, instead of swallowing it into a bare `None`. Six
+  factories (atspi, gnomeshell, x11, portal, eiinput, portalcapture) used to
+  catch their own construction failure and return `None`, which is right
+  for automatic composition -- one member declining is not an error -- but
+  wrong for `connect(backend=name)`: naming a backend is a request, and the
+  caller got `select()`'s own generic "backend 'x' cannot drive this
+  session" instead of whatever the backend actually said, e.g. why
+  `eiinput` couldn't negotiate. The catch is now centralized in one place
+  (`_auto_build`) that only automatic composition goes through; naming a
+  backend lets its own exception propagate verbatim. A factory that simply
+  cannot apply here at all -- wrong compositor, a library not importable --
+  still returns `None` either way.
+- `send_keys`'s grammar moved to a new `sendkeys.py` as `KeySender`, with
+  no change to what the grammar does. It was one method holding three
+  closures over four pieces of shared mutable state, scoring 26 on
+  cyclomatic complexity -- the worst in the package, and the reason the
+  new `C901` ceiling exists. `Session.send_keys` keeps the documentation,
+  since that is where a caller looks for it; the 31 grammar tests pass
+  unchanged, which is what makes the move safe to claim as behaviour-
+  preserving. `examples/09_gui_spy.py` and
+  `examples/_xtest_input_validate.py` were split the same way, each mode
+  and each validated capability becoming its own function.
+
 ### Added
 
+- `primary=True` on `get_clipboard()`/`set_clipboard()`, reaching the
+  X11/Wayland PRIMARY selection -- what a middle-click paste reads --
+  independently of the clipboard proper. `Session.assert_clipboard(expected,
+  primary=False)` checks either one for an exact match, raising the new
+  `ClipboardMismatch`. Every existing `CLIPBOARD_TOOLS` member (wl-copy,
+  xclip, xsel) already speaks PRIMARY as a second named selection rather
+  than a separate command, so this is one argument on the existing backend
+  rather than a new one.
+- `Session.assert_accessible()`, `assert_no_missing_accessible_names()` and
+  `assert_no_duplicate_accessible_names()`, raising the new
+  `AccessibilityViolation`. The same defect shows up twice over: a control
+  with no accessible name is read out by a screen reader as just "button",
+  and cannot be found by `gui.button("Save")` either -- so it is worth
+  asserting in an ordinary GUI test rather than only in an audit. Duplicates
+  matter for the same reason: two buttons both called "Delete" mean whichever
+  the locator returns first is a coin toss, and a test written against it
+  fails the day the order changes.
+
+  Which roles are *required* to carry a name is the whole design, and it is
+  one visible constant, `NAMED_ROLES`, overridable per call with `roles=`.
+  The line is drawn at "act on it by name": pressable controls, text entries,
+  choices, tabs and sliders. Content roles (label, heading, paragraph, table
+  cell, list item) carry their text as content rather than as a name;
+  structural ones (panel, viewport, separator, toolbar) are furniture; images
+  and icons are frequently decorative. Only visible elements are considered.
+  All of that errs toward quiet on purpose -- an assertion nobody can switch
+  on catches nothing, and a hidden dialog's worth of unnamed widgets would
+  bury the findings that matter.
 - `Session.refresh_window(window)` and `Session.is_window_open(window)`, plus
   equality and hashing on `Window`. A `Window` is a snapshot: its title was
   true when it was taken and the handle beneath it may since have gone, and
@@ -25,22 +79,6 @@ All notable changes to pyguitest are recorded here. The format follows
   What none of this addresses is `windows()` and the accessibility tree
   disagreeing about *membership* — that needs a way to relate the two
   sources, not a way to compare windows within one, and is left alone.
-
-### Changed
-
-- `send_keys`'s grammar moved to a new `sendkeys.py` as `KeySender`, with
-  no change to what the grammar does. It was one method holding three
-  closures over four pieces of shared mutable state, scoring 26 on
-  cyclomatic complexity -- the worst in the package, and the reason the
-  new `C901` ceiling exists. `Session.send_keys` keeps the documentation,
-  since that is where a caller looks for it; the 31 grammar tests pass
-  unchanged, which is what makes the move safe to claim as behaviour-
-  preserving. `examples/09_gui_spy.py` and
-  `examples/_xtest_input_validate.py` were split the same way, each mode
-  and each validated capability becoming its own function.
-
-### Added
-
 - `doctor` warns when KDE's GTK applications cannot publish elements, and
   `debug` reports the setting behind it on every desktop
   (`toolkit_accessibility()` in `session.py`). GTK loads its AT-SPI bridge
@@ -54,6 +92,23 @@ All notable changes to pyguitest are recorded here. The format follows
   field because reading the value means importing PyGObject, and `detect()`
   deliberately imports nothing — it uses `find_spec` throughout, so a plain
   `connect()` still pulls in no GNOME stack it was not already using.
+
+### Fixed
+
+- The GNOME Shell extension's window capture no longer breaks on Mutter 51,
+  which removed `Meta.WindowActor.get_image` with no drop-in replacement --
+  the id-0 capability probe correctly reported `WINDOW_CAPTURE` unsupported
+  rather than failing silently, but that meant no capture at all on Shell
+  >=51. `pyguitest-window-control` now uses `paint_to_content()` +
+  `Shell.Screenshot.composite_to_stream()` on those shells, a version fork
+  alongside the unchanged `get_image` path for Shell <=50. The first live
+  run against the new path found a second bug: the composited image was
+  the actor's whole allocation, shadow margin included (+50px on both
+  axes versus the window's real size), not just the visible frame -- fixed
+  by cropping against `get_frame_rect()`. Both the API pair and the crop
+  are now live-validated on a GNOME Shell 51.beta session with
+  `scripts/validate-gnome-extension.sh`'s new capture check (a captured
+  921x1035 window now comes back as an exact 921x1035 PNG).
 
 ## [0.2.0] — 2026-09-01
 

@@ -675,13 +675,13 @@ class GUIBackend(ABC):
 
     # -- clipboard (T3) ----------------------------------------------------
 
-    def get_clipboard(self) -> str:
-        """The clipboard's current text content."""
+    def get_clipboard(self, primary: bool = False) -> str:
+        """The current text content of the clipboard, or of PRIMARY."""
         self.require(Capability.CLIPBOARD)
         raise NotImplementedError
 
-    def set_clipboard(self, text: str) -> None:
-        """Replace the clipboard's text content."""
+    def set_clipboard(self, text: str, primary: bool = False) -> None:
+        """Replace the text content of the clipboard, or of PRIMARY."""
         self.require(Capability.CLIPBOARD)
         raise NotImplementedError
 

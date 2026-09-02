@@ -163,6 +163,42 @@ read as a claim you cannot check.
   what that script does — rather than looking a title from one up in the
   other.
 
+## Run live on GNOME Shell 51.beta (Wayland)
+
+- **`gnomeshell`'s `WINDOW_CAPTURE`, repaired for a Mutter 51 regression**
+  (2026-09-02, `scripts/validate-gnome-extension.sh`'s capture check, added
+  this session). `Meta.WindowActor.get_image` — the only capture API the
+  extension had ever used, and the one the 50.4 section above validates —
+  is gone as of Mutter 51 with no drop-in replacement; the id-0 capability
+  probe correctly reported `WINDOW_CAPTURE` unsupported rather than failing
+  silently, but that left no capture at all on Shell ≥51. The replacement,
+  `paint_to_content()` + `Shell.Screenshot.composite_to_stream()`, mirrors
+  the pattern gnome-shell's own screenshot service uses internally, and
+  needed a version fork in the extension (`_captureLegacy` for Shell ≤50,
+  `_captureModern` for ≥51) since both APIs coexist across the supported
+  shell-version range.
+
+  The first live run surfaced a real bug that writing the replacement from
+  typelib introspection alone could not have caught: the composited image
+  came back 989×587 against a 939×537 window — +50px on *both* axes, not a
+  scale factor (989/939=1.053 vs 587/537=1.093, inconsistent ratios).
+  `paint_to_content()` renders the actor's whole allocation, shadow margin
+  included, not just the visible frame. Fixed by cropping with
+  `Meta.Window.get_buffer_rect()` (full allocation) against
+  `get_frame_rect()` (visible window), scaled by texture-pixels-per-
+  buffer-pixel so it stays correct on a HiDPI/fractional-scale monitor
+  too. A second live run after the fix landed produced a 921×1035 PNG
+  against a 921×1035 window exactly — "captured size tracks frame
+  geometry uniformly" — 9 of 9 checks clean.
+
+  One wrinkle worth recording for its own sake: an intermediate run, made
+  without re-running `--install` first, still showed the old uncropped
+  result even though the crop code had already been written to disk —
+  GNOME Shell does not re-read extension JS on the next D-Bus call. The
+  fix only took effect once `--install` copied the file and a subsequent
+  logout/login actually reloaded the module, reconfirming that there is
+  no way to hot-reload an extension on Wayland.
+
 ## Run live on KDE Plasma 6 / KWin (XWayland)
 
 - **`eiinput` after its negotiation moved into python-libei** (2026-09-01),

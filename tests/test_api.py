@@ -12,7 +12,9 @@ from unittest import mock
 
 import pyguitest
 from pyguitest import (
+    AccessibilityViolation,
     Capability,
+    ClipboardMismatch,
     ElementNotFound,
     FocusMismatch,
     ImageMatch,
@@ -126,6 +128,154 @@ class FakeBackend(GUIBackend):
 
 def session():
     return pyguitest.Session(FakeBackend(), pyguitest.detect())
+
+
+class FakeClipboardBackend(GUIBackend):
+    """Two independent selections in memory: clipboard and PRIMARY."""
+
+    name = "fake-clipboard"
+
+    def __init__(self, clipboard="", primary=""):
+        self._store = {False: clipboard, True: primary}
+
+    @property
+    def capabilities(self):
+        return CapabilitySet({Capability.CLIPBOARD})
+
+    def get_clipboard(self, primary=False):
+        return self._store[primary]
+
+    def set_clipboard(self, text, primary=False):
+        self._store[primary] = text
+
+
+class TestClipboardAssertion(unittest.TestCase):
+    def test_a_matching_clipboard_passes(self):
+        gui = pyguitest.Session(FakeClipboardBackend("hello"), pyguitest.detect())
+        gui.assert_clipboard("hello")
+
+    def test_a_mismatch_raises_naming_both_values(self):
+        gui = pyguitest.Session(FakeClipboardBackend("hello"), pyguitest.detect())
+        with self.assertRaises(ClipboardMismatch) as caught:
+            gui.assert_clipboard("goodbye")
+        message = str(caught.exception)
+        self.assertIn("goodbye", message)
+        self.assertIn("hello", message)
+
+    def test_it_checks_primary_when_asked(self):
+        # The clipboard and PRIMARY are independent selections -- checking
+        # one must not accidentally read the other.
+        gui = pyguitest.Session(
+            FakeClipboardBackend(clipboard="clip", primary="middle-click"),
+            pyguitest.detect(),
+        )
+        gui.assert_clipboard("middle-click", primary=True)
+        with self.assertRaises(ClipboardMismatch):
+            gui.assert_clipboard("clip", primary=True)
+
+    def test_a_partial_match_is_not_good_enough(self):
+        # set_clipboard() replaces rather than appends, so a caller checking
+        # the round trip wants an exact match, not "contains".
+        gui = pyguitest.Session(FakeClipboardBackend("hello world"), pyguitest.detect())
+        with self.assertRaises(ClipboardMismatch):
+            gui.assert_clipboard("hello")
+
+    def test_the_mismatch_message_names_which_selection(self):
+        gui = pyguitest.Session(FakeClipboardBackend(primary="x"), pyguitest.detect())
+        with self.assertRaises(ClipboardMismatch) as caught:
+            gui.assert_clipboard("y", primary=True)
+        self.assertIn("PRIMARY", str(caught.exception))
+
+
+class TestAccessibilityAssertions(unittest.TestCase):
+    """Missing and ambiguous accessible names.
+
+    The same defect shows up twice: a control with no name is read out by a
+    screen reader as just "button", and cannot be found by
+    `gui.button("Save")` either -- so it is worth catching in a GUI test
+    rather than only in an audit.
+    """
+
+    def _gui(self, *elements):
+        gui = session()
+        gui.backend.elements = list(elements)
+        return gui
+
+    def test_an_unnamed_button_is_reported(self):
+        gui = self._gui(FakeElement(Role.PUSH_BUTTON, ""))
+        with self.assertRaises(AccessibilityViolation) as caught:
+            gui.assert_no_missing_accessible_names()
+        self.assertIn("push button", str(caught.exception))
+
+    def test_named_controls_pass(self):
+        gui = self._gui(
+            FakeElement(Role.PUSH_BUTTON, "Save"),
+            FakeElement(Role.ENTRY, "Name"),
+        )
+        gui.assert_no_missing_accessible_names()
+
+    def test_content_and_structural_roles_are_not_required_to_have_names(self):
+        # The line NAMED_ROLES draws. A label carries its text as content
+        # and a panel is furniture; demanding names of these would make the
+        # assertion unusable on any real application.
+        gui = self._gui(
+            FakeElement(Role.LABEL, ""),
+            FakeElement(Role.PANEL, ""),
+            FakeElement(Role.SEPARATOR, ""),
+            FakeElement(Role.ICON, ""),
+            FakeElement(Role.TABLE_CELL, ""),
+        )
+        gui.assert_accessible()
+
+    def test_an_invisible_unnamed_control_is_not_reported(self):
+        # Nobody can reach it, so it is not a labelling problem -- and a
+        # hidden dialog's worth of them would bury the real findings.
+        gui = self._gui(FakeElement(Role.PUSH_BUTTON, "", visible=False))
+        gui.assert_no_missing_accessible_names()
+
+    def test_two_buttons_with_one_name_are_ambiguous(self):
+        gui = self._gui(
+            FakeElement(Role.PUSH_BUTTON, "Delete"),
+            FakeElement(Role.PUSH_BUTTON, "Delete"),
+        )
+        with self.assertRaises(AccessibilityViolation) as caught:
+            gui.assert_no_duplicate_accessible_names()
+        self.assertIn("Delete", str(caught.exception))
+
+    def test_one_name_across_two_roles_is_ordinary(self):
+        # A "Save" button beside a "Save" menu item is normal, and flagging
+        # it would be noise -- so duplicates are counted per role.
+        gui = self._gui(
+            FakeElement(Role.PUSH_BUTTON, "Save"),
+            FakeElement(Role.MENU_ITEM, "Save"),
+        )
+        gui.assert_no_duplicate_accessible_names()
+
+    def test_unnamed_controls_are_not_counted_as_duplicates(self):
+        # Two unnamed buttons are one problem, not two: the missing-name
+        # check owns them, and reporting "'' used twice" as well would be
+        # the same finding wearing a worse message.
+        gui = self._gui(
+            FakeElement(Role.PUSH_BUTTON, ""),
+            FakeElement(Role.PUSH_BUTTON, ""),
+        )
+        gui.assert_no_duplicate_accessible_names()
+
+    def test_assert_accessible_reports_missing_names_first(self):
+        gui = self._gui(
+            FakeElement(Role.PUSH_BUTTON, ""),
+            FakeElement(Role.ENTRY, "Name"),
+            FakeElement(Role.ENTRY, "Name"),
+        )
+        with self.assertRaises(AccessibilityViolation) as caught:
+            gui.assert_accessible()
+        self.assertIn("no accessible name", str(caught.exception))
+
+    def test_the_role_set_can_be_narrowed_or_widened(self):
+        gui = self._gui(FakeElement(Role.LABEL, ""))
+        gui.assert_no_missing_accessible_names()  # not in NAMED_ROLES
+        with self.assertRaises(AccessibilityViolation):
+            gui.assert_no_missing_accessible_names(roles=[Role.LABEL])
 
 
 class TestWindowIdentity(unittest.TestCase):

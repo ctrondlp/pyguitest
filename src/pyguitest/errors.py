@@ -93,5 +93,25 @@ class FocusMismatch(PyGUITestError):
     """
 
 
+class AccessibilityViolation(PyGUITestError):
+    """The accessible tree is missing names, or reuses one ambiguously.
+
+    Raised by assert_accessible and friends. Unlike ElementNotFound the
+    elements are all present -- the complaint is about how they are
+    labelled, which is what a screen reader reads out and what this
+    package's own locators match on.
+    """
+
+
+class ClipboardMismatch(PyGUITestError):
+    """The clipboard does not hold the text that was expected.
+
+    Raised by assert_clipboard. Distinguishes the selection at fault
+    (clipboard proper or PRIMARY) in the message, since the two are
+    independent and a caller reading the report should not have to guess
+    which one was checked.
+    """
+
+
 class ImageNotFound(PyGUITestError):
     """No match for the template image cleared the similarity threshold."""

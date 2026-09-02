@@ -31,6 +31,7 @@ import re
 import subprocess
 import tempfile
 import time
+from collections import Counter
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -39,8 +40,10 @@ from .app import Application
 from .backends import Element, GUIBackend, ImageMatch, NullBackend, Screen, Window
 from .capabilities import TIERS, Capability, CapabilitySet, Tier
 from .errors import (
+    AccessibilityViolation,
     BackendUnavailable,
     CapabilityUnsupported,
+    ClipboardMismatch,
     ElementNotFound,
     FocusMismatch,
     ImageNotFound,
@@ -84,8 +87,10 @@ __all__ = [
     "ImageMatch",
     "NullBackend",
     "PyGUITestError",
+    "AccessibilityViolation",
     "BackendUnavailable",
     "CapabilityUnsupported",
+    "ClipboardMismatch",
     "ElementNotFound",
     "FocusMismatch",
     "ImageNotFound",
@@ -114,6 +119,41 @@ def quote_for_type(text: str | None) -> str | None:
         return None
     return _SENDKEYS_SPECIAL.sub(r"{\1}", text)
 
+
+NAMED_ROLES = (
+    Role.PUSH_BUTTON,
+    Role.TOGGLE_BUTTON,
+    Role.CHECK_BOX,
+    Role.RADIO_BUTTON,
+    Role.LINK,
+    Role.ENTRY,
+    Role.PASSWORD_TEXT,
+    Role.SPIN_BUTTON,
+    Role.COMBO_BOX,
+    Role.MENU_ITEM,
+    Role.CHECK_MENU_ITEM,
+    Role.RADIO_MENU_ITEM,
+    Role.PAGE_TAB,
+    Role.SLIDER,
+)
+"""Roles an accessible name is required of, by default.
+
+The line is drawn at *act on it by name*: everything here is something a
+user operates and therefore has to be able to identify, and it is also
+exactly what this package's own locators match on, so an unnamed one cannot
+be scripted either.
+
+What is deliberately absent matters as much. Content roles (LABEL, HEADING,
+PARAGRAPH, TEXT, TABLE_CELL, LIST_ITEM, TREE_ITEM) carry their text as
+content rather than as a name. Structural ones (PANEL, SCROLL_PANE,
+VIEWPORT, SEPARATOR, TOOL_BAR, STATUS_BAR) are furniture. IMAGE and ICON are
+frequently decorative, and flagging every decorative icon would bury the
+real findings. Containers (LIST, MENU, TREE, TABLE, PAGE_TAB_LIST) are
+named by their label, if anything.
+
+An assertion nobody can switch on is worth nothing, so this errs toward
+quiet. Pass `roles=` to any of the assertions to widen or narrow it.
+"""
 
 SESSION_CAPABILITIES = frozenset({Capability.PROCESS_LAUNCH, Capability.TIMING})
 """Capabilities Session implements itself, on any backend.
@@ -1368,6 +1408,81 @@ class Session:
         )
         self.assert_focused(name=name)
 
+    # -- accessibility regressions -----------------------------------------
+
+    def _named_candidates(
+        self, within: Element | None, roles: Sequence[str] | None
+    ) -> list[Element]:
+        """Every visible element whose role is expected to carry a name.
+
+        Visible only, deliberately: an off-screen control nobody can reach
+        is not a labelling problem, and a hidden dialog's worth of unnamed
+        widgets would drown the findings that matter.
+        """
+        found: list[Element] = []
+        for role in roles if roles is not None else NAMED_ROLES:
+            found.extend(self.elements(role=role, within=within, visible=True))
+        return found
+
+    def assert_no_missing_accessible_names(
+        self, within: Element | None = None, roles: Sequence[str] | None = None
+    ) -> None:
+        """Raise AccessibilityViolation for any unnamed control.
+
+        An unnamed button is read out by a screen reader as "button", and
+        cannot be found by `gui.button("Save")` either -- the same defect
+        shows up in both places, which is why this is worth asserting in a
+        GUI test rather than only in an audit.
+
+        `within` scopes it to one window (see window_element); `roles`
+        overrides NAMED_ROLES, which documents where the default line is
+        drawn.
+        """
+        missing = [e for e in self._named_candidates(within, roles) if not e.name]
+        if missing:
+            counts = Counter(e.role for e in missing)
+            summary = ", ".join(f"{n} x {role}" for role, n in sorted(counts.items()))
+            raise AccessibilityViolation(
+                f"{len(missing)} visible control(s) have no accessible name: {summary}"
+            )
+
+    def assert_no_duplicate_accessible_names(
+        self, within: Element | None = None, roles: Sequence[str] | None = None
+    ) -> None:
+        """Raise AccessibilityViolation if one role reuses a name.
+
+        Two buttons both called "Delete" are ambiguous to a screen reader
+        and to `gui.button("Delete")` alike -- whichever the locator returns
+        first is a coin toss, and a test written against it fails the day
+        the order changes.
+
+        Compared per role rather than globally: a "Save" button beside a
+        "Save" menu item is ordinary, and flagging it would be noise.
+        """
+        seen: Counter[tuple[str, str]] = Counter(
+            (e.role, e.name) for e in self._named_candidates(within, roles) if e.name
+        )
+        repeated = sorted(pair for pair, count in seen.items() if count > 1)
+        if repeated:
+            summary = ", ".join(f"{name!r} ({role})" for role, name in repeated)
+            raise AccessibilityViolation(
+                f"{len(repeated)} accessible name(s) are used more than once "
+                f"within one role: {summary}"
+            )
+
+    def assert_accessible(
+        self, within: Element | None = None, roles: Sequence[str] | None = None
+    ) -> None:
+        """Raise AccessibilityViolation if names are missing or ambiguous.
+
+        Both checks in one call, for a test suite that wants a single
+        assertion per screen. Missing names are reported first: a control
+        with no name at all cannot also be a duplicate, so fixing those
+        usually changes the second answer.
+        """
+        self.assert_no_missing_accessible_names(within=within, roles=roles)
+        self.assert_no_duplicate_accessible_names(within=within, roles=roles)
+
     # -- finding things by what they are -----------------------------------
     #
     # Sugar over element(): the common widget kinds, named as a user would
@@ -1481,13 +1596,36 @@ class Session:
             haystack, template, region=region, metric=metric, threshold=threshold
         )
 
-    def get_clipboard(self) -> str:
-        """The clipboard's current text content."""
-        return self.backend.get_clipboard()
+    def get_clipboard(self, primary: bool = False) -> str:
+        """The current text content of the clipboard, or of PRIMARY.
 
-    def set_clipboard(self, text: str) -> None:
-        """Replace the clipboard's text content."""
-        self.backend.set_clipboard(text)
+        `primary=True` reads the X11/Wayland PRIMARY selection instead --
+        what a middle-click paste inserts, and independent of the
+        clipboard proper: writing one never touches the other.
+        """
+        return self.backend.get_clipboard(primary=primary)
+
+    def set_clipboard(self, text: str, primary: bool = False) -> None:
+        """Replace the text content of the clipboard, or of PRIMARY.
+
+        See `get_clipboard` on `primary=`.
+        """
+        self.backend.set_clipboard(text, primary=primary)
+
+    def assert_clipboard(self, expected: str, primary: bool = False) -> None:
+        """Raise ClipboardMismatch unless the clipboard holds `expected`.
+
+        Reads through `get_clipboard`, so `primary=True` checks PRIMARY
+        instead. An exact match, not a substring -- `set_clipboard()`
+        replaces rather than appends, and a caller wanting the round trip
+        confirmed wants to know if that stopped being true.
+        """
+        actual = self.get_clipboard(primary=primary)
+        if actual != expected:
+            selection = "PRIMARY" if primary else "the clipboard"
+            raise ClipboardMismatch(
+                f"expected {selection} to hold {expected!r}; actual: {actual!r}"
+            )
 
     # -- dynamic delegation ------------------------------------------------
 

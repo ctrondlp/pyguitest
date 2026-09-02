@@ -44,14 +44,25 @@ _REGISTRY: list[tuple[int, str, Callable, bool]] = []
 def register(factory, name, priority=50, opt_in=False):
     """Register a backend factory.
 
-    `factory(environment)` returns a GUIBackend, or None if it cannot drive
-    this environment. Higher priority is tried first.
+    `factory(environment)` returns a GUIBackend, or None if it plainly
+    cannot drive this environment -- wrong compositor, a library not
+    importable, a tool not on PATH. Higher priority is tried first.
 
-    `opt_in=True` excludes it from automatic composition (a plain
-    `connect()`) entirely -- reserved for a factory whose construction has a
-    side effect no caller should hit by surprise, such as raising an
-    interactive consent dialog that blocks until a human answers it. It
-    remains reachable by name: `connect(backend=name)`.
+    It may also *raise* `BackendUnavailable` rather than return None, for a
+    failure only construction itself can discover and that has a real,
+    specific reason worth keeping -- a portal that refused the request, a
+    D-Bus service that is not running. Automatic composition (a plain
+    `connect()`) still treats that exactly like None, so no factory has to
+    protect it for that path; but naming this backend directly
+    (`connect(backend=name)`) lets the raised exception propagate verbatim
+    instead of being replaced by a generic "cannot drive this session" --
+    which is why raising here, when there is something specific to say, is
+    worth doing rather than swallowing it into a bare None as before.
+
+    `opt_in=True` excludes it from automatic composition entirely --
+    reserved for a factory whose construction has a side effect no caller
+    should hit by surprise, such as raising an interactive consent dialog
+    that blocks until a human answers it. It remains reachable by name.
     """
     _REGISTRY.append((priority, name, factory, opt_in))
     _REGISTRY.sort(key=lambda r: -r[0])
@@ -119,16 +130,28 @@ def _named_options(names, options):
 
 
 def _build_named(environment, names, options):
-    """Build each named backend in order, closing them all if one fails."""
+    """Build each named backend in order, closing them all if one fails.
+
+    Deliberately does not catch `BackendUnavailable` from the factory call
+    itself -- unlike `_auto_build` below, which automatic composition uses.
+    A factory that raised one had something specific to say (see
+    `register`'s docstring), and a caller who named this backend directly
+    asked for exactly this answer, not a generic one. The `except
+    BaseException` here is only cleanup: it closes what was already built
+    and re-raises the same exception, whichever it was.
+
+    A factory that instead returns `None` -- "plainly cannot drive this
+    environment", nothing more specific to say -- still gets the generic
+    message below. Unlike automatic composition, which reads None as "not
+    applicable to this desktop" and moves on: a name is a request, and
+    quietly dropping it would return a session missing the very capability
+    that motivated asking.
+    """
     built = []
     try:
         for name in names:
             backend = _factory_for(name)(environment, **options[name])
             if backend is None:
-                # Unlike automatic composition below, which reads None as
-                # "not applicable to this desktop" and moves on: a name is a
-                # request, and quietly dropping it would return a session
-                # missing the very capability that motivated asking.
                 raise BackendUnavailable(f"backend {name!r} cannot drive this session")
             built.append(backend)
     except BaseException:
@@ -136,6 +159,25 @@ def _build_named(environment, names, options):
             backend.close()
         raise
     return built
+
+
+def _auto_build(factory, environment):
+    """Build via `factory` for automatic composition, or None if it fails.
+
+    The counterpart to `_build_named` not catching: this is the one place
+    that does, so no individual factory has to protect itself against
+    automatic composition's list comprehension crashing outright. A
+    construction failure here is exactly as unusable as a factory that
+    declined by returning None itself, so the two are folded together --
+    but only here. A caller who named this backend directly goes through
+    `_build_named` instead, which lets the same exception -- carrying
+    whatever specific reason the factory raised it for -- propagate
+    verbatim rather than being discarded and replaced.
+    """
+    try:
+        return factory(environment)
+    except BackendUnavailable:
+        return None
 
 
 def select(environment, name=None, options=None):
@@ -185,7 +227,9 @@ def select(environment, name=None, options=None):
     # connect() can never trigger its side effect unasked.
     members = [
         b
-        for b in (f(environment) for _, _, f, opt_in in _REGISTRY if not opt_in)
+        for b in (
+            _auto_build(f, environment) for _, _, f, opt_in in _REGISTRY if not opt_in
+        )
         if b is not None
     ]
     if members:
@@ -201,14 +245,13 @@ def _atspi_factory(environment):
     """Build the AT-SPI backend, or None when dogtail is unavailable.
 
     AT-SPI leads: it needs neither geometry nor injection permission, and
-    behaves identically under X11 and Wayland.
+    behaves identically under X11 and Wayland. Construction can still raise
+    `BackendUnavailable` for a reason `available()` cannot see -- see
+    `register`'s docstring on what happens to that.
     """
     if not _atspi.available():
         return None
-    try:
-        return _atspi.AtspiBackend(environment)
-    except BackendUnavailable:
-        return None
+    return _atspi.AtspiBackend(environment)
 
 
 register(_atspi_factory, "atspi", priority=90)
@@ -224,6 +267,10 @@ def _gnomeshell_factory(environment):
     for placement, minimize and hit-testing that AT-SPI does not expose at
     all. Requires the pyguitest-window-control extension installed and
     enabled by hand; see gnome-shell-extension/README.md.
+
+    Construction can raise `BackendUnavailable` for a reason `available()`
+    cannot see -- the extension present but disabled, say -- see
+    `register`'s docstring on what happens to that.
     """
     from ..session import Compositor
     from . import gnomeshell as _gnomeshell
@@ -232,10 +279,7 @@ def _gnomeshell_factory(environment):
         return None
     if not _gnomeshell.available():
         return None
-    try:
-        return _gnomeshell.GnomeShellBackend()
-    except BackendUnavailable:
-        return None
+    return _gnomeshell.GnomeShellBackend()
 
 
 register(_gnomeshell_factory, "gnomeshell", priority=93)
@@ -441,6 +485,8 @@ def _x11_factory(environment):
 
     Registered below the Wayland-native backends so a Wayland session prefers
     them, but above null so an X11 or XWayland session always gets it.
+    Construction can still raise `BackendUnavailable` -- no display to
+    connect to, say -- see `register`'s docstring on what happens to that.
     """
     from ..session import SessionType
     from . import x11 as _x11
@@ -449,10 +495,7 @@ def _x11_factory(environment):
         return None
     if not _x11.available():
         return None
-    try:
-        return _x11.X11Backend(environment)
-    except BackendUnavailable:
-        return None
+    return _x11.X11Backend(environment)
 
 
 register(_x11_factory, "x11", priority=40)
@@ -464,15 +507,15 @@ def _portal_factory(environment, **options):
     opt_in=True: constructing this can raise an interactive consent dialog
     that blocks until a human clicks Allow -- a side effect no caller should
     hit from a plain connect(). Use connect(backend="portal") deliberately.
+    A declined dialog, or any other construction failure, raises
+    `BackendUnavailable` naming the real reason -- see `register`'s
+    docstring on what happens to that.
     """
     from . import portal as _portal
 
     if not _portal.available():
         return None
-    try:
-        return _portal.PortalBackend(**options)
-    except BackendUnavailable:
-        return None
+    return _portal.PortalBackend(**options)
 
 
 register(_portal_factory, "portal", priority=80, opt_in=True)
@@ -483,16 +526,16 @@ def _eiinput_factory(environment, **options):
 
     opt_in=True for the same reason as portal: constructing this raises a
     real RemoteDesktop consent dialog and blocks until a human answers it.
-    Use connect(backend="eiinput") deliberately.
+    Use connect(backend="eiinput") deliberately. A missing PyGObject, a
+    declined dialog, or any other construction failure raises
+    `BackendUnavailable` naming the real reason -- see `register`'s
+    docstring on what happens to that.
     """
     from . import eiinput as _eiinput
 
     if not _eiinput.available():
         return None
-    try:
-        return _eiinput.LibeiBackend(**options)
-    except BackendUnavailable:
-        return None
+    return _eiinput.LibeiBackend(**options)
 
 
 register(_eiinput_factory, "eiinput", priority=80, opt_in=True)
@@ -507,16 +550,15 @@ def _portalcapture_factory(environment, **options):
     front of the screenshot tools on any session with a portal, turning a
     plain `capture()` -- which grim or gnome-screenshot answer silently --
     into a consent prompt. Ask for it deliberately:
-    `connect(backend="portalcapture")`.
+    `connect(backend="portalcapture")`. Construction can still raise
+    `BackendUnavailable` for a reason `available()` cannot see -- see
+    `register`'s docstring on what happens to that.
     """
     from . import portalcapture as _portalcapture
 
     if not _portalcapture.available():
         return None
-    try:
-        return _portalcapture.PortalCaptureBackend(**options)
-    except BackendUnavailable:
-        return None
+    return _portalcapture.PortalCaptureBackend(**options)
 
 
 register(_portalcapture_factory, "portalcapture", priority=58, opt_in=True)

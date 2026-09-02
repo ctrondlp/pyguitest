@@ -425,10 +425,15 @@ class TestInputFactoryRanking(unittest.TestCase):
 
 
 class TestOtherFactoriesDeclineCleanly(unittest.TestCase):
-    """A factory that cannot serve a session returns None, never raises.
+    """A factory that plainly cannot serve a session returns None.
 
-    select() builds every registered factory, so one that raised on an
-    unsuitable session would take the whole composition down with it.
+    The wrong session type, a library not importable, an extension not
+    available. That is a different case from a *construction* failure with a real,
+    specific reason -- see TestConstructionFailuresPropagateWhenNamed for
+    what happens to one of those, which changed: it used to be swallowed
+    inside the factory too, and now only automatic composition swallows
+    it (_auto_build), so a caller who named the backend directly gets the
+    real reason instead of a generic one.
     """
 
     def test_x11_declines_a_pure_wayland_session(self):
@@ -453,17 +458,83 @@ class TestOtherFactoriesDeclineCleanly(unittest.TestCase):
         ):
             self.assertIsNone(backends._portalcapture_factory(_env()))
 
-    def test_a_backend_unavailable_during_construction_is_swallowed(self):
-        # Probing can fail for reasons detection cannot see -- an extension
-        # that is installed but disabled, a bus that is unreachable.
+    def test_a_backend_unavailable_during_construction_now_propagates(self):
+        # Changed on purpose (2026-09-02): this used to assertIsNone, with
+        # the factory itself swallowing the exception. Doing that inside
+        # every factory was what threw away the real reason for a caller
+        # who named the backend directly -- connect(backend="x11") saw only
+        # select()'s own generic "cannot drive this session", never "no
+        # display". The swallow now lives one level up, in _auto_build,
+        # which only automatic composition goes through; see
+        # TestConstructionFailuresPropagateWhenNamed for that half.
         with mock.patch("pyguitest.backends.x11.available", return_value=True):
             with mock.patch(
                 "pyguitest.backends.x11.X11Backend",
                 side_effect=BackendUnavailable("no display"),
             ):
-                self.assertIsNone(
+                with self.assertRaises(BackendUnavailable) as ctx:
                     backends._x11_factory(_env(session_type=SessionType.X11))
-                )
+                self.assertIn("no display", str(ctx.exception))
+
+
+class TestConstructionFailuresPropagateWhenNamed(unittest.TestCase):
+    """The real reason a construction failure raised survives when named.
+
+    But only when the backend was named -- automatic composition still
+    treats it exactly like a factory that returned None outright.
+    Registry-swapped rather than driven against a real backend, so this is
+    deterministic regardless of what is actually installed on the machine
+    running the suite -- unlike TestOtherFactoriesDeclineCleanly, which is
+    about one specific real factory's own shape.
+    """
+
+    def setUp(self):
+        self.backends = backends
+        original = list(backends._REGISTRY)
+        backends._REGISTRY.clear()
+        self.addCleanup(backends._REGISTRY.extend, original)
+        self.addCleanup(backends._REGISTRY.clear)
+
+    def _register_failing(self, name, priority=50, opt_in=False, reason="nope"):
+        def factory(environment, **options):
+            raise BackendUnavailable(reason)
+
+        self.backends.register(factory, name, priority=priority, opt_in=opt_in)
+
+    def test_named_selection_surfaces_the_real_reason(self):
+        self._register_failing("flaky", reason="the daemon is not running")
+        with self.assertRaises(BackendUnavailable) as ctx:
+            select(detect(), "flaky")
+        self.assertIn("the daemon is not running", str(ctx.exception))
+
+    def test_a_named_sequence_also_surfaces_the_real_reason(self):
+        self._register_failing("flaky", reason="a specific, real reason")
+        with self.assertRaises(BackendUnavailable) as ctx:
+            select(detect(), ["flaky"])
+        self.assertIn("a specific, real reason", str(ctx.exception))
+
+    def test_an_opt_in_factory_gets_the_same_treatment(self):
+        # The concrete motivating case: eiinput/portal/portalcapture are all
+        # opt_in=True, reachable only by name -- exactly where the old
+        # swallow-and-genericize behavior was most damaging, since naming
+        # one of these *is* the caller asking for the specific outcome.
+        self._register_failing("flaky", opt_in=True, reason="PyGObject is missing")
+        with self.assertRaises(BackendUnavailable) as ctx:
+            select(detect(), "flaky")
+        self.assertIn("PyGObject is missing", str(ctx.exception))
+
+    def test_automatic_composition_still_swallows_it_and_moves_on(self):
+        from pyguitest.backends.base import GUIBackend
+        from pyguitest.capabilities import CapabilitySet
+
+        class Working(GUIBackend):
+            name = "working"
+            capabilities = property(lambda self: CapabilitySet())
+
+        self._register_failing("flaky", priority=100, reason="boom")
+        self.backends.register(lambda env: Working(), "working", priority=10)
+        # Must not raise, and must still pick up the member that did build.
+        self.assertEqual(select(detect()).name, "working")
 
 
 class TestScreenSize(unittest.TestCase):

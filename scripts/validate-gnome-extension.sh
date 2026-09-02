@@ -85,12 +85,14 @@ PYTHONPATH="$(cd "$(dirname "$0")/.." && pwd)/src" python3 - <<'PY'
 import os
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import time
 
 from pyguitest.backends import gnomeshell
-from pyguitest.errors import WindowNotFound
+from pyguitest.capabilities import Capability
+from pyguitest.errors import CapabilityUnsupported, WindowNotFound
 
 G = "\033[32mPASS\033[0m"; R = "\033[31mFAIL\033[0m"; Y = "\033[33m..\033[0m  "
 rc = 0
@@ -204,13 +206,66 @@ if restored != before:
 print(f"  {G if restored == before else Y} restored geometry: {restored}"
       + ("" if restored == before else f" (wanted {before})"))
 
+# WINDOW_CAPTURE: the id-0 probe at construction (see capabilities above)
+# only asks the extension whether it *thinks* it can capture -- it never
+# asks for a real image. On Mutter >=51 that probe now passes through
+# _captureModern (extension.js): paint_to_content() +
+# Shell.Screenshot.composite_to_stream(), live-confirmed by an earlier
+# run of this exact check to actually produce a PNG -- but that first
+# run also showed the composited image was the actor's full allocation
+# (shadow margin included), not the window: +50px on both axes versus
+# frame_rect. The crop _captureModern now applies is unvalidated, so
+# this check was tightened from "report any mismatch, informationally"
+# to actually asserting it: real window-actor capture uses device
+# pixels, so a HiDPI/fractional-scale monitor legitimately produces more
+# pixels than frame_rect's logical units -- but *uniformly* on both
+# axes. A per-axis scale mismatch (what the shadow-margin bug looked
+# like) is not that, and is now a real failure. Parsed by hand (PNG
+# signature + IHDR) rather than via Pillow: this project deliberately
+# pulls in no image library (see backends/capture.py), and the
+# validation script should not need one either just to sanity-check its
+# own output.
+capture_path = None
+try:
+    capture_path = b.capture(w)
+    size = os.path.getsize(capture_path)
+    with open(capture_path, "rb") as f:
+        header = f.read(24)
+    is_png = header[:8] == b"\x89PNG\r\n\x1a\n"
+    if is_png and size > 0:
+        width, height = struct.unpack(">II", header[16:24])
+        g = b.geometry(w)
+        scale_x = width / g[2]
+        scale_y = height / g[3]
+        print(f"  {Y} capture() wrote a {size}-byte PNG: "
+              f"{width}x{height} (window geometry: {g[2]}x{g[3]})")
+        if abs(scale_x - scale_y) < 0.01:
+            note = "" if abs(scale_x - 1.0) < 0.01 else f" ({scale_x:.3g}x display scale)"
+            print(f"  {G} captured size tracks frame geometry uniformly{note}")
+        else:
+            print(f"  {R} captured size does not track frame geometry "
+                  f"uniformly: x scale {scale_x:.3g} vs y scale "
+                  f"{scale_y:.3g} -- the crop in _captureModern is off")
+            rc = 1
+    else:
+        print(f"  {R} capture() wrote {capture_path} but it is not a "
+              f"valid PNG ({size} bytes, header {header[:8]!r})")
+        rc = 1
+except CapabilityUnsupported as e:
+    print(f"  {Y} WINDOW_CAPTURE not declared ({e}) -- skipping the "
+          f"capture check")
+except Exception as e:
+    print(f"  {R} capture() raised: {type(e).__name__}: {e}"); rc = 1
+finally:
+    if capture_path and os.path.exists(capture_path):
+        os.remove(capture_path)
+
 # Window events: WINDOW_EVENTS is declared unconditionally (see
 # gnomeshell.py's capabilities docstring), so this much is assertable
 # regardless of what happens to be open. Whether an event actually arrives
 # is not -- that depends on someone opening or closing a window during the
 # few seconds this listens, which this script cannot make happen on its
 # own -- so that part stays informational (Y), not asserted (G/R).
-from pyguitest.capabilities import Capability
 window_events_ok = Capability.WINDOW_EVENTS in b.capabilities
 if window_events_ok:
     print(f"  {G} WINDOW_EVENTS is declared")

@@ -75,6 +75,63 @@ class TestClipboardDispatch(unittest.TestCase):
             self.runner.calls[0], (["xsel", "--clipboard", "--input"], "hello")
         )
 
+    def test_wl_copy_read_primary(self):
+        gui = self._backend("wl-copy", stdout="hello")
+        self.assertEqual(gui.get_clipboard(primary=True), "hello")
+        self.assertEqual(
+            self.runner.calls[0],
+            (["wl-paste", "--no-newline", "--primary"], None),
+        )
+
+    def test_wl_copy_write_primary(self):
+        gui = self._backend("wl-copy")
+        gui.set_clipboard("hello", primary=True)
+        self.assertEqual(self.runner.calls[0], (["wl-copy", "--primary"], "hello"))
+
+    def test_xclip_read_primary(self):
+        gui = self._backend("xclip", stdout="hello")
+        self.assertEqual(gui.get_clipboard(primary=True), "hello")
+        self.assertEqual(
+            self.runner.calls[0],
+            (["xclip", "-selection", "primary", "-out"], None),
+        )
+
+    def test_xclip_write_primary(self):
+        gui = self._backend("xclip")
+        gui.set_clipboard("hello", primary=True)
+        self.assertEqual(
+            self.runner.calls[0], (["xclip", "-selection", "primary"], "hello")
+        )
+
+    def test_xsel_read_primary(self):
+        gui = self._backend("xsel", stdout="hello")
+        self.assertEqual(gui.get_clipboard(primary=True), "hello")
+        self.assertEqual(
+            self.runner.calls[0], (["xsel", "--primary", "--output"], None)
+        )
+
+    def test_xsel_write_primary(self):
+        gui = self._backend("xsel")
+        gui.set_clipboard("hello", primary=True)
+        self.assertEqual(
+            self.runner.calls[0], (["xsel", "--primary", "--input"], "hello")
+        )
+
+    def test_primary_and_clipboard_are_independent_calls(self):
+        # Writing PRIMARY must not touch the clipboard argv, or vice versa --
+        # the two selections are independent on every real desktop, and a
+        # backend that conflated them would silently break that.
+        gui = self._backend("xclip")
+        gui.set_clipboard("for the clipboard", primary=False)
+        gui.set_clipboard("for primary", primary=True)
+        self.assertEqual(
+            [call[0] for call in self.runner.calls],
+            [
+                ["xclip", "-selection", "clipboard"],
+                ["xclip", "-selection", "primary"],
+            ],
+        )
+
     def test_name_includes_the_tool(self):
         gui = self._backend("wl-copy")
         self.assertEqual(gui.name, "clipboard:wl-copy")

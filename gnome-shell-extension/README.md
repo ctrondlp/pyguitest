@@ -16,6 +16,15 @@ found two real bugs written from the headers alone, both since fixed.
 window was captured to a PNG through `Meta.WindowActor.get_image`, on a
 pure Wayland session where every other capture route is closed.
 
+**Window capture also validated live on GNOME Shell 51.beta** (2026-09-02):
+Mutter 51 removed `get_image` with no drop-in replacement, which had made
+capture silently unavailable on any Shell ≥51 (the id-0 probe correctly
+reported it unsupported, but that is still "no capture"). The extension now
+uses `paint_to_content()` + `Shell.Screenshot.composite_to_stream()` on
+those shells instead — see **Window capture** below for the version fork,
+and `docs/validation.md`'s GNOME Shell 51.beta section for the shadow-margin
+crop bug that first live run found and fixed.
+
 **Window events validated live on GNOME Shell 50.4** (2026-08-30): all
 three -- `new`, `title`, `close` -- confirmed over the real `WindowEvent`
 D-Bus signal. `scripts/validate-gnome-extension.sh` spawns and kills a
@@ -121,9 +130,14 @@ the Shell's own screenshot interface since GNOME 42, XWayland refuses
 `GetImage` on the root window, and the Screenshot portal raises a consent
 dialog. This code runs *inside* gnome-shell, so it needs none of them.
 
-It reads the window's own actor (`Meta.WindowActor.get_image`), so the
-image is the window's content rather than whatever is stacked over those
-screen coordinates — an occluded window still comes back whole.
+It reads the window's own actor, so the image is the window's content
+rather than whatever is stacked over those screen coordinates — an
+occluded window still comes back whole. Two code paths get there depending
+on the shell: `Meta.WindowActor.get_image` on Shell ≤50, or
+`paint_to_content()` + `Shell.Screenshot.composite_to_stream()` (cropped
+against `get_frame_rect()` to exclude the actor's shadow margin) on Shell
+≥51, which removed `get_image`. Both are live-validated; see the file
+header and `docs/validation.md`.
 
 Two details worth knowing. The path **must be absolute**: gnome-shell's
 working directory is not the caller's, and a relative path is refused

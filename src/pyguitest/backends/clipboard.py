@@ -46,6 +46,11 @@ this backend looked clean and the first real run through
 `subprocess.run()` was not. The fix (see `_run`) is to give the write call
 `DEVNULL` rather than `PIPE` for stdout/stderr, so there is no pipe left
 open for the daemon to inherit.
+
+`primary=True` reaches PRIMARY instead of the clipboard proper -- the
+X11/Wayland selection that middle-click paste reads, which every tool
+here supports as a second named selection rather than a separate command,
+so this is one argument, not a second backend.
 """
 
 import subprocess
@@ -58,20 +63,39 @@ __all__ = ["ToolClipboardBackend"]
 
 _SUBPROCESS_TIMEOUT = 15
 
-# Read (stdout -> text) and write (text -> stdin) argv per tool. Text goes
-# over stdin/stdout rather than argv so arbitrary content -- including
+# Read (stdout -> text) and write (text -> stdin) argv per tool, keyed by
+# which selection: False is the clipboard proper, True is PRIMARY. Text
+# goes over stdin/stdout rather than argv so arbitrary content -- including
 # whatever a shell would treat specially -- never needs quoting, and so
 # there is no argv length limit to hit on a large paste.
 _READ = {
-    "wl-copy": ["wl-paste", "--no-newline"],
-    "xclip": ["xclip", "-selection", "clipboard", "-out"],
-    "xsel": ["xsel", "--clipboard", "--output"],
+    "wl-copy": {
+        False: ["wl-paste", "--no-newline"],
+        True: ["wl-paste", "--no-newline", "--primary"],
+    },
+    "xclip": {
+        False: ["xclip", "-selection", "clipboard", "-out"],
+        True: ["xclip", "-selection", "primary", "-out"],
+    },
+    "xsel": {
+        False: ["xsel", "--clipboard", "--output"],
+        True: ["xsel", "--primary", "--output"],
+    },
 }
 
 _WRITE = {
-    "wl-copy": ["wl-copy"],
-    "xclip": ["xclip", "-selection", "clipboard"],
-    "xsel": ["xsel", "--clipboard", "--input"],
+    "wl-copy": {
+        False: ["wl-copy"],
+        True: ["wl-copy", "--primary"],
+    },
+    "xclip": {
+        False: ["xclip", "-selection", "clipboard"],
+        True: ["xclip", "-selection", "primary"],
+    },
+    "xsel": {
+        False: ["xsel", "--clipboard", "--input"],
+        True: ["xsel", "--primary", "--input"],
+    },
 }
 
 
@@ -135,13 +159,13 @@ class ToolClipboardBackend(GUIBackend):
             )
         return result.stdout or ""
 
-    def get_clipboard(self):
-        """The clipboard's current text content."""
+    def get_clipboard(self, primary=False):
+        """The current text content of the clipboard, or of PRIMARY."""
         self.require(Capability.CLIPBOARD)
-        return self._runner(_READ[self.tool.name])
+        return self._runner(_READ[self.tool.name][primary])
 
-    def set_clipboard(self, text):
-        """Replace the clipboard's text content.
+    def set_clipboard(self, text, primary=False):
+        """Replace the text content of the clipboard, or of PRIMARY.
 
         See the module docstring and `_run` on why stdout/stderr must be
         DEVNULL rather than PIPE for this call specifically: the tool forks
@@ -150,4 +174,4 @@ class ToolClipboardBackend(GUIBackend):
         inherits never reaches EOF.
         """
         self.require(Capability.CLIPBOARD)
-        self._runner(_WRITE[self.tool.name], input_text=text)
+        self._runner(_WRITE[self.tool.name][primary], input_text=text)

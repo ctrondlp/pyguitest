@@ -21,17 +21,19 @@
 # changes, that is not what `git commit` is about to record.
 #
 # Usage:
-#   ./pre-commit-test.sh             run everything
-#   ./pre-commit-test.sh -k mypy     only checks whose name matches (repeatable)
-#   ./pre-commit-test.sh -v          stream each check's output as it runs
-#   ./pre-commit-test.sh -q          summary only; do not dump failure logs
-#   ./pre-commit-test.sh -x          stop at the first failure
+#   ./scripts/pre-commit-test.sh             run everything
+#   ./scripts/pre-commit-test.sh -k mypy     only checks whose name matches (repeatable)
+#   ./scripts/pre-commit-test.sh -v          stream each check's output as it runs
+#   ./scripts/pre-commit-test.sh -q          summary only; do not dump failure logs
+#   ./scripts/pre-commit-test.sh -x          stop at the first failure
 #
 # Exit status: 0 all passed, 1 one or more checks failed, 2 setup problem.
 
 set -uo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Repo root, not this script's own directory (scripts/): every check
+# below runs `cd "$ROOT"`, and pyproject.toml/src/tests live one level up.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON="${PYTHON:-python3}"
 RUFF="${RUFF:-ruff}"
 

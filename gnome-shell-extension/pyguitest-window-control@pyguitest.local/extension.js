@@ -14,9 +14,24 @@
 // Runs inside the gnome-shell process, which already owns the "org.gnome.Shell"
 // bus name -- so this exports a sub-path on the existing session bus
 // connection rather than owning a name of its own.
+//
+// CaptureWindow's Mutter 51 path (_captureModern) is a repair for a live
+// regression: Meta.WindowActor.get_image(), the only capture API the file
+// above was validated against, is gone as of Mutter 51 with no drop-in
+// replacement. paint_to_content()+Shell.Screenshot.composite_to_stream()
+// were live-validated against a GNOME Shell 51 beta on 2026-09-02 with
+// scripts/validate-gnome-extension.sh's capture check -- it produced a
+// real PNG, confirming the API pair works at all. That first run also
+// found the composited image was the actor's full allocation, not the
+// window: get_buffer_rect() vs get_frame_rect() showed +50px on both
+// axes, matching Mutter's invisible CSD-shadow margin. The crop this
+// file now applies to correct that is NOT yet itself live-validated --
+// re-run the capture check and confirm captured (width, height) now
+// equals frame_rect exactly before trusting it.
 
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import Shell from 'gi://Shell';
 
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
@@ -263,7 +278,17 @@ class PyguitestService {
         return true;
     }
 
-    CaptureWindow(id, path) {
+    // Async because the Mutter >=51 path (_captureModern) is: Meta
+    // dropped the synchronous get_image() this used to call, and its
+    // replacement only comes as an async callback. wrapJSObject (see
+    // enable()) dispatches a `<Name>Async(params, invocation)` method
+    // asynchronously and leaves completion to it; id-0 probes and
+    // validation failures still reply synchronously, from inside this
+    // same call, just via invocation instead of a return value.
+    CaptureWindowAsync([id, path], invocation) {
+        const reply = (ok, error) =>
+            invocation.return_value(new GLib.Variant('(bs)', [ok, error]));
+
         // id 0 is a capability probe, not a window: 0 is never a real
         // stable_sequence, and the alternative -- a caller discovering
         // that this shell cannot capture only when a real screenshot
@@ -271,51 +296,149 @@ class PyguitestService {
         // this project exists to avoid. pyguitest calls this at
         // construction to decide whether to declare WINDOW_CAPTURE.
         const missing = findMissingCaptureApis();
-        if (id === 0)
-            return [missing.length === 0, missing.join(', ')];
-        if (missing.length > 0)
-            return [false, `this GNOME Shell lacks ${missing.join(', ')}`];
+        if (id === 0) {
+            reply(missing.length === 0, missing.join(', '));
+            return;
+        }
+        if (missing.length > 0) {
+            reply(false, `this GNOME Shell lacks ${missing.join(', ')}`);
+            return;
+        }
 
         // The shell's working directory is not the caller's, so a
         // relative path would be written somewhere neither of them
         // intended. Refusing is better than writing the right image to
         // the wrong place.
-        if (!path || !path.startsWith('/'))
-            return [false, `path must be absolute, got ${JSON.stringify(path)}`];
+        if (!path || !path.startsWith('/')) {
+            reply(false, `path must be absolute, got ${JSON.stringify(path)}`);
+            return;
+        }
 
         const window = this._findWindow(id);
-        if (!window)
-            return [false, `no window with id ${id}`];
+        if (!window) {
+            reply(false, `no window with id ${id}`);
+            return;
+        }
 
         const actor = window.get_compositor_private();
-        if (!actor)
-            return [false, `window ${id} has no actor; it may be unmapped`];
+        if (!actor) {
+            reply(false, `window ${id} has no actor; it may be unmapped`);
+            return;
+        }
 
-        // get_image() reads the window's own texture, which is why this
-        // exists at all: it is the window's content, not whatever is
-        // stacked on top of those screen coordinates, and it needs no
-        // portal and raises no consent dialog because this code is
-        // already inside gnome-shell.
+        if (typeof actor.get_image === 'function')
+            this._captureLegacy(actor, reply, path);
+        else
+            this._captureModern(window, actor, reply, path);
+    }
+
+    // Shell <=50: Meta.WindowActor.get_image() reads the window's own
+    // texture straight into a Cairo surface, which is why this path
+    // exists at all -- it is the window's content, not whatever is
+    // stacked on top of those screen coordinates, and it needs no
+    // portal and raises no consent dialog because this code is already
+    // inside gnome-shell. This is the path validated against a live
+    // shell -- see the file header.
+    _captureLegacy(actor, reply, path) {
         let surface;
         try {
             surface = actor.get_image(null);
         } catch (e) {
-            return [false, `get_image failed: ${e}`];
+            reply(false, `get_image failed: ${e}`);
+            return;
         }
-        if (!surface)
-            return [false, `window ${id} has no painted content to capture`];
+        if (!surface) {
+            reply(false, 'window has no painted content to capture');
+            return;
+        }
 
         try {
-            if (typeof surface.writeToPNG !== 'function')
-                return [false, 'this GJS build cannot write PNG from a surface'];
+            if (typeof surface.writeToPNG !== 'function') {
+                reply(false, 'this GJS build cannot write PNG from a surface');
+                return;
+            }
             surface.writeToPNG(path);
         } catch (e) {
-            return [false, `could not write ${path}: ${e}`];
+            reply(false, `could not write ${path}: ${e}`);
+            return;
         } finally {
             if (typeof surface.finish === 'function')
                 surface.finish();
         }
-        return [true, ''];
+        reply(true, '');
+    }
+
+    // Mutter >=51 removed get_image with no drop-in replacement; this
+    // reassembles the same result from what it does still expose:
+    // paint_to_content() renders the actor to a Clutter.Content, whose
+    // backing Cogl.Texture composite_to_stream() can encode to PNG,
+    // mirroring the pattern gnome-shell's own screenshot service uses
+    // internally for the same job. The API pair itself is live-validated
+    // (2026-09-02, GNOME Shell 51 beta, scripts/validate-gnome-extension.sh's
+    // capture check) but the crop below is not -- see the file header.
+    _captureModern(window, actor, reply, path) {
+        let content;
+        try {
+            content = actor.paint_to_content(null);
+        } catch (e) {
+            reply(false, `paint_to_content failed: ${e}`);
+            return;
+        }
+        if (!content) {
+            reply(false, 'window has no painted content to capture');
+            return;
+        }
+
+        const texture = content.get_texture();
+        // paint_to_content() renders the actor's whole allocation, which
+        // for a client-side-decorated window is larger than the window
+        // itself: get_buffer_rect() includes the invisible margin Mutter
+        // reserves for GTK/libadwaita's drop shadow, get_frame_rect() is
+        // just the visible frame. Observed live: a 939x537 frame_rect
+        // produced an 989x587 (+50 both axes = +25/side) uncropped
+        // capture. Scaling the crop by texture-pixels-per-buffer-pixel
+        // (not just subtracting screen coordinates) keeps this correct
+        // on a HiDPI/fractional-scale monitor too, where the texture has
+        // more pixels than the buffer rect has logical units.
+        const buffer = window.get_buffer_rect();
+        const frame = window.get_frame_rect();
+        const scaleX = texture.get_width() / buffer.width;
+        const scaleY = texture.get_height() / buffer.height;
+        const cropX = Math.round((frame.x - buffer.x) * scaleX);
+        const cropY = Math.round((frame.y - buffer.y) * scaleY);
+        const cropW = Math.round(frame.width * scaleX);
+        const cropH = Math.round(frame.height * scaleY);
+
+        const stream = Gio.MemoryOutputStream.new_resizable();
+        try {
+            Shell.Screenshot.composite_to_stream(
+                texture, cropX, cropY, cropW, cropH,
+                1.0, null, 0, 0, 1.0, stream,
+                (_source, result) => {
+                    let pixbuf;
+                    try {
+                        pixbuf = Shell.Screenshot.composite_to_stream_finish(result);
+                    } catch (e) {
+                        reply(false, `composite_to_stream failed: ${e}`);
+                        return;
+                    } finally {
+                        stream.close(null);
+                    }
+                    if (!pixbuf) {
+                        reply(false, 'composite_to_stream produced no image');
+                        return;
+                    }
+                    try {
+                        pixbuf.savev(path, 'png', [], []);
+                    } catch (e) {
+                        reply(false, `could not write ${path}: ${e}`);
+                        return;
+                    }
+                    reply(true, '');
+                });
+        } catch (e) {
+            reply(false, `composite_to_stream failed: ${e}`);
+        }
     }
 
     WindowAtPoint(x, y) {
@@ -388,8 +511,23 @@ function findMissingCaptureApis() {
     if (!actor)
         return missing; // unmapped sample; says nothing about the API
 
-    if (typeof actor.get_image !== 'function')
-        missing.push('Meta.WindowActor.get_image');
+    // Two independent routes to the same result: get_image (Shell <=50)
+    // or paint_to_content + Shell.Screenshot.composite_to_stream
+    // (Mutter >=51, which removed get_image). Either is sufficient, so
+    // only report missing when neither is available; checking function
+    // *existence* rather than calling anything keeps this probe free of
+    // side effects on a window that only happens to be the first one
+    // found.
+    const hasLegacy = typeof actor.get_image === 'function';
+    const hasModern =
+        typeof actor.paint_to_content === 'function' &&
+        typeof Shell.Screenshot.composite_to_stream === 'function' &&
+        typeof Shell.Screenshot.composite_to_stream_finish === 'function';
+    if (!hasLegacy && !hasModern) {
+        missing.push(
+            'Meta.WindowActor.get_image (or paint_to_content + ' +
+            'Shell.Screenshot.composite_to_stream on Mutter >=51)');
+    }
     return missing;
 }
 
