@@ -525,7 +525,10 @@ class TestWaitForIdle(unittest.TestCase):
         # Two big jumps (busy), then three readings essentially unchanged
         # (idle) -- idle only once the streak of `samples` (default 3)
         # flat readings is reached.
-        readings = [0.0, 5.0, 10.0, 10.000001, 10.000002, 10.000003]
+        readings = [
+            (seconds, 0.01)
+            for seconds in (0.0, 5.0, 10.0, 10.000001, 10.000002, 10.000003)
+        ]
         with mock.patch("pyguitest._process_cpu_seconds", side_effect=readings):
             self.assertTrue(
                 session().wait_for_idle(1234, timeout=5, interval=0.01, samples=3)
@@ -535,16 +538,118 @@ class TestWaitForIdle(unittest.TestCase):
         # Reporting wall-clock time as "CPU seconds consumed" simulates a
         # process pinned at ~100% CPU -- always well over the 1% threshold.
         with mock.patch(
-            "pyguitest._process_cpu_seconds", side_effect=lambda pid: time.monotonic()
+            "pyguitest._process_cpu_seconds",
+            side_effect=lambda pid: (time.monotonic(), 0.01),
         ):
             self.assertFalse(session().wait_for_idle(1234, timeout=0.05, interval=0.01))
+
+
+class TestIdleIsHonestAboutWhatItCanMeasure(unittest.TestCase):
+    """The defect this was written for, and the one it must not reintroduce.
+
+    wait_for_idle used to read "cannot tell" as "idle", so a process pinned
+    at 100% on a machine with an unreadable /proc was reported idle -- a
+    test that should have failed passing instead. It is the only place in
+    the package that failed dishonestly, and not FreeBSD-only: a container
+    with hidepid=2 hits the same guard on Linux.
+    """
+
+    def test_an_unreadable_cpu_time_raises_rather_than_reporting_idle(self):
+        with mock.patch(
+            "pyguitest._process_cpu_seconds",
+            side_effect=pyguitest.PyGUITestError("cannot read CPU time"),
+        ):
+            with self.assertRaises(pyguitest.PyGUITestError):
+                session().wait_for_idle(1234, timeout=1)
+
+    def test_a_clock_coarser_than_the_interval_raises(self):
+        # `ps` on procps reports whole seconds. Sampled 0.2s apart, a process
+        # using a whole core accumulates 0.2s of CPU and the clock cannot
+        # show it -- so everything reads idle, which is the original defect
+        # one layer down.
+        with mock.patch("pyguitest._process_cpu_seconds", return_value=(3.0, 1.0)):
+            with self.assertRaises(pyguitest.PyGUITestError) as caught:
+                session().wait_for_idle(1234, timeout=1)
+        message = str(caught.exception)
+        self.assertIn("nearest 1s", message)
+        self.assertIn("at least 1s", message)  # what would actually work
+
+    def test_the_ordinary_proc_configuration_is_not_refused(self):
+        # Regression guard: an earlier version of the check compared the
+        # resolution against cpu_threshold * interval, which refused /proc's
+        # own 0.01s tick at the shipped defaults -- breaking plain Linux.
+        readings = [(10.0, 0.01)] * 6
+        with (
+            mock.patch("pyguitest._process_cpu_seconds", side_effect=readings),
+            mock.patch("pyguitest.time.sleep"),
+        ):
+            self.assertTrue(session().wait_for_idle(1234, timeout=5))
+
+    def test_a_coarse_resolution_is_fine_when_the_question_is_coarse_too(self):
+        # Same 1s resolution, but asking about 50% of a core over 5s, which
+        # it can genuinely answer.
+        readings = [(10.0, 1.0)] * 4
+        with (
+            mock.patch("pyguitest._process_cpu_seconds", side_effect=readings),
+            mock.patch("pyguitest.time.sleep"),  # the logic, not the waiting
+        ):
+            self.assertTrue(
+                session().wait_for_idle(
+                    1234, timeout=60, interval=5.0, samples=2, cpu_threshold=0.5
+                )
+            )
+
+
+class TestCpuTimeParsing(unittest.TestCase):
+    """Both `ps` formats, with the resolution derived rather than assumed."""
+
+    def test_procps_whole_seconds(self):
+        self.assertEqual(pyguitest._parse_cpu_time("00:00:02"), (2.0, 1.0))
+        self.assertEqual(pyguitest._parse_cpu_time("01:02:03"), (3723.0, 1.0))
+
+    def test_freebsd_centiseconds(self):
+        seconds, resolution = pyguitest._parse_cpu_time("0:00.03")
+        self.assertAlmostEqual(seconds, 0.03)
+        self.assertAlmostEqual(resolution, 0.01)
+
+    def test_days_are_carried(self):
+        seconds, _ = pyguitest._parse_cpu_time("2-03:00:00")
+        self.assertEqual(seconds, 2 * 86400 + 3 * 3600)
+
+
+class TestProcessTableFallsBackToPs(unittest.TestCase):
+    """FreeBSD has no /proc unless linprocfs is mounted; ps is the way in."""
+
+    def test_it_uses_ps_when_proc_is_unavailable(self):
+        with (
+            mock.patch("pyguitest._have_proc", return_value=False),
+            mock.patch(
+                "pyguitest._ps",
+                return_value="  1 /sbin/init\n 42 sleep 30\n",
+            ) as ran,
+        ):
+            table = pyguitest._process_table()
+        self.assertEqual(table[42], "sleep 30")
+        self.assertEqual(ran.call_args.args, ("axo", "pid=,args="))
+
+    def test_no_proc_and_no_ps_raises_rather_than_reporting_nothing(self):
+        # An empty table would read as "your process is not running", which
+        # is a different and wrong answer from "I cannot tell".
+        with (
+            mock.patch("pyguitest._have_proc", return_value=False),
+            mock.patch("pyguitest._ps", return_value=None),
+        ):
+            with self.assertRaises(pyguitest.PyGUITestError):
+                pyguitest._process_table()
 
 
 class TestProcHelpers(unittest.TestCase):
     """The /proc readers wait_for_process/wait_for_idle are built on."""
 
     def test_process_cpu_seconds_reads_the_current_process(self):
-        self.assertIsInstance(pyguitest._process_cpu_seconds(os.getpid()), float)
+        seconds, resolution = pyguitest._process_cpu_seconds(os.getpid())
+        self.assertIsInstance(seconds, float)
+        self.assertGreater(resolution, 0)
 
     def test_process_cpu_seconds_is_none_for_a_pid_that_does_not_exist(self):
         self.assertIsNone(pyguitest._process_cpu_seconds(2**30))

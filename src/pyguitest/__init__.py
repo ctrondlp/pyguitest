@@ -126,6 +126,44 @@ stays backend-provided.
 """
 
 
+_PS_TIMEOUT = 5
+"""Seconds to allow `ps`. Bounded because it backs a polling loop."""
+
+
+def _ps(*argv: str) -> str | None:
+    """`ps` output, or None if it could not be run.
+
+    The portable half of process inspection. /proc is a Linux shape, not a
+    POSIX one: FreeBSD does not mount it by default and its native procfs
+    exposes `status` rather than `cmdline`/`stat`, so every reader below
+    needs a second route. `ps` is that route, following the same rule as
+    tools.py and ADR-001 -- adapt a maintained CLI rather than take a
+    dependency -- and BSD-style syntax works on procps too, so one call
+    covers Linux, FreeBSD and macOS.
+    """
+    try:
+        result = subprocess.run(
+            ["ps", *argv], capture_output=True, text=True, timeout=_PS_TIMEOUT
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout if result.returncode == 0 else None
+
+
+def _have_proc() -> bool:
+    """Whether a Linux-shaped /proc is present *and* readable.
+
+    Both halves matter. FreeBSD without linprocfs has no /proc at all, and
+    a container with `hidepid=2` has one this process cannot read -- the
+    fallback is for both.
+    """
+    try:
+        with open("/proc/self/stat"):
+            return True
+    except OSError:
+        return False
+
+
 def _proc_pids() -> Iterator[int]:
     """Every currently-visible pid, from /proc's numeric entries."""
     for entry in os.listdir("/proc"):
@@ -148,21 +186,86 @@ def _process_cmdline(pid: int) -> str:
     return " ".join(part.decode(errors="replace") for part in raw.split(b"\0") if part)
 
 
-def _process_cpu_seconds(pid: int) -> float | None:
-    """Total CPU time `pid` has accumulated, in seconds.
+def _process_table() -> dict[int, str]:
+    """Every visible process, as pid -> command line.
 
-    None if it no longer exists.
+    From /proc where it works, `ps axo pid=,args=` otherwise -- one call
+    for the enumeration and the command lines together. Raises
+    PyGUITestError when neither is available, rather than reporting an
+    empty process table, which would read as "your process is not running".
     """
-    try:
-        with open(f"/proc/{pid}/stat") as handle:
-            stat = handle.read()
-    except OSError:
-        return None
-    # comm (field 2) can itself contain spaces/parens, so split after its
-    # closing ')' rather than on whitespace from the start of the line.
-    fields = stat[stat.rindex(")") + 2 :].split()
-    utime, stime = int(fields[11]), int(fields[12])  # fields 14/15, 1-indexed
-    return (utime + stime) / os.sysconf("SC_CLK_TCK")
+    if _have_proc():
+        return {pid: _process_cmdline(pid) for pid in _proc_pids()}
+    output = _ps("axo", "pid=,args=")
+    if output is None:
+        raise PyGUITestError(
+            "cannot list processes: no readable /proc and no usable `ps`. "
+            "wait_for_process needs one of the two."
+        )
+    table = {}
+    for line in output.splitlines():
+        pid, _, args = line.strip().partition(" ")
+        if pid.isdigit():
+            table[int(pid)] = args.strip()
+    return table
+
+
+def _parse_cpu_time(text: str) -> tuple[float, float]:
+    """`ps` CPU time as (seconds, the resolution it was reported at).
+
+    Both formats in one parser, and the resolution *derived* rather than
+    assumed: procps prints `[[DD-]HH:]MM:SS` -- whole seconds -- while
+    FreeBSD prints `MM:SS.ss`. Which one is in front of us decides whether
+    idleness can be measured at all (see wait_for_idle), so guessing per
+    platform would be exactly the wrong move; the fractional digits say it.
+    """
+    text = text.strip()
+    days = 0.0
+    if "-" in text:
+        day_part, _, text = text.partition("-")
+        days = float(day_part)
+    parts = text.split(":")
+    seconds = float(parts[-1])
+    minutes = float(parts[-2]) if len(parts) > 1 else 0.0
+    hours = float(parts[-3]) if len(parts) > 2 else 0.0
+    _, _, fraction = parts[-1].partition(".")
+    resolution = 10.0 ** -len(fraction) if fraction else 1.0
+    return days * 86400 + hours * 3600 + minutes * 60 + seconds, resolution
+
+
+def _process_cpu_seconds(pid: int) -> tuple[float, float] | None:
+    """(CPU seconds, resolution) for `pid`, or None if it has exited.
+
+    The distinction between "exited" and "could not read" is the whole
+    point of this signature. It used to return None for both, and
+    wait_for_idle reads None as "exited, therefore idle" -- so a process
+    pinned at 100% on a machine where /proc could not be read was reported
+    *idle*, which is the one way this package fails dishonestly: a test
+    that should have failed passes. FileNotFoundError is the genuine "it is
+    gone"; anything else is a machine that cannot answer, and raises.
+    """
+    if _have_proc():
+        try:
+            with open(f"/proc/{pid}/stat") as handle:
+                stat = handle.read()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise PyGUITestError(f"cannot read CPU time for {pid}: {exc}") from exc
+        # comm (field 2) can itself contain spaces/parens, so split after its
+        # closing ')' rather than on whitespace from the start of the line.
+        fields = stat[stat.rindex(")") + 2 :].split()
+        utime, stime = int(fields[11]), int(fields[12])  # fields 14/15, 1-indexed
+        ticks = os.sysconf("SC_CLK_TCK")
+        return (utime + stime) / ticks, 1 / ticks
+    output = _ps("-p", str(pid), "-o", "time=")
+    if output is None:
+        raise PyGUITestError(
+            f"cannot read CPU time for {pid}: no readable /proc and no usable `ps`"
+        )
+    if not output.strip():
+        return None  # ps exits 0 with no rows for a pid that is gone
+    return _parse_cpu_time(output)
 
 
 class Session:
@@ -845,12 +948,18 @@ class Session:
         `name` is `.search()`ed against the full command line, the same way
         Session.find_window matches window titles. Returns the matched
         process's pid, or None on timeout.
+
+        Reads /proc where it is available and `ps axo pid=,args=` otherwise,
+        so this works on FreeBSD (no /proc unless linprocfs is mounted) and
+        inside a container that hides it. Raises PyGUITestError if neither
+        route works, rather than reporting an empty process table -- which
+        would look exactly like "your process is not running".
         """
         pattern = re.compile(name) if isinstance(name, str) else name
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
-            for pid in _proc_pids():
-                if pattern.search(_process_cmdline(pid)):
+            for pid, cmdline in _process_table().items():
+                if pattern.search(cmdline):
                     return pid
             if deadline is not None and time.monotonic() >= deadline:
                 return None
@@ -872,20 +981,62 @@ class Session:
         watch for the latter (see docs/wayland-audit.html for what Wayland
         actually exposes). Useful after e.g. clicking "Export" and waiting
         for the exporting process to stop working before checking its
-        output. A pid that has already exited counts as idle immediately.
+        output. A pid that has already exited counts as idle immediately --
+        but a pid whose CPU time cannot be *read* raises rather than
+        counting as idle, which is the distinction this used to get wrong:
+        with /proc unreadable it reported a process pinned at 100% as idle,
+        so a test that should have failed passed instead.
+
+        Where there is no readable /proc -- FreeBSD without linprocfs, or a
+        container with hidepid=2 -- CPU time comes from `ps`, whose
+        resolution varies (whole seconds on procps, centiseconds on
+        FreeBSD). If it is coarser than `interval` -- so coarse that a
+        process using a whole core would still read as idle -- this raises
+        rather than answering badly.
+
+        Note the resolution also sets a floor under `cpu_threshold`: the
+        smallest load that can be distinguished is resolution/interval of a
+        core, which with /proc's 0.01s tick and the default 0.2s interval is
+        5%, not the 1% the default threshold names. Loads under that floor
+        read as idle. Raise `interval` to lower it.
         """
         deadline = None if timeout is None else time.monotonic() + timeout
-        previous = _process_cpu_seconds(pid)
+        reading = _process_cpu_seconds(pid)
+        if reading is None:
+            return True
+        previous, resolution = reading
+        # Refuse only what cannot be answered at all. A process using one
+        # whole core accumulates `interval` seconds of CPU per sample, so if
+        # the clock is coarser than that, *nothing* can ever register as
+        # busy and every process reads idle -- which is precisely the defect
+        # this method was fixed for, reintroduced one layer down. `ps` on
+        # procps reports whole seconds, so it hits this against the 0.2s
+        # default; /proc's centisecond ticks do not.
+        #
+        # Deliberately not a check against `cpu_threshold`: the smallest
+        # load that can be *distinguished* is resolution/interval of a core,
+        # which on /proc's 0.01s tick is 5% at the default interval rather
+        # than the 1% the default threshold names. That floor has always
+        # been there, it is documented above, and turning it into an error
+        # would refuse the configuration this has shipped with.
+        if resolution > interval:
+            raise PyGUITestError(
+                f"cannot measure idleness for {pid} here: CPU time is "
+                f"reported to the nearest {resolution:g}s, which is coarser "
+                f"than the {interval:g}s sampling interval -- a process "
+                "using a whole core would still read as idle. Raise "
+                f"interval to at least {resolution:g}s, or run where /proc "
+                "is readable."
+            )
         streak = 0
         while True:
-            if previous is None:
-                return True
             if deadline is not None and time.monotonic() >= deadline:
                 return False
             time.sleep(interval)
-            current = _process_cpu_seconds(pid)
-            if current is None:
+            reading = _process_cpu_seconds(pid)
+            if reading is None:
                 return True
+            current, _ = reading
             idle_now = (current - previous) / interval <= cpu_threshold
             streak = streak + 1 if idle_now else 0
             previous = current
