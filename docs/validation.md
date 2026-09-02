@@ -146,10 +146,22 @@ read as a claim you cannot check.
   run also had the `Window` handle itself go stale: `geometry(window)`
   raised "no window with id 106" for a window the list had just returned.
   The lesson for a caller is a general one, and worth stating plainly:
-  **a title from `windows()` is not a key into the element tree.** Track a
-  window within one source — re-scan `elements(role="frame")` for the frame
-  that was not there before — or re-resolve the `Window` immediately before
-  using it for geometry. `examples/_eiinput_portal_validate.py` does both.
+  **a title from `windows()` is not a key into the element tree**, and a
+  `Window` is a snapshot rather than a live handle.
+  `examples/_eiinput_portal_validate.py` was written against that the hard
+  way, and the API has since grown the pieces it was missing:
+  `Session.refresh_window(window)` exchanges a handle held across time for
+  the current one — or `None` if it has closed — and `Session.
+  is_window_open(window)` answers the same question directly. `Window`
+  now compares by handle-and-backend rather than by identity, so
+  `window in gui.windows()` means what it looks like.
+
+  What none of that fixes is the *cross-source* half: `windows()` and the
+  accessibility tree are still two different views, and no amount of window
+  identity bridges them. Track a window within one source — re-scan
+  `elements(role="frame")` for the frame that was not there before, which is
+  what that script does — rather than looking a title from one up in the
+  other.
 
 ## Run live on KDE Plasma 6 / KWin (XWayland)
 

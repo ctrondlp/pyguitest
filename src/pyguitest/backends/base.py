@@ -150,6 +150,34 @@ class Window:
         self.app_id = app_id
         self.pid = pid
 
+    def __eq__(self, other: object) -> bool:
+        """Whether both describe the same window of the same backend.
+
+        By handle, never by title: two windows can share a title, and a
+        title can change while the window stays put -- GNOME Text Editor
+        renames itself the moment it has content, which is enough to make
+        a title comparison answer "different window" about the window you
+        are looking at.
+
+        The backend must be the same *object*, not merely an equal one.
+        Two members of one composite can both hand out small integer
+        handles, and `106 == 106` across them would be a confident false
+        match.
+
+        What this cannot tell you: whether a handle has gone stale. An X11
+        id is reusable (see the class docstring), so a window equal to one
+        from five minutes ago may be a different window wearing a recycled
+        id. `Session.is_window_open` and `Session.refresh_window` are the
+        way to ask about *now*.
+        """
+        if not isinstance(other, Window):
+            return NotImplemented
+        return self.backend is other.backend and self.handle == other.handle
+
+    def __hash__(self) -> int:
+        """Hash on the same pair `__eq__` compares, so sets and dicts work."""
+        return hash((id(self.backend), self.handle))
+
     def __repr__(self) -> str:
         bits = [repr(self.title)]
         if self.app_id:

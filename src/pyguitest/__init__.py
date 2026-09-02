@@ -685,6 +685,36 @@ class Session:
                 return None
             time.sleep(interval)
 
+    def is_window_open(self, window: Window) -> bool:
+        """Whether `window` is still in the window list.
+
+        Asked of the list rather than of the handle, because a handle does
+        not know it has died: reading geometry from a closed window raises
+        from somewhere inside the backend -- "no window with id 106" is a
+        real example -- rather than reporting cleanly that it is gone.
+        """
+        return any(w == window for w in self.windows())
+
+    def refresh_window(self, window: Window) -> Window | None:
+        """`window` as it is *now*, or None if it has closed.
+
+        A `Window` is a snapshot: its title was true when it was taken, and
+        the handle beneath it may since have gone. Both bite in practice --
+        an editor renames itself as soon as it has content, and a handle
+        held across a few seconds of work can address nothing at all -- so
+        anything that keeps one across time should exchange it for a fresh
+        one before using it, rather than assume.
+
+        Returns a *different* object with the same identity, so
+        `refresh_window(w) == w` while `refresh_window(w).title` may not
+        match `w.title`. None means it is gone, which is the answer callers
+        most often need and cannot get from the handle itself.
+        """
+        for current in self.windows():
+            if current == window:
+                return current
+        return None
+
     def wait_window_close(
         self, window: Window, timeout: float | None = None, interval: float = 0.5
     ) -> bool:
@@ -702,19 +732,15 @@ class Session:
         None waits indefinitely. Returns True once closed, False if `timeout`
         elapses first while it is still open.
         """
-
-        def still_open() -> bool:
-            return any(w.handle == window.handle for w in self.windows())
-
-        if not still_open():
+        if not self.is_window_open(window):
             return True
         if self.supports(Capability.WINDOW_EVENTS):
             for event in self.backend.window_events(timeout=timeout):
-                if event.change == "close" and event.window.handle == window.handle:
+                if event.change == "close" and event.window == window:
                     return True
-            return not still_open()
+            return not self.is_window_open(window)
         deadline = None if timeout is None else time.monotonic() + timeout
-        while still_open():
+        while self.is_window_open(window):
             if deadline is not None and time.monotonic() >= deadline:
                 return False
             time.sleep(interval)

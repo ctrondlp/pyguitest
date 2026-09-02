@@ -7,6 +7,25 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `Session.refresh_window(window)` and `Session.is_window_open(window)`, plus
+  equality and hashing on `Window`. A `Window` is a snapshot: its title was
+  true when it was taken and the handle beneath it may since have gone, and
+  both bite in practice — a live run had `geometry()` fail with "no window
+  with id 106" for a window the list had just returned, and an editor that
+  renamed itself the moment it had content left a captured `Window`
+  describing nothing. `refresh_window` exchanges a stale one for the current
+  one, or `None` if it has closed. Equality is by handle *and* backend
+  identity, never by title (two windows can share a title, and a title can
+  change while the window stays put) and never across backends (two members
+  of one composite can both hand out small integer handles, and `106 == 106`
+  across them would be a confident false match). `wait_window_close` now
+  uses `is_window_open` rather than its own private copy of the same idiom.
+  What none of this addresses is `windows()` and the accessibility tree
+  disagreeing about *membership* — that needs a way to relate the two
+  sources, not a way to compare windows within one, and is left alone.
+
 ### Changed
 
 - `send_keys`'s grammar moved to a new `sendkeys.py` as `KeySender`, with

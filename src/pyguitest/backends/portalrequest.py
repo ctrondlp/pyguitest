@@ -170,10 +170,15 @@ def request(
             try:
                 loop.run()
             finally:
-                # Removing an already-fired one-shot source is harmless;
-                # leaving a live one holds a reference to this closure and
-                # fires it into a dead loop on some later request.
-                if source is not None:
+                # Leaving a live source holds a reference to this closure
+                # and fires it into a dead loop on some later request, so
+                # it has to go -- but only if it is still there. on_timeout
+                # returns False, which makes GLib drop the source itself,
+                # and removing it again is not merely redundant: GLib logs
+                # "Source ID N was not found when attempting to remove it"
+                # every time, which is noise on the one path where the
+                # output is being read for a reason.
+                if source is not None and not timed_out:
                     GLib.source_remove(source)
     finally:
         for subscription in subscriptions:

@@ -73,6 +73,28 @@ def _respond_code(request_path: str, result_code: int, results: dict) -> str:
     returns, so an inline emission would race ahead of the subscription
     and the client would hang in GLib.MainLoop().run() forever.
 
+    It is emitted *repeatedly* rather than once for the same reason, one
+    step further on. A single emission after a fixed delay only moves the
+    race: it assumes the client gets its subscription registered inside
+    that window, which is a bet on how busy the machine is. That bet was
+    lost on a 2015-era laptop running the full suite -- the 20ms window
+    expired before signal_subscribe(), the Response went to nobody, and the
+    client sat in run() until its own 60s timeout, turning a green suite
+    red for no reason. Re-emitting until the test is over costs nothing:
+    the client ignores every Response after the first (see on_response in
+    portalrequest.py), and the mock dies with the test.
+
+    The repeat is unbounded rather than a counted retry deliberately -- a
+    counter would need a variable, and a `def` here cannot close over one
+    (see the paragraph below). setUp spawns a fresh mock per test and
+    tearDown stops it, so "forever" is the length of one test.
+
+    Note this only matters because the mock answers on a *fixed* path. A
+    real portal derives the request path from the handle_token the caller
+    chose, which is why portalrequest.py subscribes to that derived path
+    before making the call at all -- the raceless route, and the one
+    production actually depends on.
+
     Every value this generates is baked in as a literal via repr() at
     generation time (this function runs in the test process, not the mock
     process) rather than referenced as a free variable inside `_respond`.
@@ -90,7 +112,7 @@ def _respond():
     objects[{request_path!r}].EmitSignal(
         {_REQUEST_INTERFACE!r}, "Response", "ua{{sv}}", [{result_code!r}, {results!r}]
     )
-    return False
+    return True  # keep answering; the mock is torn down after each test
 
 GLib.timeout_add(20, _respond)
 ret = {request_path!r}

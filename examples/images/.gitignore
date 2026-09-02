@@ -1,0 +1,5 @@
+# The demo pair is generated, never committed -- see README.md. Keeping the
+# tree free of binary files is deliberate: `08_find_by_image.py --demo`
+# writes these with pyguitest's own PNG encoder, which also means running
+# the demo exercises png.py rather than just reading bytes back off disk.
+*.png

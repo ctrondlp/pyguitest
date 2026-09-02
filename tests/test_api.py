@@ -3,9 +3,11 @@
 import json
 import os
 import re
+import sys
 import tempfile
 import time
 import unittest
+import uuid
 from unittest import mock
 
 import pyguitest
@@ -124,6 +126,75 @@ class FakeBackend(GUIBackend):
 
 def session():
     return pyguitest.Session(FakeBackend(), pyguitest.detect())
+
+
+class TestWindowIdentity(unittest.TestCase):
+    """A Window is a snapshot; these are the ways to ask about *now*.
+
+    The three failures behind this, all from one live run: a handle that
+    went stale mid-script ("no window with id 106" from geometry()), a
+    title that changed underneath a captured Window because the editor
+    renamed itself once it had content, and no way to ask whether two
+    Windows were the same one -- which is what pushed that script into
+    comparing titles, the thing that produced the first two problems.
+    """
+
+    def test_two_objects_for_one_window_are_equal(self):
+        # Built by hand rather than by looking twice: the fake backend hands
+        # back the same object both times, where a real one constructs a new
+        # Window per call -- which is the case that has to compare equal.
+        gui = session()
+        first = gui.find_window("Firefox")
+        again = Window(first.handle, first.backend, title=first.title)
+        self.assertIsNot(first, again)
+        self.assertEqual(first, again)
+
+    def test_a_different_window_is_not_equal(self):
+        gui = session()
+        self.assertNotEqual(gui.find_window("Firefox"), gui.find_window("Editor"))
+
+    def test_equal_handles_from_different_backends_are_not_the_same_window(self):
+        # Two members of one composite can both hand out "a" as a handle.
+        # Comparing handles alone would call those the same window.
+        one, two = FakeBackend(), FakeBackend()
+        self.assertNotEqual(
+            Window("a", one, title="Document - Editor"),
+            Window("a", two, title="Document - Editor"),
+        )
+
+    def test_a_window_survives_a_set(self):
+        gui = session()
+        windows = set(gui.windows())
+        self.assertIn(gui.find_window("Firefox"), windows)
+        self.assertEqual(len(windows | set(gui.windows())), len(windows))
+
+    def test_comparing_against_a_non_window_is_not_an_error(self):
+        self.assertNotEqual(session().find_window("Firefox"), "Firefox")
+
+    def test_refresh_window_reports_the_title_as_it_is_now(self):
+        # The editor-renamed-itself case. The handle is unchanged, so it is
+        # still the same window -- but the snapshot's title is stale.
+        gui = session()
+        stale = gui.find_window("Firefox")
+        gui.backend._windows[1] = Window("b", gui.backend, title="Firefox - Private")
+
+        fresh = gui.refresh_window(stale)
+        self.assertEqual(fresh, stale)
+        self.assertEqual(fresh.title, "Firefox - Private")
+        self.assertEqual(stale.title, "Firefox")
+
+    def test_refresh_window_reports_a_closed_window_as_gone(self):
+        gui = session()
+        window = gui.find_window("Firefox")
+        gui.backend._windows = [w for w in gui.backend._windows if w != window]
+        self.assertIsNone(gui.refresh_window(window))
+
+    def test_is_window_open_follows_the_list(self):
+        gui = session()
+        window = gui.find_window("Firefox")
+        self.assertTrue(gui.is_window_open(window))
+        gui.backend._windows = [w for w in gui.backend._windows if w != window]
+        self.assertFalse(gui.is_window_open(window))
 
 
 class TestWindowFinders(unittest.TestCase):
@@ -411,13 +482,26 @@ class TestWaitForFile(unittest.TestCase):
 
 class TestWaitForProcess(unittest.TestCase):
     def test_finds_a_running_process_by_cmdline(self):
+        # Two things here are deliberate, and this test taught both the hard
+        # way -- it failed with "31880 != 32032", having matched somebody
+        # else's process:
+        #
+        #   * The pattern is unique to this run. Searching for "sleep"
+        #     searches the whole process table for a word that any machine
+        #     has several of at any moment, so it found a `sleep` belonging
+        #     to an unrelated shell loop and reported its pid.
+        #   * The process outlives the search rather than racing it. The
+        #     original slept for 0.3s and allowed 1s to be found in, which
+        #     is a bet that the machine schedules both promptly.
+        # Python rather than `sh -c "sleep 30 # token"`: a shell given a
+        # single command execs it, which replaces argv and takes the token
+        # with it, leaving nothing to search for.
         gui = session()
-        proc = gui.start_app(["sleep", "0.3"])
-        try:
-            pid = gui.wait_for_process("sleep", timeout=1, interval=0.01)
-            self.assertEqual(pid, proc.pid)
-        finally:
-            proc.wait(timeout=2)
+        token = f"pyguitest-waitfor-{uuid.uuid4().hex[:8]}"
+        code = f"import time; time.sleep(30)  # {token}"
+        with gui.start_app([sys.executable, "-c", code]) as app:
+            pid = gui.wait_for_process(token, timeout=10, interval=0.01)
+            self.assertEqual(pid, app.pid)
 
     def test_returns_none_on_timeout_when_nothing_matches(self):
         gui = session()
