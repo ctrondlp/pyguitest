@@ -101,9 +101,12 @@ version = {attr = "pyguitest.__version__"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
-# PEP 561: ship the marker so type checkers use our annotations.
+# PEP 561: ship the marker so type checkers use our annotations. The KWin
+# script: KWinEventsBackend loads it via importlib.resources at runtime, so
+# it has to actually be in the installed package, not just the source tree.
 [tool.setuptools.package-data]
 pyguitest = ["py.typed"]
+"pyguitest.backends" = ["_kwin_window_events.js"]
 
 
 # --------------------------------------------------------------------------

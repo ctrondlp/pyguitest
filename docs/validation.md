@@ -468,6 +468,60 @@ read as a claim you cannot check.
   to X Recording bridge" window, hinting at a KWin-specific counterpart
   to the GNOME/Mutter `geometry()` caveat below -- unconfirmed, and
   deliberately not pursued further in this pass.
+- **`Capability.WINDOW_EVENTS`** (`KWinEventsBackend`, new this session) --
+  KDE's one remaining real capability gap before this: `kdotool` has no
+  event-subscription mechanism at all (checked against `kdotool --help`
+  directly -- purely query/action, unlike `xdotool behave`), so
+  `wait_for_window`/`window_events` had no path here at all until now.
+  Closed by an ad hoc KWin script (`_kwin_window_events.js`, shipped as
+  package data and loaded via `org.kde.kwin.Scripting.loadScript()` +
+  `Script.run()` at construction -- no install-and-enable step, unlike
+  the GNOME Shell extension this mirrors in spirit but not in mechanism)
+  that calls back into a small D-Bus service this backend hosts itself.
+  The architecture inverts relative to GNOME's extension for a concrete
+  reason: introspecting `org.kde.kwin.Scripting` live turned up
+  `loadScript`/`Script.run` (load and run an arbitrary file, well
+  documented) and `callDBus(...)` inside a script (call an *existing*
+  service, also well documented) but no way for a script to register a
+  new D-Bus interface or emit its own signal -- so the script became the
+  client, not the server.
+  Confirmed live end to end, both at the mechanism level
+  (`scripts/validate-kwin-events.sh`, 7/7) and through the real backend
+  class (`examples/_kwin_events_validate.py`): `wait_for_window("bash")`
+  found an already-open Konsole window immediately via `kdotool search`
+  (the existing-match check this backend needs since it has no
+  `windows()` of its own), and `wait_for_window("gedit")` on a freshly
+  spawned window returned only once a live `new` event arrived from the
+  KWin script; a later `close` event also arrived correctly once that
+  process was terminated. `window.internalId` (the KWin script's own
+  window identifier) matches `kdotool`'s UUID handle format exactly
+  (`{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}`), cross-checked against a
+  real `kdotool search .` listing -- which is what lets a `Window` this
+  backend yields interoperate with `KdotoolBackend`'s other operations
+  (geometry, activate, ...) through the composite, since `CompositeBackend`
+  reads `Window.handle` directly with no ownership check.
+  One real bug surfaced building this and was fixed before it ever ran
+  against a live KWin: an early draft of `window_events()` pumped
+  `GLib.MainContext.default().iteration(True)` in a plain polling loop,
+  which blocks indefinitely when nothing else is scheduled on the
+  context -- exactly the state a `connect=False` test backend is in,
+  deliberately, so unit tests could exercise the event queue without a
+  real KWin -- silently ignoring `timeout` altogether. Fixed by mirroring
+  `GnomeShellBackend.window_events()`'s proven `GLib.MainLoop` +
+  `timeout_add` + wake-on-event shape instead.
+  A second, narrower thing surfaced and was worked around rather than
+  fixed, since there was nothing in this codebase to fix: the KWin
+  script's own `workspace.windowList()`, called as a function, reliably
+  broke script execution -- every statement after it, and even a
+  `callDBus` placed *before* it in the same script, failed to arrive
+  at the hosted service, though a bare `callDBus` and one wrapped in an
+  ordinary function both worked fine in isolation. Enumerating
+  `workspace`'s own property names (`for (var k in workspace)`) turned
+  up `stackingOrder` alongside `windowList` -- and `stackingOrder`, read
+  as a plain property rather than called as a function, worked without
+  issue: iterating it and reading `.internalId`/`.caption` on each entry
+  produced exactly the windows a real `kdotool search .` also listed.
+  Used in the shipped script instead of `windowList()` for that reason.
 
 ## Run live on a real X11 session
 

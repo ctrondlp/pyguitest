@@ -18,6 +18,7 @@ from .composite import CompositeBackend
 from .eiinput import LibeiBackend
 from .imagesearch import ToolImageSearchBackend
 from .input import ToolInputBackend
+from .kwinevents import KWinEventsBackend
 from .null import NullBackend
 
 __all__ = [
@@ -32,6 +33,7 @@ __all__ = [
     "ToolCaptureBackend",
     "ToolClipboardBackend",
     "ToolImageSearchBackend",
+    "KWinEventsBackend",
     "LibeiBackend",
     "register",
     "select",
@@ -480,11 +482,37 @@ def _clipboard_factory(environment):
     return None
 
 
+def _kwinevents_factory(environment):
+    """Build the KWin-script-backed WINDOW_EVENTS backend, KDE only.
+
+    kdotool (the "windows" member on KDE) has no event-subscription
+    mechanism to speak; this is a second, separate composite member
+    providing only WINDOW_EVENTS, the same way capture/clipboard/
+    imagesearch sit alongside kdotool rather than being folded into it.
+    Compositor-gated rather than tried everywhere: the KWin script this
+    loads needs a live `org.kde.KWin` on the session bus, which nothing
+    but KWin provides.
+
+    Construction can raise `BackendUnavailable` for a reason `available()`
+    cannot see -- KWin's Scripting interface unreachable, the script
+    failing to load -- see `register`'s docstring on what happens to that.
+    """
+    from ..session import Compositor
+    from . import kwinevents as _kwinevents
+
+    if environment.compositor is not Compositor.KWIN:
+        return None
+    if not _kwinevents.available():
+        return None
+    return KWinEventsBackend()
+
+
 # Window IPC outranks AT-SPI: both can list windows, but only IPC reports
 # geometry that is trustworthy under Wayland.
 register(_window_factory, "windows", priority=95)
 register(_capture_factory, "capture", priority=60)
 register(_clipboard_factory, "clipboard", priority=58)
+register(_kwinevents_factory, "kwinevents", priority=57)
 register(_image_factory, "imagesearch", priority=55)
 
 

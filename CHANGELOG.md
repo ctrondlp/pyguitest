@@ -118,6 +118,24 @@ All notable changes to pyguitest are recorded here. The format follows
   field because reading the value means importing PyGObject, and `detect()`
   deliberately imports nothing — it uses `find_spec` throughout, so a plain
   `connect()` still pulls in no GNOME stack it was not already using.
+- `Capability.WINDOW_EVENTS` on KDE, via a new `KWinEventsBackend`. Closes
+  the one real capability gap KDE had left: `kdotool` has no
+  event-subscription mechanism of its own (checked against `kdotool
+  --help` directly — purely query/action, unlike `xdotool behave`), so
+  `wait_for_window`/`window_events` had no path there at all. An ad hoc
+  KWin script (`_kwin_window_events.js`, shipped as package data, loaded
+  via `org.kde.kwin.Scripting.loadScript()`/`Script.run()` at
+  construction — no install-and-enable step, unlike the GNOME Shell
+  extension this complements) calls back into a small D-Bus service this
+  backend hosts itself, inverting the GNOME extension's architecture: KWin
+  scripting has no documented way to register a new D-Bus interface or
+  emit its own signal, only to call an existing one (`callDBus`), so the
+  script is the client here rather than the server. Composed alongside
+  `KdotoolBackend` rather than merged into it, the same way
+  capture/clipboard/imagesearch already sit next to it. Live-validated end
+  to end on KDE Plasma 6/KWin — mechanism-level
+  (`scripts/validate-kwin-events.sh`) and through the real backend
+  (`examples/_kwin_events_validate.py`) — see `docs/validation.md`.
 
 ### Fixed
 
@@ -166,6 +184,16 @@ All notable changes to pyguitest are recorded here. The format follows
   `WLROOTS` either way. Fixed in both places that make the call:
   `_input_factory`, which picks the backend, and `detect()`, whose
   `input_tools` feeds `preferred_input` and `doctor`.
+- `KWinEventsBackend.window_events()` would have hung on every call that
+  found nothing queued, ignoring `timeout` entirely -- caught before it
+  ever ran against a live KWin, by the unit tests written alongside it. An
+  early draft pumped `GLib.MainContext.default().iteration(True)` in a
+  plain loop; with nothing else scheduled on the context (which is exactly
+  the state a `connect=False` test backend is in, deliberately, so those
+  tests could exercise the event queue with no real KWin at all),
+  `iteration(True)` blocks for a source that will never fire. Fixed by
+  mirroring `GnomeShellBackend.window_events()`'s proven `GLib.MainLoop` +
+  `timeout_add` + wake-on-event shape instead.
 - The GNOME Shell extension's window capture no longer breaks on Mutter 51,
   which removed `Meta.WindowActor.get_image` with no drop-in replacement --
   the id-0 capability probe correctly reported `WINDOW_CAPTURE` unsupported
