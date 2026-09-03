@@ -105,6 +105,48 @@ class TestInputPreference(unittest.TestCase):
         self.assertFalse(e.can_inject_input)
 
 
+class TestToolDiscoveryMatchesTheSession(unittest.TestCase):
+    """What `detect()` lists has to be what a backend could actually use.
+
+    `input_tools` is not decoration: `preferred_input` reads it, `doctor`
+    prints it, and `_input_factory` makes the same discovery call to pick
+    a real backend. A tool listed here that cannot work on this session is
+    a wrong answer in all three places.
+    """
+
+    def _tools(self, environment):
+        with mock.patch(
+            "pyguitest.tools.shutil.which", lambda name: f"/usr/bin/{name}"
+        ):
+            return detect(environment).input_tools
+
+    def test_a_wlroots_only_tool_is_not_listed_for_a_plain_x11_session(self):
+        # Regression: the wlroots gate was `compositor is WLROOTS or
+        # x11_session`, so wtype was listed wherever an X display existed
+        # -- including a session with no Wayland compositor at all.
+        tools_found = self._tools(env(DISPLAY=":0", XDG_SESSION_TYPE="x11"))
+        self.assertNotIn("wtype", tools_found)
+        self.assertIn("xdotool", tools_found)
+
+    def test_a_wlroots_only_tool_is_not_listed_for_gnome_xwayland(self):
+        tools_found = self._tools(
+            env(WAYLAND_DISPLAY="wayland-0", DISPLAY=":0", XDG_CURRENT_DESKTOP="GNOME")
+        )
+        self.assertNotIn("wtype", tools_found)
+
+    def test_a_wlroots_session_still_lists_its_own_tools(self):
+        tools_found = self._tools(
+            env(WAYLAND_DISPLAY="wayland-0", XDG_CURRENT_DESKTOP="sway")
+        )
+        self.assertIn("wtype", tools_found)
+
+    def test_an_x11_only_tool_is_not_listed_for_a_pure_wayland_session(self):
+        tools_found = self._tools(
+            env(WAYLAND_DISPLAY="wayland-0", XDG_CURRENT_DESKTOP="sway")
+        )
+        self.assertNotIn("xdotool", tools_found)
+
+
 class TestAtspiDetection(unittest.TestCase):
     def test_c_library_alone_is_not_reported_as_usable(self):
         # The bug this guards: find_library("atspi") succeeds on most desktops

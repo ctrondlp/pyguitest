@@ -556,13 +556,32 @@ class NiriCLI:
     def action(self, name, **arguments):
         """Perform one niri action.
 
-        The CLI spells actions in kebab case and takes their fields as long
-        options, so FocusWindow{id: 7} becomes `action focus-window --id 7`.
+        The CLI spells actions in kebab case and takes their scalar fields
+        as long options, so FocusWindow{id: 7} becomes
+        `action focus-window --id 7`.
+
+        Not every field is a scalar, though, and treating them all as one
+        emitted an argument nothing could parse. niri's SizeChange is an
+        externally tagged enum over the socket -- `{"SetFixed": 800}` --
+        and `str()` on that dict produced
+        `--change "{'SetFixed': 800}"`, so `resize_window` was broken on
+        this transport for as long as it has existed. The CLI takes the
+        change as a *positional* argument in its own spelling instead
+        (`set-window-width --id 7 800`), which `_size_change` renders;
+        positionals are collected and appended after the options, since
+        that is the only place clap accepts them.
+
+        Still unexercised against a live niri, like the rest of this
+        transport -- see docs/structure.md.
         """
         argv = ["niri", "msg", "action", _kebab(name)]
+        positional = []
         for key, value in arguments.items():
+            if isinstance(value, dict):
+                positional.append(_size_change(value))
+                continue
             argv += [f"--{_kebab(key)}", str(value)]
-        return self._runner(argv)
+        return self._runner(argv + positional)
 
     def event_stream(self, deadline=None):
         """Yield events, skipping blank and malformed lines."""
@@ -575,6 +594,38 @@ class NiriCLI:
                 yield json.loads(line)
             except ValueError:
                 continue
+
+
+_SIZE_CHANGE = {
+    "SetFixed": "{}",
+    "SetProportion": "{}%",
+    "AdjustFixed": "{:+}",
+    "AdjustProportion": "{:+}%",
+}
+"""niri's SizeChange variants, as its CLI spells them.
+
+The socket takes the enum as JSON (`{"SetFixed": 800}`); the CLI parses
+one string per variant instead -- a bare number is SetFixed, a trailing
+`%` makes it a proportion, and a leading sign makes it an adjustment.
+Transcribed from the `niri-ipc` crate's own FromStr, same as the rest of
+this transport."""
+
+
+def _size_change(value):
+    """One niri enum argument in the CLI's own spelling.
+
+    Raises rather than guessing at a variant this does not know: an
+    unrecognised one would otherwise be stringified into an argument niri
+    rejects, which is exactly the failure this function exists to end.
+    """
+    if len(value) == 1:
+        ((variant, amount),) = value.items()
+        if variant in _SIZE_CHANGE:
+            return _SIZE_CHANGE[variant].format(amount)
+    raise ValueError(
+        f"cannot spell {value!r} for `niri msg action`; known variants are "
+        + ", ".join(sorted(_SIZE_CHANGE))
+    )
 
 
 def _kebab(name):

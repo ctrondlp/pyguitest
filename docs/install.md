@@ -27,7 +27,7 @@ rather than an error.
 | `atspi` | elements — buttons, text fields, dropdowns; windows on GNOME | `[atspi]` (dogtail) | PyGObject, pyatspi, at-spi2-core | — |
 | `windows` | window control on sway, Hyprland, niri | — | — | — (unix sockets, stdlib only) |
 | `windows` (KWin) | window control on KDE | — | — | `kdotool` |
-| `gnomeshell` | window control and prompt-free per-window capture on GNOME | — | PyGObject | — (plus the [Shell extension](../gnome-shell-extension/README.md), installed by hand) |
+| `gnomeshell` | window control, prompt-free per-window capture, and outputs with their scale on GNOME | — | PyGObject | — (plus the [Shell extension](../gnome-shell-extension/README.md), installed by hand) |
 | `input` | pointer and keyboard through a CLI tool | — | — | `wdotool`, `wtype`, `ydotool` or `xdotool` |
 | `uinput` | in-process pointer and keyboard | `[uinput]` (evdev) | — | — (needs `/dev/uinput` access) |
 | `eiinput` *(opt-in)* | keymap-safe input over libei | `[eiinput]` (`python-libei[portal]`, which brings PyGObject with it) | `libei`, gobject-introspection | — |

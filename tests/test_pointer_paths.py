@@ -317,6 +317,22 @@ class TestTheOrigin(unittest.TestCase):
         gui.glide(7, 109, duration=0.02, rate=200)
         self.assertTrue(all(x == 7 for x, _ in gui.backend.moves))
 
+    def test_readback_still_supplies_the_origin_through_a_composite(self):
+        # Regression: `connect()` composes, so this is the shape a real X11
+        # session actually has -- and CompositeBackend had no
+        # pointer_position to forward, so _origin's getattr() came back
+        # None and every glide/drag with no prior move_mouse raised
+        # "POINTER_QUERY is unavailable" on a session whose own
+        # supports(POINTER_QUERY) said otherwise.
+        from pyguitest.backends.composite import CompositeBackend
+
+        member = QueryingBackend()
+        empty = RecordingBackend(CapabilitySet(set()))
+        gui = session(CompositeBackend([empty, member]))
+        self.assertTrue(gui.supports(Capability.POINTER_QUERY))
+        gui.glide(7, 109, duration=0.02, rate=200)
+        self.assertTrue(all(x == 7 for x, _ in member.moves))
+
 
 class TestDrag(unittest.TestCase):
     def test_motion_happens_between_the_press_and_the_release(self):

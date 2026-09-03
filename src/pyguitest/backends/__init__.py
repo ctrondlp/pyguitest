@@ -363,7 +363,15 @@ def _input_factory(environment):
     usable = tools.discover(
         tools.INPUT_TOOLS,
         allow_x11_only=x11,
-        allow_wlroots_only=environment.compositor is Compositor.WLROOTS or x11,
+        # The compositor alone decides this one -- an X connection is not a
+        # substitute for the wlroots protocols wtype needs. `or x11` here
+        # let wtype through on a plain X11 session (no Wayland at all) and
+        # on GNOME/KDE XWayland, where it cannot work; being keymap-safe it
+        # then outranked xdotool, so a session xdotool would have driven
+        # correctly got a backend that fails on every call. A wlroots
+        # session with
+        # XWayland is unaffected: its compositor is WLROOTS either way.
+        allow_wlroots_only=environment.compositor is Compositor.WLROOTS,
     )
 
     for tool in usable:

@@ -422,7 +422,11 @@ def detect(env: Mapping[str, str] | None = None) -> Environment:
     # limitation that remains once they are included, not a reason to
     # exclude them.
     x11_session = session_type in (SessionType.X11, SessionType.XWAYLAND)
-    wlroots = compositor is Compositor.WLROOTS or x11_session
+    # A wlroots-only tool needs a wlroots compositor, and nothing else
+    # substitutes: an X connection does not, which is why this is not
+    # `or x11_session`. See _input_factory in backends/__init__.py, which
+    # makes the same call for the backend this list only describes.
+    wlroots = compositor is Compositor.WLROOTS
     input_tools = tuple(
         t.name
         for t in _tools.discover(

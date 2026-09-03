@@ -35,6 +35,32 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ### Added
 
+- `Capability.SCREEN_INFO` on GNOME, via `GnomeShellBackend.screens()` --
+  the last failing tier-2 line, and the only capability gap that was ever
+  just a matter of not asking. Mutter's own
+  `org.gnome.Mutter.DisplayConfig.GetCurrentState` answers any session-bus
+  client with the full monitor, mode and scale list and raises no prompt;
+  nothing needed to be installed or negotiated. It is also the only source
+  in this package that reports a real *scale* -- X11 has no notion of one,
+  so an XWayland session's outputs come back at 1.0 however the desktop is
+  actually configured.
+
+  Logical monitors, not physical ones, and the size is derived rather than
+  read: `GetCurrentState` reports the panel's pixel mode and the logical
+  monitor's scale and transform separately, so the logical size is the mode
+  divided by the scale (under logical layout mode) with the axes swapped on
+  a 90/270-degree rotation. That is what keeps `screens()` in the same
+  coordinate space as `geometry()` and `window_at()` -- verified live, where
+  a maximized window sat at `(0, 32, 1920, 1048)` against a 1920x1080
+  screen. Reporting the raw mode instead would have put the two in
+  different coordinate systems on exactly the fractional-scale desktops
+  where nobody would notice by eye. A mirrored pair is one `Screen`; a
+  disabled output is none, matching `NiriBackend.screens()`.
+
+  One limitation worth knowing: this rides on `GnomeShellBackend`, which
+  will not construct without the `pyguitest-window-control` extension, so a
+  GNOME session without it gets no `screens()` either -- an artefact of
+  where the method lives rather than of what Mutter allows.
 - `primary=True` on `get_clipboard()`/`set_clipboard()`, reaching the
   X11/Wayland PRIMARY selection -- what a middle-click paste reads --
   independently of the clipboard proper. `Session.assert_clipboard(expected,
@@ -95,6 +121,51 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ### Fixed
 
+- Tier-6 operations are reachable through a composite again -- which is to
+  say, reachable at all on a real desktop. `CompositeBackend` routes each
+  call to the member that declares the capability, and the five capabilities
+  only `X11Backend` serves (`POINTER_QUERY`, `INPUT_STATE_QUERY`,
+  `WINDOW_TITLE_SET`, `WINDOW_LOWER`, `WINDOW_CURSOR_QUERY`) were missing
+  from that table, with no `__getattr__` to fall through to. So
+  `gui.supports(Capability.POINTER_QUERY)` answered `True` -- a member
+  really does provide it -- and `gui.pointer_position()` then raised
+  `AttributeError`. Since `connect()` composes on every real session, a
+  bare `X11Backend` was the only place these ever worked; `examples/
+  07_keys_and_pointer.py` and `examples/09_gui_spy.py` both check
+  `supports()` and then call straight into the gap. `Session.glide()` and
+  `drag()` hit it too, by way of `_origin`, and reported "POINTER_QUERY is
+  unavailable" on a session whose own `supports()` had just said otherwise.
+- `type_text()` on the `portal` and `eiinput` backends sends Enter for a
+  newline, as X11 and uinput already did. Both resolved `"\n"` as an
+  ordinary character and both got a real, wrong answer rather than an
+  error: `portal.py` produced `0x01000000 | 10`, the Unicode keysym form
+  of U+000A, which names no key on any keymap; and `xkb.py`'s
+  `keysym_for_char` inherited `xkb_utf32_to_keysym`'s answer of
+  `XKB_KEY_Linefeed`, which *is* on the US keymap (evdev 101,
+  `KEY_LINEFEED`) and so resolved happily to a key no physical keyboard
+  has. `type_text("name\n")` -- filling a field and submitting it, about
+  as ordinary as this API gets -- therefore typed the name and then did
+  nothing. The other control characters were already right in both places
+  and are now asserted so they stay that way.
+- `resize_window()` works on niri's `niri msg` fallback transport. niri's
+  `SizeChange` is an externally tagged enum over the socket
+  (`{"SetFixed": 800}`) and `NiriCLI.action` stringified every argument
+  into a long option, emitting `--change "{'SetFixed': 800}"` -- an
+  argument no CLI parses. The CLI takes the change positionally in its own
+  spelling (`set-window-width --id 7 800`), which is what is sent now; an
+  enum variant this does not know is refused rather than stringified. Like
+  the rest of that transport, still unexercised against a live niri.
+- A wlroots-only input tool is no longer offered to a session that merely
+  has an X display. `allow_wlroots_only` was `compositor is WLROOTS or
+  x11`, so `wtype` survived discovery on a plain X11 session with no
+  Wayland compositor at all, and on GNOME/KDE XWayland -- and being
+  keymap-safe it outranked `xdotool`, so a session `xdotool` would have
+  driven correctly got a backend that fails on every call. wtype needs
+  `zwp_virtual_keyboard_manager_v1`; an X server is not a substitute. A
+  wlroots session with XWayland is unaffected, its compositor being
+  `WLROOTS` either way. Fixed in both places that make the call:
+  `_input_factory`, which picks the backend, and `detect()`, whose
+  `input_tools` feeds `preferred_input` and `doctor`.
 - The GNOME Shell extension's window capture no longer breaks on Mutter 51,
   which removed `Meta.WindowActor.get_image` with no drop-in replacement --
   the id-0 capability probe correctly reported `WINDOW_CAPTURE` unsupported

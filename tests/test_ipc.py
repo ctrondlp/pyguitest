@@ -318,6 +318,37 @@ class TestNiriCLI(unittest.TestCase):
         transport = ipc.NiriCLI(streamer=lambda argv, deadline=None: iter(lines))
         self.assertEqual(list(transport.event_stream()), [{"WindowClosed": {"id": 1}}])
 
+    def test_a_size_change_becomes_a_positional_argument(self):
+        # Regression: SizeChange is an externally tagged enum over the
+        # socket ({"SetFixed": 800}) and every argument here was
+        # stringified into a long option, so resize_window emitted
+        # `--change "{'SetFixed': 800}"` -- an argument no CLI parses.
+        # niri takes the change positionally, in its own spelling.
+        calls = []
+        transport = ipc.NiriCLI(runner=lambda argv: calls.append(argv) or "")
+        transport.action("SetWindowWidth", id=7, change={"SetFixed": 800})
+        self.assertEqual(
+            calls[0],
+            ["niri", "msg", "action", "set-window-width", "--id", "7", "800"],
+        )
+
+    def test_every_size_change_variant_has_a_cli_spelling(self):
+        for variant, amount, expected in (
+            ("SetFixed", 800, "800"),
+            ("SetProportion", 50, "50%"),
+            ("AdjustFixed", 10, "+10"),
+            ("AdjustFixed", -10, "-10"),
+            ("AdjustProportion", 5, "+5%"),
+        ):
+            with self.subTest(variant=variant, amount=amount):
+                self.assertEqual(ipc._size_change({variant: amount}), expected)
+
+    def test_an_unknown_enum_argument_is_refused_rather_than_stringified(self):
+        # Stringifying it is precisely the bug above; failing loudly is
+        # the only other honest option.
+        with self.assertRaises(ValueError):
+            ipc._size_change({"NoSuchVariant": 1})
+
 
 class TestCLIFallback(unittest.TestCase):
     def test_sway_cli_parses_json_output(self):

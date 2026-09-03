@@ -113,6 +113,24 @@ class TestUSLayout(RealKeymapTestCase):
     def test_unknown_key_name_is_none(self):
         self.assertIsNone(self.keymap.for_name("NoSuchKeyName"))
 
+    def test_a_newline_types_enter_rather_than_linefeed(self):
+        # Regression, and the reason keysym_for_char does not simply
+        # forward to libxkbcommon: xkb_utf32_to_keysym(0x0A) answers
+        # XKB_KEY_Linefeed, which really is on this keymap (evdev 101,
+        # KEY_LINEFEED). So the lookup *succeeded* and typing "\n"
+        # pressed a key no physical keyboard has and no application
+        # treats as Enter -- a silent wrong answer, not a failure.
+        self.assertEqual(self.keymap.for_char("\n"), (KEY_ENTER, ()))
+        self.assertEqual(self.keymap.for_char("\n"), self.keymap.for_name("Return"))
+
+    def test_the_other_control_characters_need_no_help(self):
+        # libxkbcommon already answers these correctly; asserted so that a
+        # future table cannot silently start disagreeing with it.
+        self.assertEqual(self.keymap.for_char("\r"), (KEY_ENTER, ()))
+        self.assertEqual(self.keymap.for_char("\t"), self.keymap.for_name("Tab"))
+        self.assertEqual(self.keymap.for_char("\b"), self.keymap.for_name("BackSpace"))
+        self.assertEqual(self.keymap.for_char("\x1b"), self.keymap.for_name("Escape"))
+
 
 class TestFrenchLayout(RealKeymapTestCase):
     """The whole justification for this module.
@@ -148,6 +166,11 @@ class TestFrenchLayout(RealKeymapTestCase):
 
     def test_accented_letters_are_reachable_here(self):
         self.assertIsNotNone(self.keymap.for_char("é"))
+
+    def test_a_newline_still_types_enter_on_a_non_us_layout(self):
+        # The letters move between layouts; Enter does not, and the
+        # newline fix must not have hardcoded a US keycode to get there.
+        self.assertEqual(self.keymap.for_char("\n"), (KEY_ENTER, ()))
 
 
 class TestAvailability(unittest.TestCase):

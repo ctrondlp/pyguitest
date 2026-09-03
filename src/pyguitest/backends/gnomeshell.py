@@ -30,7 +30,7 @@ from ..errors import (
     PyGUITestError,
     WindowNotFound,
 )
-from .base import GUIBackend, Window
+from .base import GUIBackend, Screen, Window
 from .windows import WindowEvent
 
 __all__ = ["GnomeShellBackend", "available"]
@@ -38,6 +38,29 @@ __all__ = ["GnomeShellBackend", "available"]
 _BUS_NAME = "org.gnome.Shell"
 _OBJECT_PATH = "/org/gnome/Shell/Extensions/Pyguitest"
 _INTERFACE = "org.gnome.Shell.Extensions.Pyguitest"
+
+_DISPLAY_CONFIG_NAME = "org.gnome.Mutter.DisplayConfig"
+_DISPLAY_CONFIG_PATH = "/org/gnome/Mutter/DisplayConfig"
+"""Mutter's own output interface -- not the extension's.
+
+`screens()` is the one operation here that does not go through
+`pyguitest-window-control` at all: Mutter has always answered
+`GetCurrentState` itself, unprompted, to any session-bus client. The
+extension is still what gets this backend *constructed* (see `__init__`),
+so a GNOME session without it gets no SCREEN_INFO either -- an artefact of
+where this method lives rather than of what Mutter allows, and the reason
+to move it out if a caller ever wants outputs without window control."""
+
+_LAYOUT_MODE_LOGICAL = 1
+"""GetCurrentState's `layout-mode`: logical (1) or physical (2).
+
+It decides what a logical monitor's size *means*, so it cannot be ignored.
+Under logical layout -- GNOME's default, and what fractional scaling needs
+-- the monitor occupies `mode / scale` units of the global coordinate
+space; under physical layout it occupies the mode size and the scale
+applies only to rendering. Reporting the mode size in both cases would put
+`screens()` in a different coordinate space from `geometry()` on exactly
+the desktops that scale."""
 
 
 def _gio():
@@ -83,6 +106,15 @@ class GnomeShellBackend(GUIBackend):
                 "pulls in the same dependency this needs (see README)"
             )
         self._Gio, self._GLib = modules
+        self._display_proxy = None
+        """Mutter's DisplayConfig, built on first screens() call.
+
+        Lazily, unlike the extension proxy above: construction already
+        pays two round trips (the extension probe and the capture probe),
+        and unlike WINDOW_CAPTURE there is nothing here to *discover* --
+        DisplayConfig is core Mutter, so any session that got far enough
+        to build this backend has it. A caller who never asks for outputs
+        never pays for the proxy."""
         if proxy is not None:
             self._proxy = proxy
         else:
@@ -154,6 +186,12 @@ class GnomeShellBackend(GUIBackend):
         whole-screen method, so claiming it would promise something
         nothing here can deliver.
 
+        SCREEN_INFO is unconditional for the reason WINDOW_CAPTURE is
+        not: it reads Mutter's own DisplayConfig rather than the
+        extension, and that interface is part of the compositor, so a
+        session that got far enough to construct this backend has it.
+        There is nothing to probe for.
+
         WINDOW_EVENTS, unlike WINDOW_CAPTURE, is not behind its own probe:
         it rides on Meta.Display's `window-created` and Meta.Window's
         `unmanaging`/`notify::title` signals, which have been stable
@@ -163,6 +201,7 @@ class GnomeShellBackend(GUIBackend):
         see PyguitestService.startWatching in extension.js.
         """
         capabilities = {
+            Capability.SCREEN_INFO,
             Capability.WINDOW_LIST,
             Capability.WINDOW_STATE,
             Capability.WINDOW_GEOMETRY,
@@ -189,6 +228,114 @@ class GnomeShellBackend(GUIBackend):
             method, parameters, self._Gio.DBusCallFlags.NONE, -1, None
         )
         return reply.unpack()
+
+    # -- outputs -----------------------------------------------------------
+
+    def _display_config(self):
+        """A proxy for Mutter's DisplayConfig, built once on first use."""
+        if self._display_proxy is None:
+            try:
+                self._display_proxy = self._Gio.DBusProxy.new_for_bus_sync(
+                    self._Gio.BusType.SESSION,
+                    self._Gio.DBusProxyFlags.NONE,
+                    None,
+                    _DISPLAY_CONFIG_NAME,
+                    _DISPLAY_CONFIG_PATH,
+                    _DISPLAY_CONFIG_NAME,
+                    None,
+                )
+            except Exception as exc:
+                raise CapabilityUnsupported(
+                    Capability.SCREEN_INFO,
+                    self.name,
+                    f"cannot reach {_DISPLAY_CONFIG_NAME}: {exc}",
+                ) from exc
+        return self._display_proxy
+
+    @staticmethod
+    def _current_modes(monitors):
+        """Map each connector to the (width, height) it is displaying now.
+
+        A monitor advertises every mode it can do and marks the live one
+        with `is-current`; a monitor that is switched off marks none, and
+        is simply absent from the result.
+        """
+        sizes = {}
+        for spec, modes, _properties in monitors:
+            for _id, width, height, _refresh, _preferred, _scales, flags in modes:
+                if flags.get("is-current"):
+                    sizes[spec[0]] = (width, height)
+                    break
+        return sizes
+
+    def screens(self):
+        """Every enabled output, in the order Mutter lists them.
+
+        Read from Mutter's own `DisplayConfig.GetCurrentState`, which
+        answers any session-bus client unprompted -- so this is the one
+        method here that needs nothing from the extension, and the only
+        source in this package that reports a *scale*. X11 has no notion
+        of one, which is why an XWayland session's outputs come back at
+        1.0 however the desktop is actually scaled.
+
+        Logical monitors, not physical ones. A logical monitor is what the
+        global coordinate space is made of, so this is the same space
+        `geometry()` and `window_at()` already answer in -- which is the
+        point, since a caller who centres a click from `screens()` and a
+        rectangle from `geometry()` is mixing the two. It also means a
+        mirrored pair is one Screen (named after the first connector, the
+        one Mutter lists first) and a disabled output is none at all,
+        matching how NiriBackend skips an output with no logical rect.
+
+        Size is derived rather than read: `GetCurrentState` gives the
+        panel's pixel mode and the logical monitor's scale and transform
+        separately, and the logical size is the mode divided by the scale
+        (under logical layout mode -- see _LAYOUT_MODE_LOGICAL) with the
+        axes swapped on a 90- or 270-degree rotation.
+        """
+        self.require(Capability.SCREEN_INFO)
+        proxy = self._display_config()
+        try:
+            reply = proxy.call_sync(
+                "GetCurrentState", None, self._Gio.DBusCallFlags.NONE, -1, None
+            )
+        except Exception as exc:
+            raise CapabilityUnsupported(
+                Capability.SCREEN_INFO,
+                self.name,
+                f"DisplayConfig.GetCurrentState failed: {exc}",
+            ) from exc
+        _serial, monitors, logical_monitors, properties = reply.unpack()
+        logical = (
+            properties.get("layout-mode", _LAYOUT_MODE_LOGICAL) == _LAYOUT_MODE_LOGICAL
+        )
+        sizes = self._current_modes(monitors)
+
+        screens: list[Screen] = []
+        for _x, _y, scale, transform, _primary, specs, _properties in logical_monitors:
+            size = next((sizes[s[0]] for s in specs if s[0] in sizes), None)
+            if size is None:
+                # A logical monitor whose panel reports no current mode.
+                # Nothing to report a size from, and inventing one would
+                # be worse than leaving it out.
+                continue
+            width, height = size
+            # Transforms 1/3 are 90/270 degrees and 5/7 are those flipped;
+            # all four are odd, and all four swap the axes.
+            if transform % 2:
+                width, height = height, width
+            if logical and scale:
+                width, height = round(width / scale), round(height / scale)
+            screens.append(
+                Screen(
+                    index=len(screens),
+                    width=width,
+                    height=height,
+                    scale=scale,
+                    name=specs[0][0] if specs else "",
+                )
+            )
+        return screens
 
     def _list_windows(self):
         """The extension's raw window tuples.

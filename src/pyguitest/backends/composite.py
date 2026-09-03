@@ -84,6 +84,22 @@ _DISPATCH = {
     "find_element": Capability.ELEMENT_TREE,
     "get_clipboard": Capability.CLIPBOARD,
     "set_clipboard": Capability.CLIPBOARD,
+    # Tier 6. These have no stub on GUIBackend -- they exist only on the
+    # backend that can serve them, which today is X11Backend alone -- but
+    # they are capability-routed like everything above, so they belong
+    # here rather than being left to a caller. Without them a composite
+    # advertised POINTER_QUERY (Session.supports said yes, because a
+    # member declared it) and then answered `gui.pointer_position()` with
+    # AttributeError, since CompositeBackend has no __getattr__ to fall
+    # through to. That is the normal X11 session, not a corner case:
+    # `connect()` composes, so it hit every caller of the tier-6
+    # operations, Session.glide/drag's own origin lookup included.
+    "pointer_position": Capability.POINTER_QUERY,
+    "is_button_pressed": Capability.INPUT_STATE_QUERY,
+    "is_key_pressed": Capability.INPUT_STATE_QUERY,
+    "set_window_title": Capability.WINDOW_TITLE_SET,
+    "lower_window": Capability.WINDOW_LOWER,
+    "is_window_cursor": Capability.WINDOW_CURSOR_QUERY,
 }
 
 

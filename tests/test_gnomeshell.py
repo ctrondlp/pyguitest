@@ -205,7 +205,64 @@ class FakeProxy:
         return FakeReply((0,))
 
 
-def install_fake_gi(driver=None):
+def _mode(width, height, current=False, name=None):
+    """One GetCurrentState mode tuple: (id, w, h, refresh, scale, scales, props)."""
+    return (
+        name or f"{width}x{height}@60.000",
+        width,
+        height,
+        60.0,
+        1.0,
+        [1.0, 2.0],
+        {"is-current": True} if current else {},
+    )
+
+
+def _monitor(connector, modes):
+    """One GetCurrentState monitor: (spec, modes, properties)."""
+    return ((connector, "vendor", "product", "serial"), modes, {})
+
+
+def _logical(connectors, scale=1.0, transform=0, primary=True):
+    """One logical monitor: (x, y, scale, transform, primary, specs, props)."""
+    return (
+        0,
+        0,
+        scale,
+        transform,
+        primary,
+        [(c, "vendor", "product", "serial") for c in connectors],
+        {},
+    )
+
+
+class FakeDisplayConfig:
+    """Stands in for a Gio.DBusProxy bound to Mutter's DisplayConfig.
+
+    Shapes transcribed from a live `gdbus call ... GetCurrentState` on
+    GNOME Shell 51 rather than from the D-Bus XML, since the nesting is
+    what the unpacking has to get right.
+    """
+
+    def __init__(self, monitors=None, logical=None, layout_mode=1, fails=None):
+        self.monitors = (
+            monitors
+            if monitors is not None
+            else [_monitor("Virtual-1", [_mode(2560, 1600), _mode(1920, 1080, True)])]
+        )
+        self.logical = logical if logical is not None else [_logical(["Virtual-1"])]
+        self.properties = {"layout-mode": layout_mode}
+        self.fails = fails
+        self.calls = []
+
+    def call_sync(self, method, _parameters, _flags, _timeout, _cancellable):
+        self.calls.append(method)
+        if self.fails is not None:
+            raise self.fails
+        return FakeReply((1, self.monitors, self.logical, self.properties))
+
+
+def install_fake_gi(driver=None, display=None):
     gi = types.ModuleType("gi")
     gi.require_version = lambda *a, **kw: None
     repository = types.ModuleType("gi.repository")
@@ -215,7 +272,17 @@ def install_fake_gi(driver=None):
     Gio.DBusProxyFlags = types.SimpleNamespace(NONE=0)
     Gio.DBusCallFlags = types.SimpleNamespace(NONE=0)
     Gio.DBusSignalFlags = types.SimpleNamespace(NONE=0)
-    Gio.DBusProxy = types.SimpleNamespace(new_for_bus_sync=lambda *a, **kw: FakeProxy())
+    # Dispatch on the bus name the caller asked for: the backend builds two
+    # proxies now, the extension's and Mutter's own DisplayConfig, and
+    # handing back the extension fake for both would let a screens() test
+    # pass against a proxy that has no GetCurrentState at all.
+    display = FakeDisplayConfig() if display is None else display
+
+    def new_for_bus_sync(*args, **_kw):
+        name = args[3] if len(args) > 3 else None
+        return display if name == "org.gnome.Mutter.DisplayConfig" else FakeProxy()
+
+    Gio.DBusProxy = types.SimpleNamespace(new_for_bus_sync=new_for_bus_sync)
 
     GLib = types.ModuleType("gi.repository.GLib")
     GLib.Variant = FakeVariant
@@ -381,6 +448,140 @@ class TestUnavailable(unittest.TestCase):
         with self.assertRaises(BackendUnavailable) as ctx:
             gnomeshell.GnomeShellBackend(proxy=BrokenProxy())
         self.assertIn("not installed or not enabled", str(ctx.exception))
+
+
+class TestScreens(unittest.TestCase):
+    """Outputs come from Mutter's DisplayConfig, not from the extension.
+
+    The sizes are *derived* -- GetCurrentState reports the panel's pixel
+    mode, and the logical monitor's scale and transform, separately -- so
+    each arithmetic case gets its own test. Live cross-check on GNOME
+    Shell 51: `screens()` reported 1920x1080 while the extension put a
+    maximized window at (0, 32, 1920, 1048), i.e. 32 + 1048 = 1080
+    exactly, which is the coordinate-space agreement these encode.
+    """
+
+    def _gui(self, display=None, **kwargs):
+        display = FakeDisplayConfig(**kwargs) if display is None else display
+        self.display = display
+        patcher = install_fake_gi(display=display)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        from pyguitest.backends import gnomeshell
+
+        self.module = gnomeshell
+        self.proxy = FakeProxy()
+        return gnomeshell.GnomeShellBackend(proxy=self.proxy)
+
+    def test_screen_info_is_declared(self):
+        self.assertIn(Capability.SCREEN_INFO, self._gui().capabilities)
+
+    def test_the_current_mode_is_the_size_reported(self):
+        # Two modes are advertised and only one carries is-current; picking
+        # the first (2560x1600) would be a plausible, wrong answer.
+        (screen,) = self._gui().screens()
+        self.assertEqual(screen.size, (1920, 1080))
+        self.assertEqual(screen.name, "Virtual-1")
+        self.assertEqual(screen.scale, 1.0)
+        self.assertEqual(screen.index, 0)
+
+    def test_a_fractional_scale_gives_the_logical_size(self):
+        # The whole reason this reads logical monitors: under logical
+        # layout mode the monitor occupies mode/scale units of the space
+        # geometry() answers in, so reporting 2560x1600 here would put
+        # screens() and geometry() in different coordinate systems.
+        gui = self._gui(
+            monitors=[_monitor("DP-1", [_mode(2560, 1600, True)])],
+            logical=[_logical(["DP-1"], scale=1.25)],
+        )
+        (screen,) = gui.screens()
+        self.assertEqual(screen.size, (2048, 1280))
+        self.assertEqual(screen.scale, 1.25)
+
+    def test_physical_layout_mode_does_not_divide(self):
+        # layout-mode 2: the scale applies to rendering only, and the
+        # monitor really does occupy its full pixel mode.
+        gui = self._gui(
+            monitors=[_monitor("DP-1", [_mode(2560, 1600, True)])],
+            logical=[_logical(["DP-1"], scale=2.0)],
+            layout_mode=2,
+        )
+        (screen,) = gui.screens()
+        self.assertEqual(screen.size, (2560, 1600))
+
+    def test_a_rotated_monitor_swaps_the_axes(self):
+        for transform in (1, 3, 5, 7):
+            with self.subTest(transform=transform):
+                gui = self._gui(
+                    monitors=[_monitor("DP-1", [_mode(1920, 1080, True)])],
+                    logical=[_logical(["DP-1"], transform=transform)],
+                )
+                (screen,) = gui.screens()
+                self.assertEqual(screen.size, (1080, 1920))
+
+    def test_an_unrotated_transform_leaves_the_axes_alone(self):
+        for transform in (0, 2, 4, 6):
+            with self.subTest(transform=transform):
+                gui = self._gui(
+                    monitors=[_monitor("DP-1", [_mode(1920, 1080, True)])],
+                    logical=[_logical(["DP-1"], transform=transform)],
+                )
+                (screen,) = gui.screens()
+                self.assertEqual(screen.size, (1920, 1080))
+
+    def test_a_mirrored_pair_is_one_screen(self):
+        # Two panels, one logical monitor: one entry in the global
+        # coordinate space, so one Screen, named after the first.
+        gui = self._gui(
+            monitors=[
+                _monitor("DP-1", [_mode(1920, 1080, True)]),
+                _monitor("HDMI-1", [_mode(1920, 1080, True)]),
+            ],
+            logical=[_logical(["DP-1", "HDMI-1"])],
+        )
+        (screen,) = gui.screens()
+        self.assertEqual(screen.name, "DP-1")
+
+    def test_a_panel_with_no_current_mode_is_skipped_and_indices_stay_dense(self):
+        # Inventing a size for an output that reports none would be worse
+        # than leaving it out; the survivors must still number from zero
+        # without a gap, the way NiriBackend.screens() does.
+        gui = self._gui(
+            monitors=[
+                _monitor("DP-1", [_mode(1920, 1080)]),  # nothing is-current
+                _monitor("HDMI-1", [_mode(1280, 720, True)]),
+            ],
+            logical=[_logical(["DP-1"]), _logical(["HDMI-1"])],
+        )
+        (screen,) = gui.screens()
+        self.assertEqual(
+            (screen.index, screen.size, screen.name), (0, (1280, 720), "HDMI-1")
+        )
+
+    def test_the_extension_is_not_involved(self):
+        # This is a Mutter call. Going through the extension's proxy would
+        # work here and fail on any shell running an older copy of it.
+        gui = self._gui()
+        self.proxy.calls.clear()
+        gui.screens()
+        self.assertEqual(self.proxy.calls, [])
+        self.assertEqual(self.display.calls, ["GetCurrentState"])
+
+    def test_the_display_proxy_is_built_once_and_reused(self):
+        # Built lazily, so a caller who never asks for outputs pays
+        # nothing -- but not rebuilt per call either.
+        gui = self._gui()
+        gui.screens()
+        gui.screens()
+        self.assertEqual(self.display.calls, ["GetCurrentState"] * 2)
+
+    def test_a_display_config_failure_is_a_typed_error(self):
+        # Not a bare RuntimeError from inside GDBus: every other
+        # unsupported operation here raises CapabilityUnsupported.
+        gui = self._gui(fails=RuntimeError("GDBus.Error:ServiceUnknown"))
+        with self.assertRaises(CapabilityUnsupported) as ctx:
+            gui.screens()
+        self.assertIs(ctx.exception.capability, Capability.SCREEN_INFO)
 
 
 if __name__ == "__main__":

@@ -257,6 +257,30 @@ class TestKeyboard(PortalTestCase):
         states = [c[1][3] for c in self.connection.calls]
         self.assertEqual(states, [1, 0, 1, 0])
 
+    def test_control_characters_resolve_to_the_key_they_mean(self):
+        # Regression: a control character has no keysym in the Latin-1
+        # range the fallback covers, so "\n" became 0x01000000 | 10 --
+        # the Unicode keysym form of U+000A, which names no key on any
+        # keymap. type_text("...\n") therefore did nothing where every
+        # caller means Enter. X11Backend and uinput both map it already.
+        for char, expected in (
+            ("\n", 0xFF0D),  # Return
+            ("\r", 0xFF0D),
+            ("\t", 0xFF09),  # Tab
+            ("\b", 0xFF08),  # BackSpace
+            ("\x1b", 0xFF1B),  # Escape
+        ):
+            with self.subTest(char=char):
+                self.connection.calls.clear()
+                self.gui.press_key(char)
+                _sh, _opts, keysym, _state = self.connection.calls[-1][1]
+                self.assertEqual(keysym, expected)
+
+    def test_typing_a_trailing_newline_presses_return(self):
+        self.gui.type_text("a\n")
+        keysyms = [c[1][2] for c in self.connection.calls]
+        self.assertEqual(keysyms, [ord("a"), ord("a"), 0xFF0D, 0xFF0D])
+
     def test_type_text_does_not_warn_about_keymap_safety(self):
         # Unlike uinput/ydotool: keysym injection is keymap-safe by
         # construction, so there is nothing to warn about here.

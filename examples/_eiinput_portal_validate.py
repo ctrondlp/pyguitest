@@ -200,20 +200,32 @@ def negotiate(label: str, token: str | None, full: bool):
 # -- 3. injection ----------------------------------------------------------
 
 
-def wait_for_new_window(gui, before: set[str], timeout: float = 15.0):
-    """The first window whose title was not there before, or None.
+def wait_for_new_window(gui, before, timeout: float = 15.0):
+    """The first window not in `before`, or None. `before` is a set of Window.
 
     Deliberately not `wait_for_window(title_regex)`: the editor's title
     depends on which editor it is and on the GNOME version that named the
     app, and a regex loose enough to survive that ("." matches any non-empty
-    title) would happily return the terminal this is running in. What is
-    actually known here is that a window appeared that was not there a
-    moment ago.
+    title) would happily return the terminal this is running in.
+
+    And deliberately not comparing *titles* either, which is what this did
+    at first and which cost a live run: many terminals rewrite their own
+    window title live to reflect the foreground process or cwd, so this
+    script's own terminal can pick up a title it did not have a few seconds
+    earlier -- satisfying "wasn't in `before`" -- while gnome-text-editor's
+    window either had not appeared yet or was slower to be listed. The
+    result was the terminal being mistaken for the editor: activated
+    (trivially "successful", since it already had focus) and typed into.
+    Comparing `Window` objects instead of titles is exactly what `__eq__`
+    on `Window` exists for (by handle and backend, never by title -- see
+    backends/base.py), so the terminal's own window, whatever it renames
+    itself to, is still recognizably the *same* window and never qualifies
+    as new.
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         for window in gui.windows():
-            if window.title and window.title not in before:
+            if window not in before:
                 return window
         time.sleep(0.5)
     return None
@@ -235,7 +247,7 @@ class Editor:
         self.command = command
         self.app = None
         self.before: set[str] = set()
-        self.before_frames: set[str] = set()
+        self.before_frames = set()  # frame identities; see frame_names()
         self.window = None
         self.document: pathlib.Path | None = None
 
@@ -245,7 +257,7 @@ class Editor:
         handle, path = tempfile.mkstemp(prefix="pyguitest-eiinput-", suffix=".txt")
         os.close(handle)
         self.document = pathlib.Path(path)
-        self.before = {w.title for w in self.gui.windows()}
+        self.before = set(self.gui.windows())
         self.before_frames = frame_names(self.gui)
         self.app = self.gui.start_app([*self.command, str(self.document)])
         try:
@@ -283,15 +295,21 @@ overview opened, and the text meant for the editor went to the shell's
 search box and then to the terminal behind it."""
 
 
-def frame_names(gui) -> set[str]:
-    """Every top-level frame the accessibility tree currently reports."""
+def frame_names(gui):
+    """The identity of every top-level frame the accessibility tree reports.
+
+    `.node` (the dogtail node a frame wraps), not `.name` -- see `new_frame`
+    on why a name is not safe to diff against. dogtail's node type is real
+    and hashable, unlike pyguitest's own Element wrapper around it, which is
+    a fresh object every call and compares by identity, not value.
+    """
     try:
-        return {e.name for e in gui.elements(role="frame") if e.name}
+        return {e.node for e in gui.elements(role="frame")}
     except Exception:
         return set()
 
 
-def new_frame(gui, before: set[str], timeout: float = 5.0):
+def new_frame(gui, before, timeout: float = 5.0):
     """The accessibility frame that appeared since `before`, or None.
 
     Deliberately *not* `window_element(title)`. `windows()` and the
@@ -305,14 +323,20 @@ def new_frame(gui, before: set[str], timeout: float = 5.0):
     that no longer exists -- and the miss is expensive, because the lookup
     walks every window role on the desktop before giving up.
 
-    Staying inside one source avoids the whole question: the frame that was
-    not there before the launch is the editor, whatever it is calling itself
-    by now.
+    Staying inside one source still is not staying inside one *string*,
+    though -- `before` used to be frame names, and a live run showed why
+    that is not safe either: this script's own terminal window can rewrite
+    its own AT-SPI frame name (it tracks the window title, which many
+    terminals update live to the cwd or foreground process) between the
+    snapshot and this check, satisfying "wasn't there a moment ago" and
+    getting typed into instead of the editor. `before` is now a set of
+    frame *identities* (see `frame_names`), which a renamed frame is still
+    a member of.
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         for frame in gui.elements(role="frame"):
-            if frame.name and frame.name not in before:
+            if frame.node not in before:
                 return frame
         time.sleep(0.5)
     return None
@@ -357,7 +381,7 @@ claimed for it -- which is why a click is never sent to it. See
 `pointer_target`."""
 
 
-def pointer_target(gui, before: set[str]) -> tuple[tuple[int, int], bool]:
+def pointer_target(gui, before) -> tuple[tuple[int, int], bool]:
     """Where to point, and whether that coordinate is over the editor.
 
     Three separate things go wrong here on a GNOME session, all of them
@@ -395,7 +419,7 @@ def pointer_target(gui, before: set[str]) -> tuple[tuple[int, int], bool]:
         return BLIND_POINT, False
 
 
-def is_active(gui, window, before: set[str]) -> bool:
+def is_active(gui, window, before) -> bool:
     """Whether the editor is the active window -- by identity, not by title.
 
     A title is not identity here, and comparing them cost a whole live run:
@@ -407,21 +431,24 @@ def is_active(gui, window, before: set[str]) -> bool:
     editor renames itself the instant it has content, and the two sources
     notice at different times (see docs/validation.md).
 
-    So: prefer the backend's own handle, fall back to the title matching,
-    and finally accept any active window that was not on screen before the
-    launch -- which is the same identity `new_frame` and
-    `wait_for_new_window` use, and the one that survives a rename.
+    So: prefer `Window.__eq__` (by handle and backend, never by title), and
+    fall back to accepting any active window that was not open before the
+    launch -- the same `before` set `wait_for_new_window` uses, and the one
+    that survives a rename. `before` has to be a set of `Window` objects for
+    that fallback to mean anything: comparing `active.title` against it used
+    to work when `before` held titles, but a title will never equal (or
+    usefully test membership against) a `Window`, so this has to track the
+    type of `before` exactly, not assume it.
     """
     active = gui.active_window()
-    if active is None or not active.title:
+    if active is None:
         return False
-    handle = getattr(active, "handle", None)
-    if handle is not None and handle == getattr(window, "handle", None):
+    if active == window:
         return True
-    return active.title == window.title or active.title not in before
+    return active not in before
 
 
-def focus_editor(gui, window, before: set[str], attempts: int = 2) -> bool:
+def focus_editor(gui, window, before, attempts: int = 2) -> bool:
     """Get the editor focused, asking for help rather than giving up.
 
     `activate_window()` is not reliably enough on its own here, and the run

@@ -31,12 +31,37 @@ read as a claim you cannot check.
     the second run), and answered with the *same* token both times, which
     matches what `eiinput.py`'s own docstring records for this portal and
     is still that portal's behaviour rather than a guarantee.
+  - **Cross-process restore** (2026-09-02, `--token` in a second terminal)
+    closed the one gap the runs above left open: every restore before this
+    was still same-process -- negotiate, then restore, in the one
+    interpreter -- where the actual use case for `persist_mode`/
+    `restore_token` is a token saved today and presented from a cold
+    process tomorrow. A second, independent process that never negotiated
+    anything itself presented the token and restored in 0.25s with no
+    dialog, 9/9 checks. The token is not tied to the negotiating process
+    or D-Bus connection in any way that would have broken this.
 
   `move_mouse`/`click`/`scroll` were commanded successfully but are not
   verified: this session has no `POINTER_QUERY` to read the pointer back
   with. Everything above went through the composed `gnomeshell+atspi+
   uinput+imagesearch` session for windows and elements, and the forced
   `eiinput` session for every injected event.
+
+  **A bug the same 2026-09-02 run found, in the script, not the library:**
+  `wait_for_new_window`/`new_frame` tracked "is this a new window/frame" by
+  *title*/*name*, and this desktop's own terminal rewrites its window title
+  live to the foreground process or cwd -- so between the `before` snapshot
+  and the poll, the terminal's title changed, satisfied "wasn't there a
+  moment ago", and got mistaken for the just-launched editor: activated
+  (trivially "successful", since it already had focus) and typed into
+  instead. The portal half of that same run was unaffected and clean --
+  6.73s fresh negotiation, 0.38s same-process restore, no second dialog --
+  this was purely a detection bug in the validation script. Fixed by
+  tracking real identity instead of a label: `Window.__eq__` (by handle and
+  backend, added this same week for exactly this reason) for the window
+  path, and the underlying dogtail node for the AT-SPI frame path, since
+  pyguitest's own `Element` wrapper has no equality of its own but the node
+  it wraps does.
 - **Input injection through XTest** (`X11Backend`'s input half, forced
   rather than composited), with a caveat worth reading before trusting the
   headline. A purpose-built probe -- an X11 window created with
@@ -198,6 +223,40 @@ read as a claim you cannot check.
   fix only took effect once `--install` copied the file and a subsequent
   logout/login actually reloaded the module, reconfirming that there is
   no way to hot-reload an extension on Wayland.
+
+- **`gnomeshell`'s `SCREEN_INFO`** (2026-09-03) — the last failing tier-2
+  line, and the only one that was ever a matter of not asking. Mutter's
+  own `org.gnome.Mutter.DisplayConfig.GetCurrentState` answers any
+  session-bus client with the full monitor, mode and scale list,
+  unprompted: confirmed here by `gdbus call` before a line was written,
+  and again through `gui.screens()` afterwards. Nothing about it needs the
+  Shell extension — only this backend's *construction* does, which is the
+  one caveat below.
+
+  `screens()` returns `Screen(0, 1920x1080 'Virtual-1')` on this session,
+  matching the connector and the `is-current` mode from the raw D-Bus
+  reply. The cross-check that matters more is the coordinate space: a
+  maximized window's `geometry()` came back `(0, 32, 1920, 1048)` from the
+  extension, and 32 + 1048 = 1080 exactly. So `screens()` and `geometry()`
+  agree, which is the whole reason this reads *logical* monitors and
+  divides the panel's pixel mode by the scale rather than reporting the
+  mode directly — get that wrong and the two disagree on precisely the
+  fractional-scale desktops where a caller cannot spot it by eye.
+
+  Unmeasured here, because this session has one unscaled, unrotated
+  output: the fractional-scale divide, the physical-layout-mode branch
+  that must *not* divide, the 90°/270° axis swap, and the mirrored-pair
+  case. All four are unit-tested against shapes transcribed from this
+  machine's real `GetCurrentState` reply, but none has been seen on a
+  desktop actually configured that way.
+
+  The caveat: `SCREEN_INFO` still rides on `GnomeShellBackend`, which
+  refuses to construct without the `pyguitest-window-control` extension.
+  So a plain GNOME session without it gets no `screens()` either, even
+  though Mutter would answer. That is an artefact of where the method
+  lives, not of what Mutter allows, and splitting it into its own
+  extension-free backend is the fix if anyone wants outputs without window
+  control.
 
 ## Run live on KDE Plasma 6 / KWin (XWayland)
 

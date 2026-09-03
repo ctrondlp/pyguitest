@@ -655,3 +655,89 @@ class TestCaptureSurvivesABrokenBackend(unittest.TestCase):
             composite.capture()
         with self.assertRaises(CapabilityUnsupported):
             composite.capture(region=(0, 0, 10, 10))
+
+
+class TestTierSixDispatch(unittest.TestCase):
+    """The capabilities only X11Backend serves still have to be reachable.
+
+    Regression: they were absent from _DISPATCH, and CompositeBackend has
+    no __getattr__ to fall through to -- so `gui.supports(POINTER_QUERY)`
+    answered True (a member declared it) and `gui.pointer_position()`
+    then raised AttributeError. `connect()` composes on every real
+    desktop, so a bare X11Backend was the only place these ever worked.
+    """
+
+    class Tier6(GUIBackend):
+        """The X11Backend surface these tests need, and nothing else."""
+
+        name = "x11"
+        capabilities = CapabilitySet(
+            {
+                Capability.POINTER_QUERY,
+                Capability.INPUT_STATE_QUERY,
+                Capability.WINDOW_TITLE_SET,
+                Capability.WINDOW_LOWER,
+                Capability.WINDOW_CURSOR_QUERY,
+            }
+        )
+
+        def __init__(self):
+            self.calls = []
+
+        def pointer_position(self):
+            return (640, 480)
+
+        def is_button_pressed(self, button):
+            self.calls.append(("is_button_pressed", button))
+            return True
+
+        def is_key_pressed(self, key):
+            self.calls.append(("is_key_pressed", key))
+            return False
+
+        def set_window_title(self, window, title):
+            self.calls.append(("set_window_title", window, title))
+
+        def lower_window(self, window):
+            self.calls.append(("lower_window", window))
+
+        def is_window_cursor(self, window, shape):
+            self.calls.append(("is_window_cursor", window, shape))
+            return True
+
+    def setUp(self):
+        self.member = self.Tier6()
+        self.composite = CompositeBackend(
+            [Fake("atspi", {Capability.ELEMENT_TREE}), self.member]
+        )
+
+    def test_pointer_position_reaches_the_member_that_serves_it(self):
+        self.assertEqual(self.composite.pointer_position(), (640, 480))
+
+    def test_every_tier_six_operation_is_routed(self):
+        self.assertTrue(self.composite.is_button_pressed(1))
+        self.assertFalse(self.composite.is_key_pressed("a"))
+        self.composite.set_window_title("w", "New")
+        self.composite.lower_window("w")
+        self.assertTrue(self.composite.is_window_cursor("w", 68))
+        self.assertEqual(
+            self.member.calls,
+            [
+                ("is_button_pressed", 1),
+                ("is_key_pressed", "a"),
+                ("set_window_title", "w", "New"),
+                ("lower_window", "w"),
+                ("is_window_cursor", "w", 68),
+            ],
+        )
+
+    def test_what_supports_promises_is_what_dispatch_can_serve(self):
+        # The invariant the regression broke: every capability the
+        # composite advertises has to have a working call behind it.
+        for capability in self.Tier6.capabilities:
+            self.assertIn(capability, self.composite.capabilities)
+
+    def test_no_provider_still_raises_the_typed_error(self):
+        bare = CompositeBackend([Fake("atspi", {Capability.ELEMENT_TREE})])
+        with self.assertRaises(CapabilityUnsupported):
+            bare.pointer_position()

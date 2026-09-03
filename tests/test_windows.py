@@ -436,6 +436,24 @@ class TestNiri(unittest.TestCase):
             ],
         )
 
+    def test_resize_produces_a_runnable_argv_on_the_cli_transport(self):
+        # The socket takes the SizeChange enum as JSON; the CLI does not,
+        # and this pairing is where that mattered -- resize_window was the
+        # only caller passing a non-scalar, and it emitted
+        # `--change "{'SetFixed': 800}"` for as long as it existed.
+        from pyguitest import ipc
+
+        calls = []
+        gui = NiriBackend(ipc.NiriCLI(runner=lambda argv: calls.append(argv)))
+        gui.resize_window(7, 800, 600)
+        self.assertEqual(
+            calls,
+            [
+                ["niri", "msg", "action", "set-window-width", "--id", "7", "800"],
+                ["niri", "msg", "action", "set-window-height", "--id", "7", "600"],
+            ],
+        )
+
     def test_placement_and_minimize_are_refused_up_front(self):
         # niri is a scrolling tiler: position falls out of the layout and
         # there is no minimize at all. supports() must say so rather than

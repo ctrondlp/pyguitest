@@ -255,7 +255,23 @@ class Keymap:
     # -- lookups -----------------------------------------------------------
 
     def keysym_for_char(self, char: str) -> int:
-        """The keysym for a single character, or 0 if it has none."""
+        r"""The keysym for a single character, or 0 if it has none.
+
+        `\n` is redirected to Return rather than asked of libxkbcommon.
+        `xkb_utf32_to_keysym(0x0A)` answers XKB_KEY_Linefeed, which is a
+        real keysym and a real entry on the US keymap (evdev 101,
+        KEY_LINEFEED) -- so the lookup succeeded and typing a newline
+        pressed a key no physical keyboard has and no application treats
+        as Enter. Every other backend here maps `\n` to Enter/Return
+        (see uinput.py's `_PLAIN` and x11.py's `_CONTROL_KEYSYMS`), and
+        callers write `type_text("name\n")` meaning exactly that.
+
+        The other control characters need no such help: libxkbcommon
+        already answers Return for `\r`, Tab for `\t`, BackSpace for
+        `\b` and Escape for `\x1b`.
+        """
+        if char == "\n":
+            return self.keysym_for_name("Return")
         return self._lib.xkb_utf32_to_keysym(ord(char))
 
     def keysym_for_name(self, name: str) -> int:

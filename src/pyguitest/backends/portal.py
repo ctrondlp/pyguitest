@@ -127,17 +127,38 @@ _NAMED_KEYSYMS = {
     "space": 0x0020,
 }
 
+_CONTROL_KEYSYMS = {
+    "\n": "Return",
+    "\r": "Return",
+    "\t": "Tab",
+    "\b": "BackSpace",
+    "\x1b": "Escape",
+}
+"""Control characters, mapped to the key they mean. The same table
+X11Backend keeps, and for the same reason.
+
+A control character has no keysym of its own in the Latin-1 range the
+fallback below covers, so without this `type_text("hello\n")` sent
+`0x01000000 | 10` -- the Unicode keysym form of U+000A, which names no
+key on any keymap -- instead of Return, and the newline every caller
+means as "press Enter" did nothing. uinput maps `"\n"` to ENTER and
+X11Backend maps it to Return already; this is the third backend agreeing
+with them rather than a new convention."""
+
 
 def _keysym_for_name(name: str) -> int:
     """An X11 keysym value for a key name or single character.
 
-    Named keys come from the table above. A single character falls back to
-    its own codepoint for Latin-1 (X11 keysym values equal the codepoint by
+    Named keys come from the table above, then the control characters
+    beside it. A single character otherwise falls back to its own
+    codepoint for Latin-1 (X11 keysym values equal the codepoint by
     definition in that range, the same rule X11Backend's _char_keysym
     uses), or the Unicode keysym form for anything past it.
     """
     if name in _NAMED_KEYSYMS:
         return _NAMED_KEYSYMS[name]
+    if name in _CONTROL_KEYSYMS:
+        return _NAMED_KEYSYMS[_CONTROL_KEYSYMS[name]]
     if len(name) == 1:
         codepoint = ord(name)
         if 0x20 <= codepoint <= 0xFF:

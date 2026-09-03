@@ -142,7 +142,7 @@ whatever answers. Priority decides who wins a contested capability.
 | Priority | Name | Serves |
 |---|---|---|
 | 95 | `windows` | window control; wins `WINDOW_GEOMETRY` over AT-SPI |
-| 93 | `gnomeshell` | window control on Mutter, and prompt-free per-window capture, via the `pyguitest-window-control` extension |
+| 93 | `gnomeshell` | window control on Mutter, prompt-free per-window capture, and output/scale reporting (the last straight from Mutter's own `DisplayConfig`), via the `pyguitest-window-control` extension |
 | 90 | `atspi` | elements, and window listing where Mutter offers nothing |
 | 80 | `portal` *(opt-in)* | keyboard and pointer buttons/scroll, via the RemoteDesktop portal |
 | 80 | `eiinput` *(opt-in)* | absolute pointer move/buttons/scroll, plus keymap-safe keyboard where the compositor's keymap is readable, via libei over the same portal |

@@ -407,6 +407,37 @@ class TestInputFactoryRanking(unittest.TestCase):
         backend = self._pick(_env(session_type=SessionType.WAYLAND), {"xdotool"})
         self.assertIsNone(backend)
 
+    def test_a_wlroots_only_tool_is_not_offered_to_a_plain_x11_session(self):
+        # Regression: allow_wlroots_only was `compositor is WLROOTS or
+        # x11`, so wtype survived discovery wherever an X connection
+        # existed. Being keymap-safe it then outranked xdotool, so a
+        # session xdotool would have driven correctly got a backend that
+        # fails on every call -- wtype needs
+        # zwp_virtual_keyboard_manager_v1, and an X server is not that.
+        backend = self._pick(
+            _env(session_type=SessionType.X11, compositor=Compositor.NONE),
+            {"wtype", "xdotool"},
+        )
+        self.assertEqual(backend.tool.name, "xdotool")
+
+    def test_a_wlroots_only_tool_is_not_offered_to_gnome_xwayland_either(self):
+        # Same trap, the commoner session: Mutter implements none of the
+        # protocols wtype needs, XWayland or not.
+        backend = self._pick(
+            _env(session_type=SessionType.XWAYLAND, compositor=Compositor.MUTTER),
+            {"wtype", "xdotool"},
+        )
+        self.assertEqual(backend.tool.name, "xdotool")
+
+    def test_a_wlroots_session_with_xwayland_still_gets_its_wlroots_tool(self):
+        # The narrowing must not cost sway anything: its compositor is
+        # WLROOTS whether or not the session also carries an X display.
+        backend = self._pick(
+            _env(session_type=SessionType.XWAYLAND, compositor=Compositor.WLROOTS),
+            {"wtype", "xdotool"},
+        )
+        self.assertEqual(backend.tool.name, "wtype")
+
     def test_uinput_is_preferred_over_a_keymap_unsafe_tool(self):
         # Both are keymap-unsafe, but uinput holds one device open instead
         # of spawning a process per event.
