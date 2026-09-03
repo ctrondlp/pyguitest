@@ -66,8 +66,16 @@ atspi = ["dogtail>=2.0"]        # element automation. NB: dogtail declares no
                                 # the distro. See README INSTALL.
 x11   = ["python-xlib>=0.33"]   # X11 backend, incl. FreeBSD/Solaris
 uinput = ["evdev>=1.9"]         # last-resort input where no tool is installed
-eiinput = ["python-libei[portal]>=0.3.0"]
-                                   # libei input backend (opt-in). The
+eiinput = ["python-libei[portal]>=0.4.0"]
+                                   # libei input backend (opt-in). 0.4.0 is
+                                   # the floor because a negotiation that
+                                   # fails part-way left its portal session
+                                   # open before it, which nothing on this
+                                   # side can clean up -- negotiate() raises
+                                   # rather than handing back the object
+                                   # whose close() would -- and because the
+                                   # timeout below only bounds every leg of
+                                   # a round trip from that version. The
                                    # [portal] extra is PyGObject, which
                                    # libei.portal needs to negotiate the
                                    # RemoteDesktop session -- previously this

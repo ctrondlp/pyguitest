@@ -55,6 +55,7 @@ _BUS_NAME = "org.freedesktop.portal.Desktop"
 _OBJECT_PATH = "/org/freedesktop/portal/desktop"
 _INTERFACE = "org.freedesktop.portal.RemoteDesktop"
 _REQUEST_INTERFACE = "org.freedesktop.portal.Request"
+_SESSION_INTERFACE = "org.freedesktop.portal.Session"
 
 _SESSION_REQUEST = "/org/freedesktop/portal/desktop/request/mock/create_session"
 _DEVICES_REQUEST = "/org/freedesktop/portal/desktop/request/mock/select_devices"
@@ -169,6 +170,22 @@ class PortalDBusMockTestCase(_TestCaseBase):
         empty_methods = dbus.Array([], signature="(ssss)")
         for path in (_SESSION_REQUEST, _DEVICES_REQUEST, _START_REQUEST):
             self.mock.AddObject(path, _REQUEST_INTERFACE, empty_props, empty_methods)
+        # The object Session.Close() lands on. A real portal creates it as
+        # part of CreateSession; the mock has to be told, or a Close goes to
+        # a path that does not exist, comes back as a D-Bus error, and is
+        # swallowed as a cleanup failure -- indistinguishable here from
+        # never having been sent.
+        self.mock.AddObject(
+            _SESSION_HANDLE,
+            _SESSION_INTERFACE,
+            empty_props,
+            dbus.Array([("Close", "", "", "")], signature="(ssss)"),
+        )
+
+    def _session_close_calls(self):
+        """How many times Session.Close() actually reached the mock session."""
+        session = self.dbus_con.get_object(_BUS_NAME, _SESSION_HANDLE)
+        return len(session.GetMethodCalls("Close"))
 
     def _stop_mock(self):
         self.mock_process.terminate()
@@ -213,3 +230,33 @@ class TestNegotiationOverRealDBus(PortalDBusMockTestCase):
         self._wire_step("Start", "osa{sv}", _START_REQUEST, 1, {})  # 1 == user declined
         with self.assertRaises(PermissionRequired):
             PortalBackend()
+
+
+class TestSessionCleanupOverRealDBus(PortalDBusMockTestCase):
+    """The session CreateSession made must not outlive the negotiation.
+
+    Checked here rather than only against the stand-in connection because
+    the swallow-everything cleanup path is exactly the kind that can look
+    right in Python and still put nothing on the bus.
+    """
+
+    def test_a_declined_start_closes_the_session_over_a_real_bus(self):
+        self._wire_step(
+            "CreateSession",
+            "a{sv}",
+            _SESSION_REQUEST,
+            0,
+            {"session_handle": _SESSION_HANDLE},
+        )
+        self._wire_step("SelectDevices", "oa{sv}", _DEVICES_REQUEST, 0, {})
+        self._wire_step("Start", "osa{sv}", _START_REQUEST, 1, {})  # 1 == declined
+        with self.assertRaises(PermissionRequired):
+            PortalBackend()
+        self.assertEqual(self._session_close_calls(), 1)
+
+    def test_close_ends_the_session_over_a_real_bus(self):
+        self._approve_everything()
+        backend = PortalBackend()
+        self.assertEqual(self._session_close_calls(), 0)
+        backend.close()
+        self.assertEqual(self._session_close_calls(), 1)

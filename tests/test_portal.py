@@ -88,6 +88,10 @@ class FakeConnection:
             "Start": (0, {}),
         }
         self.calls = []
+        # (method, object path), kept alongside `calls` -- which records
+        # arguments, not destinations -- so a test can tell which session
+        # Session.Close() was sent to.
+        self.call_paths = []
         self._watchers = {}
 
     def get_unique_name(self):
@@ -107,6 +111,7 @@ class FakeConnection:
     ):
         args = parameters.value if parameters is not None else None
         self.calls.append((method, args))
+        self.call_paths.append((method, object_path))
         if method not in self.responses:
             return FakeReply(())
         handle = f"/request/{method}"
@@ -538,6 +543,147 @@ class TestRequestTimeout(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(results, {"devices": 2})
         self.assertIsNone(FakeMainLoop.pending_timeout)
+
+
+def _closed_sessions(connection):
+    """Object paths Session.Close() was sent to, in order."""
+    return [path for method, path in connection.call_paths if method == "Close"]
+
+
+class TestSessionCleanup(unittest.TestCase):
+    """A session created by CreateSession must not outlive a failure.
+
+    It lives in xdg-desktop-portal, and past CreateSession nothing else can
+    end it: __init__ raises instead of returning the object whose close()
+    would, and the session survives on the shared session-bus connection.
+    Left open, it is a standing input grant belonging to nobody.
+    """
+
+    def setUp(self):
+        patcher = install_fake_gi()
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(setattr, FakeMainLoop, "pending_timeout", None)
+        from pyguitest.backends import portal
+
+        self.module = portal
+
+    def test_a_declined_start_closes_the_session(self):
+        connection = FakeConnection(
+            responses={
+                "CreateSession": (0, {"session_handle": "/session/1"}),
+                "SelectDevices": (0, {}),
+                "Start": (1, {}),  # 1 == user cancelled, per the portal spec
+            }
+        )
+        with self.assertRaises(PermissionRequired):
+            self.module.PortalBackend(connection=connection)
+        self.assertEqual(_closed_sessions(connection), ["/session/1"])
+
+    def test_a_declined_select_devices_closes_the_session(self):
+        connection = FakeConnection(
+            responses={
+                "CreateSession": (0, {"session_handle": "/session/1"}),
+                "SelectDevices": (1, {}),
+            }
+        )
+        with self.assertRaises(PermissionRequired):
+            self.module.PortalBackend(connection=connection)
+        self.assertEqual(_closed_sessions(connection), ["/session/1"])
+
+    def test_a_request_that_is_never_answered_closes_the_session(self):
+        from pyguitest.errors import PortalTimeout
+
+        class SilentAfterCreateConnection(FakeConnection):
+            """Answers up to Start, which it accepts and never responds to."""
+
+            def call_sync(self, *args, **kwargs):
+                method = args[3]
+                if method != "Start":
+                    return super().call_sync(*args, **kwargs)
+                self.calls.append((method, args[4].value if args[4] else None))
+                self.call_paths.append((method, args[1]))
+                return FakeReply(("/request/never-answered",))
+
+        connection = SilentAfterCreateConnection()
+        with self.assertRaises(PortalTimeout):
+            self.module.PortalBackend(connection=connection)
+        self.assertEqual(_closed_sessions(connection), ["/session/1"])
+
+    def test_an_interrupted_consent_dialog_closes_the_session(self):
+        # Why the cleanup catches BaseException: Start blocks on a human,
+        # so Ctrl-C during that wait is a routine way out of __init__ --
+        # and it strands an approved session exactly as a decline does.
+        class InterruptedConnection(FakeConnection):
+            def call_sync(self, *args, **kwargs):
+                if args[3] == "Start":
+                    raise KeyboardInterrupt
+                return super().call_sync(*args, **kwargs)
+
+        connection = InterruptedConnection()
+        with self.assertRaises(KeyboardInterrupt):
+            self.module.PortalBackend(connection=connection)
+        self.assertEqual(_closed_sessions(connection), ["/session/1"])
+
+    def test_a_successful_negotiation_closes_nothing(self):
+        # The other half of it: a session that negotiated fine belongs to
+        # the caller until they close it.
+        connection = FakeConnection()
+        self.module.PortalBackend(connection=connection)
+        self.assertEqual(_closed_sessions(connection), [])
+
+
+class TestClose(unittest.TestCase):
+    def setUp(self):
+        patcher = install_fake_gi()
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        from pyguitest.backends import portal
+
+        self.module = portal
+
+    def test_close_ends_the_negotiated_session(self):
+        # Without this the session outlives the backend as a standing input
+        # grant: GLib's shared session-bus connection does not drop with it.
+        connection = FakeConnection()
+        gui = self.module.PortalBackend(connection=connection)
+        gui.close()
+        self.assertEqual(_closed_sessions(connection), ["/session/1"])
+
+    def test_close_is_idempotent(self):
+        connection = FakeConnection()
+        gui = self.module.PortalBackend(connection=connection)
+        gui.close()
+        gui.close()
+        self.assertEqual(_closed_sessions(connection), ["/session/1"])
+
+    def test_the_context_manager_closes_on_exit(self):
+        connection = FakeConnection()
+        with self.module.PortalBackend(connection=connection):
+            self.assertEqual(_closed_sessions(connection), [])
+        self.assertEqual(_closed_sessions(connection), ["/session/1"])
+
+    def test_close_leaves_an_injected_session_alone(self):
+        # An injected handle belongs to whoever injected it -- closing it
+        # would end a session this backend was only borrowing.
+        connection = FakeConnection()
+        gui = self.module.PortalBackend(
+            connection=connection, session_handle="/session/borrowed"
+        )
+        gui.close()
+        self.assertEqual(_closed_sessions(connection), [])
+
+    def test_injecting_after_close_raises(self):
+        # Rather than sending Notify* calls at a session the portal has
+        # already dropped, or building a variant around a None handle.
+        from pyguitest.errors import PyGUITestError
+
+        connection = FakeConnection()
+        gui = self.module.PortalBackend(connection=connection)
+        gui.close()
+        with self.assertRaises(PyGUITestError) as ctx:
+            gui.press_key("a")
+        self.assertIn("closed", str(ctx.exception))
 
 
 if __name__ == "__main__":

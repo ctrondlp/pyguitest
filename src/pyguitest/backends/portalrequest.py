@@ -18,6 +18,7 @@ subscribe *before* issuing the call.
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 
 from ..errors import PortalTimeout
@@ -30,11 +31,13 @@ __all__ = [
     "DEFAULT_TIMEOUT",
     "call",
     "request",
+    "close_session",
 ]
 
 BUS_NAME = "org.freedesktop.portal.Desktop"
 OBJECT_PATH = "/org/freedesktop/portal/desktop"
 REQUEST_INTERFACE = "org.freedesktop.portal.Request"
+SESSION_INTERFACE = "org.freedesktop.portal.Session"
 
 DEFAULT_TIMEOUT = 60
 """Seconds to wait for a Response before giving up, for requests that can
@@ -85,6 +88,38 @@ def call(modules, connection, interface, method, signature, args):
         -1,
         None,
     )
+
+
+def close_session(modules, connection, session_handle):
+    """End a portal session, swallowing whatever goes wrong.
+
+    A session lives in xdg-desktop-portal, not in this process, and stays
+    there until `Session.Close()` or until the D-Bus connection that
+    created it drops -- and that connection is GLib's *shared* session-bus
+    singleton, which outlives any one session. So nothing reclaims a
+    session on its own: a process that negotiates and walks away leaves a
+    standing input grant behind, and one that negotiates repeatedly
+    accumulates them until it exits.
+
+    Failures are swallowed deliberately. This runs during cleanup, usually
+    on a session the portal may already have dropped (it restarted, or the
+    user revoked the grant), and there is nothing a caller could do with
+    the failure -- least of all when it would be raised over the top of an
+    exception already unwinding.
+    """
+    Gio, _GLib = modules
+    with contextlib.suppress(Exception):
+        connection.call_sync(
+            BUS_NAME,
+            session_handle,
+            SESSION_INTERFACE,
+            "Close",
+            None,
+            None,
+            Gio.DBusCallFlags.NONE,
+            -1,
+            None,
+        )
 
 
 def request(

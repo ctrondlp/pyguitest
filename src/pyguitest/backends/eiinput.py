@@ -287,7 +287,7 @@ class LibeiBackend(GUIBackend):
                     if portal is None:
                         raise BackendUnavailable(
                             "libei.portal is unusable: negotiating a portal "
-                            "session needs python-libei 0.3.0+ and PyGObject, "
+                            "session needs python-libei 0.4.0+ and PyGObject, "
                             "and one of them is missing; `pip install "
                             "'pyguitest[eiinput]'` supplies both (see README)"
                         )

@@ -9,6 +9,16 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ### Changed
 
+- The `eiinput` extra now requires `python-libei>=0.4.0`, up from `0.3.0`.
+  Two things in that release matter here and neither can be worked around
+  from this side: a negotiation that failed part-way used to leave the
+  portal session `CreateSession` had made open — `negotiate()` raises
+  rather than returning the object whose `close()` would end it, so a
+  declined consent dialog stranded one session per attempt — and the
+  `timeout` this backend passes now bounds every leg of a round trip
+  rather than only the wait for the portal's reply, which is what
+  `_PORTAL_TIMEOUT`'s docstring has claimed all along.
+
 - A backend factory can now raise `BackendUnavailable` from construction,
   with the real reason, instead of swallowing it into a bare `None`. Six
   factories (atspi, gnomeshell, x11, portal, eiinput, portalcapture) used to
@@ -138,6 +148,33 @@ All notable changes to pyguitest are recorded here. The format follows
   (`examples/_kwin_events_validate.py`) — see `docs/validation.md`.
 
 ### Fixed
+
+- `PortalBackend` never ended its portal session. There was no `close()` at
+  all, so the base class's no-op hook ran and the session stayed live in
+  xdg-desktop-portal as a standing input grant -- a session outlives the
+  object that negotiated it, living on until `Session.Close()` or until the
+  D-Bus connection drops, and that connection is GLib's *shared*
+  session-bus singleton, which does not drop when a backend is discarded.
+  A process that builds backends repeatedly accumulated one live grant per
+  backend. `close()` now ends it (and so does `Session.close()` and the
+  context-manager form, which already called through to the backend), a
+  session that was *injected* rather than negotiated is left alone since it
+  belongs to whoever passed it in, and injecting through a closed session
+  raises instead of being sent at a session the portal has dropped.
+  Verified over a real bus in `tests/test_portal_dbusmock.py`, not only
+  against the stand-in connection: a cleanup path that swallows everything
+  is exactly the kind that can look right in Python and put nothing on the
+  wire.
+
+- A `PortalBackend` whose negotiation failed after `CreateSession` -- a
+  declined `SelectDevices` or `Start`, a request the portal never answered,
+  or a Ctrl-C while the consent dialog was up -- left that session behind
+  too, and this time nothing could ever close it: `__init__` raises rather
+  than returning the object whose `close()` would. `_negotiate_session` now
+  closes it on the way out, `KeyboardInterrupt` included, since `Start`
+  blocks on a human and Ctrl-C during that wait strands an approved session
+  exactly as a decline does. `libei.portal` (used by the `eiinput` backend)
+  had the same gap, fixed upstream in python-libei.
 
 - Tier-6 operations are reachable through a composite again -- which is to
   say, reachable at all on a real desktop. `CompositeBackend` routes each

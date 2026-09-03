@@ -247,12 +247,22 @@ class PortalBackend(GUIBackend):
 
         Populated from Start()'s reply. Only ever non-None when a
         persist_mode was requested and the portal honoured it."""
+        # An injected handle belongs to whoever injected it: `close()` ends
+        # only a session this backend negotiated itself, so a caller (or a
+        # test) sharing one session across backends does not have it closed
+        # out from under them by the first of them to be torn down.
+        self._owns_session = session_handle is None
         self._session_handle = session_handle or self._negotiate_session()
 
     # -- portal request/response plumbing ----------------------------------
 
     def _call(self, method, signature, args):
         """Call one RemoteDesktop method, returning its raw GVariant reply."""
+        if self._session_handle is None:
+            raise PyGUITestError(
+                "the portal session is closed; construct another "
+                "PortalBackend to inject input again"
+            )
         return _portalrequest.call(
             (self._Gio, self._GLib),
             self._connection,
@@ -298,7 +308,28 @@ class PortalBackend(GUIBackend):
                 Capability.KEY_EVENT, self.name, "CreateSession was not approved"
             )
         session_handle = results["session_handle"]
+        try:
+            return self._select_and_start(session_handle)
+        except BaseException:
+            # CreateSession has already created a session inside the portal,
+            # and from here nothing else can close it: __init__ raises rather
+            # than returning the object whose close() would, and the session
+            # outlives the failure on the shared session-bus connection.
+            # BaseException, not Exception: Start blocks on a human answering
+            # the dialog, so Ctrl-C during that wait is a routine way out --
+            # and it strands an approved session exactly as a decline does.
+            _portalrequest.close_session(
+                (self._Gio, self._GLib), self._connection, session_handle
+            )
+            raise
 
+    def _select_and_start(self, session_handle):
+        """Ask for devices and start the session, returning its handle.
+
+        Split out of `_negotiate_session` only so the caller can wrap the
+        whole of it in one `try`: every step here can fail, and each of
+        those failures leaves the same session behind to be closed.
+        """
         options = {"types": self._GLib.Variant("u", _DEVICE_KEYBOARD | _DEVICE_POINTER)}
         if self._persist_mode != PERSIST_NONE:
             options["persist_mode"] = self._GLib.Variant("u", self._persist_mode)
@@ -341,6 +372,26 @@ class PortalBackend(GUIBackend):
                 Capability.TEXT_ENTRY,
             }
         )
+
+    def close(self):
+        """End the portal session this backend negotiated.
+
+        The session lives in xdg-desktop-portal, not here, and outlives
+        this object: without `Session.Close()` it stays a standing input
+        grant until the D-Bus connection that created it drops -- and that
+        connection is GLib's shared session-bus singleton, which does not
+        drop when a backend is discarded. A process that builds backends
+        repeatedly (a test suite, a long-running driver) would otherwise
+        leave one live session behind per backend.
+
+        Idempotent, and a no-op for a session that was injected rather than
+        negotiated here: that one belongs to whoever passed it in. After
+        this, injection raises rather than being sent to a dead session.
+        """
+        if self._session_handle is None or not self._owns_session:
+            return
+        handle, self._session_handle = self._session_handle, None
+        _portalrequest.close_session((self._Gio, self._GLib), self._connection, handle)
 
     # -- pointer -----------------------------------------------------------
 

@@ -166,8 +166,11 @@ takes only a device-type bitmask and so cannot express `persist_mode` or
 `restore_token` (see `backends/eiinput.py`'s module docstring, and
 upstream's own note that liboeffis is "intentionally kept simple"). That
 negotiation lived in this package until it was upstreamed in python-libei
-0.3.0, which is the version the `eiinput` extra now requires; the extra also
-pulls in PyGObject, which that module needs. `libeis` is only needed to run
+0.3.0; the `eiinput` extra requires 0.4.0, which is where a negotiation
+that fails part-way stopped leaving its portal session open behind it, and
+where the timeout below came to bound every leg of a round trip rather than
+only the wait for the portal's reply. The extra also pulls in PyGObject,
+which that module needs. `libeis` is only needed to run
 `tests/test_eiinput_libei.py`, not at runtime.
 
 This is the only backend here that is **keymap-safe by construction**.
