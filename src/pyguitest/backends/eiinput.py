@@ -166,6 +166,10 @@ the one wanted; an absolute device returns immediately."""
 
 _BUTTONS = {1: 0x110, 2: 0x112, 3: 0x111}  # BTN_LEFT, BTN_MIDDLE, BTN_RIGHT
 
+_DETENT = 120
+"""libei's discrete-scroll unit: one wheel notch is 120, matching the
+high-resolution wheel convention the kernel and Wayland both use."""
+
 
 def _portal():
     """Import libei.portal, or return None if it cannot negotiate here.
@@ -690,11 +694,20 @@ class LibeiBackend(GUIBackend):
         self._pump()
 
     def scroll(self, dx=0, dy=0):
-        """Scroll by logical-pixel deltas, on whichever axes are non-zero."""
+        """Scroll by whole detents; `dy` positive is up. See GUIBackend.
+
+        `scroll_discrete`, not `scroll_delta`: libei offers both, and the
+        smooth one takes logical *pixels*, which made `scroll(0, 3)` three
+        pixels here and three wheel notches on every other backend. One
+        detent is 120 in libei's units.
+
+        The negation is the other half of the same agreement -- libei
+        follows wl_pointer, where positive is down.
+        """
         self.require(Capability.POINTER_SCROLL)
         if not dx and not dy:
             return
-        self._emulating().scroll_delta(dx, dy).frame()
+        self._emulating().scroll_discrete(int(dx) * _DETENT, -int(dy) * _DETENT).frame()
         self._pump()
 
     # -- keyboard ----------------------------------------------------------

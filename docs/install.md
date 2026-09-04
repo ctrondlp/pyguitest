@@ -77,6 +77,29 @@ dependencies, and PyGObject does not build from source cleanly. `pyatspi` is
 used by the AT-SPI backend but appears in no extra, for exactly the same
 reason.
 
+### AT-SPI also needs the bus to be running
+
+The packages are one half; a running accessibility bus is the other. Ask
+for it directly:
+
+```sh
+gdbus call --session --dest org.a11y.Bus --object-path /org/a11y/bus \
+    --method org.a11y.Bus.GetAddress
+```
+
+A desktop session starts `at-spi-bus-launcher` for you and this answers
+with an address. A container, a CI runner or a headless session often has
+neither the service nor a session bus to activate it on, and there the
+`atspi` backend declines with a message naming `org.a11y.Bus` rather than
+naming dogtail. `pyguitest debug` reports the same answer on its `a11y bus`
+line, with a third state for "could not ask" -- no `gdbus` -- since that is
+not the same as an answer.
+
+It is worth checking rather than assuming, because getting it wrong used to
+be spectacular: libatspi answers an unreachable bus by aborting the calling
+process, so `connect()` died with a core dump and no exception. pyguitest
+asks this question before it imports anything that would.
+
 ### On KDE, one more step that is not a package
 
 GTK applications load their AT-SPI bridge only when the GNOME setting

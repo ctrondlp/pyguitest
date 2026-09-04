@@ -71,6 +71,35 @@ PYTHONPATH=src python3 -m unittest discover -s tests \
 That distinction is not pedantry: a permanently-skipped test in this repo
 went on hiding a constructor signature that no longer existed.
 
+## The headless GNOME session
+
+Window control, window capture and window events need a live compositor, so
+none of them can be covered by the unit tests above. `headless-session.sh`
+runs a command inside a private `gnome-shell --headless` on its own session
+bus — nothing appears on screen, and a shell already running is untouched:
+
+```sh
+./scripts/headless-session.sh ./scripts/validate-gnome-extension.sh
+```
+
+That is green end to end with nobody watching, and it is the closest thing
+this project has to a compositor-tier regression test. Anything else works
+too:
+
+```sh
+./scripts/headless-session.sh pyguitest doctor
+./scripts/headless-session.sh python3 examples/01_what_can_i_do.py
+```
+
+Needs `gnome-shell` (40 or newer, for `--headless`), `dbus-run-session` and
+`gdbus`. The window-control checks also want the
+`pyguitest-window-control` extension installed and enabled for your user —
+the same install as on a real session, since the headless shell reads the
+same `~/.local/share/gnome-shell/extensions`.
+
+What it does not cover: input actually reaching a client, and anything
+needing the portal's consent dialog, which has nobody to click it.
+
 ## Lint, format, types
 
 All configured in `pyproject.toml`:
@@ -98,6 +127,15 @@ exception is the portal job, which installs `python3-dbusmock` and
 `dbus-daemon` and negotiates against a real private session bus; it fails if
 those tests *skip*, since a green job that proved nothing is worse than a
 red one.
+
+"No compositor" is now half true. A `compositor` job runs the GNOME Shell
+extension validation inside `headless-session.sh`, which is the whole
+COMPOSITOR tier — window control, capture and events — with nobody
+watching. It is on `workflow_dispatch` and a nightly schedule rather than
+on pushes, because whether a GitHub runner can host `gnome-shell
+--headless` at all is untested: headless mode needs no DRM master, which
+was the part that mattered locally, but a runner has no logind session
+either. Move it onto pushes once it has a track record.
 
 ## Documentation is tested too
 

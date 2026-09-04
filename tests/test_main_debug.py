@@ -42,15 +42,20 @@ def setUpModule():
     here at the source.
     """
     global _probe_patch
-    _probe_patch = mock.patch(
-        "pyguitest.__main__.toolkit_accessibility", return_value=None
-    )
-    _probe_patch.start()
+    _probe_patch = [
+        mock.patch("pyguitest.__main__.toolkit_accessibility", return_value=None),
+        # Same argument for the accessibility-bus probe: it shells out to
+        # gdbus against whatever bus this machine happens to have, and a
+        # unit test against a fake session must not depend on that.
+        mock.patch("pyguitest.__main__.a11y_bus_probe", return_value=True),
+    ]
+    for patcher in _probe_patch:
+        patcher.start()
 
 
 def tearDownModule():
-    if _probe_patch is not None:
-        _probe_patch.stop()
+    for patcher in _probe_patch or []:
+        patcher.stop()
 
 
 class _FakeBackend:
@@ -219,9 +224,12 @@ class TestDebugData(unittest.TestCase):
         data = _debug_data(_FakeGui(_environment(), backend=_BareBackend()))
         self.assertIsNone(data["backend_report"])
 
-    def test_tool_groups_cover_all_four_kinds(self):
+    def test_tool_groups_cover_every_kind_tools_py_defines(self):
         data = _debug_data(_FakeGui(_environment()))
-        self.assertEqual(set(data["tools"]), {"input", "capture", "window", "image"})
+        self.assertEqual(
+            set(data["tools"]),
+            {"input", "capture", "window", "image", "clipboard"},
+        )
         for group in data["tools"].values():
             self.assertTrue(group)
             for entry in group:
@@ -229,6 +237,24 @@ class TestDebugData(unittest.TestCase):
                 self.assertIn("present", entry)
                 self.assertIn("path", entry)
                 self.assertIn("version", entry)
+
+    def test_the_accessibility_bus_is_reported(self):
+        # It used to be the one AT-SPI fact that could not appear in a bug
+        # report, because asking for it aborted the process (see
+        # backends.atspi.a11y_bus_reachable).
+        data = _debug_data(_FakeGui(_environment()))
+        self.assertIn("a11y_bus", data)
+        self.assertIn("a11y bus", _format_debug(data))
+
+    def test_clipboard_tools_are_reported_like_every_other_group(self):
+        # Regression: CLIPBOARD_TOOLS was the one group _debug_data never
+        # asked about, so a pasted bug report about the clipboard said
+        # nothing about wl-copy/xclip/xsel -- while `environment` in the
+        # same output listed clipboard_tools a few lines above.
+        data = _debug_data(_FakeGui(_environment()))
+        names = [entry["name"] for entry in data["tools"]["clipboard"]]
+        self.assertIn("wl-copy", names)
+        self.assertIn("clipboard tools", _format_debug(data))
 
 
 class TestFormatDebug(unittest.TestCase):

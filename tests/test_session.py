@@ -109,6 +109,67 @@ class TestInputPreference(unittest.TestCase):
         self.assertTrue(e.can_inject_input)
         self.assertIsNone(e.preferred_input)
 
+    def test_transport_names_the_tool_when_a_keymap_safe_one_is_present(self):
+        e = dataclasses.replace(self.wayland, input_tools=("wdotool", "ydotool"))
+        self.assertEqual(e.input_transport, "wdotool")
+
+    def test_transport_names_uinput_where_preferred_input_says_nothing(self):
+        # The reported bug: `summary()` printed "input none available" on a
+        # box injecting perfectly well through in-process uinput, while the
+        # `mechanisms` line two rows below it said `uinput`.
+        e = dataclasses.replace(
+            self.wayland, input_tools=(), uinput_writable=True, has_evdev=True
+        )
+        self.assertIsNone(e.preferred_input)
+        self.assertEqual(e.input_transport, "uinput (in-process)")
+        self.assertIn("uinput", e.summary())
+        self.assertNotIn("none available", e.summary())
+
+    def test_uinput_outranks_a_keymap_unsafe_tool(self):
+        # Mirrors backends._input_factory, which prefers in-process uinput
+        # to ydotool: same keymap limitation, without a process per event.
+        e = dataclasses.replace(
+            self.wayland,
+            input_tools=("ydotool",),
+            uinput_writable=True,
+            has_evdev=True,
+        )
+        self.assertEqual(e.preferred_input, "ydotool")
+        self.assertEqual(e.input_transport, "uinput (in-process)")
+
+    def test_a_keymap_unsafe_tool_still_beats_nothing(self):
+        e = dataclasses.replace(
+            self.wayland,
+            input_tools=("ydotool",),
+            uinput_writable=False,
+            has_evdev=False,
+        )
+        self.assertEqual(e.input_transport, "ydotool")
+
+    def test_libei_is_named_last_and_marked_opt_in(self):
+        # It is never chosen by automatic composition -- naming it without
+        # the caveat would describe a session nobody gets by default.
+        e = dataclasses.replace(
+            self.wayland,
+            input_tools=(),
+            has_libei=True,
+            uinput_writable=False,
+        )
+        self.assertIn("libei", e.input_transport)
+        self.assertIn("opt-in", e.input_transport)
+
+    def test_no_transport_at_all_is_still_none(self):
+        bare = dataclasses.replace(
+            self.wayland,
+            input_tools=(),
+            has_libei=False,
+            has_portal=False,
+            uinput_writable=False,
+            has_evdev=False,
+        )
+        self.assertIsNone(bare.input_transport)
+        self.assertIn("input        none available", bare.summary())
+
     def test_portal_alone_does_not_count_as_injectable(self):
         # Regression: has_portal used to count on its own, but nothing in
         # this package can actually drive a portal transport -- there is no

@@ -6,13 +6,14 @@ frame filtering.
 """
 
 import re
+import subprocess
 import sys
 import types
 import unittest
 from unittest import mock
 
 from pyguitest.capabilities import Capability
-from pyguitest.errors import CapabilityUnsupported
+from pyguitest.errors import BackendUnavailable, CapabilityUnsupported
 from pyguitest.session import SessionType, detect
 
 
@@ -148,6 +149,20 @@ class AtspiTestCase(unittest.TestCase):
         from pyguitest.backends import atspi
 
         self.atspi = atspi
+        # The fake dogtail needs no accessibility bus, but _dogtail() now
+        # probes for one before importing anything (see
+        # a11y_bus_reachable). Left unpatched, every test here would go on
+        # to ask the real session bus and answer False on any machine
+        # without a desktop -- CI included.
+        self.set_a11y_bus(True)
+
+    def set_a11y_bus(self, reachable):
+        """Pin the a11y-bus answer for one test, spawning nothing."""
+        patcher = mock.patch.object(
+            self.atspi, "a11y_bus_reachable", return_value=reachable
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def backend(self, session_type=SessionType.X11):
         env = detect({"DISPLAY": ":0", "XDG_SESSION_TYPE": "x11"})
@@ -161,6 +176,118 @@ class AtspiTestCase(unittest.TestCase):
 class TestAvailability(AtspiTestCase):
     def test_available_when_dogtail_imports(self):
         self.assertTrue(self.atspi.available())
+
+    def test_unreachable_accessibility_bus_declines_before_importing(self):
+        # The import is what has to be avoided, not merely reported:
+        # dogtail.tree builds its root from pyatspi at import time and
+        # libatspi answers an unreachable bus with g_error(), which aborts
+        # the process. Seen for real inside scripts/headless-session.sh.
+        self.set_a11y_bus(False)
+        self.assertFalse(self.atspi.available())
+
+    def test_the_refusal_names_the_bus_rather_than_dogtail(self):
+        self.set_a11y_bus(False)
+        with self.assertRaises(BackendUnavailable) as caught:
+            self.atspi.AtspiBackend()
+        message = str(caught.exception)
+        self.assertIn("org.a11y.Bus", message)
+        self.assertNotIn("pip install", message)
+
+
+class TestTheAccessibilityBusProbe(unittest.TestCase):
+    """The probe itself: a subprocess, and what each way it can fail means.
+
+    Two functions, on purpose. `a11y_bus_probe` keeps the third answer --
+    "could not ask" -- for `pyguitest debug` to print, and
+    `a11y_bus_reachable` folds it into yes for the decision, because
+    refusing AT-SPI on a box whose bus may be fine is the worse error.
+    """
+
+    def setUp(self):
+        from pyguitest.backends import atspi
+
+        self.atspi = atspi
+        previous = atspi._A11Y_BUS_ANSWERED
+        atspi._A11Y_BUS_ANSWERED = False
+        self.addCleanup(setattr, atspi, "_A11Y_BUS_ANSWERED", previous)
+
+    def _run(self, **kwargs):
+        with (
+            mock.patch.object(
+                self.atspi.shutil, "which", return_value="/usr/bin/gdbus"
+            ),
+            mock.patch.object(self.atspi.subprocess, "run", **kwargs) as run,
+        ):
+            return self.atspi.a11y_bus_probe(), run
+
+    def test_a_successful_call_means_reachable(self):
+        answer, run = self._run(
+            return_value=subprocess.CompletedProcess([], 0, b"", b"")
+        )
+        self.assertIs(answer, True)
+        self.assertIn("org.a11y.Bus.GetAddress", run.call_args[0][0])
+
+    def test_a_failed_call_means_unreachable(self):
+        answer, _ = self._run(
+            return_value=subprocess.CompletedProcess([], 1, b"", b"error")
+        )
+        self.assertIs(answer, False)
+
+    def test_a_timeout_answers_no(self):
+        # The two ways of being wrong are not symmetric: a wrong "no" skips
+        # a backend, a wrong "yes" core-dumps the caller's process.
+        answer, _ = self._run(
+            side_effect=subprocess.TimeoutExpired(cmd="gdbus", timeout=5)
+        )
+        self.assertIs(answer, False)
+
+    def test_gdbus_that_cannot_be_spawned_was_never_asked(self):
+        answer, _ = self._run(side_effect=OSError("boom"))
+        self.assertIsNone(answer)
+
+    def test_no_gdbus_at_all_answers_none_without_spawning(self):
+        with mock.patch.object(self.atspi.shutil, "which", return_value=None):
+            self.assertIsNone(self.atspi.a11y_bus_probe())
+
+    def test_an_unasked_question_still_lets_the_backend_be_tried(self):
+        # Restores the behaviour this probe replaced rather than disabling
+        # AT-SPI on a box whose bus may be perfectly fine.
+        with mock.patch.object(self.atspi, "a11y_bus_probe", return_value=None):
+            self.assertTrue(self.atspi.a11y_bus_reachable())
+
+    def test_only_a_definite_no_declines(self):
+        for answer, expected in ((True, True), (None, True), (False, False)):
+            with self.subTest(probe=answer):
+                with mock.patch.object(
+                    self.atspi, "a11y_bus_probe", return_value=answer
+                ):
+                    self.assertIs(self.atspi.a11y_bus_reachable(), expected)
+
+    def test_a_no_is_not_memoized(self):
+        # Asymmetric on purpose: a process that starts before its desktop
+        # is ready would otherwise have AT-SPI permanently unavailable for
+        # a reason nothing reports, and the failing probe is immediate.
+        with (
+            mock.patch.object(
+                self.atspi.shutil, "which", return_value="/usr/bin/gdbus"
+            ),
+            mock.patch.object(self.atspi.subprocess, "run") as run,
+        ):
+            run.return_value = subprocess.CompletedProcess([], 1, b"", b"")
+            self.assertIs(self.atspi.a11y_bus_probe(), False)
+            run.return_value = subprocess.CompletedProcess([], 0, b"", b"")
+            self.assertIs(self.atspi.a11y_bus_probe(), True)
+            self.assertEqual(run.call_count, 2)
+
+    def test_the_answer_is_memoized(self):
+        answer, run = self._run(
+            return_value=subprocess.CompletedProcess([], 0, b"", b"")
+        )
+        self.assertIs(answer, True)
+        self.assertEqual(run.call_count, 1)
+        # A composite asks available() once per member build; a probe that
+        # spawned a process each time would be paid for repeatedly.
+        self.assertIs(self.atspi.a11y_bus_probe(), True)
 
 
 class TestWaylandCoordinateHonesty(AtspiTestCase):

@@ -20,6 +20,11 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+  schedule:
+    # Nightly, and the compositor job below is why: it is the one job here
+    # that has never run on a GitHub runner, so it needs somewhere to fail
+    # that is not somebody's pull request.
+    - cron: "0 4 * * *"
 
 permissions:
   contents: read
@@ -167,6 +172,74 @@ jobs:
             echo "::error::the dbusmock tests skipped themselves, so this"
             echo "::error::job proved nothing -- the apt packages above"
             echo "::error::did not land for the system python3."
+            exit 1
+          fi
+
+  compositor:
+    name: the COMPOSITOR tier, in a headless GNOME session
+    runs-on: ubuntu-latest
+    # Everything else in this file works because it needs no compositor.
+    # This one is the opposite: window control, window capture and window
+    # events cannot be faked, and until now every claim about them in
+    # docs/validation.md came from a person watching a screen.
+    # `gnome-shell --headless --virtual-monitor` is a full Mutter with no
+    # output attached, so scripts/headless-session.sh can run the same
+    # validation unattended. It passes on a Fedora 45 developer machine.
+    #
+    # NOT on pushes or pull requests, deliberately. Whether a GitHub runner
+    # can host it at all is untested -- headless mode needs no DRM master,
+    # which is the part that mattered locally, but a runner also has no
+    # logind session, and the local run registered with GDM and monitored
+    # one. So this is dispatch-and-nightly until it has a track record;
+    # move it into `needs` for `publish` once it has one.
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v5
+
+      # gnome-shell brings Mutter and the `gnome-extensions` CLI; dbus
+      # brings dbus-run-session, libglib2.0-bin brings gdbus and
+      # gsettings, and the GTK4 introspection data is for
+      # scripts/probe-window.py, which supplies the window the geometry
+      # checks point at.
+      - name: Install GNOME Shell and the tools the script needs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gnome-shell dbus libglib2.0-bin python3-gi gir1.2-gtk-4.0
+
+      # Two steps, and the order matters: the shell reads its enabled
+      # extensions at startup, so enabling has to happen before
+      # headless-session.sh launches it. `--install` only copies files and
+      # exits.
+      - name: Install and enable the window-control extension
+        run: |
+          ./scripts/validate-gnome-extension.sh --install
+          # Inside a session bus of its own: `gnome-extensions enable`
+          # writes a GSettings key, dconf needs a bus to write it, and a
+          # runner has none. Written to ~/.config/dconf/user, which the
+          # shell started below reads at startup like any other session.
+          dbus-run-session -- \
+            gnome-extensions enable pyguitest-window-control@pyguitest.local
+
+      # Captured rather than streamed for the same reason as the portal and
+      # ImageMagick jobs above: this script exits 0 when it decides there
+      # is nothing to check, and a job that proved nothing must not be
+      # green. "move/resize compose correctly" is the line that only
+      # appears once the backend battery has actually run against a real
+      # window.
+      - name: Run the extension validation inside a headless session
+        run: |
+          set -o pipefail
+          output=$(./scripts/headless-session.sh --timeout 90 \
+              ./scripts/validate-gnome-extension.sh 2>&1) || status=$?
+          echo "$output"
+          if [ -n "${status:-}" ]; then
+            exit "$status"
+          fi
+          if ! echo "$output" | grep -q "move/resize compose correctly"; then
+            echo "::error::the backend battery never ran, so this job proved"
+            echo "::error::nothing -- the shell, the extension or the probe"
+            echo "::error::window did not come up. See the output above."
             exit 1
           fi
 

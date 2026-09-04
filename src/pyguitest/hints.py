@@ -323,6 +323,43 @@ def hints_for(
             command("imagemagick"),
             packages="ImageMagick",
         )
+    # The clipboard is the one gap where installing something is not
+    # always the answer. wl-clipboard needs wlr-data-control, which Mutter
+    # does not implement, and the X11 tools cannot see a native Wayland
+    # client -- so on GNOME `clipboard_tools` is empty and stays empty, and
+    # the only route is the Clipboard portal, which is a connect() argument
+    # rather than a package. Nothing consulted can_use_clipboard before
+    # this, so `doctor` was silent on a session with no clipboard at all.
+    if not environment.can_use_clipboard:
+        if environment.compositor is Compositor.MUTTER:
+            yield Hint(
+                "the clipboard",
+                "reading and writing the clipboard: no tool can serve it on "
+                "GNOME, but the Clipboard portal can -- "
+                'connect(backend="portal", backend_options={"clipboard": '
+                "True}). It prompts for consent once, and serves the "
+                "selection only while the Session lives, where wl-copy and "
+                "xclip leave a daemon behind that outlives them",
+                None,
+                installable=False,
+            )
+        else:
+            # Same shape as the capture and input hints above: the session
+            # decides, not the distribution. Both packages carry the same
+            # name on every family in _PACKAGES, so neither needs an entry
+            # there -- unlike `atspi`, whose name differs on all four.
+            clipboard_package = (
+                "xclip"
+                if environment.session_type is SessionType.X11
+                else "wl-clipboard"
+            )
+            yield Hint(
+                "the clipboard",
+                "reading and writing the clipboard, and asserting on what "
+                "an application copied",
+                f"{installer} {clipboard_package}" if installer else None,
+                packages=clipboard_package,
+            )
     uinput_usable = environment.uinput_writable and environment.has_evdev
     if not environment.input_tools and not uinput_usable:
         # ydotool is ranked last in tools.py precisely because it is

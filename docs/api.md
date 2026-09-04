@@ -62,7 +62,7 @@ The recommended way to drive an application: match on what a widget is and what 
 | `press_button(button: int)` | `POINTER_BUTTON` |  | Press a mouse button. 1 is left, 2 middle, 3 right. |
 | `release_button(button: int)` | `POINTER_BUTTON` |  | Release a mouse button. |
 | `drag(start: tuple[int, int], end: tuple[int, int], button: int = 1, duration: float = 0.3, rate: float = 120.0, via: Sequence[tuple[int, int]] = (), ease: Callable[[float], float] \| None = None, settle: float = 0.05, screen: int = 0)` | `POINTER_BUTTON`, `POINTER_MOVE` — uses `POINTER_QUERY` if present |  | Press at `start`, glide to `end`, release. Drag-and-drop. |
-| `scroll(dx: int = 0, dy: int = 0)` | `POINTER_SCROLL` |  | Scroll by axis steps. |
+| `scroll(dx: int = 0, dy: int = 0)` | `POINTER_SCROLL` |  | Scroll by whole wheel detents: `dy` positive is up, `dx` right. |
 
 ## Keyboard
 
@@ -279,7 +279,8 @@ What the current login actually offers.
 | `has_uinput: bool` |  |
 | `has_xlib: bool` |  |
 | `has_xtest: bool` |  |
-| `preferred_input` | The input backend to try first. |
+| `input_transport` | What will actually inject input here, whether or not it is a tool. |
+| `preferred_input` | The input *tool* to try first, or None if none is installed. |
 | `summary()` | A short human-readable description of this environment. |
 | `uinput_writable: bool` |  |
 | `wayland_display: str` |  |

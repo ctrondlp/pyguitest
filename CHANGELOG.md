@@ -9,6 +9,33 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ### Changed
 
+- **`scroll()` now means the same thing on every backend**, which took a
+  change to two of them. It counts whole wheel detents and `dy > 0`
+  scrolls up.
+
+  Neither half was true before. `LibeiBackend` called `scroll_delta`,
+  which takes logical *pixels*, so `gui.scroll(0, 3)` was three wheel
+  notches on X11, xdotool, uinput and the portal, and three pixels on
+  `eiinput`. And the direction split four/two: X11 clicks buttons 4/5 and
+  uinput emits `REL_WHEEL`, both taking positive as up, while the portal
+  and libei follow `wl_pointer`, where positive is down. A caller could
+  not write one scroll that behaved the same way twice.
+
+  The X11 reading won -- on numbers, and because this package is the
+  successor to an X11 module. `eiinput` sends `scroll_discrete` (120
+  units to the detent) and both it and `portal` negate `dy`. Horizontal
+  is untouched: positive is right in both conventions, and flipping both
+  axes would have introduced a second bug while fixing the first. The
+  convention is now stated in `GUIBackend.scroll`, `Session.scroll` and
+  [docs/input.md](docs/input.md).
+
+  **This changes behaviour for existing callers of those two backends**:
+  a `portal` or `eiinput` scroll now goes the other way, and an `eiinput`
+  scroll moves 120x further per unit. Both were previously inconsistent
+  with the majority rather than documented, so there is no correct code
+  to migrate -- but code written against the old `eiinput` behaviour will
+  need its magnitudes rescaled.
+
 - The `eiinput` extra now requires `python-libei>=0.4.0`, up from `0.3.0`.
   Two things in that release matter here and neither can be worked around
   from this side: a negotiation that failed part-way used to leave the
@@ -44,6 +71,66 @@ All notable changes to pyguitest are recorded here. The format follows
   and each validated capability becoming its own function.
 
 ### Added
+
+- `scripts/headless-session.sh` runs a command inside a private
+  `gnome-shell --headless --virtual-monitor WxH` on its own session bus.
+  Nothing appears on screen and a shell already running is untouched, so
+  it works on a developer's desktop as well as on a bare CI runner -- and
+  it makes the COMPOSITOR tier testable without a human for the first
+  time. `./scripts/headless-session.sh ./scripts/validate-gnome-extension.sh`
+  is green end to end: window move/resize composing over six rounds, a
+  capture matching the window exactly, the `new`/`title`/`close` window
+  events, and `window_at()` hit-testing, all unattended.
+
+  Three things had to be closed to get there, each of which made a
+  "headless" run quietly wrong rather than obviously broken. `DISPLAY` is
+  unset for the command, because headless mode starts its own XWayland but
+  exports its display to nothing -- leaving the outer value in place points
+  every X11 tool at the developer's real X server. The Wayland socket and
+  its `.lock` are removed on the way out, since a signalled shell leaves
+  both behind and the next run cannot bind. And the script waits for the
+  shell's *extensions* to load, not just for its bus name: those are about
+  4.4 seconds apart here, and a connect in between fails with the same
+  error an uninstalled extension gives.
+
+- A `compositor` job in CI, running that validation inside the headless
+  session so the COMPOSITOR tier stays working rather than having worked
+  once. On `workflow_dispatch` and a nightly schedule, not on pushes:
+  whether a GitHub runner can host `gnome-shell --headless` is untested,
+  and an unproven job has no business failing someone's pull request. It
+  fails loudly if the backend battery never ran, the same way the portal
+  and ImageMagick jobs fail on a silent skip.
+
+- `scripts/probe-window.py`: one plain GTK4 window, held open until killed,
+  for the window-control checks to point at.
+  `validate-gnome-extension.sh` spawns it when nothing is open -- which is
+  always the case in a headless session -- instead of exiting early with
+  "open a window and re-run". It waits for a window with a real size, not
+  merely a listed one: Mutter publishes a toplevel to `ListWindows` before
+  the client's first configure round trip, so an unlucky first look gets a
+  real window whose `frame_rect` is still 0x0, and the geometry battery
+  then measures move and resize against a size that never existed.
+
+- `Environment.input_transport`: what will actually inject input here,
+  which is a different question from `preferred_input` and now the one
+  `summary()` answers. See Fixed below.
+
+- `examples/_portal_clipboard_validate.py`, the live check the portal
+  clipboard shipped without. Its write half hands the portal no bytes --
+  `SetSelection` declares ownership and a GLib loop on a daemon thread
+  answers each `SelectionTransfer` -- so a fake connection cannot tell
+  whether it works, and a failure reads as an *empty* clipboard to the
+  whole desktop rather than as an error. The script settles it the only way
+  it can be settled: a separate process pastes what was written. It also
+  counts the transfers the portal actually asked for, runs the read
+  direction first as a control so a failure can be attributed, and checks
+  that the selection dies with the session as documented.
+
+- `docs/upstream.md`: the two Wayland protocol gaps worth filing upstream,
+  written as issue text rather than as notes --
+  `ext-image-copy-capture-v1` in Mutter, and a foreign-toplevel geometry
+  protocol that nobody implements. The second is the one number standing
+  between an accessible tree and clicking what it finds.
 
 - Clipboard on GNOME, at last: `PortalBackend` takes `clipboard=True` and
   then serves `Capability.CLIPBOARD` through
@@ -197,6 +284,99 @@ All notable changes to pyguitest are recorded here. The format follows
   (`examples/_kwin_events_validate.py`) — see `docs/validation.md`.
 
 ### Fixed
+
+- **A clipboard read could fail with an `AttributeError`** from inside a
+  D-Bus helper. Found the first time the new validation script ran
+  against a real desktop (2026-09-04): `SelectionRead` answered with an
+  ordinary `(h)` reply and **no file descriptor list**, so the code read
+  `.get` off `None`. It now raises a typed error saying what happened,
+  and saying that the condition is usually transient -- a selection
+  changing hands answers this way while the hand-over is in flight, so
+  the right response is to retry, not to conclude the clipboard is empty.
+
+  Reading also tries several MIME spellings in turn now
+  (`text/plain;charset=utf-8`, `text/plain`, `UTF8_STRING`, `STRING`).
+  That went in on the theory that the failure was a type mismatch, since
+  `xclip` advertises only `TARGETS` and `UTF8_STRING` -- and a later run
+  disproved it by reporting that `text/plain;charset=utf-8` answers on
+  the first try. Mutter maps X11 atoms onto MIME types, as it should. The
+  list is kept as a defensive measure for other portal implementations,
+  costing nothing when the first type answers, and its docstring says
+  plainly that no spelling below the first is known to be needed.
+
+  The same run proved the half that was actually in doubt: a separate
+  process pasted back exactly what `set_clipboard()` wrote, with
+  `SelectionTransfer` firing five times to produce it.
+
+- **The same read could also return `None` instead of text**, which
+  reached the caller as `'NoneType' object has no attribute 'decode'`.
+  Found on the next run, once the fix above stopped hiding it: the
+  descriptor the portal hands back can be **non-blocking**, and
+  `BufferedReader.read()` answers None rather than bytes when a
+  non-blocking read has nothing ready yet -- so `os.fdopen(fd).read()`
+  only ever worked because the owner had usually already written. Reading
+  now waits on the descriptor and drains it to EOF, bounded at five
+  seconds: the writer is another application reached through the portal,
+  and a clipboard read that blocks forever inside a test run is the worst
+  of the available failures.
+
+- **`PortalBackend.set_clipboard`'s documented lifetime was wrong.** It
+  said a script that sets the clipboard and exits "leaves nothing
+  behind". Measured: after `close()` the content was still pasteable, and
+  no transfer fired to produce it -- something downstream had cached the
+  bytes, which on GNOME is Mutter's XWayland selection bridge. What the
+  session can honestly promise is that it stops *serving*; what a given
+  application sees afterwards is not ours to claim. Corrected there, in
+  `backends/clipboard.py`, and in the `doctor` hint.
+
+- **`connect()` could abort the process** -- SIGABRT, core dumped, no
+  exception -- on any session with no reachable accessibility bus.
+  libatspi answers an unreachable bus with `g_error()`, which is
+  `abort()`, and `import dogtail.tree` reaches that path on the way in:
+  the module builds its `root` from `pyatspi.Registry.getDesktop(0)` at
+  import time. No `try`/`except` around the import can help. `atspi.py`
+  now asks `gdbus` whether `org.a11y.Bus` answers *before* importing
+  anything, and declines the backend with a typed `BackendUnavailable`
+  naming the bus if it does not. A subprocess rather than Gio in-process
+  for the same reason `session.toolkit_accessibility` shells out:
+  importing Gio caches the session bus for the life of the process. Found
+  in a headless GNOME session, but reachable in any container or CI
+  runner.
+
+  `pyguitest debug` now reports the same answer on an `a11y bus` line --
+  the one AT-SPI fact that could not previously appear in a bug report,
+  because asking for it ended the process. `has_atspi` beside it says the
+  *library* is installed, which is a different claim.
+
+- `ExternalTool.version()` printed a failed run's stderr as the tool's
+  version. Seen in a real `pyguitest debug` on a Wayland session, where
+  xclip's version column read `xclip: Error: Can't open display: (null)`.
+  stderr is still read when stdout is empty -- several of these tools
+  report their version there -- but only when the command actually
+  succeeded.
+
+- `Environment.summary()` reported `input none available` on a machine
+  injecting input perfectly well, while the `mechanisms` line two rows
+  below it said `uinput`. `preferred_input` ranks *tools*, and answers
+  None on a session served by in-process uinput; the summary line was
+  asking it the wrong question. The new `input_transport` answers the
+  right one, mirroring `backends._input_factory`'s own order -- keymap-safe
+  tools, then in-process uinput, then keymap-unsafe tools, with libei last
+  and marked opt-in, since automatic composition never selects it.
+
+- `pyguitest debug` never reported the clipboard tools. `_debug_data`
+  asked about four of the five groups in `tools.py`, so a pasted bug
+  report about the clipboard said nothing about wl-copy, xclip or xsel --
+  while `environment.clipboard_tools`, a few lines above in the same
+  output, listed them.
+
+- `pyguitest doctor` was silent on a session with no clipboard path at
+  all. `Environment.can_use_clipboard` existed and nothing consulted it.
+  It now yields a hint, and the advice differs by desktop, because on
+  GNOME there is nothing to install: Mutter implements no
+  wlr-data-control, so the hint points at
+  `connect(backend="portal", backend_options={"clipboard": True})`
+  instead of naming a package that would run, exit 0, and copy nothing.
 
 - Session classification now trusts `WAYLAND_DISPLAY`/`DISPLAY` over a
   possibly-stale `XDG_SESSION_TYPE`, not the other way around. Found live

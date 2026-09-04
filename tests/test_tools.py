@@ -180,6 +180,22 @@ class TestVersion(unittest.TestCase):
             )
             self.assertEqual(fake.version(), "ydotool 1.0.4")
 
+    def test_a_failed_run_does_not_report_its_error_as_a_version(self):
+        # Regression, seen in a real `pyguitest debug` on a Wayland
+        # session: `xclip --version` cannot open a display, exits 1, and
+        # its complaint was printed in the version column.
+        fake = tools.ExternalTool("xclip", frozenset())
+        with (
+            mock.patch("pyguitest.tools.shutil.which", return_value="/bin/xclip"),
+            mock.patch("pyguitest.tools.subprocess.run") as run,
+        ):
+            run.return_value = mock.Mock(
+                returncode=1,
+                stdout="",
+                stderr="xclip: Error: Can't open display: (null)\n",
+            )
+            self.assertIsNone(fake.version())
+
     def test_no_output_at_all_reports_none(self):
         fake = tools.ExternalTool("xdotool", frozenset())
         with (

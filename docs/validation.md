@@ -288,6 +288,143 @@ read as a claim you cannot check.
   the consent dialog and looked like an `eiinput` fault. The script now
   picks the window member per compositor.
 
+- **`Capability.CLIPBOARD` through the Clipboard portal** (2026-09-04,
+  `examples/_portal_clipboard_validate.py`, run by the user). The one
+  stage-1 item that had shipped without ever meeting a real desktop, and
+  the one that least deserved the benefit of the doubt: `set_clipboard()`
+  hands the portal no bytes at all — it declares ownership with
+  `SetSelection` and then has to answer a `SelectionTransfer` signal once
+  per paste, from a GLib loop on a daemon thread. Every unit test for it
+  drives `_on_transfer` directly, so all twenty would still pass on a
+  desktop where the signal never arrives, and the symptom there is not an
+  exception but a clipboard that reads as **empty** to everything.
+
+  **It works.** `xclip`, a separate process, pasted back exactly what
+  `set_clipboard()` wrote — twice, and then the replacement value — with
+  `SelectionTransfer` firing five times to produce them. The write path,
+  the riskiest code in the stage, is confirmed.
+
+  Three runs were needed, and each one corrected the last. Two failures
+  came with the first, both real; fixing them exposed a third bug; and
+  the third run then disproved the explanation given for the first:
+
+  `get_clipboard()` raised `AttributeError` against a selection `xclip`
+  owned. `SelectionRead` had answered with an ordinary `(h)` reply and
+  **no file descriptor list at all**, so the code read `.get` off `None`.
+  The first explanation was wrong, and a third run is what showed it.
+  `xclip` advertises exactly `TARGETS` and `UTF8_STRING` — measured with
+  `xclip -t TARGETS -o` — so the obvious reading was that asking for
+  `text/plain;charset=utf-8` had asked for something the owner did not
+  have, and a fallback list of four spellings went in on that basis. The
+  third run then reported which spelling actually answered:
+  **`text/plain;charset=utf-8`, first try, no refusals.** The type that
+  failed in run one works. Mutter maps X11 target atoms onto MIME types
+  on the way across, as it should, and the fallback list fixed nothing.
+
+  What the failure most likely was, on the evidence: a **race**. The read
+  came immediately after `xclip` claimed the selection, and a portal
+  answering a hand-over still in flight replies with no descriptor. The
+  script's own bug is what turned that into a reported failure — its
+  retry loop broke out on the first exception instead of retrying to its
+  deadline, so one transient refusal ended the phase. Both are fixed: the
+  loop retries, and the typed error now says the condition is often
+  transient and suggests retrying through `wait_until`.
+
+  The fallback list stays, relabelled as defensive rather than
+  load-bearing, since it costs nothing when the first type answers — but
+  nothing here is evidence that any spelling below the first is ever
+  needed.
+
+  Phase 0 of the first run read the *shell's* own clipboard content
+  perfectly, which is worth noting for its own sake: the read worked
+  against a settled owner, and that is exactly how a hand-over race would
+  survive a less careful check.
+
+  **A third bug surfaced on the second run**, in the same few lines and
+  invisible until the first two were out of the way: phase 0 raised
+  `'NoneType' object has no attribute 'decode'`. The descriptor the
+  portal hands back can be **non-blocking**, and `BufferedReader.read()`
+  answers `None` rather than bytes when a non-blocking read has nothing
+  ready yet — so `os.fdopen(fd).read()` was never safe here, and only
+  ever worked because the owner had usually already written. Reading now
+  waits on the descriptor with `select` and drains it to EOF, bounded at
+  five seconds, because the writer is another application reached through
+  the portal and a clipboard read that blocks forever inside a test run
+  is the worst of the available failures. Three bugs in one code path,
+  each hidden behind the one before it — this is the case for running the
+  thing rather than reasoning about it.
+
+  The clipboard also **survived `close()`** — `xclip` still pasted the
+  marker afterwards, contradicting a documented claim. But the transfer
+  counter did not move, so nothing was asked of this process: something
+  downstream had cached the bytes, and on GNOME that is Mutter's
+  XWayland selection bridge. The docstring said "a script that sets the
+  clipboard and exits leaves nothing behind"; what it can honestly say is
+  that the session stops *serving*, and that what a given application
+  sees afterwards depends on caching it does not control. Corrected in
+  `PortalBackend.set_clipboard`, and the script now separates the two
+  cases with the counter instead of reporting a flat failure.
+
+  `primary=True` was refused on both halves, as designed — the portal
+  interface has no PRIMARY selection. The second run passed all seven
+  checks.
+
+  Still unmeasured: no *native Wayland* client has read a selection this
+  backend owns. `wl-paste` cannot do it on Mutter, which is why the
+  witness is `xclip` through XWayland — so every result above is really
+  "as seen from X11".
+
+## Run unattended in a headless GNOME session
+
+New on 2026-09-04, and the first thing here that is a regression test
+rather than a record of someone watching a screen. `scripts/headless-
+session.sh` starts `gnome-shell --headless --virtual-monitor WxH` on its
+own session bus, so it neither collides with a running shell nor shows
+anything on the display, and runs a command inside it.
+
+`./scripts/headless-session.sh ./scripts/validate-gnome-extension.sh` is
+green end to end: 9 of 9 shell-level checks, and the whole
+`GnomeShellBackend` battery under them — `move_window` leaving size
+alone, `resize_window` leaving position alone, the two composing over six
+rounds, a 600×400 PNG from `capture()` matching the window exactly, the
+`new`/`title`/`close` window events, and `window_at()` hitting the right
+window. Nobody clicked anything.
+
+Two things it settles that the plan could only guess at. The headless
+backend does **not** object to the seat situation — the open question that
+decided whether pyguitest could have CI at all. And the GNOME Shell
+extension loads and exports its D-Bus object in headless mode exactly as
+it does in a real session, so the COMPOSITOR tier is testable without a
+desktop.
+
+`screens()` is worth its own line: it answers `Screen(0, 1280x720
+'Meta-0')` against `--virtual-monitor 1280x720`. On a real monitor that
+check can only confirm the number matches the compositor's own; here the
+number was *chosen*, which is a stronger test of the same code.
+
+Three findings came out of getting there, all now handled:
+
+- **`connect()` aborted the process** on a session with no accessibility
+  bus. Not an exception — libatspi answers an unreachable bus with
+  `g_error()`, which is `abort()`, and `import dogtail.tree` reaches it at
+  import time. No `try`/`except` can catch that, so `backends/atspi.py`
+  now asks `gdbus` whether `org.a11y.Bus` answers before importing
+  anything. This was reachable in any container or CI runner, not only
+  here.
+- **The shell takes its bus name about 4.4 seconds before its extensions
+  are loaded.** A connect in that window fails with "Object does not exist
+  at path" — the same error an extension that is not installed gives. The
+  script waits for both.
+- **A window can be listed before it has a size.** Mutter publishes a
+  toplevel to `ListWindows` before the client's first configure round
+  trip, so an unlucky first look gets a real window whose `frame_rect` is
+  still 0×0. The validation script now waits for a sized window; a caller
+  doing `wait_for_window()` then `geometry()` can see the same 0×0.
+
+What it does not cover: input injection reaching a client, anything
+needing the portal's consent dialog (there is nobody to click it), and
+every non-GNOME desktop.
+
 ## Run live on KDE Plasma 6 / KWin (XWayland)
 
 - **`eiinput` after its negotiation moved into python-libei** (2026-09-01),
@@ -582,7 +719,6 @@ the installed library — names, signatures and return shapes.
   not. `Start()` raises an interactive consent dialog that blocks until a
   human clicks Allow, so every step beyond it needs a person at a real
   desktop.
-
 `tests/test_portal_dbusmock.py` covers the wire plumbing under that gap. It
 uses [python-dbusmock](https://github.com/martinpitt/python-dbusmock) the
 way `xdg-desktop-portal`'s own test suite does: a private `dbus-daemon` in a

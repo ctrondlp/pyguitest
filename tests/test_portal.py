@@ -19,6 +19,7 @@ from pyguitest.errors import (
     BackendUnavailable,
     CapabilityUnsupported,
     PermissionRequired,
+    PyGUITestError,
 )
 
 
@@ -101,6 +102,17 @@ class FakeConnection:
         self._watchers = {}
         self.unsubscribed = []
         self.clipboard_content = b""
+        self.non_blocking = False
+        """Hand SelectionRead's descriptor over in non-blocking mode.
+
+        What GNOME actually did, and what made `read()` answer None."""
+        self.offered_mimes = None
+        """MIME types SelectionRead will answer, or None for "any".
+
+        A real owner advertises what it feels like: xclip offers only
+        `UTF8_STRING`, and the portal answered a request for
+        `text/plain;charset=utf-8` against it with a reply carrying no fd
+        list at all. Setting this reproduces that shape."""
         self.handed_out = []
         """Every fd this fake gave out, so a test can prove they close."""
         self.written_to = []
@@ -178,10 +190,17 @@ class FakeConnection:
         args = parameters.value if parameters is not None else None
         self.calls.append((method, args))
         self.call_paths.append((method, object_path))
+        if method == "SelectionRead" and self.offered_mimes is not None:
+            requested = args[1] if args else None
+            if requested not in self.offered_mimes:
+                # No fd list, not an error reply -- what GNOME actually did.
+                return FakeReply((0,)), None
         read_fd, write_fd = os.pipe()
         if method == "SelectionRead":
             os.write(write_fd, self.clipboard_content)
             os.close(write_fd)
+            if self.non_blocking:
+                os.set_blocking(read_fd, False)
             self._own.append(read_fd)
             return FakeReply((7,)), FakeFDList({7: read_fd}, self.handed_out)
         # SelectionWrite: the portal hands us the *write* end to fill.
@@ -417,7 +436,18 @@ class TestPointer(PortalTestCase):
         method, args = self.connection.calls[-1]
         self.assertEqual(method, "NotifyPointerAxisDiscrete")
         self.assertEqual(args[2], 0)  # vertical
-        self.assertEqual(args[3], 3)
+        # Negated: the portal follows wl_pointer, where positive scrolls
+        # down, and this package settled on X11's reading of `dy > 0` as
+        # up. See GUIBackend.scroll.
+        self.assertEqual(args[3], -3)
+
+    def test_horizontal_scroll_is_not_negated(self):
+        # Positive is right in both conventions; only vertical disagreed.
+        self.gui.scroll(dx=2)
+        method, args = self.connection.calls[-1]
+        self.assertEqual(method, "NotifyPointerAxisDiscrete")
+        self.assertEqual(args[2], 1)  # horizontal
+        self.assertEqual(args[3], 2)
 
     def test_scroll_with_nothing_to_do_sends_nothing(self):
         self.gui.scroll()
@@ -518,6 +548,50 @@ class TestClipboard(unittest.TestCase):
         fd = self.connection.handed_out[-1]
         with self.assertRaises(OSError):
             os.fstat(fd)
+
+    def test_a_type_the_owner_does_not_offer_falls_through_to_the_next(self):
+        # Measured on GNOME, 2026-09-04: xclip advertises only
+        # UTF8_STRING, so asking solely for text/plain;charset=utf-8 read
+        # an empty clipboard from a selection that plainly had content.
+        self.connection.offered_mimes = {"UTF8_STRING"}
+        self.connection.clipboard_content = b"from xclip"
+        self.assertEqual(self._gui().get_clipboard(), "from xclip")
+        asked = [a[1] for m, a in self.connection.calls if m == "SelectionRead"]
+        self.assertEqual(asked[0], "text/plain;charset=utf-8")
+        self.assertIn("UTF8_STRING", asked)
+
+    def test_a_non_blocking_descriptor_is_still_read_in_full(self):
+        # The bug a live run caught: the portal's pipe can arrive
+        # non-blocking, and BufferedReader.read() answers None rather than
+        # bytes when nothing is ready yet -- so the old code raised
+        # "'NoneType' object has no attribute 'decode'" at the caller.
+        self.connection.non_blocking = True
+        self.connection.clipboard_content = b"slow owner"
+        self.assertEqual(self._gui().get_clipboard(), "slow owner")
+
+    def test_a_writer_that_never_finishes_gives_up_rather_than_hanging(self):
+        # The pipe stays open with nothing in it: a real owner that is
+        # wedged. Blocking forever inside a test run is the worst of the
+        # available failures.
+        read_fd, write_fd = os.pipe()
+        self.addCleanup(os.close, write_fd)
+        with self.assertRaises(PyGUITestError) as caught:
+            self.module._drain(read_fd, timeout=0.05)
+        self.assertIn("did not finish writing", str(caught.exception))
+        # Closed even on the way out, or a long run leaks one per read.
+        with self.assertRaises(OSError):
+            os.fstat(read_fd)
+
+    def test_a_reply_with_no_fd_list_raises_a_typed_error(self):
+        # It used to read `.get` off None, so the caller got an
+        # AttributeError from inside a D-Bus helper -- which says nothing
+        # about clipboards and cannot be caught meaningfully.
+        self.connection.offered_mimes = set()
+        with self.assertRaises(PyGUITestError) as caught:
+            self._gui().get_clipboard()
+        message = str(caught.exception)
+        self.assertIn("could not be read as text", message)
+        self.assertIn("text/plain;charset=utf-8", message)
 
     def test_undecodable_bytes_do_not_raise(self):
         # Another application owns the selection and can put anything on

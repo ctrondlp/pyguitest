@@ -140,6 +140,10 @@ class FakeDevice:
         self.calls.append(("scroll_delta", dx, dy))
         return self
 
+    def scroll_discrete(self, dx, dy):
+        self.calls.append(("scroll_discrete", dx, dy))
+        return self
+
     def keyboard_key(self, keycode, is_press):
         self.calls.append(("keyboard_key", keycode, is_press))
         return self
@@ -466,9 +470,26 @@ class TestPointer(LibeiTestCase):
         with self.assertRaises(ValueError):
             self.gui.press_button(9)
 
-    def test_scroll_sends_a_delta(self):
+    def test_scroll_sends_whole_detents_not_pixels(self):
+        # scroll_delta takes logical pixels, so scroll(0, 3) used to mean
+        # three notches on every other backend and three *pixels* here.
+        # One detent is 120 in libei's discrete units.
         self.gui.scroll(dx=1, dy=3)
-        self.assertIn(("scroll_delta", 1, 3), self.device.calls)
+        self.assertIn(("scroll_discrete", 120, -360), self.device.calls)
+        self.assertNotIn("scroll_delta", [c[0] for c in self.device.calls])
+
+    def test_positive_dy_scrolls_up(self):
+        # libei follows wl_pointer, where positive is down; this package
+        # settled on X11's reading, so the backend negates. See
+        # GUIBackend.scroll.
+        self.gui.scroll(dy=1)
+        self.assertIn(("scroll_discrete", 0, -120), self.device.calls)
+
+    def test_horizontal_is_not_negated(self):
+        # Positive is right in both conventions -- only the vertical axis
+        # disagreed, and flipping both would have introduced a second bug.
+        self.gui.scroll(dx=2)
+        self.assertIn(("scroll_discrete", 240, 0), self.device.calls)
 
     def test_scroll_with_nothing_to_do_sends_nothing(self):
         self.gui.scroll()

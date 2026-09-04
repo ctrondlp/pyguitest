@@ -567,7 +567,28 @@ class GUIBackend(ABC):
         raise NotImplementedError
 
     def scroll(self, dx: int = 0, dy: int = 0) -> None:
-        """Scroll by axis steps. X11 buttons 4 and 5 map here, not to buttons."""
+        """Scroll by whole wheel detents: `dy` positive is up, `dx` right.
+
+        Both halves of that are a decision, because the mechanisms
+        underneath disagree with each other:
+
+        **Units are detents**, one notch of a physical wheel, never
+        pixels. X11 and xdotool click buttons 4-7 `abs(steps)` times,
+        uinput emits `REL_WHEEL`, the portal sends
+        `NotifyPointerAxisDiscrete` -- all detents already. libei is the
+        odd one out: it offers `scroll_delta` in logical pixels as well,
+        and `LibeiBackend` deliberately uses `scroll_discrete` (120 units
+        to the detent) so that `scroll(0, 3)` means the same thing on
+        every backend rather than three notches on five of them and three
+        pixels on the sixth.
+
+        **`dy > 0` scrolls up**, following X11's buttons 4/5 rather than
+        Wayland's axis events, which take positive as *down*. The X11
+        reading won on numbers -- four of six backends already did it, and
+        this package is the successor to an X11 module -- so `portal` and
+        `eiinput` negate `dy` on the way out. Horizontal needs no such
+        fix: positive is right in both conventions.
+        """
         self.require(Capability.POINTER_SCROLL)
         raise NotImplementedError
 

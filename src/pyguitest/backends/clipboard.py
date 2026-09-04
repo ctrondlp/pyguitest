@@ -23,9 +23,11 @@ already negotiates -- `connect(backend="portal", backend_options={
 this protocol nor a reachable portal path" was true when written and is
 not now: xdg-desktop-portal 1.22 with xdg-desktop-portal-gnome 51 carries
 the Clipboard interface (probed live, 2026-09-01). Note the two paths differ
-in lifetime as well as mechanism -- see PortalBackend.set_clipboard: the tools
-here fork a daemon that outlives the process, while the portal path holds
-the selection only while the Session does.
+in lifetime as well as mechanism: the tools here fork a daemon that outlives
+the process, while the portal path stops serving the selection when the
+Session closes. Even that is an upper bound rather than a promise about
+what a given application then sees -- see PortalBackend.set_clipboard for
+the caching measured underneath it on GNOME.
 
 Persistence is the one real trap, and it is not only about waiting for the
 right process to exit. The X11 and Wayland clipboard protocols both work

@@ -81,7 +81,9 @@ else
 fi
 
 echo "== 6. GnomeShellBackend against the live extension =="
+PYGUITEST_ROOT="$(cd "$(dirname "$0")/.." && pwd)" \
 PYTHONPATH="$(cd "$(dirname "$0")/.." && pwd)/src" python3 - <<'PY'
+import atexit
 import os
 import shutil
 import signal
@@ -109,8 +111,35 @@ print(f"  {Y} capabilities: {b.capabilities}")
 wins = b.windows()
 print(f"  {G} windows() -> {len(wins)} window(s)")
 if not wins:
-    print(f"  {Y} no windows open; open one and re-run to exercise geometry")
-    sys.exit(0)
+    # Inside scripts/headless-session.sh nothing is open at all, and the
+    # geometry battery below is the whole point of the run -- so open a
+    # window rather than exiting with "open one and re-run". atexit rather
+    # than a try/finally around the rest: this script exits from several
+    # places below, and every one of them has to close it.
+    probe = os.path.join(os.environ.get("PYGUITEST_ROOT", "."),
+                         "scripts", "probe-window.py")
+    print(f"  {Y} nothing is open -- spawning {probe}")
+    spawned = subprocess.Popen([sys.executable, probe])
+    atexit.register(spawned.terminate)
+    # Waits for a *sized* window, not merely a listed one. Mutter publishes
+    # a toplevel to ListWindows before the client has been through its first
+    # configure round trip, so an unlucky first look reports a real window
+    # whose frame_rect is still 0x0 -- and the battery below then measures
+    # move and resize against a size that was never real. Seen on the first
+    # headless run of this script, where every round "failed to converge"
+    # back on (0, 0, 0, 0).
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        wins = [w for w in b.windows() if b.geometry(w)[2:] > (0, 0)]
+        if wins:
+            break
+        time.sleep(0.2)
+    if not wins:
+        print(f"  {R} no probe window with a real size appeared -- is "
+              f"PyGObject's GTK4 binding installed?")
+        sys.exit(1)
+    print(f"  {G} probe window opened: {b.geometry(wins[0])[2:]} at "
+          f"{b.geometry(wins[0])[:2]}")
 
 # The D-Bus tuple has no maximized/tiled flag, so a window that will not
 # move (typically maximized) cannot be filtered out ahead of time -- only

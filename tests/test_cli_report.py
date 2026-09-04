@@ -58,6 +58,10 @@ class TestReportAdviceGating(unittest.TestCase):
             capture_tools=("grim",),
             input_tools=("wdotool",),
             image_tools=("compare",),
+            # Likewise stands in for a clipboard path: GNOME has none from
+            # a tool, so without this the clipboard hint fires and there is
+            # always something missing here.
+            clipboard_tools=("wl-copy",),
         )
         # WINDOW_PLACEMENT stands in for "the GNOME Shell extension is
         # active" -- compositor is MUTTER here (XDG_CURRENT_DESKTOP=GNOME),

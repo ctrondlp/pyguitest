@@ -477,7 +477,13 @@ class Session:
         self.release_button(button)
 
     def scroll(self, dx: int = 0, dy: int = 0) -> None:
-        """Scroll by axis steps."""
+        """Scroll by whole wheel detents: `dy` positive is up, `dx` right.
+
+        One unit is one notch of a physical wheel, not a pixel, and the
+        direction is X11's rather than Wayland's -- the same on every
+        backend, which took a fix on two of them. `GUIBackend.scroll`
+        has the reasoning.
+        """
         self.backend.scroll(dx, dy)
         self._after_event()
 

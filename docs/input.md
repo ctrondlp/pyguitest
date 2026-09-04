@@ -281,6 +281,28 @@ python-libei's `eis.Eis.create_for_fd()` already draws for testing without a
 portal at all, and the boundary `tests/test_portal_dbusmock.py` works
 inside.
 
+## Scrolling: detents, and which way is up
+
+`scroll(dx, dy)` counts **wheel detents** — one notch of a physical
+wheel — and `dy` positive scrolls **up**, `dx` positive scrolls right.
+The same on every backend.
+
+Neither half was free, because the mechanisms underneath disagree:
+
+| | Units | `dy > 0` |
+|---|---|---|
+| X11, xdotool, wdotool | buttons 4–7, clicked `abs(dy)` times | up |
+| uinput, ydotool | `REL_WHEEL` | up |
+| portal | `NotifyPointerAxisDiscrete` | **down** |
+| eiinput | `scroll_delta` — logical **pixels** | **down** |
+
+So `scroll(0, 3)` used to mean three notches on four backends and three
+*pixels* on `eiinput`, in the opposite direction on two of them. The
+X11 reading won on numbers and on lineage — this package is the successor
+to an X11 module — so `eiinput` now sends `scroll_discrete` (120 units to
+the detent) and both it and `portal` negate `dy`. Horizontal needed no
+fix: positive is right in both conventions.
+
 ## Motion between the two points
 
 `move_mouse()` teleports. One event goes out and the pointer is simply

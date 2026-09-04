@@ -215,15 +215,46 @@ class Environment:
 
     @property
     def preferred_input(self) -> str | None:
-        """The input backend to try first.
+        """The input *tool* to try first, or None if none is installed.
 
-        libei leads: it is portal-brokered, needs no device node, reaches
-        native Wayland clients, and lets the caller supply its own keymap --
-        which is what keeps type_text() correct on a non-US layout. uinput is
-        the fallback precisely because it cannot do that last part.
+        Deliberately narrow: it ranks `input_tools`, and a session that
+        injects input perfectly well through no tool at all answers None
+        here. `input_transport` is the wider question -- what will
+        actually carry the events -- and is what `summary()` reports.
         """
         if self.input_tools:
             return self.input_tools[0]
+        return None
+
+    @property
+    def input_transport(self) -> str | None:
+        """What will actually inject input here, whether or not it is a tool.
+
+        `preferred_input` answers the narrower question and is None on a
+        machine served by in-process uinput -- which made `summary()`
+        print "input none available" on a session whose own `mechanisms`
+        line, two rows below it, correctly said `uinput`.
+
+        The order mirrors `backends._input_factory`, the thing that
+        actually chooses: keymap-safe tools first, then in-process uinput,
+        then keymap-unsafe tools, which uinput outranks because it costs no
+        process per event and is no less safe. libei comes last and says
+        it is opt-in -- automatic composition never selects it, so naming
+        it plainly would describe a session nobody gets without asking.
+
+        These are labels for a person reading `summary()`, not names to
+        pass to `connect(backend=...)`.
+        """
+        keymap_safe = {t.name for t in _tools.INPUT_TOOLS if t.keymap_safe}
+        for name in self.input_tools:
+            if name in keymap_safe:
+                return name
+        if self.uinput_writable and self.has_evdev:
+            return "uinput (in-process)"
+        if self.input_tools:
+            return self.input_tools[0]
+        if self.has_libei:
+            return 'libei (opt-in: connect(backend="eiinput"))'
         return None
 
     def summary(self) -> str:
@@ -232,7 +263,7 @@ class Environment:
             f"session      {self.session_type.value}",
             f"compositor   {self.compositor.value}"
             + (f" ({self.desktop})" if self.desktop else ""),
-            f"input        {self.preferred_input or 'none available'}",
+            f"input        {self.input_transport or 'none available'}",
             "tools        "
             + (
                 ", ".join(

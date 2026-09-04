@@ -15,6 +15,7 @@ otherwise drown it.
 | [structure.md](structure.md) | The repository layout, file by file |
 | [validation.md](validation.md) | What has actually been run against a real desktop, and what has not |
 | [wayland-audit.md](wayland-audit.md) | The audit of all 50 X11::GUITest exports that this project's API design derives from |
+| [upstream.md](upstream.md) | The two protocol gaps worth filing upstream, written as issue text |
 | [adr-001-dependencies.md](adr-001-dependencies.md) | Why libraries were chosen as they were |
 | [adr-002-transports.md](adr-002-transports.md) | Why sockets replaced CLI tools for the compositor IPC backends |
 

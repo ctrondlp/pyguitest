@@ -206,6 +206,8 @@ in CI.
 - [ADR 002](docs/adr-002-transports.md) — why sockets replaced CLI tools
 - [docs/wayland-audit.md](docs/wayland-audit.md) — the audit all of this
   derives from: all 50 X11::GUITest exports, classified
+- [docs/upstream.md](docs/upstream.md) — the two Wayland protocol gaps worth
+  taking upstream, written as issue text
 
 ## Contributing
 

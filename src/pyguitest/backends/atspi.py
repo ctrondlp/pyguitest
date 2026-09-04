@@ -19,6 +19,8 @@ import contextlib
 import io
 import os
 import re
+import shutil
+import subprocess
 from typing import TYPE_CHECKING, Any
 
 from ..capabilities import Capability, CapabilitySet
@@ -27,7 +29,98 @@ from ..roles import Role
 from ..session import SessionType
 from .base import GUIBackend, Window
 
-__all__ = ["AtspiBackend", "Element", "available"]
+__all__ = [
+    "AtspiBackend",
+    "Element",
+    "a11y_bus_probe",
+    "a11y_bus_reachable",
+    "available",
+]
+
+
+_A11Y_BUS_TIMEOUT = 5
+"""Seconds to wait for the accessibility-bus probe. Short because it runs
+inside connect(): a probe that hangs would hang every session, and what it
+waits for is a local D-Bus round trip."""
+
+_A11Y_BUS_ANSWERED = False
+"""Memoized *positive* answer from a11y_bus_probe; a no is never cached.
+Caching one would leave a process that started before its desktop did with
+AT-SPI permanently unavailable, for a reason nothing reports -- and the
+probe is one cheap subprocess whose failing case fails immediately."""
+
+
+def a11y_bus_reachable():
+    """Whether to let anything import dogtail. True when in doubt.
+
+    The gate `available()` and `AtspiBackend` use. It folds "could not
+    ask" into yes on purpose: refusing AT-SPI on a box that may well have
+    a working bus is the worse of the two errors. `a11y_bus_probe` keeps
+    that third answer for anything reporting rather than deciding.
+    """
+    return a11y_bus_probe() is not False
+
+
+def a11y_bus_probe():
+    """Whether the accessibility bus answers: True, False, or None.
+
+    None means the question could not be asked -- no `gdbus` -- which is
+    a different line in a bug report from "it answered", and the reason
+    this is separate from `a11y_bus_reachable`.
+
+    libatspi does not fail politely when it cannot reach the bus. It calls
+    `g_error()`, which **aborts the process**, and `import dogtail.tree`
+    reaches that path on the way in: the module builds its `root` at import
+    time from `pyatspi.Registry.getDesktop(0)`. So on a session with no
+    reachable bus, importing dogtail takes the caller's whole program down
+    with a core dump, and no try/except around the import can prevent it.
+    Found by running `connect()` inside `scripts/headless-session.sh` --
+    exactly where CI would run, and where the a11y bus launcher could not
+    be activated.
+
+    The question therefore has to be answered *before* the import, by
+    something whose death is not ours: `gdbus`, making the same
+    `org.a11y.Bus.GetAddress` call libatspi makes. A subprocess rather than
+    Gio in-process for a second reason as well -- see
+    `session.toolkit_accessibility`, which shells out for precisely this:
+    importing Gio caches the session bus for the life of the process, which
+    breaks tests/test_portal_dbusmock.py.
+
+    Only a yes is remembered; see _A11Y_BUS_ANSWERED. A *timeout* answers
+    False: the cost of being wrong there is a skipped backend, and the cost
+    of being wrong the other way is a core dump.
+    """
+    global _A11Y_BUS_ANSWERED
+    if _A11Y_BUS_ANSWERED:
+        return True
+    gdbus = shutil.which("gdbus")
+    if gdbus is None:
+        return None
+    try:
+        probe = subprocess.run(
+            [
+                gdbus,
+                "call",
+                "--session",
+                "--dest",
+                "org.a11y.Bus",
+                "--object-path",
+                "/org/a11y/bus",
+                "--method",
+                "org.a11y.Bus.GetAddress",
+            ],
+            capture_output=True,
+            timeout=_A11Y_BUS_TIMEOUT,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    except OSError:
+        return None  # on PATH but would not run: still an unasked question
+    if probe.returncode != 0:
+        return False
+    _A11Y_BUS_ANSWERED = True
+    return True
 
 
 def _dogtail():
@@ -40,6 +133,10 @@ def _dogtail():
     missing when that is used. Set PYGUITEST_DOGTAIL_LOGS=1 to see the import
     noise.
     """
+    # Before the import, not after: see a11y_bus_reachable on why an
+    # unreachable bus makes this import fatal rather than raising.
+    if not a11y_bus_reachable():
+        return None
     quiet = not os.environ.get("PYGUITEST_DOGTAIL_LOGS")
     sink = io.StringIO()
     try:
@@ -288,6 +385,14 @@ class AtspiBackend(GUIBackend):
         """Connect to the accessibility bus through dogtail."""
         modules = _dogtail()
         if modules is None:
+            if not a11y_bus_reachable():
+                raise BackendUnavailable(
+                    "the accessibility bus did not answer (org.a11y.Bus on "
+                    "the session bus). Install at-spi2-core, or start "
+                    "at-spi-bus-launcher; a headless or container session "
+                    "often has neither. Importing dogtail without it aborts "
+                    "the process, so this refuses rather than trying"
+                )
             raise BackendUnavailable(
                 "dogtail is not installed; pip install 'pyguitest[atspi]'"
             )

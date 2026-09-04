@@ -111,6 +111,12 @@ class TestHints(unittest.TestCase):
             capture_tools=("grim",),
             input_tools=("wdotool",),
             image_tools=("compare",),
+            # Discovery never finds one on this fixture's GNOME/Wayland
+            # session -- wl-copy needs wlr-data-control and the X11 tools
+            # cannot see a Wayland client -- so "complete" has to say so
+            # explicitly or the clipboard hint fires and nothing is
+            # complete anywhere.
+            clipboard_tools=("wl-copy",),
         )
         self.assertEqual(list(hints_for(complete)), [])
         self.assertIn("Nothing missing", advice(complete))
@@ -339,6 +345,62 @@ class TestInputAdvice(unittest.TestCase):
         self.assertNotIn("membership of the 'input' group", components)
 
 
+class TestClipboardAdvice(unittest.TestCase):
+    """The one gap where installing something is not always the answer.
+
+    `can_use_clipboard` existed and nothing consulted it, so `doctor` was
+    silent on a session with no clipboard path at all -- including every
+    GNOME session, where that is permanent rather than a missing package.
+    """
+
+    def _no_clipboard(self, **overrides):
+        base = {
+            "has_atspi": True,
+            "has_pygobject": True,
+            "has_dogtail": True,
+            "capture_tools": ("grim",),
+            "input_tools": ("wdotool",),
+            "image_tools": ("compare",),
+            "clipboard_tools": (),
+        }
+        return environment(**{**base, **overrides})
+
+    def _hint(self, env):
+        return next(h for h in hints_for(env) if h.component == "the clipboard")
+
+    def test_gnome_is_pointed_at_the_portal_not_at_a_package(self):
+        # Mutter implements no wlr-data-control, so there is nothing to
+        # install: recommending wl-clipboard here would send someone off to
+        # install a tool that runs, exits 0 and copies nothing.
+        hint = self._hint(self._no_clipboard())
+        self.assertFalse(hint.installable)
+        self.assertIsNone(hint.command)
+        self.assertIn('backend="portal"', hint.why)
+        self.assertIn('"clipboard": True', hint.why)
+
+    def test_kwin_is_told_to_install_wl_clipboard(self):
+        # KWin is not a wlroots compositor but carries the protocol anyway,
+        # which is why the tool is keyed off the compositor and not off
+        # whether the session is Wayland.
+        hint = self._hint(self._no_clipboard(compositor=Compositor.KWIN))
+        self.assertIn("wl-clipboard", hint.command)
+        self.assertTrue(hint.installable)
+
+    def test_x11_is_told_to_install_xclip(self):
+        hint = self._hint(
+            self._no_clipboard(
+                compositor=Compositor.OTHER, session_type=SessionType.X11
+            )
+        )
+        self.assertIn("xclip", hint.command)
+
+    def test_a_session_with_a_clipboard_tool_hears_nothing(self):
+        env = self._no_clipboard(
+            compositor=Compositor.KWIN, clipboard_tools=("wl-copy",)
+        )
+        self.assertNotIn("the clipboard", [h.component for h in hints_for(env)])
+
+
 class TestToolRecommendationsAreKeyedByCompositor(unittest.TestCase):
     """Recommendations must fit the compositor, not just the distro.
 
@@ -519,6 +581,7 @@ class TestGnomeShellExtensionHint(unittest.TestCase):
             "capture_tools": ("grim",),
             "input_tools": ("wdotool",),
             "image_tools": ("compare",),
+            "clipboard_tools": ("wl-copy",),
         }
         return environment(**{**base, **overrides})
 

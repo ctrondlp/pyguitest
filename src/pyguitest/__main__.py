@@ -26,6 +26,7 @@ from collections import Counter
 from enum import Enum
 
 from . import Capability, __version__, connect, tools
+from .backends.atspi import a11y_bus_probe
 from .capabilities import TIERS, Tier
 from .compat import LEGACY
 from .hints import advice, detect_distro, hints_for
@@ -199,6 +200,12 @@ def _debug_data(gui) -> dict:
             "capture": _tool_reports(tools.CAPTURE_TOOLS),
             "window": _tool_reports(tools.WINDOW_TOOLS),
             "image": _tool_reports(tools.IMAGE_TOOLS),
+            # Listed like the rest even though the answer on Mutter is
+            # always "none": that a desktop has no clipboard tool is
+            # exactly what a pasted bug report about the clipboard needs
+            # to say, and `environment.clipboard_tools` a few lines above
+            # already reports it -- these two disagreeing was the bug.
+            "clipboard": _tool_reports(tools.CLIPBOARD_TOOLS),
         },
         "env_vars": {name: os.environ.get(name) for name in _ENV_VARS_OF_INTEREST},
         "backend": gui.backend.name,
@@ -213,6 +220,12 @@ def _debug_data(gui) -> dict:
         # it turns out to matter on some other desktop, this line is what
         # will show it.
         "toolkit_accessibility": toolkit_accessibility(),
+        # The other half of the AT-SPI story, and the one that used to end
+        # the process rather than a line of output: see
+        # backends.atspi.a11y_bus_reachable. `has_atspi` above says the
+        # library is installed, which is a different claim from the bus
+        # answering, and a bug report about "no elements" needs both.
+        "a11y_bus": a11y_bus_probe(),
     }
 
 
@@ -254,7 +267,7 @@ def _format_debug(data: dict) -> str:
     for name, value in data["environment"].items():
         lines.append(f"  {name:<16} {value!r}")
 
-    for group in ("input", "capture", "window", "image"):
+    for group in ("input", "capture", "window", "image", "clipboard"):
         lines.append("")
         lines.append(f"{group} tools")
         for tool in data["tools"][group]:
@@ -280,6 +293,15 @@ def _format_debug(data: dict) -> str:
             "assert_tab_order cannot match a widget here",
             None: "not probed (no element tree on this desktop)",
         }[focus]
+    )
+    lines.append(
+        "a11y bus     "
+        + {
+            True: "org.a11y.Bus answers",
+            False: "org.a11y.Bus did NOT answer -- AT-SPI is unavailable "
+            "here; install at-spi2-core or start at-spi-bus-launcher",
+            None: "not asked (no gdbus) -- AT-SPI is attempted anyway",
+        }[data["a11y_bus"]]
     )
     lines.append(
         "toolkit      "

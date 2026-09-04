@@ -9,18 +9,22 @@ pyguitest/
 ├── LICENSE                     GPL-2.0-or-later
 ├── pyproject.toml              packaging, ruff and pytest config
 ├── .pre-commit-config.yaml     ruff lint + format on commit
-├── .github/workflows/ci.yml    tests on 3.10-3.14, lint, types, D-Bus
+├── .github/workflows/ci.yml    tests on 3.10-3.14, lint, types, D-Bus,
+│                               and a headless GNOME compositor nightly
 ├── README.md                   what this is, install, usage
 ├── CONTRIBUTING.md             tests, lint, types, CI
 ├── examples/                   runnable scripts, simplest first
 ├── scripts/                    generators and live-validation helpers
-│   └── gen-api-docs.py         writes docs/api.md from the source
+│   ├── gen-api-docs.py         writes docs/api.md from the source
+│   ├── headless-session.sh     runs a command inside a private headless GNOME
+│   └── probe-window.py         one plain window for the checks to point at
 ├── gnome-shell-extension/       pyguitest-window-control; opt-in, live-verified
 ├── docs/
 │   ├── README.md               index into this folder, for anyone landing here directly
 │   ├── api.md                  generated reference: every public name and its capability
 │   ├── design.md               why the API is not a port, and what follows
 │   ├── wayland-audit.md        the audit all of this derives from
+│   ├── upstream.md             two protocol gaps, written as issue text
 │   ├── install.md              what each backend needs, per distribution
 │   ├── input.md                injecting input: permissions, keymaps, libei
 │   ├── validation.md           what has been run against a real desktop

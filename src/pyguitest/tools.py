@@ -141,7 +141,16 @@ class ExternalTool:
             )
         except (OSError, subprocess.TimeoutExpired):
             return None
-        output = (result.stdout or result.stderr or "").strip()
+        # stderr counts only when the command succeeded. Several of these
+        # tools print their version there rather than on stdout, which is
+        # why the fallback exists -- but a *failed* run's stderr is an
+        # error message, and printing that as a version is worse than
+        # printing nothing. Seen in a real `pyguitest debug`: on a session
+        # with no X display, xclip's version read "xclip: Error: Can't
+        # open display: (null)".
+        output = (result.stdout or "").strip()
+        if not output and result.returncode == 0:
+            output = (result.stderr or "").strip()
         return output.splitlines()[0] if output else None
 
 

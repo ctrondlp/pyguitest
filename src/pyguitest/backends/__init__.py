@@ -251,8 +251,16 @@ def _atspi_factory(environment):
     `BackendUnavailable` for a reason `available()` cannot see -- see
     `register`'s docstring on what happens to that.
     """
-    if not _atspi.available():
+    if not _atspi.available() and _atspi.a11y_bus_reachable():
         return None
+    # available() answers False for two quite different reasons. dogtail
+    # not being installed means this backend does not apply here, and
+    # automatic composition should move on -- that is the None above. An
+    # accessibility bus that did not answer means it *does* apply, and a
+    # caller who named `atspi` deserves that reason rather than the
+    # registry's generic "cannot drive this session"; constructing is what
+    # raises it. Automatic composition is unaffected either way: _auto_build
+    # folds a raise and a None together.
     return _atspi.AtspiBackend(environment)
 
 

@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import select
 import threading
 import time
 import uuid
@@ -62,10 +63,40 @@ _INTERFACE = "org.freedesktop.portal.RemoteDesktop"
 _CLIPBOARD_INTERFACE = "org.freedesktop.portal.Clipboard"
 
 _CLIPBOARD_MIME = "text/plain;charset=utf-8"
-"""The one MIME type this backend reads and offers.
+"""The MIME type this backend offers when it owns the selection.
 
 `Session.get_clipboard`/`set_clipboard` are text-only by signature, so
 advertising more would promise something the API above cannot express."""
+
+_CLIPBOARD_READ_TIMEOUT = 5.0
+"""Seconds to spend draining one SelectionRead pipe.
+
+The writer is the selection's owner, reached through the portal, and it
+may be an application that is busy or wedged. A clipboard read that hangs
+forever inside a test run is worse than one that gives up and says so."""
+
+_CLIPBOARD_READ_MIMES = (
+    "text/plain;charset=utf-8",
+    "text/plain",
+    "UTF8_STRING",
+    "STRING",
+)
+"""What to ask for when *reading*, in order of preference.
+
+Defensive, and known to be unnecessary on GNOME. The owner decides what
+it advertises and is under no obligation to spell text the way this
+package does, so a single spelling would read an empty clipboard against
+an owner that picked another -- but Mutter maps X11 target atoms onto
+MIME types on the way across, and `text/plain;charset=utf-8` reads an
+`xclip`-owned selection correctly even though `xclip` itself advertises
+only `TARGETS` and `UTF8_STRING` (measured 2026-09-04, both halves).
+
+The names below the first are therefore untested guesses at what some
+*other* portal implementation might want, kept because they cost nothing
+when the first works and because the alternative -- reading the offered
+types out of the `SelectionOwnerChanged` signal -- is real work that
+nothing has yet shown to be needed. Do not read this list as evidence
+that any of them is ever required."""
 
 # AvailableDeviceTypes / SelectDevices bitmask, per the portal's own spec.
 _DEVICE_KEYBOARD = 1
@@ -201,6 +232,44 @@ def _gio():
 def available():
     """Whether the library this backend needs is importable."""
     return _gio() is not None
+
+
+def _drain(fd, timeout=_CLIPBOARD_READ_TIMEOUT):
+    """Read a pipe to EOF and return the bytes. Always closes `fd`.
+
+    Not `os.fdopen(fd).read()`, which is what this replaced and what a
+    live run caught: the descriptor the portal hands back can be
+    **non-blocking**, and `BufferedReader.read()` answers None rather than
+    bytes when a non-blocking read has nothing ready yet. The caller then
+    got `AttributeError: 'NoneType' object has no attribute 'decode'` --
+    seen on GNOME 2026-09-04, reading a selection whose owner had not put
+    its bytes in the pipe by the time we looked.
+
+    So this waits on the descriptor instead of assuming, and bounds the
+    wait: the writer is another application, reached through the portal,
+    and a clipboard read that blocks forever inside a test run is the
+    worst of the available failures.
+    """
+    chunks: list[bytes] = []
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise PyGUITestError(
+                    f"the clipboard owner did not finish writing within {timeout}s"
+                )
+            if not select.select([fd], [], [], remaining)[0]:
+                continue  # nothing ready; the deadline above ends this
+            try:
+                chunk = os.read(fd, 65536)
+            except BlockingIOError:
+                continue  # readable, then not: try again until the deadline
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
 
 
 class PortalBackend(GUIBackend):
@@ -339,7 +408,23 @@ class PortalBackend(GUIBackend):
             None,
         )
         (index,) = reply.unpack()
-        return fd_list.get(index)
+        # A reply can arrive with no descriptors attached at all -- seen on
+        # GNOME for a `SelectionRead` the owner had nothing to answer with,
+        # where `(h)` unpacked to a perfectly ordinary 0 and the side
+        # channel was empty. Without this the next line reads `.get` off
+        # None and the caller gets an AttributeError from inside a D-Bus
+        # helper, which says nothing about clipboards.
+        fd = -1 if fd_list is None else fd_list.get(index)
+        if fd < 0:
+            raise PyGUITestError(
+                f"the portal answered {method} with no file descriptor; "
+                "the selection's owner offered nothing for this request. "
+                "Often transient -- a selection changing hands answers "
+                "this way while the hand-over is in flight, and the same "
+                "call succeeds a moment later, so retry through "
+                "Session.wait_until rather than treating it as final"
+            )
+        return fd
 
     def _request(self, method, signature, args):
         """Call a method that returns a Request handle, and await its reply.
@@ -518,13 +603,20 @@ class PortalBackend(GUIBackend):
         self._notify_button(button, _RELEASED)
 
     def scroll(self, dx=0, dy=0):
-        """Scroll by axis steps, on whichever axes are non-zero."""
+        """Scroll by whole detents; `dy` positive is up. See GUIBackend.
+
+        The vertical negation is the portal following wl_pointer, where a
+        positive axis value scrolls *down*. This package settled on X11's
+        reading instead, so it is flipped here rather than left for every
+        caller to remember per backend. Horizontal agrees already:
+        positive is right in both.
+        """
         self.require(Capability.POINTER_SCROLL)
         if dy:
             self._call(
                 "NotifyPointerAxisDiscrete",
                 "(oa{sv}ui)",
-                (self._session_handle, {}, 0, int(dy)),
+                (self._session_handle, {}, 0, -int(dy)),
             )
         if dx:
             self._call(
@@ -558,17 +650,42 @@ class PortalBackend(GUIBackend):
         """The clipboard's current text, read through the portal.
 
         `SelectionRead` hands back a pipe the portal writes the current
-        owner's content into; this reads it to EOF and decodes it. One
-        MIME type is asked for (see _CLIPBOARD_MIME) rather than
-        negotiating, because the API above is text-only.
+        owner's content into; `_drain` reads it to EOF and this decodes
+        it.
+
+        Several types are tried in turn (see _CLIPBOARD_READ_MIMES),
+        though on GNOME the first one answers; the rest are defensive.
+
+        Raises rather than returning "" when nothing can be read, matching
+        `ToolClipboardBackend`, where the underlying tool exits non-zero
+        for the same situation. Note that a selection *changing hands* can
+        produce that failure transiently -- see `_call_for_fd` -- so a
+        caller reading straight after another process wrote should retry
+        rather than conclude the clipboard is empty.
         """
         self.require(Capability.CLIPBOARD)
         self._no_primary(primary)
-        fd = self._call_for_fd(
-            "SelectionRead", "(os)", (self._session_handle, _CLIPBOARD_MIME)
+        refusals = []
+        for mime in _CLIPBOARD_READ_MIMES:
+            try:
+                fd = self._call_for_fd(
+                    "SelectionRead", "(os)", (self._session_handle, mime)
+                )
+            except PyGUITestError as exc:
+                refusals.append(f"{mime} ({exc})")
+                continue
+            except Exception as exc:  # noqa: BLE001 -- see below
+                # A GLib.GError for an unoffered type is one plausible
+                # answer among several, and which one a given portal
+                # implementation gives is not specified anywhere. Trying
+                # the next type is right for all of them; the reasons are
+                # kept and reported together if every type fails.
+                refusals.append(f"{mime} ({type(exc).__name__}: {exc})")
+                continue
+            return _drain(fd).decode("utf-8", errors="replace")
+        raise PyGUITestError(
+            "the clipboard could not be read as text. Tried " + "; ".join(refusals)
         )
-        with os.fdopen(fd, "rb", closefd=True) as handle:
-            return handle.read().decode("utf-8", errors="replace")
 
     def set_clipboard(self, text, primary=False):
         """Put `text` on the clipboard, and keep serving it.
@@ -588,10 +705,21 @@ class PortalBackend(GUIBackend):
         GLib main loop on a daemon thread instead, started on the first
         `set_clipboard` and living until `close()`.
 
-        The practical consequence is worth stating plainly: the clipboard
-        holds only while the Session does. A script that sets the
-        clipboard and exits leaves nothing behind, where the CLI backends
-        leave a daemon that outlives them.
+        The practical consequence, stated as precisely as the measurement
+        supports: what dies with the session is the ability to serve *new*
+        transfers. Once `close()` has run, nothing here can answer another
+        paste. Whether a given application still shows the old value
+        depends on whether something between us and it kept a copy, and on
+        GNOME something does -- measured 2026-09-04, `xclip` still pasted
+        the content after `close()`, with no `SelectionTransfer` firing to
+        produce it, so Mutter's XWayland selection bridge had cached the
+        bytes on their way across. Nothing was asked of this process.
+
+        So do not rely on either behaviour. Treat a clipboard set through
+        this backend as lasting no longer than the session, and treat what
+        an XWayland client sees afterwards as an accident of caching. The
+        CLI backends are different in kind, not degree: they fork a daemon
+        that genuinely keeps serving after the process exits.
         """
         self.require(Capability.CLIPBOARD)
         self._no_primary(primary)
