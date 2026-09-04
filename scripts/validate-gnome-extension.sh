@@ -16,6 +16,30 @@ DST="$HOME/.local/share/gnome-shell/extensions/$UUID"
 OBJ=/org/gnome/Shell/Extensions/Pyguitest
 IFACE=org.gnome.Shell.Extensions.Pyguitest
 
+# The extension's state, asked of the CLI first and of the shell itself
+# when that cannot answer. `gnome-extensions info` talks to the well-known
+# name org.gnome.Shell.Extensions, which D-Bus activates from a service
+# file whose Exec (gnome-extensions-app) a minimal install does not ship --
+# so on a bare CI runner it fails with "No such file or directory" and
+# reports an empty state for an extension that is loaded and answering
+# calls two checks further down. The shell exports the same interface at
+# /org/gnome/Shell, needs nothing installed, and is the better source.
+extension_state() {
+  local state raw
+  state=$(gnome-extensions info "$UUID" 2>/dev/null | sed -n 's/ *State: //p')
+  if [ -n "$state" ]; then echo "$state"; return; fi
+  raw=$(gdbus call --session --dest org.gnome.Shell \
+        --object-path /org/gnome/Shell \
+        --method org.gnome.Shell.Extensions.GetExtensionInfo "$UUID" 2>/dev/null)
+  # 'state' is a double in GNOME's ExtensionInfo dict, so gdbus prints it
+  # as <1.0>; the integer spellings are covered in case that ever changes.
+  case "$raw" in
+    "")                      echo "" ;;
+    *"'state': <1.0>"*|*"'state': <1>"*|*"'state': <uint32 1>"*) echo "ACTIVE" ;;
+    *)                       echo "not enabled (shell replied ${raw:0:60})" ;;
+  esac
+}
+
 pass=0; fail=0
 ok()   { printf '  \033[32mPASS\033[0m %s\n' "$1"; pass=$((pass+1)); }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=$((fail+1)); }
@@ -38,7 +62,7 @@ fi
 
 echo "== 2. shell sees a compatible version =="
 gnome-shell --version
-state=$(gnome-extensions info "$UUID" 2>/dev/null | sed -n 's/ *State: //p')
+state=$(extension_state)
 case "$state" in
   "OUT OF DATE") bad "State=OUT OF DATE -- shell cached old metadata; log out/in";;
   "") bad "shell does not know this extension";;
@@ -48,7 +72,7 @@ esac
 echo "== 3. enable =="
 gnome-extensions enable "$UUID" 2>&1 && ok "enable returned 0" || bad "enable failed"
 sleep 1
-state=$(gnome-extensions info "$UUID" 2>/dev/null | sed -n 's/ *State: //p')
+state=$(extension_state)
 [ "$state" = "ACTIVE" ] && ok "State=ACTIVE" || bad "State=$state (see: journalctl -f -o cat /usr/bin/gnome-shell)"
 
 echo "== 4. the compatibility probe's verdict =="

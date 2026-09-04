@@ -24,10 +24,10 @@
 // real PNG, confirming the API pair works at all. That first run also
 // found the composited image was the actor's full allocation, not the
 // window: get_buffer_rect() vs get_frame_rect() showed +50px on both
-// axes, matching Mutter's invisible CSD-shadow margin. The crop this
-// file now applies to correct that is NOT yet itself live-validated --
-// re-run the capture check and confirm captured (width, height) now
-// equals frame_rect exactly before trusting it.
+// axes, matching Mutter's invisible CSD-shadow margin. The crop that
+// corrects it is live-validated now, on two machines that disagreed --
+// see _captureModern, which crops relative to the actor because
+// buffer_rect turned out not to describe the painted area everywhere.
 
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
@@ -373,9 +373,9 @@ class PyguitestService {
     // paint_to_content() renders the actor to a Clutter.Content, whose
     // backing Cogl.Texture composite_to_stream() can encode to PNG,
     // mirroring the pattern gnome-shell's own screenshot service uses
-    // internally for the same job. The API pair itself is live-validated
-    // (2026-09-02, GNOME Shell 51 beta, scripts/validate-gnome-extension.sh's
-    // capture check) but the crop below is not -- see the file header.
+    // internally for the same job. Both the API pair and the crop below
+    // are live-validated (2026-09-02 and 2026-09-04, GNOME Shell 51 beta,
+    // scripts/validate-gnome-extension.sh's capture check).
     _captureModern(window, actor, reply, path) {
         let content;
         try {
@@ -402,29 +402,58 @@ class PyguitestService {
         // more pixels than the buffer rect has logical units.
         const buffer = window.get_buffer_rect();
         const frame = window.get_frame_rect();
-        const scaleX = texture.get_width() / buffer.width;
-        const scaleY = texture.get_height() / buffer.height;
-        const cropX = Math.round((frame.x - buffer.x) * scaleX);
-        const cropY = Math.round((frame.y - buffer.y) * scaleY);
-        const cropW = Math.round(frame.width * scaleX);
-        const cropH = Math.round(frame.height * scaleY);
-        // Logged, not merely computed. The crop was derived on one machine
-        // and disagreed on the second: a CI runner with software rendering
-        // produced 628x429 for a 600x400 frame, i.e. scaleX 1.047 vs
-        // scaleY 1.073 -- not a scale factor at all. The arithmetic below
-        // assumes texture-size/buffer-size *is* the device-pixel ratio,
-        // which is only true while buffer_rect really does include the
-        // shadow margin; where buffer_rect equals frame_rect, that ratio
-        // silently becomes garbage and the "crop" expands instead. These
-        // four rects are what distinguishes those cases, and nothing else
-        // reports them.
-        // console.log, not GJS's legacy global log(): this file is an ESM
-        // extension (GNOME 45+), where console is the documented logger
-        // and the global is not something to bet a capture path on.
-        console.log(`pyguitest capture: frame=${frame.width}x${frame.height}` +
+        // Relative to the ACTOR, not to buffer_rect. The texture came from
+        // paint_to_content(actor), so the actor's allocation is what it
+        // covers -- and buffer_rect is not reliably the same thing. Two
+        // machines disagree: on GNOME Shell 51/Fedora buffer_rect included
+        // the CSD shadow margin (a 939x537 frame inside a 989x587 buffer),
+        // while on a CI runner with software rendering buffer_rect came
+        // back *equal* to frame_rect while the texture was still padded --
+        // 628x429 around a 600x400 frame, a 28x29 margin, asymmetric the
+        // way a drop shadow with a vertical offset is.
+        //
+        // The old arithmetic divided texture size by buffer size and called
+        // it the device-pixel ratio. That is only true while buffer_rect
+        // describes the whole painted area; where it equals frame_rect the
+        // ratio silently becomes the margin ratio, cropX/cropY come out 0,
+        // and the "crop" expands to the entire texture instead of trimming
+        // it. That is exactly the 628x429 image the runner produced.
+        //
+        // Using the actor reduces to the old behaviour wherever buffer_rect
+        // was right (the actor sits at the buffer origin there), so the
+        // Fedora result this was validated against is unchanged.
+        const originX = actor.get_x();
+        const originY = actor.get_y();
+        const allocW = actor.get_width();
+        const allocH = actor.get_height();
+        // One scale, from the axis with something to divide by: the ratio
+        // is a device-pixel factor and is uniform by definition, so taking
+        // it per-axis is what let a margin masquerade as a scale.
+        const scale = allocW > 0 ? texture.get_width() / allocW : 1;
+        const clamp = (value, limit) => Math.max(0, Math.min(value, limit));
+        const cropX = clamp(Math.round((frame.x - originX) * scale),
+                            texture.get_width());
+        const cropY = clamp(Math.round((frame.y - originY) * scale),
+                            texture.get_height());
+        const cropW = clamp(Math.round(frame.width * scale),
+                            texture.get_width() - cropX);
+        const cropH = clamp(Math.round(frame.height * scale),
+                            texture.get_height() - cropY);
+        // printerr(), not console.log(): GJS routes console.log through
+        // structured logging, which lands in the journal and never on
+        // stderr -- so the first attempt at this diagnostic produced
+        // nothing at all in the log scripts/headless-session.sh keeps.
+        // printerr writes straight to stderr, which is what that log is.
+        //
+        // Kept rather than removed now the crop is fixed: these five
+        // numbers are what distinguished the two machines, and a third
+        // one disagreeing again is exactly what this needs to report.
+        printerr(`pyguitest capture: frame=${frame.width}x${frame.height}` +
             `+${frame.x}+${frame.y} buffer=${buffer.width}x${buffer.height}` +
-            `+${buffer.x}+${buffer.y} texture=${texture.get_width()}x` +
-            `${texture.get_height()} crop=${cropW}x${cropH}+${cropX}+${cropY}`);
+            `+${buffer.x}+${buffer.y} actor=${allocW}x${allocH}` +
+            `+${originX}+${originY} texture=${texture.get_width()}x` +
+            `${texture.get_height()} scale=${scale.toFixed(3)} ` +
+            `crop=${cropW}x${cropH}+${cropX}+${cropY}`);
 
         const stream = Gio.MemoryOutputStream.new_resizable();
         try {

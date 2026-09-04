@@ -205,8 +205,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            gnome-shell dbus libglib2.0-bin python3-gi gir1.2-gtk-4.0 \
-            gnome-shell-extension-prefs
+            gnome-shell dbus libglib2.0-bin python3-gi gir1.2-gtk-4.0
 
       # Two steps, and the order matters: the shell reads its enabled
       # extensions at startup, so enabling has to happen before

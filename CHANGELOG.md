@@ -108,18 +108,32 @@ All notable changes to pyguitest are recorded here. The format follows
   with every window capability, and move, resize, restore and hit-testing
   all passed there.
 
-- The extension now logs the four rectangles behind a window capture --
-  frame, buffer, texture and the crop it computed. The crop was derived on
-  one machine and disagreed on the second: a CI runner with software
-  rendering produced a 628x429 image for a 600x400 window, an x scale of
-  1.047 against a y scale of 1.073, which is not a scale factor at all.
-  The arithmetic assumes texture-size/buffer-size *is* the device-pixel
-  ratio, and that holds only while `buffer_rect` genuinely includes the
-  shadow margin; where it equals `frame_rect`, the ratio becomes
-  meaningless and the "crop" expands the image instead of trimming it.
-  Which of those is happening is exactly what nothing reported, so this
-  logs it rather than guessing at a fix. The CI job prints the shell log
-  when the run fails.
+- **Window capture cropped against the wrong rectangle.** A CI runner
+  with software rendering produced a 628x429 image for a 600x400 window --
+  an x scale of 1.047 against a y scale of 1.073, which is not a scale
+  factor at all, and the check caught it for that reason.
+
+  The arithmetic divided texture size by `buffer_rect` size and called the
+  result the device-pixel ratio. That holds only while `buffer_rect`
+  genuinely describes the whole painted area, which is true on GNOME Shell
+  51/Fedora and was not true on the runner, where it came back equal to
+  `frame_rect`. There the ratio silently becomes the shadow-margin ratio,
+  the offsets come out zero, and the "crop" expands to the entire texture
+  instead of trimming it.
+
+  The crop is now taken relative to the **actor**, which is what
+  `paint_to_content()` actually painted and therefore what the texture's
+  size is derived from -- self-consistent by construction, where
+  `buffer_rect` is an independent claim that can disagree. On the machine
+  the original was validated against, actor and buffer are identical
+  (`actor=628x429+646+344 buffer=628x429+646+344 texture=628x429`,
+  measured), so that result is unchanged: the crop comes out
+  `600x400+14+12`, exactly the frame.
+
+  The extension also logs those five numbers now, through `printerr` --
+  `console.log` goes to the journal and never reached the log the CI job
+  keeps, which is why the first attempt at this diagnostic printed
+  nothing.
 
 - `scripts/probe-window.py`: one plain GTK4 window, held open until killed,
   for the window-control checks to point at.
