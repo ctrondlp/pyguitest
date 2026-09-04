@@ -149,6 +149,23 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ### Fixed
 
+- Session classification now trusts `WAYLAND_DISPLAY`/`DISPLAY` over a
+  possibly-stale `XDG_SESSION_TYPE`, not the other way around. Found live
+  on a machine offering several session types at login (Plasma X11,
+  Plasma Wayland, GNOME): logind reported `XDG_SESSION_TYPE=wayland` for
+  a session the user had explicitly chosen as `plasmax11`
+  (`DESKTOP_SESSION=plasmax11`), with `DISPLAY=:0` set and
+  `WAYLAND_DISPLAY` entirely absent -- no Wayland socket to connect to at
+  all. `_classify()` checked the declared type before ever looking at
+  `DISPLAY`, so this reported `SessionType.WAYLAND` on a real X11
+  session, `X11Backend` never joined the composite, and the eight
+  tier-3/tier-6 capabilities only it serves
+  (`SCREEN_INFO`, `WINDOW_CAPTURE`, `WINDOW_PID`, `INPUT_STATE_QUERY`,
+  `POINTER_QUERY`, `WINDOW_CURSOR_QUERY`, `WINDOW_LOWER`,
+  `WINDOW_TITLE_SET`) all read `[ no]` on `01_what_can_i_do.py`, not
+  because anything was missing but because a backend that would have
+  connected fine was never tried. The declared type is now only a
+  fallback for when neither environment variable is set at all.
 - `Window` identity is scoped to the composite rather than to one member,
   so a window watched through `WINDOW_EVENTS` compares equal to the same
   window listed through `WINDOW_LIST` when the two come from different
