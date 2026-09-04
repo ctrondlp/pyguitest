@@ -151,6 +151,13 @@ _DEVICE_TIMEOUT = 15
 """Seconds to wait for a device to reach DEVICE_RESUMED once the fd is live.
 No dialog involved past this point, so much shorter than the wait above."""
 
+_SYNC_TIMEOUT = 1.0
+"""Default seconds for sync() to wait for its PONG.
+
+A round trip to a compositor on the same machine, with no dialog and no
+human in it -- so this is generous by orders of magnitude, and a sync that
+actually reaches it means something is wrong rather than merely slow."""
+
 _SIBLING_SETTLE = 1.0
 """Extra seconds to keep draining events after a device resumes that lacks
 POINTER_ABSOLUTE, in case its absolute-pointer sibling is still coming --
@@ -273,6 +280,8 @@ class LibeiBackend(GUIBackend):
         self._emulation_started = False
         self._keyboard_emulation_started = False
         self._sender = sender
+        self._ping_supported = None
+        """Whether ei_new_ping resolves here; None until _can_ping asks."""
         self._device = device
         self._keyboard = keyboard
         self._keymap = keymap
@@ -509,7 +518,38 @@ class LibeiBackend(GUIBackend):
         if self._keyboard is not None and self._keymap is not None:
             provided.add(Capability.KEY_EVENT)
             provided.add(Capability.TEXT_ENTRY)
+        # Only with a live connection to ping *over*. A directly-injected
+        # device (the seam most tests use) has no sender, and libei before
+        # 1.4 has no ei_new_ping at all -- both are "cannot round trip",
+        # and declaring it anyway would promise a confirmation this can
+        # never deliver.
+        if provided and self._can_ping():
+            provided.add(Capability.INPUT_SYNC)
         return CapabilitySet(provided)
+
+    def _can_ping(self):
+        """Whether this connection can actually round-trip, asked once.
+
+        Probed by building a Ping and throwing it away rather than by
+        reading a version: `ei_new_ping` arrived in libei 1.4, and the
+        binding resolves the symbol lazily, so on an older library this
+        raises rather than reporting anything.
+
+        Memoized because `capabilities` is a property that gets read
+        constantly -- a composite unions it on every dispatch -- and an
+        unmemoized probe would allocate a throwaway Ping each time. No
+        traffic is generated either way; nothing is sent until send().
+        """
+        if self._ping_supported is None:
+            self._ping_supported = False
+            if self._sender is not None:
+                try:
+                    self._sender.new_ping()
+                except Exception:
+                    pass
+                else:
+                    self._ping_supported = True
+        return self._ping_supported
 
     def close(self):
         """End emulation on both devices, and release everything held.
@@ -586,6 +626,50 @@ class LibeiBackend(GUIBackend):
         self._sender.dispatch()
         for _event in self._sender.events:
             pass
+
+    def sync(self, timeout=_SYNC_TIMEOUT):
+        """Block until the compositor has consumed the events sent so far.
+
+        libei's ping/pong, which is a real round trip: the PONG cannot be
+        sent before EIS has read past everything queued ahead of the ping,
+        so receiving it proves the compositor consumed this backend's
+        events rather than merely that the socket accepted them. That is
+        what makes it an honest replacement for the fixed sleep after
+        injection that every GUI script grows.
+
+        It proves delivery to the *compositor* and nothing beyond it --
+        see the base class on why that distinction is worth keeping in
+        mind. Returns True once the PONG arrives, False on timeout.
+
+        Each batch is drained completely rather than broken out of on the
+        first match. python-libei releases an event when the generator
+        resumes past it, and a SYNC event's own reply is sent at exactly
+        that moment, so abandoning the generator mid-batch can stall a
+        later round trip -- documented on `Context.events`, and cheap
+        enough to respect.
+        """
+        self.require(Capability.INPUT_SYNC)
+        ping = self._sender.new_ping()
+        ping.send()
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            select.select([self._sender.fd], [], [], remaining)
+            self._sender.dispatch()
+            answered = False
+            for event in self._sender.events:
+                if event.event_type is not self._ei.EventType.PONG:
+                    continue
+                # A PONG for someone else's ping is not ours to act on,
+                # and `pong` needs libei 1.4 to read at all.
+                try:
+                    answered = answered or event.pong.id == ping.id
+                except Exception:
+                    continue
+            if answered:
+                return True
 
     def move_mouse(self, x, y, screen=0):
         """Move the pointer to an absolute position, within the device's region."""

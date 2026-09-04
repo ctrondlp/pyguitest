@@ -599,6 +599,27 @@ class GUIBackend(ABC):
         self.require(Capability.TEXT_ENTRY)
         raise NotImplementedError
 
+    def sync(self, timeout: float = 1.0) -> bool:
+        """Block until the compositor has consumed the events sent so far.
+
+        The honest alternative to sleeping after injection. A backend that
+        can offer this has a round trip to the compositor -- libei's
+        ping/pong -- so "has my input arrived" stops being a guess.
+
+        What it proves is bounded, and the bound matters: the *compositor*
+        has taken the events. It says nothing about whether the
+        application under the pointer processed them, laid out, or
+        repainted. `Session.wait_until` on an element's own state is what
+        answers that; this removes one source of flakiness underneath it,
+        not all of them.
+
+        Returns True once confirmed, False if `timeout` elapses first --
+        never raising on timeout, matching wait_for_window and the rest of
+        the wait family.
+        """
+        self.require(Capability.INPUT_SYNC)
+        raise NotImplementedError
+
     # -- windows (T3) ------------------------------------------------------
 
     def windows(self) -> list[Window]:

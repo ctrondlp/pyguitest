@@ -178,3 +178,18 @@ has to keep including them for a distro packager to be able to build and test
 from it. `publish` uploads the exact artifact `build` checked, never a rebuild.
 
 Nothing publishes on a branch push: `publish` is gated on `refs/tags/v*`.
+
+## Generated documentation
+
+`docs/api.md` is generated, not written. Its capability column comes from
+`CompositeBackend._DISPATCH` and its provider column from each backend's
+`capabilities` property, so it changes whenever a backend or a Session
+method does:
+
+```sh
+python3 scripts/gen-api-docs.py
+```
+
+Edit the docstrings and regenerate; edits to `docs/api.md` itself are
+overwritten. `tests/test_api_docs.py` fails when the committed file no
+longer matches the source, so a stale reference cannot reach main.

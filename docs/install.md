@@ -32,7 +32,7 @@ rather than an error.
 | `input` | pointer and keyboard through a CLI tool | — | — | `wdotool`, `wtype`, `ydotool` or `xdotool` |
 | `uinput` | in-process pointer and keyboard | `[uinput]` (evdev) | — | — (needs `/dev/uinput` access) |
 | `eiinput` *(opt-in)* | keymap-safe input over libei | `[eiinput]` (`python-libei[portal]`, which brings PyGObject with it) | `libei`, gobject-introspection | — |
-| `portal` *(opt-in)* | keyboard and pointer buttons/scroll via the RemoteDesktop portal | — | PyGObject | — |
+| `portal` *(opt-in)* | keyboard and pointer buttons/scroll via the RemoteDesktop portal, and the clipboard with `clipboard=True` — the only clipboard path on GNOME | — | PyGObject | — |
 | `capture` | screenshots | — | — | `grim`, `gnome-screenshot`, `spectacle` or `import` |
 | `portalcapture` *(opt-in)* | screenshots via the Screenshot portal, no tool needed | — | PyGObject | — |
 | `imagesearch` | finding a control by a picture of it | — | — | `compare` (ImageMagick) |

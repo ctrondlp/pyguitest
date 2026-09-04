@@ -1,7 +1,7 @@
 """Capabilities and the tier scale.
 
 The tiers come from the audit of all 50 X11::GUITest exports in
-docs/wayland-audit.html. They are ordered by implementation cost: each costs
+docs/wayland-audit.md. They are ordered by implementation cost: each costs
 strictly more than the one above it, and NO_PATH cannot be bought at any price
 short of being the compositor.
 
@@ -89,6 +89,12 @@ class Capability(Enum):
     TEXT_ENTRY = (
         Tier.PRIVILEGED,
         "Typing characters; needs a backend-controlled keymap, which raw uinput lacks",
+    )
+    INPUT_SYNC = (
+        Tier.PRIVILEGED,
+        "Confirm the compositor has consumed the events sent so far, instead "
+        "of sleeping and hoping; proves delivery to the compositor, never "
+        "that the application processed or repainted them",
     )
 
     # -- T3: per-desktop window backends -----------------------------------

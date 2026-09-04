@@ -49,7 +49,7 @@ classifiers = [
 # No hard dependencies by design. Every display-server mechanism is probed at
 # runtime and degrades to an unsupported capability rather than an import error,
 # because no single set of bindings is present across GNOME, KDE, wlroots, X11,
-# and the BSDs. See docs/wayland-audit.html.
+# and the BSDs. See docs/wayland-audit.md.
 dependencies = []
 
 # Rationale for each choice is in docs/adr-001-dependencies.md.

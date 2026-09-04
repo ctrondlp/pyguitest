@@ -1,7 +1,7 @@
 """pyguitest -- cross-platform GUI automation.
 
 Successor to X11::GUITest. The shape of this API follows an audit of all 50 of
-that module's exports against Wayland (docs/wayland-audit.html), whose finding
+that module's exports against Wayland (docs/wayland-audit.md), whose finding
 was that a faithful port is the wrong target: 13 functions carry over unchanged,
 6 have no path on any compositor, and the rest change shape.
 
@@ -1018,7 +1018,7 @@ class Session:
         "Idle" means its CPU usage stayed under `cpu_threshold` (a fraction
         of one core) across `samples` consecutive polls -- CPU-idle, not
         "the UI stopped changing"; no backend here has an event stream to
-        watch for the latter (see docs/wayland-audit.html for what Wayland
+        watch for the latter (see docs/wayland-audit.md for what Wayland
         actually exposes). Useful after e.g. clicking "Export" and waiting
         for the exporting process to stop working before checking its
         output. A pid that has already exited counts as idle immediately --
@@ -1528,6 +1528,31 @@ class Session:
     # Only operations with no Session-level equivalent are listed. capture,
     # find_element and find_elements are deliberately absent: screenshot,
     # element and elements above are those, with the same arguments.
+
+    def sync(self, timeout: float = 1.0) -> bool:
+        """Block until the compositor has consumed the input sent so far.
+
+        The honest replacement for `wait()` after injection. Where a
+        backend offers Capability.INPUT_SYNC (libei today, via its
+        ping/pong round trip), this returns once the compositor has
+        actually taken the events rather than once a guessed interval has
+        elapsed::
+
+            gui.click()
+            gui.sync()
+            assert gui.element(name="Saved")
+
+        It proves the compositor consumed them, never that the
+        application processed or repainted them -- `wait_until` on the
+        element state you care about is what answers that. This removes
+        one source of flakiness underneath it, not all of them.
+
+        Returns True once confirmed and False on timeout, matching the
+        rest of the wait family; raises CapabilityUnsupported where no
+        backend can round trip, since a silent no-op here would hand back
+        exactly the false confidence it exists to remove.
+        """
+        return self.backend.sync(timeout=timeout)
 
     def screens(self) -> list[Screen]:
         """Every output, in advertised order."""

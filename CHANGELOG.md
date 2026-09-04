@@ -45,6 +45,55 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ### Added
 
+- Clipboard on GNOME, at last: `PortalBackend` takes `clipboard=True` and
+  then serves `Capability.CLIPBOARD` through
+  `org.freedesktop.portal.Clipboard`. Mutter implements no
+  wlr-data-control, so wl-clipboard cannot work there and GNOME has had no
+  clipboard path at all -- `connect(backend="portal", backend_options={
+  "clipboard": True})` is now one.
+
+  `RequestClipboard` is issued between `SelectDevices` and `Start`, and
+  that ordering is the whole constraint: the portal binds clipboard access
+  to the session at `Start`, so requesting it afterwards is ignored and the
+  session comes up without access, silently. It rides the RemoteDesktop
+  session this backend already negotiates, so it costs no second consent
+  dialog and no new dependency -- `portal.py` owns its own D-Bus
+  negotiation and needed nothing from python-libei.
+
+  Reading is a `SelectionRead` and a pipe. Writing has a *lifetime*, which
+  is the part worth knowing before relying on it: `SetSelection` declares
+  ownership and carries no content, and the portal then asks for the bytes
+  once per paste via a `SelectionTransfer` signal. Something must be
+  listening for as long as the selection is owned -- the same problem
+  `wl-copy` and `xclip` solve by forking a daemon. This cannot fork, since
+  the session belongs to this process, so it runs a GLib loop on a daemon
+  thread with its own `MainContext` (not the default one, which a caller's
+  own loop may own). The consequence: **the clipboard holds only while the
+  Session does**, where the CLI backends leave a daemon behind that
+  outlives them.
+
+  `primary=True` raises rather than being served from the clipboard: the
+  portal interface has no PRIMARY selection at all, and the two are
+  independent by design, so answering one with the other would answer a
+  different question than was asked.
+- `Capability.INPUT_SYNC` and `Session.sync()`, the honest replacement for
+  the `time.sleep()` every GUI script grows after injection. `eiinput` is
+  the one backend that can offer it: libei has a real round trip
+  (`ei_new_ping()`, answered by a `PONG`), and the reply cannot be sent
+  before EIS has read past everything queued ahead of the ping -- so
+  receiving it proves the compositor *consumed* the events rather than
+  merely that the socket accepted them.
+
+  Scoped deliberately. It proves delivery to the compositor and says
+  nothing about whether the application processed or repainted them;
+  `wait_until` on the state you care about is what answers that, and
+  nothing in this stack reports a repaint at all. Returns True on
+  confirmation and False on timeout like the rest of the wait family, and
+  raises where no backend can round trip rather than returning a
+  meaningless False. Needs libei 1.4+, probed by building a Ping rather
+  than by reading a version, since the binding resolves the symbol lazily
+  and an older library raises rather than reporting anything -- the
+  capability is withheld there instead of faked.
 - `Capability.SCREEN_INFO` on GNOME, via `GnomeShellBackend.screens()` --
   the last failing tier-2 line, and the only capability gap that was ever
   just a matter of not asking. Mutter's own

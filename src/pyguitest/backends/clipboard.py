@@ -12,11 +12,20 @@ wl-clipboard (wl-copy/wl-paste) speaks wlr-data-control-unstable-v1, an
 unprivileged protocol with no consent dialog. Confirmed live on KDE Plasma
 6 as well as the wlroots compositors it was written for -- KWin is not a
 wlroots compositor, but implements this protocol anyway (see
-tools.ExternalTool.mutter_incompatible). Mutter implements neither this
-protocol nor a reachable portal path, so GNOME has no member in
-CLIPBOARD_TOOLS at all yet; closing that gap needs the Shell extension
-this package already carries for other Mutter-shaped gaps, not a new CLI
-adapter, and is deliberately not attempted here.
+tools.ExternalTool.mutter_incompatible). Mutter implements it not at all,
+so GNOME has no member in CLIPBOARD_TOOLS and no *tool* can serve the
+clipboard there.
+
+GNOME is served instead by `portal.py`, through
+org.freedesktop.portal.Clipboard on the RemoteDesktop session that backend
+already negotiates -- `connect(backend="portal", backend_options={
+"clipboard": True})`. This module's earlier claim that Mutter had "neither
+this protocol nor a reachable portal path" was true when written and is
+not now: xdg-desktop-portal 1.22 with xdg-desktop-portal-gnome 51 carries
+the Clipboard interface (probed live, 2026-09-01). Note the two paths differ
+in lifetime as well as mechanism -- see PortalBackend.set_clipboard: the tools
+here fork a daemon that outlives the process, while the portal path holds
+the selection only while the Session does.
 
 Persistence is the one real trap, and it is not only about waiting for the
 right process to exit. The X11 and Wayland clipboard protocols both work

@@ -38,11 +38,19 @@ involved) and then fixing it the same way here. Do not remove this option.
 
 from __future__ import annotations
 
+import contextlib
+import os
+import threading
 import time
 import uuid
 
 from ..capabilities import Capability, CapabilitySet
-from ..errors import BackendUnavailable, PermissionRequired, PyGUITestError
+from ..errors import (
+    BackendUnavailable,
+    CapabilityUnsupported,
+    PermissionRequired,
+    PyGUITestError,
+)
 from . import portalrequest as _portalrequest
 from .base import GUIBackend
 
@@ -51,6 +59,13 @@ __all__ = ["PortalBackend", "available"]
 _BUS_NAME = "org.freedesktop.portal.Desktop"
 _OBJECT_PATH = "/org/freedesktop/portal/desktop"
 _INTERFACE = "org.freedesktop.portal.RemoteDesktop"
+_CLIPBOARD_INTERFACE = "org.freedesktop.portal.Clipboard"
+
+_CLIPBOARD_MIME = "text/plain;charset=utf-8"
+"""The one MIME type this backend reads and offers.
+
+`Session.get_clipboard`/`set_clipboard` are text-only by signature, so
+advertising more would promise something the API above cannot express."""
 
 # AvailableDeviceTypes / SelectDevices bitmask, per the portal's own spec.
 _DEVICE_KEYBOARD = 1
@@ -199,6 +214,7 @@ class PortalBackend(GUIBackend):
         session_handle=None,
         restore_token=None,
         persist_mode=PERSIST_NONE,
+        clipboard=False,
     ):
         """Connect to the session bus and negotiate a RemoteDesktop session.
 
@@ -242,6 +258,20 @@ class PortalBackend(GUIBackend):
                 ) from exc
         self._persist_mode = persist_mode
         self._restore_token = restore_token
+        self._clipboard = clipboard
+        self._content = b""
+        """What set_clipboard last put up, served on every paste."""
+        self._serving = False
+        self._loop = None
+        self._thread = None
+        self._transfer_subscription = None
+        """Whether this session asked the portal for clipboard access.
+
+        Off by default: it widens what the one consent dialog grants, and
+        a caller injecting input has no use for it. On GNOME it is the
+        only clipboard path this package has at all -- Mutter implements
+        no wlr-data-control, so wl-clipboard cannot serve it (see
+        backends/clipboard.py)."""
         self.restore_token = None
         """The token to reuse next time, or None if the portal issued none.
 
@@ -256,8 +286,14 @@ class PortalBackend(GUIBackend):
 
     # -- portal request/response plumbing ----------------------------------
 
-    def _call(self, method, signature, args):
-        """Call one RemoteDesktop method, returning its raw GVariant reply."""
+    def _call(self, method, signature, args, interface=_INTERFACE):
+        """Call one portal method, returning its raw GVariant reply.
+
+        `interface` defaults to RemoteDesktop, which is all this backend
+        spoke originally. The clipboard half addresses
+        org.freedesktop.portal.Clipboard instead -- a different interface
+        on the same object path, bound to the same session.
+        """
         if self._session_handle is None:
             raise PyGUITestError(
                 "the portal session is closed; construct another "
@@ -266,11 +302,44 @@ class PortalBackend(GUIBackend):
         return _portalrequest.call(
             (self._Gio, self._GLib),
             self._connection,
-            _INTERFACE,
+            interface,
             method,
             signature,
             args,
         )
+
+    def _call_for_fd(self, method, signature, args):
+        """Call a Clipboard method that answers with a fd, and return it.
+
+        The `h` in a portal signature is an *index* into a UnixFDList
+        delivered on a side channel, not a descriptor -- so this needs
+        `call_with_unix_fd_list_sync` (which answers `(reply, fd_list)`)
+        and an explicit reply type, exactly as ConnectToEIS does. Reading
+        the int and treating it as a fd would address whatever this
+        process happens to have open at that number.
+
+        The fd that comes back is owned -- `g_unix_fd_list_get()` dups it
+        -- so the caller closes it.
+        """
+        if self._session_handle is None:
+            raise PyGUITestError(
+                "the portal session is closed; construct another "
+                "PortalBackend to use the clipboard again"
+            )
+        reply, fd_list = self._connection.call_with_unix_fd_list_sync(
+            _BUS_NAME,
+            _OBJECT_PATH,
+            _CLIPBOARD_INTERFACE,
+            method,
+            self._GLib.Variant(signature, args),
+            self._GLib.VariantType.new("(h)"),
+            self._Gio.DBusCallFlags.NONE,
+            -1,
+            None,
+            None,
+        )
+        (index,) = reply.unpack()
+        return fd_list.get(index)
 
     def _request(self, method, signature, args):
         """Call a method that returns a Request handle, and await its reply.
@@ -345,6 +414,25 @@ class PortalBackend(GUIBackend):
                 Capability.KEY_EVENT, self.name, "SelectDevices was not approved"
             )
 
+        # Before Start, and the ordering is the whole constraint: the
+        # portal binds clipboard access to the session at Start time, so
+        # requesting it afterwards is ignored -- the session comes up
+        # without access and every Selection* call then fails against a
+        # session that was never granted any. Not a Request/Response
+        # method either (no out-arguments, answers immediately), so this
+        # is a plain call. It goes through _portalrequest directly rather
+        # than self._call, whose closed-session guard reads
+        # self._session_handle -- not assigned until this method returns.
+        if self._clipboard:
+            _portalrequest.call(
+                (self._Gio, self._GLib),
+                self._connection,
+                _CLIPBOARD_INTERFACE,
+                "RequestClipboard",
+                "(oa{sv})",
+                (session_handle, {}),
+            )
+
         code, results = self._request("Start", "(osa{sv})", (session_handle, "", {}))
         if code != 0:
             raise PermissionRequired(
@@ -363,15 +451,23 @@ class PortalBackend(GUIBackend):
 
     @property
     def capabilities(self):
-        """Keyboard and pointer button/scroll; no POINTER_MOVE (see above)."""
-        return CapabilitySet(
-            {
-                Capability.POINTER_BUTTON,
-                Capability.POINTER_SCROLL,
-                Capability.KEY_EVENT,
-                Capability.TEXT_ENTRY,
-            }
-        )
+        """Keyboard and pointer button/scroll; no POINTER_MOVE (see above).
+
+        CLIPBOARD only when `clipboard=True` was asked for at
+        construction: the portal grants it at Start, so a session that
+        did not request it cannot acquire it later, and declaring the
+        capability regardless would promise what this session was never
+        granted.
+        """
+        provided = {
+            Capability.POINTER_BUTTON,
+            Capability.POINTER_SCROLL,
+            Capability.KEY_EVENT,
+            Capability.TEXT_ENTRY,
+        }
+        if self._clipboard:
+            provided.add(Capability.CLIPBOARD)
+        return CapabilitySet(provided)
 
     def close(self):
         """End the portal session this backend negotiated.
@@ -388,6 +484,11 @@ class PortalBackend(GUIBackend):
         negotiated here: that one belongs to whoever passed it in. After
         this, injection raises rather than being sent to a dead session.
         """
+        # Before the session: the service thread answers pastes *on* it,
+        # and a transfer racing the Close would address a dead session.
+        # Unconditional, unlike the session teardown below -- the thread
+        # is this object's own either way, injected session or not.
+        self._stop_serving()
         if self._session_handle is None or not self._owns_session:
             return
         handle, self._session_handle = self._session_handle, None
@@ -431,6 +532,179 @@ class PortalBackend(GUIBackend):
                 "(oa{sv}ui)",
                 (self._session_handle, {}, 1, int(dx)),
             )
+
+    # -- clipboard ---------------------------------------------------------
+
+    def _no_primary(self, primary):
+        """Refuse PRIMARY, which this interface does not have.
+
+        The portal's Clipboard interface addresses one selection -- the
+        clipboard proper. There is no PRIMARY in it at all, so a
+        `primary=True` served quietly from the clipboard would answer a
+        different question than the one asked, and the two selections are
+        independent by design. Every other clipboard backend here really
+        does offer both (see backends/clipboard.py), so the honest answer
+        is a typed refusal rather than a silent substitution.
+        """
+        if primary:
+            raise CapabilityUnsupported(
+                Capability.CLIPBOARD,
+                self.name,
+                "the Clipboard portal has no PRIMARY selection; it "
+                "addresses the clipboard proper only",
+            )
+
+    def get_clipboard(self, primary=False):
+        """The clipboard's current text, read through the portal.
+
+        `SelectionRead` hands back a pipe the portal writes the current
+        owner's content into; this reads it to EOF and decodes it. One
+        MIME type is asked for (see _CLIPBOARD_MIME) rather than
+        negotiating, because the API above is text-only.
+        """
+        self.require(Capability.CLIPBOARD)
+        self._no_primary(primary)
+        fd = self._call_for_fd(
+            "SelectionRead", "(os)", (self._session_handle, _CLIPBOARD_MIME)
+        )
+        with os.fdopen(fd, "rb", closefd=True) as handle:
+            return handle.read().decode("utf-8", errors="replace")
+
+    def set_clipboard(self, text, primary=False):
+        """Put `text` on the clipboard, and keep serving it.
+
+        This is the half with a lifetime. `SetSelection` only declares
+        *ownership*: no content travels with it, and the portal comes back
+        later -- once per paste -- with a `SelectionTransfer` signal naming
+        a MIME type and a serial. Answering means `SelectionWrite` for a
+        pipe, the bytes, then `SelectionWriteDone`. Miss those and the
+        clipboard reads as empty to everything on the desktop.
+
+        So something has to be listening for as long as this process owns
+        the selection, which is exactly the problem `wl-copy` and `xclip`
+        solve by forking a daemon on write (see backends/clipboard.py's
+        module docstring, which found that the hard way). This backend
+        cannot fork -- the session belongs to this process -- so it runs a
+        GLib main loop on a daemon thread instead, started on the first
+        `set_clipboard` and living until `close()`.
+
+        The practical consequence is worth stating plainly: the clipboard
+        holds only while the Session does. A script that sets the
+        clipboard and exits leaves nothing behind, where the CLI backends
+        leave a daemon that outlives them.
+        """
+        self.require(Capability.CLIPBOARD)
+        self._no_primary(primary)
+        self._content = text.encode("utf-8")
+        self._start_serving()
+        self._call(
+            "SetSelection",
+            "(oa{sv})",
+            (
+                self._session_handle,
+                {"mime_types": self._GLib.Variant("as", [_CLIPBOARD_MIME])},
+            ),
+            interface=_CLIPBOARD_INTERFACE,
+        )
+
+    def _start_serving(self):
+        """Subscribe to SelectionTransfer and pump a loop for it, once.
+
+        The thread is a daemon and the loop is its own MainContext rather
+        than the default one: a caller may be running a main loop of their
+        own on the main thread (a GTK application driving this in-process
+        is not far-fetched), and stealing the default context would
+        deliver their signals here instead.
+        """
+        if self._serving:
+            return
+        self._serving = True
+        context = self._GLib.MainContext.new()
+        context.push_thread_default()
+        try:
+            self._transfer_subscription = self._connection.signal_subscribe(
+                _BUS_NAME,
+                _CLIPBOARD_INTERFACE,
+                "SelectionTransfer",
+                _OBJECT_PATH,
+                None,
+                self._Gio.DBusSignalFlags.NONE,
+                self._on_transfer,
+                None,
+            )
+        finally:
+            context.pop_thread_default()
+        self._loop = self._GLib.MainLoop.new(context, False)
+        self._thread = threading.Thread(
+            target=self._serve,
+            args=(self._loop,),
+            name="pyguitest-clipboard",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _serve(self, loop):
+        """Run the clipboard loop on its own context, on its own thread.
+
+        Takes the loop as an argument rather than reading `self._loop`:
+        `_stop_serving` clears that attribute, and a thread still winding
+        down would otherwise read None off it and raise on the way out.
+        """
+        context = loop.get_context()
+        context.push_thread_default()
+        try:
+            loop.run()
+        finally:
+            context.pop_thread_default()
+
+    def _on_transfer(self, _conn, _sender, _path, _iface, _signal, params, *_args):
+        """Answer one paste request with the content we last were given.
+
+        Deliberately total: this runs on the service thread, where an
+        exception would kill the loop and silently stop the clipboard
+        working for the rest of the session, with nothing to report it to.
+        A failed transfer is reported to the portal instead --
+        `SelectionWriteDone(success=False)` is what the interface documents
+        for a request that cannot be handled.
+        """
+        try:
+            session_handle, _mime_type, serial = params.unpack()
+        except Exception:  # noqa: BLE001 -- see above
+            return
+        if session_handle != self._session_handle:
+            return  # another session's paste, on a shared connection
+        success = False
+        try:
+            fd = self._call_for_fd(
+                "SelectionWrite", "(ou)", (self._session_handle, serial)
+            )
+            with os.fdopen(fd, "wb", closefd=True) as handle:
+                handle.write(self._content)
+            success = True
+        except Exception:  # noqa: BLE001 -- see above
+            success = False
+        with contextlib.suppress(Exception):  # see above
+            self._call(
+                "SelectionWriteDone",
+                "(oub)",
+                (self._session_handle, serial, success),
+                interface=_CLIPBOARD_INTERFACE,
+            )
+
+    def _stop_serving(self):
+        """Tear the clipboard service down. Idempotent, and never raises."""
+        if self._transfer_subscription is not None:
+            with contextlib.suppress(Exception):
+                self._connection.signal_unsubscribe(self._transfer_subscription)
+            self._transfer_subscription = None
+        if self._loop is not None:
+            with contextlib.suppress(Exception):
+                self._loop.quit()
+            self._loop = None
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+            self._thread = None
+        self._serving = False
 
     # -- keyboard ----------------------------------------------------------
 

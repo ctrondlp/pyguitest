@@ -258,6 +258,36 @@ read as a claim you cannot check.
   extension-free backend is the fix if anyone wants outputs without window
   control.
 
+- **`Capability.INPUT_SYNC`** (2026-09-04, `examples/_eiinput_validate.py`)
+  — `sync()` returned `True` in **2.2ms**. That number is the point of the
+  feature: it replaces the `time.sleep(0.3)` that sat after every injected
+  event in this very script, so the guess it removes was roughly 130x
+  longer than the answer it replaces — and unlike the sleep, it is a fact
+  rather than a hope. libei's ping/pong cannot answer before EIS has read
+  past everything queued ahead of the ping.
+
+  Two things came free with the run. `INPUT_SYNC` appeared in the
+  capabilities `eiinput` offered, so the libei-1.4 probe (which builds a
+  throwaway `Ping` rather than reading a version, since the binding
+  resolves the symbol lazily) works against a real library. And the call
+  went through a **composite** — the session was `eiinput+gnomeshell` —
+  so `CompositeBackend`'s `_DISPATCH` routed it to the one member that
+  serves it. That is the same routing whose absence made the tier-6
+  operations unreachable (see the caveat at the end of this file), now
+  exercised live for a new operation rather than only unit-tested.
+
+  Still unmeasured: what `sync()` is worth under load. This ran against an
+  idle desktop, where the round trip is fast and the sleep was pure waste;
+  the case that matters is a busy compositor, where the sleep is sometimes
+  too *short*. Nothing here shows that.
+
+  The run also confirmed `eiinput` composes with `gnomeshell` on GNOME at
+  all — the script had only ever named `windows` alongside it, which is
+  right on KDE and resolves to nothing on Mutter, so its first GNOME run
+  failed with the registry's generic "cannot drive this session" before
+  the consent dialog and looked like an `eiinput` fault. The script now
+  picks the window member per compositor.
+
 ## Run live on KDE Plasma 6 / KWin (XWayland)
 
 - **`eiinput` after its negotiation moved into python-libei** (2026-09-01),

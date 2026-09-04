@@ -6,6 +6,8 @@ the Python-side request/response plumbing and call construction: the part a
 fake connection can actually stand in for.
 """
 
+import contextlib
+import os
 import sys
 import types
 import unittest
@@ -13,7 +15,11 @@ import warnings
 from unittest import mock
 
 from pyguitest.capabilities import Capability
-from pyguitest.errors import BackendUnavailable, PermissionRequired
+from pyguitest.errors import (
+    BackendUnavailable,
+    CapabilityUnsupported,
+    PermissionRequired,
+)
 
 
 class FakeVariant:
@@ -93,6 +99,14 @@ class FakeConnection:
         # Session.Close() was sent to.
         self.call_paths = []
         self._watchers = {}
+        self.unsubscribed = []
+        self.clipboard_content = b""
+        self.handed_out = []
+        """Every fd this fake gave out, so a test can prove they close."""
+        self.written_to = []
+        """Read ends of the pipes SelectionWrite handed over."""
+        self._own = []
+        """The fake's own ends, closed by tearDown rather than by the code."""
 
     def get_unique_name(self):
         return ":1.42"
@@ -139,7 +153,91 @@ class FakeConnection:
         return len(self._watchers)
 
     def signal_unsubscribe(self, subscription_id):
-        pass
+        self.unsubscribed.append(subscription_id)
+
+    def call_with_unix_fd_list_sync(
+        self,
+        bus_name,
+        object_path,
+        interface,
+        method,
+        parameters,
+        reply_type,
+        flags,
+        timeout,
+        fd_list,
+        cancellable,
+    ):
+        """Answer a `(h)` method with an index into a FakeFDList.
+
+        Mirrors the real thing's two-value return. The index is
+        deliberately not the fd number -- reading the int and using it as
+        a descriptor is the bug this shape exists to prevent, and a fake
+        where the two agreed could not catch it.
+        """
+        args = parameters.value if parameters is not None else None
+        self.calls.append((method, args))
+        self.call_paths.append((method, object_path))
+        read_fd, write_fd = os.pipe()
+        if method == "SelectionRead":
+            os.write(write_fd, self.clipboard_content)
+            os.close(write_fd)
+            self._own.append(read_fd)
+            return FakeReply((7,)), FakeFDList({7: read_fd}, self.handed_out)
+        # SelectionWrite: the portal hands us the *write* end to fill.
+        self.written_to.append(read_fd)
+        self._own.append(write_fd)
+        return FakeReply((9,)), FakeFDList({9: write_fd}, self.handed_out)
+
+
+class FakeFDList:
+    """Stands in for Gio.UnixFDList: index -> fd, and `get` dups like the real one.
+
+    The dup matters: `g_unix_fd_list_get()` hands the caller an owned
+    descriptor, which is why the backend has to close it. `handed_out`
+    records the dup actually given away -- not the fake's own end -- so a
+    test can prove that exact descriptor was closed.
+    """
+
+    def __init__(self, fds, handed_out):
+        self._fds = fds
+        self._handed_out = handed_out
+
+    def get(self, index):
+        fd = os.dup(self._fds[index])
+        self._handed_out.append(fd)
+        return fd
+
+
+class FakeContext:
+    """Stands in for GLib.MainContext, recording push/pop balance."""
+
+    def __init__(self):
+        self.depth = 0
+
+    def push_thread_default(self):
+        self.depth += 1
+
+    def pop_thread_default(self):
+        self.depth -= 1
+
+
+class ServiceLoop:
+    """A GLib.MainLoop stand-in that a test drives instead of a thread."""
+
+    def __init__(self, context):
+        self._context = context
+        self.ran = False
+        self.quit_called = False
+
+    def get_context(self):
+        return self._context
+
+    def run(self):
+        self.ran = True
+
+    def quit(self):
+        self.quit_called = True
 
 
 def install_fake_gi():
@@ -171,6 +269,9 @@ def install_fake_gi():
 
     GLib.timeout_add_seconds = timeout_add_seconds
     GLib.source_remove = source_remove
+    GLib.VariantType = types.SimpleNamespace(new=lambda spec: spec)
+    GLib.MainContext = types.SimpleNamespace(new=FakeContext)
+    GLib.MainLoop.new = staticmethod(lambda context, running: ServiceLoop(context))
 
     repository.Gio = Gio
     repository.GLib = GLib
@@ -321,6 +422,207 @@ class TestPointer(PortalTestCase):
     def test_scroll_with_nothing_to_do_sends_nothing(self):
         self.gui.scroll()
         self.assertEqual(self.connection.calls, [])
+
+
+class TestClipboard(unittest.TestCase):
+    """The Clipboard portal half, which rides the RemoteDesktop session.
+
+    GNOME has no other clipboard path at all: Mutter implements no
+    wlr-data-control, so wl-clipboard cannot serve it. The ordering
+    constraint is the whole design -- RequestClipboard must land between
+    SelectDevices and Start, because the portal binds access at Start.
+    """
+
+    def setUp(self):
+        patcher = install_fake_gi()
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        from pyguitest.backends import portal
+
+        self.module = portal
+        self.connection = FakeConnection()
+        # The fake keeps its own end of every pipe it makes; nothing in
+        # the code under test owns those, so this closes them rather than
+        # leaking a pair per test through the whole run.
+        self.addCleanup(self._close_fake_fds)
+
+    def _close_fake_fds(self):
+        for fd in self.connection._own + self.connection.written_to:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
+    def _gui(self, clipboard=True):
+        gui = self.module.PortalBackend(
+            connection=self.connection,
+            session_handle="/session/1",
+            clipboard=clipboard,
+        )
+        self.addCleanup(gui.close)
+        return gui
+
+    # -- negotiation ---------------------------------------------------
+
+    def test_request_clipboard_lands_between_select_devices_and_start(self):
+        # The portal binds clipboard access at Start, so afterwards is too
+        # late and the session comes up without it -- silently.
+        self.module.PortalBackend(connection=self.connection, clipboard=True).close()
+        methods = [m for m, _ in self.connection.calls]
+        self.assertLess(
+            methods.index("SelectDevices"), methods.index("RequestClipboard")
+        )
+        self.assertLess(methods.index("RequestClipboard"), methods.index("Start"))
+
+    def test_request_clipboard_goes_to_the_clipboard_interface(self):
+        # A different interface on the same object path; sending it to
+        # RemoteDesktop would be an UnknownMethod at negotiation time.
+        gui = self.module.PortalBackend(connection=self.connection, clipboard=True)
+        self.addCleanup(gui.close)
+        self.assertIn("RequestClipboard", [m for m, _ in self.connection.calls])
+
+    def test_clipboard_is_not_requested_by_default(self):
+        # It widens what the one consent dialog grants, and a caller
+        # injecting input has no use for it.
+        self.module.PortalBackend(connection=self.connection).close()
+        self.assertNotIn("RequestClipboard", [m for m, _ in self.connection.calls])
+
+    def test_the_capability_follows_what_was_asked_for(self):
+        self.assertIn(Capability.CLIPBOARD, self._gui(clipboard=True).capabilities)
+        self.assertNotIn(Capability.CLIPBOARD, self._gui(clipboard=False).capabilities)
+
+    def test_clipboard_calls_are_refused_without_the_capability(self):
+        gui = self._gui(clipboard=False)
+        with self.assertRaises(CapabilityUnsupported):
+            gui.get_clipboard()
+        with self.assertRaises(CapabilityUnsupported):
+            gui.set_clipboard("x")
+
+    # -- read ----------------------------------------------------------
+
+    def test_get_clipboard_reads_the_fd_the_portal_hands_back(self):
+        self.connection.clipboard_content = b"hello"
+        self.assertEqual(self._gui().get_clipboard(), "hello")
+
+    def test_get_clipboard_asks_for_the_text_mime_type(self):
+        gui = self._gui()
+        gui.get_clipboard()
+        (_method, args) = next(
+            c for c in self.connection.calls if c[0] == "SelectionRead"
+        )
+        self.assertEqual(args, ("/session/1", "text/plain;charset=utf-8"))
+
+    def test_get_clipboard_closes_the_fd_it_was_given(self):
+        # The fd is dup'd for us by g_unix_fd_list_get; leaking one per
+        # read would exhaust the process over a long run.
+        gui = self._gui()
+        gui.get_clipboard()
+        fd = self.connection.handed_out[-1]
+        with self.assertRaises(OSError):
+            os.fstat(fd)
+
+    def test_undecodable_bytes_do_not_raise(self):
+        # Another application owns the selection and can put anything on
+        # it; a UnicodeDecodeError here would be pyguitest's fault-looking
+        # failure for someone else's content.
+        self.connection.clipboard_content = b"\xff\xfe"
+        self.assertIsInstance(self._gui().get_clipboard(), str)
+
+    # -- PRIMARY -------------------------------------------------------
+
+    def test_primary_is_refused_rather_than_served_from_the_clipboard(self):
+        # The interface has no PRIMARY at all. Serving it from the
+        # clipboard would answer a different question than was asked, and
+        # the two selections are independent by design.
+        gui = self._gui()
+        with self.assertRaises(CapabilityUnsupported):
+            gui.get_clipboard(primary=True)
+        with self.assertRaises(CapabilityUnsupported):
+            gui.set_clipboard("x", primary=True)
+
+    # -- write ---------------------------------------------------------
+
+    def test_set_clipboard_declares_ownership_of_the_text_type(self):
+        gui = self._gui()
+        gui.set_clipboard("hello")
+        (_method, args) = next(
+            c for c in self.connection.calls if c[0] == "SetSelection"
+        )
+        self.assertEqual(args[0], "/session/1")
+        self.assertEqual(args[1]["mime_types"].value, ["text/plain;charset=utf-8"])
+
+    def test_a_transfer_request_is_answered_with_the_content(self):
+        # SetSelection carries no content: the portal comes back once per
+        # paste, and missing that leaves the clipboard reading as empty.
+        gui = self._gui()
+        gui.set_clipboard("hello")
+        gui._on_transfer(
+            None,
+            None,
+            None,
+            None,
+            None,
+            FakeReply(("/session/1", "text/plain;charset=utf-8", 5)),
+        )
+        served = self.connection.written_to[-1]
+        self.assertEqual(os.read(served, 64), b"hello")
+        (_method, args) = next(
+            c for c in self.connection.calls if c[0] == "SelectionWriteDone"
+        )
+        self.assertEqual(args, ("/session/1", 5, True))
+
+    def test_a_transfer_for_another_session_is_ignored(self):
+        gui = self._gui()
+        gui.set_clipboard("hello")
+        before = len(self.connection.calls)
+        gui._on_transfer(
+            None, None, None, None, None, FakeReply(("/session/other", "text", 5))
+        )
+        self.assertEqual(len(self.connection.calls), before)
+
+    def test_a_failed_transfer_reports_failure_rather_than_raising(self):
+        # This runs on the service thread, where an exception would kill
+        # the loop and silently stop the clipboard for the whole session.
+        gui = self._gui()
+        gui.set_clipboard("hello")
+        gui._call_for_fd = mock.Mock(side_effect=RuntimeError("no fd"))
+        gui._on_transfer(
+            None, None, None, None, None, FakeReply(("/session/1", "text", 5))
+        )
+        (_method, args) = next(
+            c for c in self.connection.calls if c[0] == "SelectionWriteDone"
+        )
+        self.assertIs(args[2], False)
+
+    def test_the_service_starts_once_however_often_the_clipboard_is_set(self):
+        gui = self._gui()
+        gui.set_clipboard("one")
+        loop = gui._loop
+        gui.set_clipboard("two")
+        self.assertIs(gui._loop, loop)
+
+    def test_setting_again_replaces_what_is_served(self):
+        gui = self._gui()
+        gui.set_clipboard("one")
+        gui.set_clipboard("two")
+        gui._on_transfer(
+            None, None, None, None, None, FakeReply(("/session/1", "text", 1))
+        )
+        self.assertEqual(os.read(self.connection.written_to[-1], 64), b"two")
+
+    def test_close_stops_the_service_before_ending_the_session(self):
+        # A transfer racing the Close would address a dead session.
+        gui = self.module.PortalBackend(
+            connection=self.connection, session_handle="/session/1", clipboard=True
+        )
+        gui.set_clipboard("hello")
+        loop = gui._loop
+        gui.close()
+        self.assertTrue(loop.quit_called)
+        self.assertTrue(self.connection.unsubscribed)
+        self.assertFalse(gui._serving)
+        self.assertIsNone(gui._transfer_subscription)
+
+    def test_close_is_safe_when_the_clipboard_was_never_used(self):
+        self._gui().close()  # addCleanup closes it a second time too
 
 
 class TestNegotiation(unittest.TestCase):

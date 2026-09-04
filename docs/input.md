@@ -351,6 +351,40 @@ callable from a fraction in [0, 1] to one, clamped) and is off by default,
 because constant velocity is what a flick test wants: an ease-out decelerates
 into the target, and a flick released at zero speed does not throw.
 
+## Knowing the input arrived: `sync()`
+
+Every GUI script grows a `time.sleep()` after injection, and every one of
+them is a guess — too short and the test is flaky, too long and the suite
+crawls. `Capability.INPUT_SYNC` replaces the guess with an answer:
+
+```python
+gui.click()
+gui.sync()
+assert gui.element(name="Saved")
+```
+
+`eiinput` is the one backend that can offer it, because libei has a real
+round trip — `ei_new_ping()`, answered by a `PONG` event. The reply cannot
+be sent before EIS has read past everything queued ahead of the ping, so
+receiving it proves the compositor consumed this session's events rather
+than merely that the socket accepted them. Needs libei 1.4 or newer, which
+is where `ei_new_ping` arrived; where it is missing the capability is
+withheld rather than faked.
+
+**What it does not prove**, and the distinction is the whole point of
+trusting it: the *compositor* has the events. Whether the application under
+the pointer processed them, laid out, or repainted is a separate question,
+and `gui.wait_until(lambda: ...)` on the state you actually care about is
+what answers it. `sync()` removes one source of flakiness underneath that,
+not all of them. There is no protocol anywhere in this stack that reports
+"the client repainted" — see `docs/wayland-audit.md`.
+
+Returns `True` once confirmed and `False` on timeout, matching
+`wait_for_window` and the rest of the wait family; it raises
+`CapabilityUnsupported` where no backend can round trip, rather than
+quietly returning `False` and handing back the false confidence it exists
+to remove.
+
 ## When injected input appears to do nothing
 
 **Check your environment before suspecting the backend.** On a VirtualBox

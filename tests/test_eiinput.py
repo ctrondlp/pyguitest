@@ -21,6 +21,7 @@ from unittest import mock
 from pyguitest.capabilities import Capability
 from pyguitest.errors import (
     BackendUnavailable,
+    CapabilityUnsupported,
     PermissionRequired,
     PyGUITestError,
 )
@@ -66,13 +67,39 @@ class FakeEventType(enum.IntEnum):
     SEAT_ADDED = 1
     DEVICE_ADDED = 2
     DEVICE_RESUMED = 3
+    PONG = 90
 
 
 class FakeEvent:
-    def __init__(self, event_type, seat=None, device=None):
+    def __init__(self, event_type, seat=None, device=None, pong=None):
         self.event_type = event_type
         self.seat = seat
         self.device = device
+        self._pong = pong
+
+    @property
+    def pong(self):
+        """Mirrors the real accessor, which raises off a non-PONG event."""
+        if self.event_type is not FakeEventType.PONG:
+            raise AssertionError("pong read off a non-PONG event")
+        if self._pong is None:
+            raise RuntimeError("this libei is older than 1.4")
+        return self._pong
+
+
+class FakePing:
+    """Stands in for libei's Ping: an id, and a send() that records."""
+
+    _next_id = 1
+
+    def __init__(self):
+        self.id = FakePing._next_id
+        FakePing._next_id += 1
+        self.sent = False
+
+    def send(self):
+        self.sent = True
+        return self
 
 
 class FakeDevice:
@@ -155,9 +182,19 @@ class FakeSeat:
 class FakeSender:
     """Yields one scripted batch of events per `events` access."""
 
-    def __init__(self, event_batches=(), fd=99):
+    def __init__(self, event_batches=(), fd=99, can_ping=True):
         self.fd = fd
         self._batches = list(event_batches)
+        self.can_ping = can_ping
+        self.pings = []
+
+    def new_ping(self):
+        # Mirrors libei <1.4, where the symbol does not resolve at all.
+        if not self.can_ping:
+            raise AttributeError("ei_new_ping")
+        ping = FakePing()
+        self.pings.append(ping)
+        return ping
 
     def dispatch(self):
         pass
@@ -518,6 +555,108 @@ class TestKeyboard(unittest.TestCase):
         gui = self._gui(keymap=keymap)
         gui.close()
         self.assertTrue(keymap.closed)
+
+
+class TestSync(unittest.TestCase):
+    """sync() is a real round trip, not a sleep with better branding."""
+
+    def _gui(self, sender, device=None):
+        ei_patcher = install_fake_ei()
+        ei_patcher.start()
+        self.addCleanup(ei_patcher.stop)
+        portal_patcher, _portal = install_fake_portal()
+        portal_patcher.start()
+        self.addCleanup(portal_patcher.stop)
+        from pyguitest.backends.eiinput import LibeiBackend
+
+        gui = LibeiBackend(sender=sender, device=device or FakeDevice())
+        gui._sender = sender
+        return gui
+
+    @staticmethod
+    def _pong_for(sender):
+        """A batch answering whichever ping has been sent by then."""
+
+        class Answering(list):
+            def __iter__(self):
+                ping = sender.pings[-1]
+                return iter([FakeEvent(FakeEventType.PONG, pong=ping)])
+
+        return Answering()
+
+    def test_a_pong_for_our_ping_confirms(self):
+        sender = FakeSender()
+        gui = self._gui(sender)
+        sender._batches = [self._pong_for(sender)]
+        with _always_ready():
+            self.assertTrue(gui.sync())
+        # pings[0] is _can_ping's throwaway probe; the sent one is ours.
+        self.assertTrue(sender.pings[-1].sent)
+
+    def test_a_pong_for_someone_elses_ping_is_not_ours(self):
+        # Two clients share an EIS connection's event stream in principle;
+        # matching on "a PONG arrived" rather than on the id would return
+        # early and report input delivered that is still queued.
+        sender = FakeSender(
+            event_batches=[[FakeEvent(FakeEventType.PONG, pong=FakePing())]]
+        )
+        gui = self._gui(sender)
+        with _always_ready():
+            self.assertFalse(gui.sync(timeout=0.05))
+
+    def test_timeout_returns_false_rather_than_raising(self):
+        # Matches wait_for_window and the rest of the wait family.
+        sender = FakeSender(event_batches=[])
+        gui = self._gui(sender)
+        with _always_ready():
+            self.assertFalse(gui.sync(timeout=0.05))
+
+    def test_unrelated_events_in_the_batch_are_drained_not_skipped(self):
+        sender = FakeSender()
+        gui = self._gui(sender)
+
+        class Mixed(list):
+            def __iter__(self):
+                return iter(
+                    [
+                        FakeEvent(FakeEventType.DEVICE_RESUMED),
+                        FakeEvent(FakeEventType.PONG, pong=sender.pings[-1]),
+                    ]
+                )
+
+        sender._batches = [Mixed()]
+        with _always_ready():
+            self.assertTrue(gui.sync())
+
+    def test_a_libei_too_old_to_read_pong_does_not_confirm(self):
+        # `Event.pong` needs libei 1.4; a PONG whose accessor raises must
+        # not be counted as ours.
+        sender = FakeSender(event_batches=[[FakeEvent(FakeEventType.PONG, pong=None)]])
+        gui = self._gui(sender)
+        with _always_ready():
+            self.assertFalse(gui.sync(timeout=0.05))
+
+    def test_input_sync_is_declared_when_the_connection_can_ping(self):
+        gui = self._gui(FakeSender())
+        self.assertIn(Capability.INPUT_SYNC, gui.capabilities)
+
+    def test_input_sync_is_withheld_where_ping_is_unavailable(self):
+        # libei <1.4: promising a confirmation this can never deliver is
+        # worse than not offering it.
+        gui = self._gui(FakeSender(can_ping=False))
+        self.assertNotIn(Capability.INPUT_SYNC, gui.capabilities)
+
+    def test_input_sync_is_withheld_without_a_sender(self):
+        # A directly-injected device has no connection to round-trip over.
+        ei_patcher = install_fake_ei()
+        ei_patcher.start()
+        self.addCleanup(ei_patcher.stop)
+        from pyguitest.backends.eiinput import LibeiBackend
+
+        gui = LibeiBackend(device=FakeDevice())
+        self.assertNotIn(Capability.INPUT_SYNC, gui.capabilities)
+        with self.assertRaises(CapabilityUnsupported):
+            gui.sync()
 
 
 class TestClose(LibeiTestCase):

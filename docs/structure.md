@@ -13,10 +13,14 @@ pyguitest/
 ├── README.md                   what this is, install, usage
 ├── CONTRIBUTING.md             tests, lint, types, CI
 ├── examples/                   runnable scripts, simplest first
+├── scripts/                    generators and live-validation helpers
+│   └── gen-api-docs.py         writes docs/api.md from the source
 ├── gnome-shell-extension/       pyguitest-window-control; opt-in, live-verified
 ├── docs/
 │   ├── README.md               index into this folder, for anyone landing here directly
-│   ├── wayland-audit.html      the audit all of this derives from
+│   ├── api.md                  generated reference: every public name and its capability
+│   ├── design.md               why the API is not a port, and what follows
+│   ├── wayland-audit.md        the audit all of this derives from
 │   ├── install.md              what each backend needs, per distribution
 │   ├── input.md                injecting input: permissions, keymaps, libei
 │   ├── validation.md           what has been run against a real desktop
@@ -144,7 +148,7 @@ whatever answers. Priority decides who wins a contested capability.
 | 95 | `windows` | window control; wins `WINDOW_GEOMETRY` over AT-SPI |
 | 93 | `gnomeshell` | window control on Mutter, prompt-free per-window capture, and output/scale reporting (the last straight from Mutter's own `DisplayConfig`), via the `pyguitest-window-control` extension |
 | 90 | `atspi` | elements, and window listing where Mutter offers nothing |
-| 80 | `portal` *(opt-in)* | keyboard and pointer buttons/scroll, via the RemoteDesktop portal |
+| 80 | `portal` *(opt-in)* | keyboard and pointer buttons/scroll, via the RemoteDesktop portal; also the clipboard with `clipboard=True`, which is the only clipboard path on GNOME |
 | 80 | `eiinput` *(opt-in)* | absolute pointer move/buttons/scroll, plus keymap-safe keyboard where the compositor's keymap is readable, via libei over the same portal |
 | 70 | `input` | pointer and keyboard |
 | 60 | `capture` | screenshots |

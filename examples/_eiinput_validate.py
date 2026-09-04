@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""One-off live validation of LibeiBackend (`eiinput`) on real KDE/KWin.
+"""One-off live validation of LibeiBackend (`eiinput`) on a real desktop.
 
-`eiinput` has only ever been live-validated on GNOME Shell (see
-`docs/validation.md`); whether KDE's `xdg-desktop-portal-kde` implements
-the same `RemoteDesktop`+libei negotiation the same way is, as of this
-script, unconfirmed. That is what this checks.
+Written for KDE/KWin first -- `eiinput` had only ever been live-validated
+on GNOME Shell (see `docs/validation.md`), and whether KDE's
+`xdg-desktop-portal-kde` implements the same `RemoteDesktop`+libei
+negotiation the same way was the open question. It runs on either desktop
+now: the window half is chosen per compositor (see `_window_backend`),
+because naming the wrong one fails before the consent dialog is even
+reached.
 
 `connect(backend="eiinput")` negotiates a real `RemoteDesktop` portal
 session and will raise a genuine "Allow this app to control your input?"
@@ -15,9 +18,18 @@ auto-selected).
 
 `LibeiBackend` is input-only -- it has no window-management capabilities of
 its own, unlike `KdotoolBackend` or `gnomeshell` -- so window discovery and
-activation come from `windows`, named alongside it in one session:
-`connect(backend=["eiinput", "windows"])`. The order is the precedence, so
-`eiinput` serves every capability it has and `windows` fills in the rest.
+activation come from a second member named alongside it in one session:
+`connect(backend=["eiinput", <window backend>])`. The order is the
+precedence, so `eiinput` serves every capability it has and the other
+fills in the rest.
+
+*Which* window backend is not the same everywhere, and naming the wrong
+one fails immediately with the registry's generic "cannot drive this
+session" -- before the consent dialog, so it reads as though `eiinput`
+were unavailable when it is not. `windows` covers sway/Hyprland/niri and
+KDE (via kdotool); on GNOME it resolves to nothing at all, because Mutter
+implements no foreign-toplevel protocol and `for_compositor()` has no
+entry for it -- there, the window half is `gnomeshell`.
 That still keeps `eiinput` isolated the way `_kdotool_validate.py` isolates
 kdotool -- nothing is composed automatically, both members are named -- and
 it is what this script wanted all along: it previously opened two separate
@@ -38,7 +50,12 @@ import sys
 import time
 
 import pyguitest
-from pyguitest import BackendUnavailable, Capability, PermissionRequired
+from pyguitest import (
+    BackendUnavailable,
+    Capability,
+    Compositor,
+    PermissionRequired,
+)
 
 if shutil.which("gedit") is None:
     sys.exit(
@@ -46,16 +63,41 @@ if shutil.which("gedit") is None:
         "point at. On Fedora: sudo dnf install gedit"
     )
 
-print("connecting to eiinput -- a consent dialog may appear; click Allow")
+
+def _window_backend(environment):
+    """The registry name serving windows on this compositor.
+
+    Mutter is the exception the hard way: `windows` is the right answer on
+    sway, Hyprland, niri and KDE, and on GNOME its factory returns None --
+    so naming it there fails with the registry's generic message and looks
+    like an `eiinput` problem, which is what sent this script's first GNOME
+    run down the wrong path.
+    """
+    if environment.compositor is Compositor.MUTTER:
+        return "gnomeshell"
+    return "windows"
+
+
+environment = pyguitest.detect()
+companion = _window_backend(environment)
+print(
+    f"connecting to eiinput + {companion} on {environment.compositor.value} "
+    "-- a consent dialog may appear; click Allow"
+)
 try:
     # One session naming both backends, in precedence order: `eiinput`
-    # serves every injected event, `windows` serves the window discovery and
-    # activation it has none of. This used to be two separate sessions,
-    # because naming a backend gave you only that one -- see the note below
+    # serves every injected event, the other serves the window discovery
+    # and activation it has none of. This used to be two separate sessions,
+    # because naming a backend gave you only that one -- see the note above
     # on why they were paired by hand.
-    gui = pyguitest.connect(backend=["eiinput", "windows"])
+    gui = pyguitest.connect(backend=["eiinput", companion])
 except (BackendUnavailable, PermissionRequired) as exc:
-    sys.exit(f"eiinput unavailable: {exc}")
+    sys.exit(
+        f"could not open an eiinput + {companion} session: {exc}\n"
+        f"(if {companion!r} is the part that failed, eiinput itself may be "
+        "fine -- on GNOME that member needs the pyguitest-window-control "
+        "extension installed and enabled)"
+    )
 input_gui = windows_gui = gui
 print(f"forced backend: {gui.backend.name}")
 # eiinput's own capabilities, not the session's union: what this script is
@@ -66,9 +108,18 @@ print("capabilities offered:", sorted(c.name for c in eiinput_backend.capabiliti
 
 app = windows_gui.start_app(["gedit", "--new-window"])
 try:
-    window = windows_gui.wait_for_window("gedit", timeout=10)
+    # Matched case-insensitively and against the document name too: a
+    # window title is a label, not an identity, and gedit's carries the
+    # app name on some desktops and only "Untitled Document" on others.
+    # On a miss, say what *was* on screen -- "never opened a window" alone
+    # is a dead end when the window is right there under another name.
+    window = windows_gui.wait_for_window("(?i)gedit|Untitled Document", timeout=10)
     if window is None:
-        sys.exit("gedit never opened a window")
+        seen = ", ".join(repr(w.title) for w in windows_gui.windows()) or "none"
+        sys.exit(
+            "no gedit window matched within 10s.\n"
+            f"windows visible to {companion!r}: {seen}"
+        )
     print(f"found: {window.title!r}")
 
     windows_gui.activate_window(window)
@@ -104,6 +155,23 @@ try:
         time.sleep(0.3)
     else:
         print("TEXT_ENTRY not offered -- skipping type_text")
+
+    if input_gui.supports(Capability.INPUT_SYNC):
+        # The point of sync() is that it replaces the time.sleep() calls
+        # above, so this measures it rather than merely calling it: a
+        # round trip to a compositor on the same machine should land in
+        # single-digit milliseconds, orders of magnitude under the 0.3s
+        # each guessed sleep costs. A number far from that -- or a False
+        # -- is the finding worth reporting.
+        print("syncing...")
+        started = time.monotonic()
+        confirmed = input_gui.sync()
+        elapsed = time.monotonic() - started
+        print(f"  sync() -> {confirmed} in {elapsed * 1000:.1f}ms")
+        if not confirmed:
+            print("  NOT confirmed: no PONG arrived within the timeout")
+    else:
+        print("INPUT_SYNC not offered -- skipping sync (libei 1.4+ needed)")
 
     print("\nall calls completed without raising")
 
