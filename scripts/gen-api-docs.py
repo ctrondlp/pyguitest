@@ -28,7 +28,7 @@ sys.path.insert(0, str(ROOT / "src"))
 import pyguitest  # noqa: E402
 import pyguitest.backends as backends_pkg  # noqa: E402
 from pyguitest.backends.composite import _DISPATCH  # noqa: E402
-from pyguitest.capabilities import Capability, Tier  # noqa: E402
+from pyguitest.capabilities import TIERS, Capability, Tier  # noqa: E402
 
 OUT = ROOT / "docs" / "api.md"
 
@@ -175,8 +175,28 @@ def cell(text: str) -> str:
 
 
 def first_line(obj) -> str:
-    """First paragraph of a docstring, collapsed to one line."""
+    """First paragraph of a docstring, collapsed to one line.
+
+    Empty when the object has no docstring *of its own*. A plain value
+    borrows its type's, and `getattr_static` on a dataclass field hands
+    back its default value -- so `has_dogtail: bool = False` documented
+    itself with `bool`'s docstring. Useless on any one version, and worse
+    across them: that text is "bool(x) -> bool" up to Python 3.11 and
+    "Returns True when the argument is true..." from 3.12, so a committed
+    `docs/api.md` could not match on every supported version at once, and
+    CI failed on 3.10 against a file generated on a newer interpreter.
+
+    Compared by equality, not identity: a C type builds `__doc__` fresh on
+    each access, so `False.__doc__ is bool.__doc__` is False even though
+    the text is exactly the borrowed one. Equality still keeps every
+    descriptor that carries its own line -- a NamedTuple's `_tuplegetter`
+    ("Alias for field number 0"), `tuple.count`, a property's getter --
+    since none of those match their own type's docstring.
+    """
     target = obj.fget if isinstance(obj, property) else obj
+    own = getattr(target, "__doc__", None)
+    if own is None or own == getattr(type(target), "__doc__", None):
+        return ""
     doc = inspect.getdoc(target) or ""
     return re.sub(r"\s+", " ", doc.split("\n\n")[0].strip())
 
@@ -319,15 +339,45 @@ def field_types(cls) -> dict[str, str]:
     return types
 
 
+def inherited_from_builtin(cls, name: str) -> bool:
+    """Whether `name` comes from a builtin base rather than from this class.
+
+    `ImageMatch` is a NamedTuple, so `getmembers` finds `tuple.count` and
+    `tuple.index` on it -- neither part of this package's API, and both
+    documented by a C type. Same for the `_tuplegetter` descriptors behind
+    the fields, whose "Alias for field number 0" says nothing the label
+    `x: int` does not already say.
+
+    Excluding them is a correctness fix as much as a tidiness one: a C
+    type's docstring is free to change between interpreters, and
+    `docs/api.md` is committed and byte-compared on every supported
+    version. One such string (`bool`'s, reached through a dataclass
+    default) already broke CI on 3.10 against a file generated on a newer
+    Python; leaving a handful more in place would be waiting for the same
+    failure.
+    """
+    for base in type.mro(cls):
+        if name in vars(base):
+            return getattr(base, "__module__", "") == "builtins"
+    return False
+
+
 def member_row(cls, name: str, types: dict[str, str]) -> str:
     """One row of a type's member table."""
     static = inspect.getattr_static(cls, name, None)
-    doc = first_line(static)
     if isinstance(static, property) or inspect.isfunction(static):
-        return f"| `{cell(signature(cls, name))}` | {cell(doc)} |"
+        return f"| `{cell(signature(cls, name))}` | {cell(first_line(static))} |"
     declared = types.get(name)
     label = f"{name}: {declared}" if declared else name
-    return f"| `{cell(label)}` | {cell(doc)} |"
+    # No description for a data member. What reaches here is only ever a
+    # field -- `count`/`index` and the rest of the builtin surface are
+    # filtered out above -- and a field carries no documentation of its
+    # own: a dataclass default borrows its *type's* docstring, and a
+    # NamedTuple's `_tuplegetter` says "Alias for field number 0", which
+    # tells a reader nothing the label `x: int` has not already told them.
+    # Both are also stdlib text that may be reworded between interpreters,
+    # and this file is byte-compared on every version CI runs.
+    return f"| `{cell(label)}` |  |"
 
 
 def session_row(name: str, x11_only: set[str]) -> str:
@@ -469,7 +519,11 @@ def render_types(out: list[str]) -> None:
         if cls is None:
             continue
         out += [f"### {name}", "", first_line(cls), ""]
-        members = [n for n, _ in inspect.getmembers(cls) if not n.startswith("_")]
+        members = [
+            n
+            for n, _ in inspect.getmembers(cls)
+            if not n.startswith("_") and not inherited_from_builtin(cls, n)
+        ]
         if not members:
             continue
         types = field_types(cls)
@@ -505,8 +559,12 @@ def render_capabilities(out: list[str], prov, x11_only: set[str]) -> None:
         "| Tier | Name | Meaning |",
         "|------|------|---------|",
     ]
+    # TIERS, not the member's docstring: an enum member inherits its
+    # class's, so every row read "What it costs to implement a capability
+    # on Wayland" -- the same sentence six times, where TIERS carries what
+    # each tier actually means.
     for tier in Tier:
-        out.append(f"| T{tier.value} | {tier.name} | {cell(first_line(tier))} |")
+        out.append(f"| T{tier.value} | {tier.name} | {cell(TIERS[tier])} |")
     out.append("")
 
 

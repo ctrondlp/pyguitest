@@ -232,13 +232,11 @@ Where a template image was found.
 
 | Member | What it does |
 |--------|--------------|
-| `count` | Return number of occurrences of value. |
-| `height: int` | Alias for field number 3 |
-| `index` | Return first index of value. |
-| `score: float` | Alias for field number 4 |
-| `width: int` | Alias for field number 2 |
-| `x: int` | Alias for field number 0 |
-| `y: int` | Alias for field number 1 |
+| `height: int` |  |
+| `score: float` |  |
+| `width: int` |  |
+| `x: int` |  |
+| `y: int` |  |
 
 ### Application
 
@@ -270,21 +268,21 @@ What the current login actually offers.
 | `can_inject_input` | Whether any input mechanism is worth attempting. |
 | `can_use_atspi` | Whether the accessibility layer is actually reachable. |
 | `can_use_clipboard` | Whether a clipboard tool is reachable on this session. |
-| `desktop: str` | str(object='') -> str str(bytes_or_buffer[, encoding[, errors]]) -> str |
-| `display: str` | str(object='') -> str str(bytes_or_buffer[, encoding[, errors]]) -> str |
-| `has_atspi: bool` | Returns True when the argument is true, False otherwise. The builtins True and False are the only two instances of the class bool. The class bool is a subclass of the class int, and cannot be subclassed. |
-| `has_dogtail: bool` | Returns True when the argument is true, False otherwise. The builtins True and False are the only two instances of the class bool. The class bool is a subclass of the class int, and cannot be subclassed. |
-| `has_evdev: bool` | Returns True when the argument is true, False otherwise. The builtins True and False are the only two instances of the class bool. The class bool is a subclass of the class int, and cannot be subclassed. |
-| `has_libei: bool` | Returns True when the argument is true, False otherwise. The builtins True and False are the only two instances of the class bool. The class bool is a subclass of the class int, and cannot be subclassed. |
-| `has_portal: bool` | Returns True when the argument is true, False otherwise. The builtins True and False are the only two instances of the class bool. The class bool is a subclass of the class int, and cannot be subclassed. |
-| `has_pygobject: bool` | Returns True when the argument is true, False otherwise. The builtins True and False are the only two instances of the class bool. The class bool is a subclass of the class int, and cannot be subclassed. |
-| `has_uinput: bool` | Returns True when the argument is true, False otherwise. The builtins True and False are the only two instances of the class bool. The class bool is a subclass of the class int, and cannot be subclassed. |
-| `has_xlib: bool` | Returns True when the argument is true, False otherwise. The builtins True and False are the only two instances of the class bool. The class bool is a subclass of the class int, and cannot be subclassed. |
-| `has_xtest: bool` | Returns True when the argument is true, False otherwise. The builtins True and False are the only two instances of the class bool. The class bool is a subclass of the class int, and cannot be subclassed. |
+| `desktop: str` |  |
+| `display: str` |  |
+| `has_atspi: bool` |  |
+| `has_dogtail: bool` |  |
+| `has_evdev: bool` |  |
+| `has_libei: bool` |  |
+| `has_portal: bool` |  |
+| `has_pygobject: bool` |  |
+| `has_uinput: bool` |  |
+| `has_xlib: bool` |  |
+| `has_xtest: bool` |  |
 | `preferred_input` | The input backend to try first. |
 | `summary()` | A short human-readable description of this environment. |
-| `uinput_writable: bool` | Returns True when the argument is true, False otherwise. The builtins True and False are the only two instances of the class bool. The class bool is a subclass of the class int, and cannot be subclassed. |
-| `wayland_display: str` | str(object='') -> str str(bytes_or_buffer[, encoding[, errors]]) -> str |
+| `uinput_writable: bool` |  |
+| `wayland_display: str` |  |
 
 ## Capabilities
 
@@ -329,12 +327,12 @@ Wayland prevents by design, which is why those rows are X11 only.
 
 | Tier | Name | Meaning |
 |------|------|---------|
-| T1 | PORTABLE | What it costs to implement a capability on Wayland. |
-| T2 | DIRECT | What it costs to implement a capability on Wayland. |
-| T3 | COMPOSITOR | What it costs to implement a capability on Wayland. |
-| T4 | PRIVILEGED | What it costs to implement a capability on Wayland. |
-| T5 | REWORK | What it costs to implement a capability on Wayland. |
-| T6 | NO_PATH | What it costs to implement a capability on Wayland. |
+| T1 | PORTABLE | No display server involved |
+| T2 | DIRECT | Core Wayland protocol |
+| T3 | COMPOSITOR | Per-desktop backend |
+| T4 | PRIVILEGED | Consent or device access |
+| T5 | REWORK | Goal survives, model does not |
+| T6 | NO_PATH | Deliberately prevented |
 
 ## Roles
 
@@ -379,7 +377,7 @@ WINDOW_ROLES
 | `Capability` | An operation a backend may or may not support. |
 | `CapabilitySet` | The capabilities a backend actually provides. |
 | `Tier` | What it costs to implement a capability on Wayland. |
-| `TIERS` | dict() -> new empty dictionary dict(mapping) -> new dictionary initialized from a mapping object's (key, value) pairs dict(iterable) -> new dictionary initialized as if via: d = {} for k, v in iterable: d[k] = v dict(**kwargs) -> new dictionary initialized with the name=value pairs in the keyword argument list. For example: dict(one=1, two=2) |
+| `TIERS` |  |
 | `Environment` | What the current login actually offers. |
 | `SessionType` | What kind of display server the session is running. |
 | `Compositor` | Compositor family, which decides the window backend. |
