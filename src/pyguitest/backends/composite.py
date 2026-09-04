@@ -111,6 +111,15 @@ class CompositeBackend(GUIBackend):
         self.members = list(members)
         if not self.members:
             raise ValueError("a composite needs at least one member")
+        # One identity scope across every member, so a Window issued by one
+        # is comparable with a Window issued by another -- see
+        # base.identity_scope and Window.__eq__. Needed because a desktop
+        # can serve two window capabilities from two members: on KDE
+        # kdotool lists and KWinEventsBackend watches, both speaking the
+        # same KWin UUIDs, and without this a watched window compared
+        # unequal to the identical listed one.
+        for member in self.members:
+            member._identity_scope = self
         self._capture_failed: dict = {}
         """Members whose capture() has already failed, and why.
 

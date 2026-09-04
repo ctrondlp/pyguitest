@@ -33,6 +33,7 @@ __all__ = [
     "ImageMatch",
     "Element",
     "check_region",
+    "identity_scope",
 ]
 
 _Backend = TypeVar("_Backend", bound="GUIBackend")
@@ -125,6 +126,23 @@ class ImageMatch(NamedTuple):
     score: float
 
 
+def identity_scope(backend: GUIBackend | None) -> object:
+    """What a Window's identity is compared within.
+
+    The backend itself, unless it is a member of a composite -- in which
+    case every member of that composite shares one scope, so a Window
+    issued by any of them is comparable with a Window issued by any other.
+
+    That grouping is what makes a desktop whose window capabilities are
+    split across members work at all: KDE serves WINDOW_LIST from
+    `kdotool` and WINDOW_EVENTS from `KWinEventsBackend`, and the two
+    speak the same KWin UUIDs. `CompositeBackend.__init__` is what sets
+    it; nothing else assigns to `_identity_scope`, and a backend used on
+    its own keeps the strict per-backend rule it always had.
+    """
+    return getattr(backend, "_identity_scope", None) or backend
+
+
 class Window:
     """A toplevel window.
 
@@ -151,7 +169,7 @@ class Window:
         self.pid = pid
 
     def __eq__(self, other: object) -> bool:
-        """Whether both describe the same window of the same backend.
+        """Whether both describe the same window, within one identity scope.
 
         By handle, never by title: two windows can share a title, and a
         title can change while the window stays put -- GNOME Text Editor
@@ -159,10 +177,24 @@ class Window:
         a title comparison answer "different window" about the window you
         are looking at.
 
-        The backend must be the same *object*, not merely an equal one.
-        Two members of one composite can both hand out small integer
-        handles, and `106 == 106` across them would be a confident false
-        match.
+        The *scope* is the backend, or the composite it belongs to where
+        there is one -- see `identity_scope`. Scoping to the bare backend
+        was the original rule, and it broke the moment one desktop served
+        two window capabilities from two different members: on KDE
+        `kdotool` lists windows and `KWinEventsBackend` watches them, both
+        speaking the same KWin UUIDs, and a Window from `wait_for_window()`
+        compared unequal to the identical window from `windows()`. That
+        made `Session.is_window_open` answer False about an open window,
+        `refresh_window` answer None, and `wait_window_close` return True
+        immediately -- a test waiting on a dialog sailing straight past it.
+
+        The cost is the case the old rule was aimed at, and it is worth
+        stating plainly: two members of one composite that hand out
+        unrelated handles from overlapping value spaces (small integers,
+        say) can now false-match on `106 == 106`. That risk is confined to
+        members of the same composite, which is a set the caller composed
+        deliberately; between unrelated backends the strict rule still
+        holds.
 
         What this cannot tell you: whether a handle has gone stale. An X11
         id is reusable (see the class docstring), so a window equal to one
@@ -172,11 +204,20 @@ class Window:
         """
         if not isinstance(other, Window):
             return NotImplemented
-        return self.backend is other.backend and self.handle == other.handle
+        return (
+            identity_scope(self.backend) is identity_scope(other.backend)
+            and self.handle == other.handle
+        )
 
     def __hash__(self) -> int:
-        """Hash on the same pair `__eq__` compares, so sets and dicts work."""
-        return hash((id(self.backend), self.handle))
+        """Hash on the same pair `__eq__` compares, so sets and dicts work.
+
+        A member's scope is set once, when its composite is built, and
+        never changes afterwards -- so a Window's hash is stable for its
+        life. Windows only exist after composition, since composing is
+        what `connect()` does before handing anything back.
+        """
+        return hash((id(identity_scope(self.backend)), self.handle))
 
     def __repr__(self) -> str:
         bits = [repr(self.title)]

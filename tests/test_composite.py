@@ -741,3 +741,111 @@ class TestTierSixDispatch(unittest.TestCase):
         bare = CompositeBackend([Fake("atspi", {Capability.ELEMENT_TREE})])
         with self.assertRaises(CapabilityUnsupported):
             bare.pointer_position()
+
+
+class TestWindowIdentityAcrossMembers(unittest.TestCase):
+    """One composite is one identity scope for Windows.
+
+    Regression, found 2026-09-03 when KDE became the first desktop to
+    serve WINDOW_LIST and WINDOW_EVENTS from *different* members --
+    kdotool lists, KWinEventsBackend watches, both speaking the same KWin
+    UUIDs. Window.__eq__ compared backend identity, so a window from
+    wait_for_window() was unequal to the identical window from windows():
+    is_window_open() said False about an open window, refresh_window()
+    said None, and wait_window_close() returned True immediately, having
+    consumed no events at all.
+    """
+
+    def setUp(self):
+        self.lister = Fake("kdotool", {Capability.WINDOW_LIST}, marker="listed")
+        self.watcher = Fake("kwinevents", {Capability.WINDOW_EVENTS}, marker="watched")
+        self.composite = CompositeBackend([self.lister, self.watcher])
+
+    def _pair(self, handle="{uuid}"):
+        """The same window as each member would hand it out."""
+        return (
+            Window(handle=handle, backend=self.lister, title="Editor"),
+            Window(handle=handle, backend=self.watcher, title="Editor"),
+        )
+
+    def test_members_of_one_composite_share_an_identity_scope(self):
+        listed, watched = self._pair()
+        self.assertEqual(listed, watched)
+
+    def test_equal_windows_hash_together(self):
+        # Otherwise set() and dict() disagree with ==, and Session's own
+        # `any(w == window for w in self.windows())` is the cheap half of
+        # a contract the other half would break.
+        listed, watched = self._pair()
+        self.assertEqual(hash(listed), hash(watched))
+        self.assertEqual(len({listed, watched}), 1)
+
+    def test_different_handles_still_differ_within_one_composite(self):
+        listed, _ = self._pair("{one}")
+        _, watched = self._pair("{two}")
+        self.assertNotEqual(listed, watched)
+
+    def test_backends_outside_any_composite_keep_the_strict_rule(self):
+        # The protection the old rule existed for: two unrelated backends
+        # handing out overlapping handle spaces must not false-match.
+        loose = Fake("other", {Capability.WINDOW_LIST}, marker="loose")
+        self.assertNotEqual(
+            Window(handle=106, backend=loose),
+            Window(handle=106, backend=Fake("another", set())),
+        )
+
+    def test_members_of_different_composites_do_not_match(self):
+        other = CompositeBackend(
+            [Fake("kdotool", {Capability.WINDOW_LIST}), Fake("kwinevents", set())]
+        )
+        self.assertNotEqual(
+            Window(handle=106, backend=self.lister),
+            Window(handle=106, backend=other.members[0]),
+        )
+
+    def test_session_answers_correctly_about_a_watched_window(self):
+        # The end-to-end shape a KDE session actually has, and the four
+        # symptoms measured before the fix: is_window_open False for an
+        # open window, refresh_window None, and wait_window_close True in
+        # 0.00s having consumed no events.
+        from pyguitest import Session
+        from pyguitest.backends.windows import WindowEvent
+        from pyguitest.session import Compositor, Environment, SessionType
+
+        handle = "{1f2e-3d4c}"
+        watcher = self.watcher
+
+        class Watcher(Fake):
+            def window_events(self, timeout=None):
+                self.consumed = getattr(self, "consumed", 0) + 1
+                yield WindowEvent(
+                    change="close",
+                    window=Window(handle=handle, backend=self, title="Editor"),
+                )
+
+        class Lister(Fake):
+            def windows(self):
+                return [Window(handle=handle, backend=self, title="Editor")]
+
+        lister = Lister("kdotool", {Capability.WINDOW_LIST})
+        watcher = Watcher("kwinevents", {Capability.WINDOW_EVENTS})
+        gui = Session(
+            CompositeBackend([lister, watcher]),
+            Environment(SessionType.WAYLAND, Compositor.KWIN),
+        )
+        watched = Window(handle=handle, backend=watcher, title="Editor")
+        self.assertTrue(gui.is_window_open(watched))
+        self.assertIsNotNone(gui.refresh_window(watched))
+        # Matched off the event itself, not off the timeout fallback.
+        self.assertTrue(gui.wait_window_close(gui.windows()[0], timeout=5.0))
+        self.assertEqual(watcher.consumed, 1)
+
+    def test_a_member_used_bare_is_unchanged_until_it_is_composed(self):
+        # Scope is assigned by CompositeBackend.__init__, so a backend
+        # nobody composed compares exactly as it always did.
+        bare = Fake("x11", {Capability.WINDOW_LIST})
+        self.assertEqual(Window(handle=1, backend=bare), Window(handle=1, backend=bare))
+        self.assertNotEqual(
+            Window(handle=1, backend=bare),
+            Window(handle=1, backend=Fake("x11", {Capability.WINDOW_LIST})),
+        )

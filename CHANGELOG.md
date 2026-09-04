@@ -149,6 +149,29 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ### Fixed
 
+- `Window` identity is scoped to the composite rather than to one member,
+  so a window watched through `WINDOW_EVENTS` compares equal to the same
+  window listed through `WINDOW_LIST` when the two come from different
+  members. KDE is the first desktop where they do -- `kdotool` lists and
+  the new `KWinEventsBackend` watches, both speaking the same KWin UUIDs
+  -- and `Window.__eq__` compared backend *identity*, so the two were
+  unequal. `Session.is_window_open()` answered False about an open window,
+  `refresh_window()` answered None, and `wait_window_close()` returned
+  True in 0.00s having consumed no events at all, because it
+  short-circuits on `is_window_open` before ever reaching the event loop:
+  a test waiting for a dialog to close sailed straight past it. In the
+  other direction -- a window from `windows()` -- the close event never
+  matched, so the call waited out its whole timeout and got the right
+  answer only from the fallback, or hung indefinitely with `timeout=None`.
+
+  `CompositeBackend.__init__` now gives every member one shared identity
+  scope, and `Window.__eq__`/`__hash__` compare within it. The tradeoff is
+  the case the strict rule was aimed at, and it is worth stating: two
+  members of one composite handing out unrelated handles from overlapping
+  value spaces can now false-match on `106 == 106`. That is confined to
+  members the caller composed deliberately; between unrelated backends,
+  and for a backend used on its own, the strict rule is unchanged.
+
 - `PortalBackend` never ended its portal session. There was no `close()` at
   all, so the base class's no-op hook ran and the session stayed live in
   xdg-desktop-portal as a standing input grant -- a session outlives the
