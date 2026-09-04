@@ -267,16 +267,37 @@ class Environment:
 
 
 def _classify(env: Mapping[str, str]) -> SessionType:
-    """Decide the session type from the environment variables."""
+    """Decide the session type from the environment variables.
+
+    `WAYLAND_DISPLAY`/`DISPLAY` are trusted over `XDG_SESSION_TYPE` where
+    they disagree, not the other way around -- confirmed live on a
+    machine offering several session types (Plasma X11, Plasma Wayland,
+    GNOME) at login: logind reported `XDG_SESSION_TYPE=wayland` for a
+    session the user had explicitly chosen as `plasmax11`
+    (`DESKTOP_SESSION=plasmax11`), with `DISPLAY=:0` set and
+    `WAYLAND_DISPLAY` entirely absent -- no Wayland socket to connect to
+    at all. The declared type here is set at the seat/greeter level and
+    is not guaranteed to track which session variant was actually picked,
+    while a display socket either exists or does not. An earlier version
+    checked `declared == "wayland"` before ever looking at `display`, so
+    this reported `SessionType.WAYLAND` on a real X11 session -- eight
+    tier-3/tier-6 capabilities only `X11Backend` serves then read `[ no]`
+    on `01_what_can_i_do.py`, because a backend that would have connected
+    fine was never even tried.
+    """
     wayland = env.get("WAYLAND_DISPLAY", "")
     display = env.get("DISPLAY", "")
     declared = env.get("XDG_SESSION_TYPE", "").lower()
 
     if wayland and display:
         return SessionType.XWAYLAND
-    if wayland or declared == "wayland":
+    if wayland:
         return SessionType.WAYLAND
-    if display or declared == "x11":
+    if display:
+        return SessionType.X11
+    if declared == "wayland":
+        return SessionType.WAYLAND
+    if declared == "x11":
         return SessionType.X11
     return SessionType.HEADLESS if not declared else SessionType.UNKNOWN
 

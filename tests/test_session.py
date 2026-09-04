@@ -27,6 +27,26 @@ class TestSessionClassification(unittest.TestCase):
         e = detect(env(DISPLAY=":0", XDG_SESSION_TYPE="x11"))
         self.assertIs(e.session_type, SessionType.X11)
 
+    def test_display_wins_over_a_misdeclared_xdg_session_type(self):
+        # Regression: observed live on a machine offering several session
+        # types at login (Plasma X11, Plasma Wayland, GNOME). Logind
+        # reported XDG_SESSION_TYPE=wayland for a session the user had
+        # explicitly chosen as plasmax11 (DESKTOP_SESSION=plasmax11),
+        # DISPLAY=:0 set, WAYLAND_DISPLAY entirely absent -- no Wayland
+        # socket existed at all. The declared type used to be checked
+        # before DISPLAY, so this reported WAYLAND on a real X11 session,
+        # and every X11Backend-only capability read [ no] as a result.
+        e = detect(
+            env(
+                DISPLAY=":0",
+                XDG_SESSION_TYPE="wayland",
+                DESKTOP_SESSION="plasmax11",
+                XDG_SESSION_DESKTOP="plasmax11",
+                XDG_CURRENT_DESKTOP="KDE",
+            )
+        )
+        self.assertIs(e.session_type, SessionType.X11)
+
     def test_headless(self):
         e = detect(env())
         self.assertIs(e.session_type, SessionType.HEADLESS)
