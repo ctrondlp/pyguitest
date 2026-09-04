@@ -480,8 +480,34 @@ class TestOtherFactoriesDeclineCleanly(unittest.TestCase):
         )
 
     def test_atspi_declines_when_dogtail_is_absent(self):
-        with mock.patch("pyguitest.backends.atspi.available", return_value=False):
+        # Both inputs have to be pinned, not just the first. `available()`
+        # answers False for two different reasons and the factory tells
+        # them apart by asking about the bus -- so leaving that unpatched
+        # made this test read the machine it ran on. It passed on a
+        # desktop and failed on CI, where nothing answers org.a11y.Bus.
+        with (
+            mock.patch("pyguitest.backends.atspi.available", return_value=False),
+            mock.patch(
+                "pyguitest.backends.atspi.a11y_bus_reachable", return_value=True
+            ),
+        ):
             self.assertIsNone(backends._atspi_factory(_env()))
+
+    def test_atspi_raises_the_bus_reason_rather_than_declining(self):
+        # The other half of that split, and the case a plain None would
+        # describe badly: dogtail may well be installed and the backend
+        # perfectly applicable, with only the accessibility bus missing.
+        # A caller who named `atspi` gets that reason instead of the
+        # registry's generic "cannot drive this session".
+        with (
+            mock.patch("pyguitest.backends.atspi.available", return_value=False),
+            mock.patch(
+                "pyguitest.backends.atspi.a11y_bus_reachable", return_value=False
+            ),
+            self.assertRaises(BackendUnavailable) as caught,
+        ):
+            backends._atspi_factory(_env())
+        self.assertIn("org.a11y.Bus", str(caught.exception))
 
     def test_portalcapture_declines_without_pygobject(self):
         with mock.patch(
