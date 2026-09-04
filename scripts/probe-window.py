@@ -25,7 +25,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 
-from gi.repository import Gtk  # noqa: E402 -- must follow require_version
+from gi.repository import Gio, Gtk  # noqa: E402 -- must follow require_version
 
 TITLE = "pyguitest probe window"
 APP_ID = "local.pyguitest.ProbeWindow"
@@ -44,7 +44,12 @@ def main(argv):
     title = TITLE
     if len(argv) >= 2 and argv[0] == "--title":
         title = argv[1]
-    app = Gtk.Application(application_id=APP_ID)
+    # NON_UNIQUE so each invocation is its own process with its own
+    # window. The default single-instance behaviour would hand a second
+    # launch to the first process, which then owns the new window -- and
+    # the window-event checks spawn one of these precisely so they can
+    # kill it and watch the "close" event arrive.
+    app = Gtk.Application(application_id=APP_ID, flags=Gio.ApplicationFlags.NON_UNIQUE)
     app.connect("activate", on_activate, title)
     return app.run([])
 

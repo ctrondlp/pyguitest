@@ -101,6 +101,26 @@ All notable changes to pyguitest are recorded here. The format follows
   fails loudly if the backend battery never ran, the same way the portal
   and ImageMagick jobs fail on a silent skip.
 
+  Its first run settled the question it was built to answer: **a GitHub
+  runner can host `gnome-shell --headless`**, with no GPU, software
+  rendering and no logind session. The compositor came up, the extension
+  loaded and exported its D-Bus object, `GnomeShellBackend` constructed
+  with every window capability, and move, resize, restore and hit-testing
+  all passed there.
+
+- The extension now logs the four rectangles behind a window capture --
+  frame, buffer, texture and the crop it computed. The crop was derived on
+  one machine and disagreed on the second: a CI runner with software
+  rendering produced a 628x429 image for a 600x400 window, an x scale of
+  1.047 against a y scale of 1.073, which is not a scale factor at all.
+  The arithmetic assumes texture-size/buffer-size *is* the device-pixel
+  ratio, and that holds only while `buffer_rect` genuinely includes the
+  shadow margin; where it equals `frame_rect`, the ratio becomes
+  meaningless and the "crop" expands the image instead of trimming it.
+  Which of those is happening is exactly what nothing reported, so this
+  logs it rather than guessing at a fix. The CI job prints the shell log
+  when the run fails.
+
 - `scripts/probe-window.py`: one plain GTK4 window, held open until killed,
   for the window-control checks to point at.
   `validate-gnome-extension.sh` spawns it when nothing is open -- which is

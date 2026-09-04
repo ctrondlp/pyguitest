@@ -408,6 +408,23 @@ class PyguitestService {
         const cropY = Math.round((frame.y - buffer.y) * scaleY);
         const cropW = Math.round(frame.width * scaleX);
         const cropH = Math.round(frame.height * scaleY);
+        // Logged, not merely computed. The crop was derived on one machine
+        // and disagreed on the second: a CI runner with software rendering
+        // produced 628x429 for a 600x400 frame, i.e. scaleX 1.047 vs
+        // scaleY 1.073 -- not a scale factor at all. The arithmetic below
+        // assumes texture-size/buffer-size *is* the device-pixel ratio,
+        // which is only true while buffer_rect really does include the
+        // shadow margin; where buffer_rect equals frame_rect, that ratio
+        // silently becomes garbage and the "crop" expands instead. These
+        // four rects are what distinguishes those cases, and nothing else
+        // reports them.
+        // console.log, not GJS's legacy global log(): this file is an ESM
+        // extension (GNOME 45+), where console is the documented logger
+        // and the global is not something to bet a capture path on.
+        console.log(`pyguitest capture: frame=${frame.width}x${frame.height}` +
+            `+${frame.x}+${frame.y} buffer=${buffer.width}x${buffer.height}` +
+            `+${buffer.x}+${buffer.y} texture=${texture.get_width()}x` +
+            `${texture.get_height()} crop=${cropW}x${cropH}+${cropX}+${cropY}`);
 
         const stream = Gio.MemoryOutputStream.new_resizable();
         try {

@@ -205,7 +205,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            gnome-shell dbus libglib2.0-bin python3-gi gir1.2-gtk-4.0
+            gnome-shell dbus libglib2.0-bin python3-gi gir1.2-gtk-4.0 \
+            gnome-shell-extension-prefs
 
       # Two steps, and the order matters: the shell reads its enabled
       # extensions at startup, so enabling has to happen before
@@ -231,9 +232,16 @@ jobs:
         run: |
           set -o pipefail
           output=$(./scripts/headless-session.sh --timeout 90 \
+              --log shell.log \
               ./scripts/validate-gnome-extension.sh 2>&1) || status=$?
           echo "$output"
+          # The shell's own log, kept via --log rather than discarded, is
+          # where the extension's capture diagnostics land -- the four
+          # rects that explain a crop coming out the wrong size. Only
+          # printed on failure, where it is the whole point.
           if [ -n "${status:-}" ]; then
+            echo "----- gnome-shell log -----"
+            grep -i "pyguitest" shell.log || tail -n 60 shell.log
             exit "$status"
           fi
           if ! echo "$output" | grep -q "move/resize compose correctly"; then

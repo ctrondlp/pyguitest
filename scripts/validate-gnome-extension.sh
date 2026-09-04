@@ -317,10 +317,22 @@ else:
     # whatever this doesn't cover.
     _SPAWN_CANDIDATES = ["gnome-text-editor", "gedit", "gnome-calculator"]
     spawn_app = next((a for a in _SPAWN_CANDIDATES if shutil.which(a)), None)
-    if spawn_app is not None:
+    spawn_argv = [spawn_app] if spawn_app else None
+    if spawn_argv is None:
+        # No editor installed -- a bare CI runner. probe-window.py needs
+        # only GTK4, which is already here (it opened the window the
+        # geometry battery used), and it is NON_UNIQUE, so this is a
+        # second process with a second window rather than the first one
+        # being asked to open another.
+        probe = os.path.join(os.environ.get("PYGUITEST_ROOT", "."),
+                             "scripts", "probe-window.py")
+        if os.path.exists(probe):
+            spawn_app = "probe-window.py"
+            spawn_argv = [sys.executable, probe, "--title", "pyguitest event probe"]
+    if spawn_argv is not None:
         print(f"  {Y} spawning {spawn_app!r} to exercise \"new\" "
               f"deterministically")
-        launcher = subprocess.Popen([spawn_app])
+        launcher = subprocess.Popen(spawn_argv)
 
         # One continuous subscription for the whole spawn-kill-close
         # sequence, rather than a separate window_events() call before and
