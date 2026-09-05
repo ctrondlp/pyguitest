@@ -64,7 +64,7 @@ if TYPE_CHECKING:
     # package, including the ones on a backend that never touches it.
     from .backends.windows import WindowEvent
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "connect",

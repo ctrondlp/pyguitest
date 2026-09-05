@@ -7,6 +7,8 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-09-05
+
 ### Changed
 
 - **`scroll()` now means the same thing on every backend**, which took a
@@ -1133,7 +1135,8 @@ First public release.
 - A `pyguitest` command-line entry point.
 - PEP 561 type information (`py.typed`); no hard runtime dependencies.
 
-[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/ctrondlp/pyguitest/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ctrondlp/pyguitest/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/ctrondlp/pyguitest/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/ctrondlp/pyguitest/tree/v0.1.0
