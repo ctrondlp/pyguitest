@@ -28,11 +28,20 @@ class _FakeRoot:
     otherwise a module-level singleton shared across every test in this file.
     """
 
+    # The root window is by definition the origin of screen coordinates, which
+    # is what makes it the right window to translate *into*.
+    _root_pos = (0, 0)
+
     def __init__(self):
         self.sent_events = []
 
     def send_event(self, event, event_mask=0):
         self.sent_events.append((event, event_mask))
+
+    def translate_coords(self, src, x, y):
+        """(x, y) in `src`'s space, expressed in root (screen) coordinates."""
+        sx, sy = src._root_pos
+        return types.SimpleNamespace(x=sx + x, y=sy + y)
 
 
 _ROOT = _FakeRoot()
@@ -82,9 +91,19 @@ class FakeWindow:
         x, y, w, h = self._geom
         return types.SimpleNamespace(x=x, y=y, width=w, height=h, root=_ROOT)
 
-    def translate_coords(self, dst, x, y):
+    def translate_coords(self, src, x, y):
+        """Real semantics: (x, y) in `src`'s space, expressed in this window's.
+
+        Modelled the way X actually defines it, not the way the caller wished
+        it worked. The earlier fake took the point to be relative to the window
+        it was *called on*, which is the same misreading the backend had, so a
+        geometry() that returned negated coordinates matched a fake that
+        returned negated coordinates and the pair of them agreed all the way
+        to a green suite.
+        """
+        sx, sy = src._root_pos
         rx, ry = self._root_pos
-        return types.SimpleNamespace(x=rx + x, y=ry + y)
+        return types.SimpleNamespace(x=sx + x - rx, y=sy + y - ry)
 
     def configure(self, **kw):
         self.configured.update(kw)
@@ -975,3 +994,59 @@ class TestCapture(X11TestCase):
         self.gui.environment = types.SimpleNamespace(session_type=SessionType.XWAYLAND)
         with self.assertRaises(CapabilityUnsupported):
             self.gui.capture(region=(0, 0, 10, 10))
+
+
+class TestGeometryDirection(X11TestCase):
+    """geometry() translated through the root in the wrong direction.
+
+    `w.translate_coords(src, x, y)` sends `src_wid=src, dst_wid=w`, so asking
+    the *handle* to translate the root's origin returns where the root is in
+    the window's coordinates -- the negation of the position wanted. Invisible
+    for as long as every window under test sat at (0, 0), and caught on a bare
+    Xvfb with a second window at (600, 400), which read back as (-600, -400).
+    """
+
+    def test_a_window_away_from_the_origin_reads_back_where_it_is(self):
+        away = FakeWindow("Away", geom=(0, 0, 320, 200), root_pos=(600, 400))
+        self.assertEqual(self.gui.geometry(away), (600, 400, 320, 200))
+
+    def test_the_origin_is_not_negated(self):
+        away = FakeWindow("Away", geom=(0, 0, 10, 10), root_pos=(600, 400))
+        x, y, _, _ = self.gui.geometry(away)
+        self.assertGreater(x, 0)
+        self.assertGreater(y, 0)
+
+    def test_a_window_at_the_origin_is_where_the_bug_hid(self):
+        # Negation is invisible at (0, 0), which is why every existing test
+        # agreed with a backend that had this backwards.
+        origin = FakeWindow("Origin", geom=(0, 0, 310, 263), root_pos=(0, 0))
+        self.assertEqual(self.gui.geometry(origin), (0, 0, 310, 263))
+
+
+class TestDisplayNameReachesTheBackend(unittest.TestCase):
+    """`backend_options={"display_name": ...}` had nowhere to go.
+
+    `X11Backend.__init__` has always taken `display_name`, but the factory
+    `connect()` builds it through accepted no options, so asking for a display
+    by argument raised TypeError and `$DISPLAY` was the only route.
+    """
+
+    def test_the_factory_forwards_a_display_name(self):
+        patcher = install_fake_xlib()
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        from pyguitest.backends import _x11_factory
+        from pyguitest.session import Compositor, Environment, SessionType
+
+        environment = Environment(SessionType.X11, Compositor.NONE)
+        self.assertIsNotNone(_x11_factory(environment, display_name=":99"))
+
+    def test_the_factory_still_builds_with_no_options(self):
+        patcher = install_fake_xlib()
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        from pyguitest.backends import _x11_factory
+        from pyguitest.session import Compositor, Environment, SessionType
+
+        environment = Environment(SessionType.X11, Compositor.NONE)
+        self.assertIsNotNone(_x11_factory(environment))

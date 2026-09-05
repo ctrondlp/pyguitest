@@ -25,6 +25,16 @@ class TestDistroDetection(unittest.TestCase):
         self.assertEqual(detect_distro("ID=fedora\nVERSION_ID=44"), "fedora")
         self.assertEqual(detect_distro("ID=arch"), "arch")
 
+    def test_the_bsds_are_recognised(self):
+        # Verified against a live GhostBSD 26.1 box: it sets ID=ghostbsd and
+        # carries no ID_LIKE line at all, so it needs its own entry rather
+        # than resolving onto FreeBSD the way a Linux derivative would.
+        self.assertEqual(detect_distro('ID=freebsd\nVERSION_ID="15.0"'), "freebsd")
+        self.assertEqual(
+            detect_distro('NAME="GhostBSD"\nID="ghostbsd"\nVERSION_ID="26.1"'),
+            "freebsd",
+        )
+
     def test_id_like_is_used_when_the_id_is_unknown(self):
         # Derivatives name their parent, so Mint resolves through Ubuntu.
         self.assertEqual(
@@ -274,15 +284,20 @@ class TestInputAdvice(unittest.TestCase):
     """
 
     def _input_only(self, **overrides):
-        return environment(
-            has_atspi=True,
-            has_pygobject=True,
-            has_dogtail=True,
-            capture_tools=("grim",),
-            input_tools=(),
-            uinput_writable=False,
-            **overrides,
-        )
+        base = {
+            "has_atspi": True,
+            "has_pygobject": True,
+            "has_dogtail": True,
+            "capture_tools": ("grim",),
+            "input_tools": (),
+            "uinput_writable": False,
+            # Pinned rather than inherited from the host: detect() reads
+            # this off the real machine, so leaving it would make the
+            # assertions below depend on whether the box running the suite
+            # happens to have an 'input' group. FreeBSD does not.
+            "has_input_group": True,
+        }
+        return environment(**{**base, **overrides})
 
     def test_recommends_installable_packages_not_a_source_build(self):
         hints = list(hints_for(self._input_only(has_libei=True), distro="fedora"))
@@ -298,6 +313,23 @@ class TestInputAdvice(unittest.TestCase):
         self.assertIn("membership of the 'input' group", components)
         group_hint = next(h for h in hints if "input' group" in h.component)
         self.assertIn("usermod -aG input", group_hint.command)
+
+    def test_no_input_group_means_no_advice_to_join_one(self):
+        # FreeBSD has /dev/uinput through cuse, owned root:wheel 0600, and
+        # no 'input' group -- so the old advice named a group that was not
+        # there, then followed it with a udev rule for a system with no udev.
+        hints = list(
+            hints_for(self._input_only(has_input_group=False), distro="freebsd")
+        )
+        components = [h.component for h in hints]
+        self.assertNotIn("membership of the 'input' group", components)
+        # The injection advice itself still stands; only the group step goes.
+        self.assertIn("input injection", components)
+
+    def test_freebsd_is_given_pkg_names_not_generic_advice(self):
+        hints = list(hints_for(self._input_only(), distro="freebsd"))
+        commands = " ".join(h.command or "" for h in hints)
+        self.assertIn("sudo pkg install", commands)
 
     def test_wdotool_is_mentioned_only_as_a_caveat(self):
         # It is the sole keymap-safe option on GNOME, but no distro ships it,
@@ -366,7 +398,12 @@ class TestClipboardAdvice(unittest.TestCase):
         return environment(**{**base, **overrides})
 
     def _hint(self, env):
-        return next(h for h in hints_for(env) if h.component == "the clipboard")
+        # distro is pinned for the reason _hints pins it: left unset,
+        # hints_for reads the *host's* /etc/os-release, and `command` is
+        # None for any distro _FAMILIES does not know -- so these tests
+        # passed on Fedora and errored on FreeBSD, Alpine or NixOS.
+        hints = hints_for(env, distro="fedora")
+        return next(h for h in hints if h.component == "the clipboard")
 
     def test_gnome_is_pointed_at_the_portal_not_at_a_package(self):
         # Mutter implements no wlr-data-control, so there is nothing to
@@ -487,7 +524,15 @@ class TestToolRecommendationsAreKeyedByCompositor(unittest.TestCase):
         # ydotool genuinely is the only packaged option there.
         hints = list(
             hints_for(
-                environment(capture_tools=(), input_tools=(), uinput_writable=False),
+                environment(
+                    capture_tools=(),
+                    input_tools=(),
+                    uinput_writable=False,
+                    # Pinned: environment() builds on a real detect(), so
+                    # without this the group assertion below depends on
+                    # whether the host has an 'input' group. FreeBSD does not.
+                    has_input_group=True,
+                ),
                 distro="fedora",
             )
         )

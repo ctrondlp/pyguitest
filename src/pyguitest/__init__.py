@@ -170,8 +170,8 @@ _PS_TIMEOUT = 5
 """Seconds to allow `ps`. Bounded because it backs a polling loop."""
 
 
-def _ps(*argv: str) -> str | None:
-    """`ps` output, or None if it could not be run.
+def _ps(*argv: str) -> subprocess.CompletedProcess[str] | None:
+    """Run `ps`, returning its result, or None if it could not be run.
 
     The portable half of process inspection. /proc is a Linux shape, not a
     POSIX one: FreeBSD does not mount it by default and its native procfs
@@ -180,14 +180,19 @@ def _ps(*argv: str) -> str | None:
     tools.py and ADR-001 -- adapt a maintained CLI rather than take a
     dependency -- and BSD-style syntax works on procps too, so one call
     covers Linux, FreeBSD and macOS.
+
+    The whole result is returned, not just stdout on success, because the
+    exit status carries an answer the caller needs: `ps -p` exits *1* with
+    no rows for a pid that has gone, on procps and FreeBSD alike, and that
+    is a different fact from "ps is unusable here". Collapsing the two into
+    None is what made wait_for_idle raise for an exited process.
     """
     try:
-        result = subprocess.run(
+        return subprocess.run(
             ["ps", *argv], capture_output=True, text=True, timeout=_PS_TIMEOUT
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
-    return result.stdout if result.returncode == 0 else None
 
 
 def _have_proc() -> bool:
@@ -229,21 +234,27 @@ def _process_cmdline(pid: int) -> str:
 def _process_table() -> dict[int, str]:
     """Every visible process, as pid -> command line.
 
-    From /proc where it works, `ps axo pid=,args=` otherwise -- one call
-    for the enumeration and the command lines together. Raises
+    From /proc where it works, `ps axo pid= -o args=` otherwise -- one
+    call for the enumeration and the command lines together. Raises
     PyGUITestError when neither is available, rather than reporting an
     empty process table, which would read as "your process is not running".
+
+    The two separate `-o` flags are not a style choice. FreeBSD's ps takes
+    everything after `=` as the header for the *last* keyword in that
+    argument, so the tidier `-o pid=,args=` asks it for a single pid column
+    headed ",args=" and hands back empty command lines. Verified on FreeBSD
+    15, where it made wait_for_process match nothing at all.
     """
     if _have_proc():
         return {pid: _process_cmdline(pid) for pid in _proc_pids()}
-    output = _ps("axo", "pid=,args=")
-    if output is None:
+    result = _ps("axo", "pid=", "-o", "args=")
+    if result is None or result.returncode != 0:
         raise PyGUITestError(
             "cannot list processes: no readable /proc and no usable `ps`. "
             "wait_for_process needs one of the two."
         )
     table = {}
-    for line in output.splitlines():
+    for line in result.stdout.splitlines():
         pid, _, args = line.strip().partition(" ")
         if pid.isdigit():
             table[int(pid)] = args.strip()
@@ -298,14 +309,29 @@ def _process_cpu_seconds(pid: int) -> tuple[float, float] | None:
         utime, stime = int(fields[11]), int(fields[12])  # fields 14/15, 1-indexed
         ticks = os.sysconf("SC_CLK_TCK")
         return (utime + stime) / ticks, 1 / ticks
-    output = _ps("-p", str(pid), "-o", "time=")
-    if output is None:
+    result = _ps("-p", str(pid), "-o", "time=")
+    if result is None:
         raise PyGUITestError(
             f"cannot read CPU time for {pid}: no readable /proc and no usable `ps`"
         )
-    if not output.strip():
-        return None  # ps exits 0 with no rows for a pid that is gone
-    return _parse_cpu_time(output)
+    if not result.stdout.strip():
+        # `ps -p` prints no row for a pid that is gone, exiting 1 as it does
+        # so. But it prints no row for arguments it rejects either, and
+        # answering "gone" to that would tell wait_for_idle a running
+        # process is idle -- the one way this package must not fail.
+        # os.kill(pid, 0) settles which case it is, needing neither /proc
+        # nor ps: it raises only when the pid genuinely does not exist.
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return None
+        except PermissionError:
+            pass  # Alive, merely somebody else's.
+        raise PyGUITestError(
+            f"cannot read CPU time for {pid}: the process is running, but "
+            "`ps` returned no row for it"
+        )
+    return _parse_cpu_time(result.stdout)
 
 
 class Session:
@@ -475,6 +501,29 @@ class Session:
         """Press and release a mouse button. Replaces ClickMouseButton."""
         self.press_button(button)
         self.release_button(button)
+
+    def double_click(self, button: int = 1) -> None:
+        """Press and release a mouse button twice, as one double-click.
+
+        Whether a pair of clicks *is* a double-click is the toolkit's
+        judgement, not this package's: GTK and Qt each measure the gap
+        between the two presses against a threshold that defaults to 400ms
+        and is settable per desktop.
+
+        So the four events go out back-to-back, deliberately skipping the
+        `event_delay` pause that calling click() twice would take between
+        them. At an `event_delay` of 0.2s that pause alone puts 400ms
+        between the presses and delivers two single clicks -- a test that
+        then passes against a widget that never saw a double-click, which
+        is the failure this package works hardest to avoid. A double-click
+        is one user action, so it takes one `event_delay` at the end, the
+        same as every other action here.
+        """
+        self.backend.press_button(button)
+        self.backend.release_button(button)
+        self.backend.press_button(button)
+        self.backend.release_button(button)
+        self._after_event()
 
     def scroll(self, dx: int = 0, dy: int = 0) -> None:
         """Scroll by whole wheel detents: `dy` positive is up, `dx` right.
@@ -995,11 +1044,12 @@ class Session:
         Session.find_window matches window titles. Returns the matched
         process's pid, or None on timeout.
 
-        Reads /proc where it is available and `ps axo pid=,args=` otherwise,
-        so this works on FreeBSD (no /proc unless linprocfs is mounted) and
-        inside a container that hides it. Raises PyGUITestError if neither
-        route works, rather than reporting an empty process table -- which
-        would look exactly like "your process is not running".
+        Reads /proc where it is available and `ps axo pid= -o args=`
+        otherwise, so this works on FreeBSD (no /proc unless linprocfs is
+        mounted) and inside a container that hides it. Raises
+        PyGUITestError if neither route works, rather than reporting an
+        empty process table -- which would look exactly like "your process
+        is not running".
         """
         pattern = re.compile(name) if isinstance(name, str) else name
         deadline = None if timeout is None else time.monotonic() + timeout

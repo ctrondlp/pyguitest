@@ -56,6 +56,21 @@ _PACKAGES = {
         "input": "ydotool python3-evdev",
         "imagemagick": "ImageMagick",
     },
+    # Names verified against a live FreeBSD 15 pkg catalogue, not guessed.
+    # The `py312-` prefix is not decoration: FreeBSD ports build Python
+    # modules per interpreter version and only for the ports tree's default
+    # flavour, so this tracks that default and will need moving when it
+    # does. Someone running a non-default python3 -- GhostBSD 26.1 ships
+    # 3.11 against a 3.12 ports default -- installs a module their
+    # interpreter cannot import, which is why `doctor` reports what it can
+    # actually load rather than what is installed.
+    "freebsd": {
+        "install": "sudo pkg install",
+        "atspi": "py312-pygobject py312-atspi at-spi2-core",
+        "capture": "gnome-screenshot",
+        "input": "ydotool py312-evdev",
+        "imagemagick": "ImageMagick7",
+    },
 }
 
 # The screenshot tool that actually works on a given compositor, which the
@@ -88,6 +103,11 @@ _FAMILIES = {
     "manjaro": "arch",
     "opensuse": "suse",
     "suse": "suse",
+    # The BSDs ship /etc/os-release too. GhostBSD needs its own entry
+    # rather than riding ID_LIKE: it sets ID=ghostbsd and no ID_LIKE line
+    # at all, so nothing maps it onto FreeBSD by itself.
+    "freebsd": "freebsd",
+    "ghostbsd": "freebsd",
 }
 
 
@@ -410,7 +430,16 @@ def hints_for(
         # when the device is already writable: what's missing there is
         # python-evdev, not group membership, and telling someone to
         # usermod/newgrp for a permission they already have is a dead end.
-        if ydotool_is_last_resort and not environment.uinput_writable:
+        # ...and only where there is an 'input' group to join. FreeBSD has
+        # /dev/uinput (root:wheel 0600) and no such group, so this used to
+        # tell a reader to join a group that does not exist, then follow it
+        # with a udev rule for a system that has no udev. Read off the
+        # environment rather than probed here, because hints_for is pure.
+        if (
+            ydotool_is_last_resort
+            and not environment.uinput_writable
+            and environment.has_input_group
+        ):
             yield Hint(
                 "membership of the 'input' group",
                 "/dev/uinput is root-only by default. Groups are set at "

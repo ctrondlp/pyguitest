@@ -7,6 +7,81 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`double_click()`**, alongside `click()`. Whether a pair of clicks *is* a
+  double-click is the toolkit's judgement -- GTK and Qt each measure the gap
+  between the two presses against a threshold defaulting to 400ms -- so the
+  four events go out back-to-back, skipping the `event_delay` pause that
+  calling `click()` twice would take between them. At an `event_delay` of
+  0.2s that pause alone puts exactly 400ms between the presses and delivers
+  two single clicks: a test passing against a widget that never saw a
+  double-click. A double-click is one user action and takes one
+  `event_delay`, at the end, like every other action.
+
+- **FreeBSD and GhostBSD in the distribution table**, so `doctor` names `pkg`
+  packages instead of falling back to bare component names. GhostBSD needs
+  its own `_FAMILIES` entry rather than riding `ID_LIKE`: it sets
+  `ID=ghostbsd` and carries no `ID_LIKE` line at all. Names were read off a
+  live FreeBSD 15 catalogue, not guessed -- note that the `py312-` prefix
+  tracks the ports tree's default Python, not the interpreter you run, and
+  [docs/install.md](docs/install.md) says so.
+
+### Fixed
+
+- **`geometry()` returned the negation of a window's position on X11**, and
+  with it `window_at()` was blind to every window not at the origin.
+  `w.translate_coords(src, x, y)` sends `src_wid=src, dst_wid=w`, so calling
+  it on the *handle* with the root as source asks where the root's origin
+  sits in the window's coordinates -- `(-x, -y)`. It has to be called on the
+  root with the handle as source.
+
+  This survived because the test fake shared the backend's misreading, so a
+  negated answer matched a negated expectation all the way to a green suite,
+  and because a negation is invisible at `(0, 0)`, where the windows under
+  test sat. It is also, in all likelihood, the real cause of what this
+  backend recorded as a Mutter/XWayland placement quirk -- "geometry() can
+  return a position wildly off from where the window is rendered, while
+  move_window still moves it correctly". Negated coordinates are wildly off,
+  only the read-back is affected, and it reproduces on a bare Xvfb with no
+  compositor in sight: a second window at `(600, 400)` read back as
+  `(-600, -400)`. That comment is gone.
+
+- **`wait_for_process()` matched nothing on FreeBSD.** The `ps` fallback
+  asked for `ps axo pid=,args=`, and FreeBSD's `ps` takes everything after
+  `=` as the header for the *last* keyword in that argument -- so it
+  returned a single pid column headed `,args=` and empty command lines.
+  procps is the lenient one here; FreeBSD follows the documented BSD rule.
+  Now two separate `-o` flags, which both implementations read alike.
+  Confirmed on FreeBSD 15: 114 of 114 command lines were empty before, none
+  after.
+
+- **`wait_for_idle()` raised for a process that had already exited**,
+  wherever `/proc` cannot be read -- FreeBSD without linprocfs, or a
+  container with `hidepid=2`. `ps -p <gone>` exits *1* with no rows on
+  procps and FreeBSD alike, and `_ps` folded that into the same `None` it
+  used for "ps is unusable", so the "already exited counts as idle" contract
+  in the method's own docstring never held on that path. An empty result is
+  now disambiguated with `os.kill(pid, 0)`: genuinely gone reads as idle,
+  while a live process whose CPU time could not be read still raises --
+  deliberately not keyed on the exit status alone, since `ps` also prints no
+  rows for arguments it rejects, and calling that "gone" would report a busy
+  process as idle.
+
+- **The `input` group advice named a group that need not exist.** `doctor`
+  told any user with an unwritable `/dev/uinput` to join the `input` group
+  and follow it with a udev rule. FreeBSD has `/dev/uinput` through cuse,
+  owned `root:wheel` 0600, no `input` group, and no udev. The group step now
+  appears only where the group does, and the environment note says what is
+  actually true otherwise. Read off the machine rather than switched on the
+  platform -- a minimal container has the same gap.
+
+- **`connect(backend="x11", backend_options={"display_name": ":99"})` raised
+  `TypeError`.** `X11Backend` has always accepted `display_name`, but the
+  factory that builds it took no options, leaving `$DISPLAY` as the only way
+  to choose a display -- which matters to anything driving a nested or
+  virtual X server rather than the ambient one.
+
 ## [0.3.0] — 2026-09-05
 
 ### Changed

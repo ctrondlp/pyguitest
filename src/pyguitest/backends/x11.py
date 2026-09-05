@@ -470,25 +470,28 @@ class X11Backend(GUIBackend):
         translated to the root window here rather than trusting get_geometry
         directly.
 
-        Observed live on GNOME/Mutter (XWayland): this can still return a
-        position wildly off from where the window is actually rendered, even
-        though the root window's own geometry and the client's offset within
-        its frame both check out as sane on their own. The likely, but not
-        independently confirmed, explanation is that Mutter's XWayland
-        integration doesn't keep the decoration frame's X11-visible position
-        synced to its real Wayland-compositor placement -- move_window still
-        visibly moves the window correctly in that case; only the read-back
-        through geometry() disagrees with reality. Not reproduced on other
-        window managers, and not something a different X11 request from this
-        backend would fix if the underlying frame position X11 reports really
-        is stale.
+        The direction of that translation is the whole of it, and it used to
+        be backwards. `w.translate_coords(src, x, y)` in python-xlib sends
+        `src_wid=src, dst_wid=w`, so calling it on the *handle* with the root
+        as source asks where the root's origin is in the window's coordinates
+        -- which is (-x, -y), the negation of the wanted answer. It has to be
+        called on the root with the handle as source.
+
+        That was invisible for as long as every window checked sat at (0, 0),
+        where a negation cannot be seen. It is also, in all likelihood, the
+        real cause of what was recorded here as a Mutter/XWayland quirk:
+        "geometry() can return a position wildly off from where the window is
+        actually rendered, while move_window still moves it correctly".
+        Negated coordinates are wildly off, only the read-back is affected,
+        and it reproduces with no compositor in sight -- caught on a bare Xvfb
+        with two windows, one at the origin and one at (600, 400), where the
+        second read back as (-600, -400).
         """
         self.require(Capability.WINDOW_GEOMETRY)
         handle = self._handle(window)
         try:
             geom = handle.get_geometry()
-            root = geom.root
-            origin = handle.translate_coords(root, 0, 0)
+            origin = geom.root.translate_coords(handle, 0, 0)
         except Exception as exc:
             raise WindowNotFound(f"window is gone: {exc}") from exc
         return (origin.x, origin.y, geom.width, geom.height)

@@ -146,17 +146,24 @@ looks wrong.
 
 <!-- generated from pyguitest.hints._PACKAGES; tests/test_docs.py pins it -->
 
-| | Fedora | Debian / Ubuntu | Arch | openSUSE |
-|---|---|---|---|---|
-| *install with* | `sudo dnf install` | `sudo apt install` | `sudo pacman -S` | `sudo zypper install` |
-| Elements (AT-SPI) | `python3-gobject python3-pyatspi at-spi2-core` | `python3-gi python3-pyatspi gir1.2-atspi-2.0` | `python-gobject python-atspi at-spi2-core` | `python3-gobject python3-atspi at-spi2-core` |
-| Screenshots | `gnome-screenshot` | `gnome-screenshot` | `grim` | `gnome-screenshot` |
-| Input injection | `ydotool python3-evdev` | `ydotool python3-evdev` | `ydotool python-evdev` | `ydotool python3-evdev` |
-| Image search | `ImageMagick` | `imagemagick` | `imagemagick` | `ImageMagick` |
+| | Fedora | Debian / Ubuntu | Arch | openSUSE | FreeBSD |
+|---|---|---|---|---|---|
+| *install with* | `sudo dnf install` | `sudo apt install` | `sudo pacman -S` | `sudo zypper install` | `sudo pkg install` |
+| Elements (AT-SPI) | `python3-gobject python3-pyatspi at-spi2-core` | `python3-gi python3-pyatspi gir1.2-atspi-2.0` | `python-gobject python-atspi at-spi2-core` | `python3-gobject python3-atspi at-spi2-core` | `py312-pygobject py312-atspi at-spi2-core` |
+| Screenshots | `gnome-screenshot` | `gnome-screenshot` | `grim` | `gnome-screenshot` | `gnome-screenshot` |
+| Input injection | `ydotool python3-evdev` | `ydotool python3-evdev` | `ydotool python-evdev` | `ydotool python3-evdev` | `ydotool py312-evdev` |
+| Image search | `ImageMagick` | `imagemagick` | `imagemagick` | `ImageMagick` | `ImageMagick7` |
 
 An unrecognised distribution still gets the component names from `doctor`,
 just without a command — the package names are the only part that cannot be
 guessed.
+
+FreeBSD's `py312-` prefix tracks the ports tree's default Python rather than
+the interpreter you happen to run: ports build these modules for one version
+only, so on a system whose `python3` is something else — GhostBSD 26.1 ships
+3.11 against a 3.12 ports default — the package installs and the import still
+fails. `pyguitest doctor` reports what it can actually load, which is the
+reason to prefer it over this table.
 
 `libei` for the `eiinput` backend is not in that table because it is not
 part of any automatic path; see [input.md](input.md#eiinput-keymap-safe-input-over-libei).

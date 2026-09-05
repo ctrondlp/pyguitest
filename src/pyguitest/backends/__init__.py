@@ -524,13 +524,21 @@ register(_kwinevents_factory, "kwinevents", priority=57)
 register(_image_factory, "imagesearch", priority=55)
 
 
-def _x11_factory(environment):
+def _x11_factory(environment, **options):
     """X11: the only backend serving tier-6, and the only route to the BSDs.
 
     Registered below the Wayland-native backends so a Wayland session prefers
     them, but above null so an X11 or XWayland session always gets it.
     Construction can still raise `BackendUnavailable` -- no display to
     connect to, say -- see `register`'s docstring on what happens to that.
+
+    `display_name` is forwarded because `X11Backend` has always accepted it
+    and nothing could reach it: `connect(backend="x11",
+    backend_options={"display_name": ":99"})` raised TypeError here, leaving
+    `$DISPLAY` as the only way to choose a display. That matters to anything
+    driving a server other than the ambient one -- a nested or virtual X
+    server, or a recorder capturing one display while the session runs on
+    another.
     """
     from ..session import SessionType
     from . import x11 as _x11
@@ -539,7 +547,7 @@ def _x11_factory(environment):
         return None
     if not _x11.available():
         return None
-    return _x11.X11Backend(environment)
+    return _x11.X11Backend(environment, display_name=options.get("display_name"))
 
 
 register(_x11_factory, "x11", priority=40)

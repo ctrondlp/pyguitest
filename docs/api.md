@@ -148,6 +148,12 @@ Raise on failure with a message naming what was actually found, for use directly
 | `assert_no_missing_accessible_names(within: Element \| None = None, roles: Sequence[str] \| None = None)` | `ELEMENT_TREE` |  | Raise AccessibilityViolation for any unnamed control. |
 | `assert_no_duplicate_accessible_names(within: Element \| None = None, roles: Sequence[str] \| None = None)` | `ELEMENT_TREE` |  | Raise AccessibilityViolation if one role reuses a name. |
 
+## Other
+
+| Call | Needs | | What it does |
+|------|-------|---|--------------|
+| `double_click(button: int = 1)` | `POINTER_BUTTON` |  | Press and release a mouse button twice, as one double-click. |
+
 ## Forwarded to the backend
 
 `Session` writes out the interface above and forwards anything else
@@ -273,6 +279,7 @@ What the current login actually offers.
 | `has_atspi: bool` |  |
 | `has_dogtail: bool` |  |
 | `has_evdev: bool` |  |
+| `has_input_group: bool` |  |
 | `has_libei: bool` |  |
 | `has_portal: bool` |  |
 | `has_pygobject: bool` |  |

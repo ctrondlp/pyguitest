@@ -324,11 +324,11 @@ and `drag()` wraps a press and a release around one:
 
 ```python
 gui.move_mouse(120, 400)
-gui.glide(600, 400, duration=0.3)        # ~36 events over 300ms
+gui.glide(600, 400, duration=0.3)  # ~36 events over 300ms
 
-gui.drag((120, 400), (600, 400))         # press, glide, release
+gui.drag((120, 400), (600, 400))  # press, glide, release
 
-gui.glide(600, 400, via=[(300, 120)])    # routed over the toolbar on the way
+gui.glide(600, 400, via=[(300, 120)])  # routed over the toolbar on the way
 ```
 
 `duration` is wall-clock seconds and `rate` the points per second, so the two

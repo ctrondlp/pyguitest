@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import time
@@ -767,6 +768,62 @@ class TestCpuTimeParsing(unittest.TestCase):
         self.assertEqual(seconds, 2 * 86400 + 3 * 3600)
 
 
+def _ps_result(stdout, returncode=0):
+    """Build a subprocess result standing in for a real `ps` run."""
+    return subprocess.CompletedProcess(["ps"], returncode, stdout, "")
+
+
+class _RecordingButtons(GUIBackend):
+    """A backend that records only the button events sent to it."""
+
+    name = "buttons"
+
+    def __init__(self):
+        self.events = []
+
+    @property
+    def capabilities(self):
+        return CapabilitySet({Capability.POINTER_BUTTON})
+
+    def press_button(self, button):
+        self.events.append(("press", button))
+
+    def release_button(self, button):
+        self.events.append(("release", button))
+
+
+class TestDoubleClick(unittest.TestCase):
+    """double_click sends four button events with no pause between them."""
+
+    def _session(self, event_delay=0.0):
+        backend = _RecordingButtons()
+        gui = pyguitest.Session(backend, pyguitest.detect(), event_delay=event_delay)
+        return gui, backend
+
+    def test_it_sends_press_and_release_twice(self):
+        gui, backend = self._session()
+        gui.double_click()
+        self.assertEqual(
+            backend.events,
+            [("press", 1), ("release", 1), ("press", 1), ("release", 1)],
+        )
+
+    def test_it_passes_the_button_through(self):
+        gui, backend = self._session()
+        gui.double_click(button=3)
+        self.assertEqual([button for _, button in backend.events], [3, 3, 3, 3])
+
+    def test_event_delay_does_not_separate_the_two_clicks(self):
+        # Calling click() twice would pause four times, leaving 2 x
+        # event_delay between the presses -- 400ms at the common 0.2s
+        # setting, which is exactly the GTK/Qt double-click threshold. One
+        # pause, and it comes after the pair.
+        gui, _ = self._session(event_delay=0.05)
+        with mock.patch("pyguitest.time.sleep") as slept:
+            gui.double_click()
+        self.assertEqual(slept.call_count, 1)
+
+
 class TestProcessTableFallsBackToPs(unittest.TestCase):
     """FreeBSD has no /proc unless linprocfs is mounted; ps is the way in."""
 
@@ -775,12 +832,15 @@ class TestProcessTableFallsBackToPs(unittest.TestCase):
             mock.patch("pyguitest._have_proc", return_value=False),
             mock.patch(
                 "pyguitest._ps",
-                return_value="  1 /sbin/init\n 42 sleep 30\n",
+                return_value=_ps_result("  1 /sbin/init\n 42 sleep 30\n"),
             ) as ran,
         ):
             table = pyguitest._process_table()
         self.assertEqual(table[42], "sleep 30")
-        self.assertEqual(ran.call_args.args, ("axo", "pid=,args="))
+        # Two `-o` flags, not "pid=,args=": FreeBSD's ps reads everything
+        # after `=` as the header for the last keyword, collapsing that to
+        # one pid column with empty command lines.
+        self.assertEqual(ran.call_args.args, ("axo", "pid=", "-o", "args="))
 
     def test_no_proc_and_no_ps_raises_rather_than_reporting_nothing(self):
         # An empty table would read as "your process is not running", which
@@ -803,6 +863,46 @@ class TestProcHelpers(unittest.TestCase):
 
     def test_process_cpu_seconds_is_none_for_a_pid_that_does_not_exist(self):
         self.assertIsNone(pyguitest._process_cpu_seconds(2**30))
+
+    def test_cpu_seconds_is_none_when_ps_shows_no_row_and_the_pid_is_gone(self):
+        # `ps -p` exits 1 with no rows for a pid that has gone -- on procps
+        # and FreeBSD alike. _ps used to fold that into None, so this
+        # reached wait_for_idle as an exception rather than as "idle",
+        # against the contract its own docstring states.
+        with (
+            mock.patch("pyguitest._have_proc", return_value=False),
+            mock.patch("pyguitest._ps", return_value=_ps_result("", 1)),
+        ):
+            self.assertIsNone(pyguitest._process_cpu_seconds(2**30))
+
+    def test_cpu_seconds_raises_when_ps_shows_no_row_for_a_live_pid(self):
+        # The same empty output, but the process is running -- so it is `ps`
+        # that failed, and reporting "gone" would let wait_for_idle call a
+        # busy process idle: the dishonest pass this module exists to avoid.
+        with (
+            mock.patch("pyguitest._have_proc", return_value=False),
+            mock.patch("pyguitest._ps", return_value=_ps_result("", 1)),
+        ):
+            with self.assertRaises(pyguitest.PyGUITestError):
+                pyguitest._process_cpu_seconds(os.getpid())
+
+    def test_cpu_seconds_raises_when_ps_cannot_be_run_at_all(self):
+        with (
+            mock.patch("pyguitest._have_proc", return_value=False),
+            mock.patch("pyguitest._ps", return_value=None),
+        ):
+            with self.assertRaises(pyguitest.PyGUITestError):
+                pyguitest._process_cpu_seconds(os.getpid())
+
+    def test_cpu_seconds_parses_the_freebsd_ps_fallback(self):
+        # Centiseconds, as FreeBSD 15 actually prints them.
+        with (
+            mock.patch("pyguitest._have_proc", return_value=False),
+            mock.patch("pyguitest._ps", return_value=_ps_result("0:00.44\n")),
+        ):
+            seconds, resolution = pyguitest._process_cpu_seconds(os.getpid())
+        self.assertAlmostEqual(seconds, 0.44)
+        self.assertAlmostEqual(resolution, 0.01)
 
     def test_process_cmdline_reads_the_current_process(self):
         self.assertIn("python", pyguitest._process_cmdline(os.getpid()).lower())

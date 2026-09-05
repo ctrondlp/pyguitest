@@ -13,6 +13,7 @@ is first exercised.
 from __future__ import annotations
 
 import ctypes.util
+import grp
 import importlib.util
 import os
 import shutil
@@ -100,6 +101,22 @@ def _uinput() -> tuple[bool, bool]:
     return True, os.access(path, os.W_OK)
 
 
+def _has_input_group() -> bool:
+    """Whether an 'input' group exists for a user to be added to.
+
+    Asked of the machine rather than inferred from the platform, which is
+    how everything else here decides things -- and it is not only the BSDs
+    that lack the group; a minimal container image can too. FreeBSD has
+    /dev/uinput through cuse, owned root:wheel 0600, and no 'input' group,
+    so the advice built on one had nothing to attach to.
+    """
+    try:
+        grp.getgrnam("input")
+    except KeyError:
+        return False
+    return True
+
+
 def _portal(env: Mapping[str, str]) -> bool:
     """Heuristic: a session bus plus an installed portal service.
 
@@ -140,6 +157,9 @@ class Environment:
     has_pygobject: bool = False
     has_dogtail: bool = False
     has_evdev: bool = False
+    # Defaults True so a hand-built Environment keeps the advice it always
+    # got; detect() always sets it from the machine. See _has_input_group.
+    has_input_group: bool = True
     has_portal: bool = False
     has_xtest: bool = False
     has_xlib: bool = False
@@ -556,11 +576,24 @@ def detect(env: Mapping[str, str] | None = None) -> Environment:
             f"only keymap-unsafe input tools found ({', '.join(input_tools)}); "
             "typed text may differ on a non-US layout"
         )
+    input_group = _has_input_group()
     if uinput_present and not uinput_writable:
-        notes.append(
-            "/dev/uinput exists but is not writable: add yourself to the "
-            "'input' group, then run `newgrp input` or log in again"
-        )
+        if input_group:
+            notes.append(
+                "/dev/uinput exists but is not writable: add yourself to the "
+                "'input' group, then run `newgrp input` or log in again"
+            )
+        else:
+            # FreeBSD reaches here: it has /dev/uinput via cuse, owned
+            # root:wheel 0600, and no 'input' group at all. Naming the
+            # group anyway sent the reader after something that does not
+            # exist, and the udev rule behind it after a system with no
+            # udev.
+            notes.append(
+                "/dev/uinput exists but is not writable, and there is no "
+                "'input' group on this system to join: its ownership or "
+                "mode has to be changed directly"
+            )
 
     return Environment(
         session_type=session_type,
@@ -571,6 +604,7 @@ def detect(env: Mapping[str, str] | None = None) -> Environment:
         has_libei=_lib("ei"),
         has_uinput=uinput_present,
         uinput_writable=uinput_writable,
+        has_input_group=input_group,
         has_atspi=has_atspi,
         has_pygobject=has_pygobject,
         has_dogtail=has_dogtail,
