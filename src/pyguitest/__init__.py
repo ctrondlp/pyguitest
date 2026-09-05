@@ -64,7 +64,7 @@ if TYPE_CHECKING:
     # package, including the ones on a backend that never touches it.
     from .backends.windows import WindowEvent
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "connect",
@@ -1658,6 +1658,34 @@ class Session:
     def root_element(self) -> Element:
         """The accessible-tree root. The replacement for the X11 window tree."""
         return self.backend.root_element()
+
+    def extents(self, element: Element) -> tuple[int, int, int, int] | None:
+        """`element`'s (x, y, width, height) in screen coordinates.
+
+        None where the element occupies no screen space -- it publishes no
+        rectangle, or reports an empty one because it is not showing.
+
+        The counterpart of geometry() for elements, and separate from it
+        because the two are answered by different backends: a window
+        rectangle can come from the compositor, an element's only ever from
+        the accessible tree. Needs Capability.ELEMENT_GEOMETRY.
+        """
+        return self.backend.extents(element)
+
+    def element_at(self, x: int, y: int) -> Element | None:
+        """The deepest accessible element at a screen coordinate, or None.
+
+        What window_at is for windows, with no `screen` argument: the
+        accessible tree is addressed in one desktop-wide coordinate space.
+
+        The answer is only as good as the extents behind it. A toolkit that
+        misreports them -- GTK4 has been seen placing every widget at the
+        origin -- makes one element claim every point, and nothing here can
+        tell that apart from a correct answer, so a caller turning a
+        coordinate into a locator should check that the element it got back
+        really covers the point (extents() says).
+        """
+        return self.backend.element_at(x, y)
 
     def locate(
         self,

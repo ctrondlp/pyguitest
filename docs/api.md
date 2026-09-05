@@ -153,6 +153,8 @@ Raise on failure with a message naming what was actually found, for use directly
 | Call | Needs | | What it does |
 |------|-------|---|--------------|
 | `double_click(button: int = 1)` | `POINTER_BUTTON` |  | Press and release a mouse button twice, as one double-click. |
+| `element_at(x: int, y: int)` | `ELEMENT_GEOMETRY` |  | The deepest accessible element at a screen coordinate, or None. |
+| `extents(element: Element)` | `ELEMENT_GEOMETRY` |  | `element`'s (x, y, width, height) in screen coordinates. |
 
 ## Forwarded to the backend
 
@@ -198,6 +200,7 @@ One node of the accessible tree, as every backend agrees to expose it.
 | `name` | The element's accessible name, such as a button's label. |
 | `options()` | The choices this dropdown or list offers, as Elements. |
 | `parent` | The containing element, or None at the root. |
+| `pid` | The process this element belongs to, where the bridge says. |
 | `role` | The element's accessible role, such as 'push button'. |
 | `select()` | Select this element, for a list item, tab, or menu entry. |
 | `selectable` | Whether the element can be a list item, tab, or menu selection. |
@@ -325,6 +328,7 @@ Wayland prevents by design, which is why those rows are X11 only.
 | `CLIPBOARD` | T3 | PortalBackend, ToolClipboardBackend | Read and write the clipboard's text content; a new feature, X11::GUITest never had it |
 | `ELEMENT_TREE` | T5 | AtspiBackend | Walk the accessible tree; replaces the X11 window-tree walk |
 | `ELEMENT_ACTION` | T5 | AtspiBackend | Act on an element without coordinates or injection permission |
+| `ELEMENT_GEOMETRY` | T5 | AtspiBackend | Read an element's screen rectangle, and hit-test a coordinate against the accessible tree; one capability rather than the two windows get, because both are the same Component call and no toolkit answers one without the other. A pure Wayland client is never told where it sits on screen, so this is X11 and XWayland only, exactly like WINDOW_GEOMETRY on this backend |
 | `POINTER_QUERY` | T6 | X11Backend **(X11 only)** | Read the global pointer position; injection works, readback does not |
 | `INPUT_STATE_QUERY` | T6 | X11Backend **(X11 only)** | Read global keyboard or button state; this is what a keylogger reads |
 | `WINDOW_TITLE_SET` | T6 | X11Backend **(X11 only)** | Rewrite another application's title; that is impersonation |

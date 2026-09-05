@@ -324,6 +324,19 @@ class Element(Protocol):
         """The names of the actions this element offers, e.g. 'click'."""
         ...
 
+    @property
+    def pid(self) -> int | None:
+        """The process this element belongs to, where the bridge says.
+
+        None where the accessibility bridge publishes none, which is common
+        enough that a caller must handle it: it is the one field here that
+        the toolkit is not obliged to answer. Its use is telling elements
+        of one application apart from another's -- the accessibility bus is
+        scoped to the login session, not to a display, so on a machine
+        running two of them the tree carries both.
+        """
+        ...
+
     def click(self) -> None:
         """Act on the element directly -- no coordinates, no injection."""
         ...
@@ -829,4 +842,26 @@ class GUIBackend(ABC):
     ) -> Element | None:
         """The first accessible element matching, or None."""
         self.require(Capability.ELEMENT_TREE)
+        raise NotImplementedError
+
+    def extents(self, element: Element) -> tuple[int, int, int, int] | None:
+        """`element`'s (x, y, width, height) in screen coordinates.
+
+        None where the element occupies no screen space at all -- it
+        publishes no Component interface, or reports an empty rectangle
+        because it is not currently showing. That is an ordinary answer
+        about an ordinary element, not a missing capability, which is why
+        it is None rather than a raise.
+        """
+        self.require(Capability.ELEMENT_GEOMETRY)
+        raise NotImplementedError
+
+    def element_at(self, x: int, y: int) -> Element | None:
+        """The deepest accessible element at a screen coordinate, or None.
+
+        The element counterpart of window_at, and takes no `screen`
+        argument on purpose: the accessible tree is addressed in one
+        desktop-wide coordinate space, with no per-output index to pass.
+        """
+        self.require(Capability.ELEMENT_GEOMETRY)
         raise NotImplementedError

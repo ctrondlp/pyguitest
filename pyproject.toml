@@ -201,3 +201,10 @@ warn_redundant_casts = true
 # errors, mostly Optional attributes narrowed in one method but used in
 # another) is fixed; keep it on so that gap cannot quietly reopen.
 check_untyped_defs = true
+# mypy defaults this to true and imports sqlite3 unconditionally to honor
+# it -- a crash, not a fallback, on a Python built without it. Confirmed on
+# FreeBSD 15 (GhostBSD's python3.11 port has no _sqlite3), which is the
+# only place this has come up, but the flag is harmless anywhere the module
+# is present: the cache just becomes one file per module instead of one
+# sqlite db.
+sqlite_cache = false

@@ -7,6 +7,8 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-09-05
+
 ### Added
 
 - **`double_click()`**, alongside `click()`. Whether a pair of clicks *is* a
@@ -18,6 +20,43 @@ All notable changes to pyguitest are recorded here. The format follows
   two single clicks: a test passing against a widget that never saw a
   double-click. A double-click is one user action and takes one
   `event_delay`, at the end, like every other action.
+
+- **`element_at(x, y)` and `extents(element)`**, plus **`Element.pid`** — the
+  coordinate half of the element API, under the new `ELEMENT_GEOMETRY`
+  capability. `element_at` hit-tests a screen point against the accessible
+  tree and descends to the deepest element that claims it; `extents` reads
+  an element's screen rectangle, answering None where it has none rather
+  than pretending to a rectangle. One capability covers both, unlike
+  `WINDOW_GEOMETRY` and `WINDOW_AT_POINT`, because both are the same
+  Component call and no toolkit answers one without the other.
+
+  This is the question a *recorder* has to ask -- input arrives as a
+  coordinate, and turning it into `gui.button("Save").click()` means asking
+  what is under that point -- and until now the only way to ask it was
+  `gi.repository.Atspi` directly, past this package. Both go to the
+  Component interface rather than dogtail's `Node.extents`, which silently
+  retries in *window* coordinates whenever the screen ones come back at the
+  origin: a rescue for a Wayland client that hands any other caller a
+  rectangle in a different coordinate space with nothing to say so.
+  `ELEMENT_GEOMETRY` is withheld in a pure Wayland session for the same
+  reason `WINDOW_GEOMETRY` already is.
+
+  `Element.pid` completes it: an accessibility bus is scoped to the login
+  session rather than to a display, so the tree on a machine running two of
+  them carries both, and a pid is what tells an element of the application
+  under the pointer from an identically-placed one somewhere else.
+
+  Two rules in `element_at` were written by running it on a real desktop
+  rather than reasoned. **Every answer must contain the point it was looked
+  up at**: a toolkit reporting widgets in *window* coordinates -- which a
+  native Wayland GTK4 client cannot avoid, never being told where it sits --
+  otherwise answers points hundreds of pixels away with a real, named
+  widget, and a terminal's "New Terminal" button at (0, 0, 34, 34) came
+  back for a point at (49, 83). **The smallest surviving answer wins, not
+  the first**: the accessible tree carries no stacking order and
+  application order is arbitrary, and GNOME Shell publishes a full-screen
+  `panel`, so first-wins returned that same panel for every point on the
+  desktop whatever window was actually there.
 
 - **FreeBSD and GhostBSD in the distribution table**, so `doctor` names `pkg`
   packages instead of falling back to bare component names. GhostBSD needs
@@ -81,6 +120,15 @@ All notable changes to pyguitest are recorded here. The format follows
   factory that builds it took no options, leaving `$DISPLAY` as the only way
   to choose a display -- which matters to anything driving a nested or
   virtual X server rather than the ambient one.
+
+- **`mypy` crashed rather than degraded on a Python built without
+  `sqlite3`.** Its incremental cache defaults to the sqlite backend and
+  imports the module unconditionally to honour that, so type-checking the
+  package was impossible on FreeBSD 15, whose `python3.11` port ships no
+  `_sqlite3`. `sqlite_cache = false` in `pyproject.toml` costs nothing
+  where the module is present -- the cache becomes one file per module
+  instead of one database -- and is the difference between a contributor
+  being able to run the gate there and not.
 
 ## [0.3.0] — 2026-09-05
 
@@ -1210,7 +1258,8 @@ First public release.
 - A `pyguitest` command-line entry point.
 - PEP 561 type information (`py.typed`); no hard runtime dependencies.
 
-[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/ctrondlp/pyguitest/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ctrondlp/pyguitest/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ctrondlp/pyguitest/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/ctrondlp/pyguitest/compare/v0.1.0...v0.1.1

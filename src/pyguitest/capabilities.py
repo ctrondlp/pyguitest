@@ -152,6 +152,15 @@ class Capability(Enum):
         Tier.REWORK,
         "Act on an element without coordinates or injection permission",
     )
+    ELEMENT_GEOMETRY = (
+        Tier.REWORK,
+        "Read an element's screen rectangle, and hit-test a coordinate "
+        "against the accessible tree; one capability rather than the two "
+        "windows get, because both are the same Component call and no "
+        "toolkit answers one without the other. A pure Wayland client is "
+        "never told where it sits on screen, so this is X11 and XWayland "
+        "only, exactly like WINDOW_GEOMETRY on this backend",
+    )
 
     # -- T6: no path -------------------------------------------------------
     POINTER_QUERY = (

@@ -49,6 +49,24 @@ Caching one would leave a process that started before its desktop did with
 AT-SPI permanently unavailable, for a reason nothing reports -- and the
 probe is one cheap subprocess whose failing case fails immediately."""
 
+_WAYLAND_COORDS = (
+    "AT-SPI screen coordinates are unreliable in a pure Wayland session; "
+    "a client is not told where it is on screen"
+)
+"""Why the coordinate capabilities are withheld, shared by all three calls
+that can be refused for it so the three cannot drift apart."""
+
+_MAX_DEPTH = 24
+"""Descent limit for element_at, so a cyclic accessible tree cannot spin
+forever. Deep enough for any real widget hierarchy; a tree that has not
+bottomed out by here is malformed, and the node reached is still a truthful
+answer, just not the deepest one."""
+
+
+def _at_point(pyatspi, node, x, y):
+    """The child of `node` at a screen point, or None."""
+    return node.queryComponent().getAccessibleAtPoint(x, y, pyatspi.DESKTOP_COORDS)
+
 
 def a11y_bus_reachable():
     """Whether to let anything import dogtail. True when in doubt.
@@ -261,6 +279,21 @@ class Element:
         """The names of the actions this element offers, e.g. 'click'."""
         return sorted(getattr(self.node, "actions", {}) or {})
 
+    @property
+    def pid(self):
+        """The process this element belongs to, or None.
+
+        Not every bridge answers, and one that does not raises rather than
+        returning nothing -- so does a node whose application has since
+        exited. A pid of 0 is the bridge saying it does not know, which is
+        the same answer as not being asked.
+        """
+        try:
+            pid = int(self.node.get_process_id())
+        except Exception:  # noqa: BLE001 - an unanswered pid is not an error
+            return None
+        return pid or None
+
     def click(self):
         """Act on the element directly -- no coordinates, no injection."""
         self.node.click()
@@ -422,6 +455,7 @@ class AtspiBackend(GUIBackend):
         }
         if self._screen_coords_trustworthy:
             caps.add(Capability.WINDOW_GEOMETRY)
+            caps.add(Capability.ELEMENT_GEOMETRY)
         return CapabilitySet(caps)
 
     # -- elements ----------------------------------------------------------
@@ -476,6 +510,110 @@ class AtspiBackend(GUIBackend):
         )
         return matches[0] if matches else None
 
+    def extents(self, element):
+        """An element's (x, y, width, height) in screen coordinates, or None."""
+        self.require(Capability.ELEMENT_GEOMETRY, _WAYLAND_COORDS)
+        return self._extents(element.node)
+
+    def element_at(self, x, y):
+        """The most specific element at a screen point, or None.
+
+        Every application is asked, because the accessible tree has no root
+        that hit-tests: `get_accessible_at_point` answers about one
+        component's own children, so the walk has to start at each frame
+        and descend from whichever claim the point.
+
+        The *smallest* of those answers wins, not the first. The tree
+        carries no stacking order -- AT-SPI's z-order is optional and
+        almost never implemented -- and application order is arbitrary, so
+        specificity is the only signal available. It matters live: on GNOME
+        the shell publishes a full-screen `panel`, so first-wins returned
+        that same panel for every point on the desktop, whatever window was
+        actually there. A caller needing certainty about which window it
+        landed in should check the answer against `window_at`.
+
+        Every answer along the way must survive its own extents: a node is
+        only accepted where the rectangle it reports contains the point it
+        was looked up at. A toolkit that reports widgets in *window*
+        coordinates -- a native Wayland GTK4 client cannot do otherwise,
+        since it is never told where it sits -- otherwise claims points
+        hundreds of pixels away and answers them with a real, named widget.
+        Seen live: a terminal's "New Terminal" button, extents (0, 0, 34,
+        34), returned for a point at (49, 83). An application publishing no
+        extents at all drops out for the same reason, since nothing it says
+        can be checked.
+
+        A whole application is skipped rather than believed if it raises --
+        an application that exits mid-walk is ordinary, and taking the hit
+        test down with it would make this fail for reasons having nothing
+        to do with the point asked about.
+        """
+        self.require(Capability.ELEMENT_GEOMETRY, _WAYLAND_COORDS)
+        pyatspi = self._pyatspi(Capability.ELEMENT_GEOMETRY)
+        best = None
+        best_area = None
+        for app in self._tree.root.applications():
+            for node in self._hits_in(pyatspi, app, x, y):
+                area = self._area(node)
+                if best is None or area < best_area:
+                    best, best_area = node, area
+        return Element(best) if best is not None else None
+
+    def _hits_in(self, pyatspi, app, x, y):
+        """The deepest believable node under each of one app's toplevels."""
+        found = []
+        try:
+            for frame in app.children:
+                if self._covers(frame, x, y):
+                    found.append(self._descend(pyatspi, frame, x, y))
+        except Exception:  # noqa: BLE001 - a dead application is not an error
+            return found
+        return found
+
+    def _descend(self, pyatspi, node, x, y):
+        """Follow the point down to the deepest node that really covers it."""
+        for _ in range(_MAX_DEPTH):
+            child = _at_point(pyatspi, node, x, y)
+            if child is None or not self._covers(child, x, y):
+                return node
+            node = child
+        return node
+
+    def _covers(self, node, x, y):
+        """Whether the node's own rectangle contains the point."""
+        rect = self._extents(node)
+        if rect is None:
+            return False
+        left, top, width, height = rect
+        return left <= x < left + width and top <= y < top + height
+
+    def _area(self, node):
+        """How much screen the node covers. Only asked of a node that does."""
+        rect = self._extents(node)
+        return 0 if rect is None else rect[2] * rect[3]
+
+    def _extents(self, node):
+        """One node's screen rectangle, or None where it has no useful one.
+
+        Goes to the Component interface rather than dogtail's own
+        `Node.extents`, which retries in *window* coordinates whenever the
+        screen ones come back at the origin. That heuristic rescues a
+        Wayland client, which reports (0, 0) for everything -- but it hands
+        back a rectangle in a different coordinate space with nothing to
+        say so, and a caller comparing element rectangles against
+        `geometry()`'s window one cannot tell the two apart. This backend
+        answers in screen coordinates or not at all; ELEMENT_GEOMETRY is
+        withheld in the session where they would be meaningless.
+        """
+        pyatspi = self._pyatspi(Capability.ELEMENT_GEOMETRY)
+        try:
+            rect = node.queryComponent().getExtents(pyatspi.DESKTOP_COORDS)
+        except Exception:  # noqa: BLE001 - no Component interface, or a dead node
+            return None
+        if rect is None or rect.width <= 0 or rect.height <= 0:
+            return None
+        return (rect.x, rect.y, rect.width, rect.height)
+
     # -- windows -----------------------------------------------------------
 
     def windows(self):
@@ -524,8 +662,8 @@ class AtspiBackend(GUIBackend):
         node: Any = window.handle if isinstance(window, Window) else window.node
         return bool(node.showing)
 
-    def _state_active(self):
-        """The pyatspi constant marking an active window.
+    def _pyatspi(self, capability):
+        """The pyatspi module, or a typed error naming what wanted it.
 
         pyatspi is not in this package's dependency declarations at all --
         the atspi extra only pulls in dogtail, and pyatspi is meant to come
@@ -539,12 +677,16 @@ class AtspiBackend(GUIBackend):
             import pyatspi
         except ImportError as exc:
             raise CapabilityUnsupported(
-                Capability.WINDOW_STATE,
+                capability,
                 self.name,
                 "pyatspi is not installed; install it via your distribution "
                 "(see README)",
             ) from exc
-        return pyatspi.STATE_ACTIVE
+        return pyatspi
+
+    def _state_active(self):
+        """The pyatspi constant marking an active window."""
+        return self._pyatspi(Capability.WINDOW_STATE).STATE_ACTIVE
 
     def activate_window(self, window):
         """Give a window keyboard focus."""
@@ -553,11 +695,7 @@ class AtspiBackend(GUIBackend):
 
     def geometry(self, window):
         """A window's (x, y, width, height), where coordinates are reliable."""
-        self.require(
-            Capability.WINDOW_GEOMETRY,
-            "AT-SPI screen coordinates are unreliable in a pure Wayland "
-            "session; a client is not told where it is on screen",
-        )
+        self.require(Capability.WINDOW_GEOMETRY, _WAYLAND_COORDS)
         node: Any = window.handle if isinstance(window, Window) else window.node
         try:
             x, y = node.position

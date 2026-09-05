@@ -27,6 +27,41 @@ class FakeState:
         return state in self._states
 
 
+class FakeRect:
+    """Stands in for the BoundingBox pyatspi's getExtents returns."""
+
+    def __init__(self, x, y, width, height):
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+
+
+class FakeComponent:
+    """Stands in for pyatspi's Component interface on one node.
+
+    getAccessibleAtPoint answers about the node's own children and returns
+    None for a point outside the node, which is what the real one does and
+    what lets element_at walk frames until one claims the point.
+    """
+
+    def __init__(self, node):
+        self.node = node
+
+    def getExtents(self, coord_type):
+        x, y = self.node.position
+        width, height = self.node.size
+        return FakeRect(x, y, width, height)
+
+    def getAccessibleAtPoint(self, x, y, coord_type):
+        if not self.node.covers(x, y):
+            return None
+        for child in self.node.children:
+            if child.covers(x, y):
+                return child
+        return None
+
+
 class FakeNode:
     def __init__(
         self,
@@ -38,6 +73,8 @@ class FakeNode:
         active=False,
         sensitive=True,
         description="",
+        pid=0,
+        component=True,
     ):
         self.name = name
         self.roleName = role
@@ -51,8 +88,23 @@ class FakeNode:
         self._active = active
         self.sensitive = sensitive
         self.description = description
+        self._pid = pid
+        self._component = component
         for child in self.children:
             child.parent = self
+
+    def covers(self, x, y):
+        left, top = self.position
+        width, height = self.size
+        return left <= x < left + width and top <= y < top + height
+
+    def queryComponent(self):
+        if not self._component:
+            raise NotImplementedError("no Component interface")
+        return FakeComponent(self)
+
+    def get_process_id(self):
+        return self._pid
 
     def click(self):
         self.clicked = True
@@ -80,6 +132,14 @@ class FakeNode:
         return self.children
 
 
+class _DeadApplication:
+    """An application that has exited: reading its children raises."""
+
+    @property
+    def children(self):
+        raise RuntimeError("the application is gone")
+
+
 class _RaisingSize:
     """Stands in for a node whose Component.size raises, like a dead ponytail."""
 
@@ -101,16 +161,34 @@ class FakePredicate:
         return self.roleName in (None, node.roleName) and self.name in (None, node.name)
 
 
+def fake_pyatspi():
+    """The pieces of pyatspi this backend reads, as a stand-in module.
+
+    pyatspi is not installed in this environment and is declared in no
+    dependency list -- it is meant to come from the distro -- so every test
+    that reaches a call needing it supplies this instead.
+    """
+    module = types.ModuleType("pyatspi")
+    module.STATE_ACTIVE = "STATE_ACTIVE"
+    module.DESKTOP_COORDS = 0
+    module.WINDOW_COORDS = 1
+    return module
+
+
 def build_tree():
-    button = FakeNode("OK", "push button", position=(10, 20), size=(80, 30))
+    button = FakeNode("OK", "push button", position=(10, 20), size=(80, 30), pid=4242)
     # Additional children of `frame`, not of `app` -- windows() only counts
     # an application's direct children, so these cannot change window counts
     # or geometry in tests that only look at gui.windows().
-    cancel = FakeNode("Cancel", "push button", sensitive=False)
+    cancel = FakeNode(
+        "Cancel", "push button", sensitive=False, position=(110, 20), size=(80, 30)
+    )
     notifications = FakeNode(
         "Enable notifications",
         "check box",
         description="Turn notifications on or off",
+        position=(10, 70),
+        size=(200, 24),
     )
     frame = FakeNode(
         "Document - Editor",
@@ -403,17 +481,13 @@ class TestActiveWindow(AtspiTestCase):
             self.assertIn("pyatspi", str(ctx.exception))
 
     def test_active_window_is_found_once_pyatspi_is_available(self):
-        fake_pyatspi = types.ModuleType("pyatspi")
-        fake_pyatspi.STATE_ACTIVE = "STATE_ACTIVE"
-        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi}):
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
             gui = self.backend()
             self.frame._active = True
             self.assertEqual(gui.active_window().title, "Document - Editor")
 
     def test_returns_none_when_no_frame_is_active(self):
-        fake_pyatspi = types.ModuleType("pyatspi")
-        fake_pyatspi.STATE_ACTIVE = "STATE_ACTIVE"
-        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi}):
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
             gui = self.backend()
             self.assertIsNone(gui.active_window())
 
@@ -480,6 +554,117 @@ class TestElements(AtspiTestCase):
         gui = self.backend()
         found = gui.find_elements(role="push button", name="OK", enabled=False)
         self.assertEqual(found, [])
+
+    def test_pid_reports_the_owning_process(self):
+        gui = self.backend()
+        self.assertEqual(gui.find_element(name="OK").pid, 4242)
+
+    def test_an_unanswered_pid_is_none_rather_than_zero(self):
+        # A bridge that does not publish one answers 0, which means "I do
+        # not know" -- the same answer as not being asked, and the caller
+        # comparing it against a window's pid must not read it as a
+        # process id that happens to be zero.
+        gui = self.backend()
+        self.assertIsNone(gui.find_element(name="Cancel").pid)
+
+    def test_a_bridge_that_raises_leaves_the_pid_unknown(self):
+        gui = self.backend()
+        element = gui.find_element(name="OK")
+        element.node.get_process_id = lambda: (_ for _ in ()).throw(RuntimeError("no"))
+        self.assertIsNone(element.pid)
+
+
+class TestElementGeometry(AtspiTestCase):
+    """Extents and hit-testing: the coordinate half of the element API.
+
+    Both are gated behind ELEMENT_GEOMETRY for the same reason geometry()
+    is gated behind WINDOW_GEOMETRY -- a pure Wayland client is not told
+    where it sits on screen, so the numbers exist but mean nothing.
+    """
+
+    def gui(self, session_type=SessionType.X11):
+        return self.backend(session_type)
+
+    def test_declared_under_x11_and_withheld_under_wayland(self):
+        self.assertIn(Capability.ELEMENT_GEOMETRY, self.gui().capabilities)
+        self.assertNotIn(
+            Capability.ELEMENT_GEOMETRY,
+            self.gui(SessionType.WAYLAND).capabilities,
+        )
+
+    def test_extents_returns_the_screen_rectangle(self):
+        gui = self.gui()
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertEqual(gui.extents(gui.find_element(name="OK")), (10, 20, 80, 30))
+
+    def test_extents_refuses_under_pure_wayland_with_the_reason(self):
+        gui = self.gui(SessionType.WAYLAND)
+        element = gui.find_element(name="OK")
+        with self.assertRaises(CapabilityUnsupported) as ctx:
+            gui.extents(element)
+        self.assertIn("where it is on screen", str(ctx.exception))
+
+    def test_an_element_with_no_rectangle_answers_none_rather_than_raising(self):
+        # Having no Component interface is an ordinary fact about an
+        # ordinary element, not a missing capability.
+        gui = self.gui()
+        element = gui.find_element(name="OK")
+        element.node._component = False
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertIsNone(gui.extents(element))
+
+    def test_an_empty_rectangle_is_none_too(self):
+        # AT-SPI's extents are meaningful only while the element is
+        # showing; an off-screen one reports a zero-size box, and handing
+        # that back as a rectangle invites a click at its corner.
+        gui = self.gui()
+        element = gui.find_element(name="OK")
+        element.node.size = (0, 0)
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertIsNone(gui.extents(element))
+
+    def test_element_at_finds_the_element_under_the_point(self):
+        gui = self.gui()
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertEqual(gui.element_at(20, 30).name, "OK")
+            self.assertEqual(gui.element_at(120, 30).name, "Cancel")
+
+    def test_element_at_descends_past_the_frame_to_a_leaf(self):
+        # The frame claims the point first; the answer must be the deepest
+        # element that claims it, not the first.
+        label = FakeNode("Save", "label", position=(20, 25), size=(20, 10))
+        self.button.children.append(label)
+        label.parent = self.button
+        gui = self.gui()
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertEqual(gui.element_at(25, 30).name, "Save")
+
+    def test_element_at_is_none_where_nothing_covers_the_point(self):
+        gui = self.gui()
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertIsNone(gui.element_at(4000, 4000))
+
+    def test_a_cyclic_tree_terminates(self):
+        # A node that answers the hit test with itself would otherwise
+        # descend forever; the depth cap makes it answer that node.
+        gui = self.gui()
+        self.button.children.append(self.button)
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertEqual(gui.element_at(20, 30).name, "OK")
+
+    def test_an_application_that_raises_does_not_take_the_hit_test_with_it(self):
+        # An application exiting mid-walk is ordinary. The point asked
+        # about is still answerable by the applications that remain.
+        gui = self.gui()
+        gui._tree.root.children.insert(0, _DeadApplication())
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertEqual(gui.element_at(20, 30).name, "OK")
+
+    def test_element_at_refuses_under_pure_wayland_with_the_reason(self):
+        gui = self.gui(SessionType.WAYLAND)
+        with self.assertRaises(CapabilityUnsupported) as ctx:
+            gui.element_at(20, 30)
+        self.assertIn("where it is on screen", str(ctx.exception))
 
 
 if __name__ == "__main__":

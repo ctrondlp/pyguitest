@@ -83,6 +83,8 @@ _DISPATCH = {
     "root_element": Capability.ELEMENT_TREE,
     "find_elements": Capability.ELEMENT_TREE,
     "find_element": Capability.ELEMENT_TREE,
+    "extents": Capability.ELEMENT_GEOMETRY,
+    "element_at": Capability.ELEMENT_GEOMETRY,
     "get_clipboard": Capability.CLIPBOARD,
     "set_clipboard": Capability.CLIPBOARD,
     # Tier 6. These have no stub on GUIBackend -- they exist only on the
