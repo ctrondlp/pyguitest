@@ -1,4 +1,5 @@
 import dataclasses
+import subprocess
 import unittest
 from unittest import mock
 
@@ -80,6 +81,45 @@ class TestCompositorDetection(unittest.TestCase):
         # without one, even when nothing names which one.
         e = detect(env(WAYLAND_DISPLAY="wayland-0"))
         self.assertIs(e.compositor, Compositor.OTHER)
+
+
+class TestAssistiveTechnologyProbe(unittest.TestCase):
+    """Why a Chromium window can be listed but have no elements at all."""
+
+    def _answer(self, **kwargs):
+        from pyguitest import session
+
+        with mock.patch.object(session.subprocess, "run", **kwargs):
+            return session.assistive_technology_enabled()
+
+    def test_true_and_false_are_read_out_of_the_variant(self):
+        # gdbus prints a property as a variant: "(<true>,)".
+        self.assertIs(
+            self._answer(return_value=mock.Mock(returncode=0, stdout="(<true>,)\n")),
+            True,
+        )
+        self.assertIs(
+            self._answer(return_value=mock.Mock(returncode=0, stdout="(<false>,)\n")),
+            False,
+        )
+
+    def test_no_accessibility_bus_answers_none_not_false(self):
+        # "Could not ask" and "an AT is not running" are different facts,
+        # and only the second one explains an empty element tree.
+        self.assertIsNone(self._answer(return_value=mock.Mock(returncode=1, stdout="")))
+
+    def test_a_missing_gdbus_answers_none(self):
+        self.assertIsNone(self._answer(side_effect=OSError))
+
+    def test_a_hang_answers_none_rather_than_raising(self):
+        self.assertIsNone(
+            self._answer(side_effect=subprocess.TimeoutExpired(cmd="gdbus", timeout=5))
+        )
+
+    def test_unexpected_output_answers_none(self):
+        self.assertIsNone(
+            self._answer(return_value=mock.Mock(returncode=0, stdout="who knows"))
+        )
 
 
 class TestInputPreference(unittest.TestCase):

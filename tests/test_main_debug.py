@@ -48,6 +48,11 @@ def setUpModule():
         # gdbus against whatever bus this machine happens to have, and a
         # unit test against a fake session must not depend on that.
         mock.patch("pyguitest.__main__.a11y_bus_probe", return_value=True),
+        # Same again for the Chromium probe: it shells out to gdbus
+        # against whatever accessibility bus this machine has.
+        mock.patch(
+            "pyguitest.__main__.assistive_technology_enabled", return_value=False
+        ),
     ]
     for patcher in _probe_patch:
         patcher.start()

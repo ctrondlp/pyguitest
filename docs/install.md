@@ -100,6 +100,29 @@ be spectacular: libatspi answers an unreachable bus by aborting the calling
 process, so `connect()` died with a core dump and no exception. pyguitest
 asks this question before it imports anything that would.
 
+### Chromium and Electron apps need an AT to be announced
+
+VS Code, Chrome, Slack and anything else built on Electron publish **no
+accessibility elements at all** until something says an assistive
+technology is running:
+
+```sh
+gdbus call --session --dest org.a11y.Bus --object-path /org/a11y/bus \
+    --method org.freedesktop.DBus.Properties.Get org.a11y.Status IsEnabled
+```
+
+`false` is the normal answer on a desktop with no screen reader, and the
+symptom is confusing rather than obvious: `windows()` lists the window
+(that comes from the compositor), while the application has no node in the
+accessibility tree whatsoever — not an empty one, none. So
+`window_element()` and every element query raise as though the application
+were not running.
+
+Launching the application with `--force-renderer-accessibility` is the
+better fix for a test that starts it. Setting the property true works
+across the board but costs those applications real performance. `pyguitest
+debug` reports the value on its `chromium a11y` line.
+
 ### On KDE, one more step that is not a package
 
 GTK applications load their AT-SPI bridge only when the GNOME setting

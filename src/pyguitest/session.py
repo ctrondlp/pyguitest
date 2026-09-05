@@ -29,6 +29,7 @@ __all__ = [
     "Environment",
     "detect",
     "toolkit_accessibility",
+    "assistive_technology_enabled",
 ]
 
 _INTERFACE_SCHEMA = "org.gnome.desktop.interface"
@@ -412,6 +413,69 @@ def toolkit_accessibility() -> bool | None:
     if answer == "true":
         return True
     if answer == "false":
+        return False
+    return None
+
+
+def assistive_technology_enabled() -> bool | None:
+    """Whether an assistive technology is announced, or None if unknowable.
+
+    The Chromium half of the accessibility story, and the reason a
+    Chromium-family application can be completely absent from the
+    accessibility tree while `windows()` lists it happily.
+
+    Chromium -- and so Electron, and so VS Code, Slack and the rest --
+    builds no accessibility tree at all until something says an AT is
+    running, which on Linux means `org.a11y.Status.IsEnabled` on the
+    accessibility bus. Until then it never registers with AT-SPI, so it is
+    not a missing *frame* in the tree: there is no application node for it
+    either. `windows()` still sees the window, because that comes from the
+    compositor, which has no opinion about accessibility.
+
+    Measured on a GNOME Shell 51 desktop (2026-09-05): `IsEnabled` false,
+    and neither Google Chrome nor VS Code present in the tree while both
+    were open and listed by `windows()`. That is the whole of what
+    docs/validation.md previously recorded as "the two traversal paths
+    disagree for Chromium clients", which was the wrong diagnosis.
+
+    Setting it true makes those applications publish, at a real
+    performance cost to them -- so this reports and does not change it.
+    `--force-renderer-accessibility` on the application's own command line
+    is the other way, and the better one for a test that launches the
+    application itself.
+
+    A subprocess for the same reason `toolkit_accessibility` uses one: an
+    in-process Gio call caches the session bus for the life of the
+    process. Three answers, and None means the question could not be asked
+    -- no `gdbus`, or no accessibility bus to ask.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "gdbus",
+                "call",
+                "--session",
+                "--dest",
+                "org.a11y.Bus",
+                "--object-path",
+                "/org/a11y/bus",
+                "--method",
+                "org.freedesktop.DBus.Properties.Get",
+                "org.a11y.Status",
+                "IsEnabled",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=_GSETTINGS_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    answer = (result.stdout or "").strip()
+    if "true" in answer:
+        return True
+    if "false" in answer:
         return False
     return None
 

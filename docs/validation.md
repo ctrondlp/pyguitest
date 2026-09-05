@@ -148,15 +148,30 @@ read as a claim you cannot check.
   than leaving a caller to read it as a test failure. `pyguitest debug`
   reports the same probe's answer.
 - **`window_element()` cannot see an Electron window** that `windows()`
-  can. Found while investigating the above: `gui.windows()` listed a
-  running VS Code window (it walks `root.applications()` then each
-  application's own children), while `gui.elements(role=FRAME/WINDOW/
-  DIALOG)` — a recursive descendant search from the tree root, which
-  `window_element()` uses — did not return it at all, so
-  `window_element("Visual Studio Code")` raised WindowNotFound for a
-  window that was open, active, and listed by `windows()`. The two
-  traversal paths disagree for Chromium/Electron clients specifically.
-  Not yet root-caused.
+  can. Found while investigating the above: `window_element("Visual Studio
+  Code")` raised WindowNotFound for a window that was open, active, and
+  listed by `windows()`.
+
+  **Root-caused 2026-09-05, and the original diagnosis here was wrong.**
+  This was recorded as "the two AT-SPI traversal paths disagree for
+  Chromium/Electron clients". They do not. A read-only probe of a session
+  with Google Chrome and VS Code both open found *neither application in
+  the accessibility tree at all* — no application node, so no frames to
+  disagree about. The tree held gnome-shell, ibus, two portal helpers and
+  the terminal, and nothing else.
+
+  The cause is `org.a11y.Status.IsEnabled`, which was `false`. Chromium
+  builds no accessibility tree until something announces an assistive
+  technology, and until then never registers with AT-SPI. `windows()` is
+  unaffected because it comes from the compositor, which has no opinion
+  about accessibility. Two ways round it: set that property true (every
+  Chromium app then publishes, at a real performance cost to them), or
+  launch the application with `--force-renderer-accessibility`, which is
+  the better option for a test that starts the application itself.
+
+  `pyguitest debug` reports the property now, on a `chromium a11y` line,
+  because an empty element tree for an application that is plainly running
+  is otherwise indistinguishable from a bug in this package.
 - **`windows()` and the accessibility tree disagree about *titles* too**,
   not only about membership (2026-09-01, GNOME Shell, `gnomeshell+atspi+
   uinput` composed session). Writing the `eiinput` re-validation script

@@ -361,6 +361,29 @@ All notable changes to pyguitest are recorded here. The format follows
   application sees afterwards is not ours to claim. Corrected there, in
   `backends/clipboard.py`, and in the `doctor` hint.
 
+- **Root-caused: why a Chromium or Electron window has no elements.** VS
+  Code, Chrome, Slack and the rest publish *nothing* to AT-SPI -- no
+  application node, so not an empty tree but no tree -- while
+  `org.a11y.Status.IsEnabled` is false, which is the normal state of a
+  desktop with no screen reader. `windows()` lists the window regardless,
+  because that comes from the compositor.
+
+  This had been recorded since 2026-08-31 as "the two AT-SPI traversal
+  paths disagree for Chromium/Electron clients", which was wrong: a
+  read-only probe of a session with Chrome and VS Code both open found
+  neither application in the tree at all, so there were no frames to
+  disagree about. Corrected in docs/validation.md.
+
+  `session.assistive_technology_enabled()` reports the property and
+  `pyguitest debug` prints it on a `chromium a11y` line -- an empty
+  element tree for an application that is plainly running is otherwise
+  indistinguishable from a bug in this package. Deliberately not a
+  `doctor` hint: false is the ordinary answer nearly everywhere, so it
+  would fire on almost every machine. docs/install.md carries the two
+  ways round it, of which `--force-renderer-accessibility` on the
+  application's own command line is the better one for a test that
+  launches it.
+
 - **`connect()` could abort the process** -- SIGABRT, core dumped, no
   exception -- on any session with no reachable accessibility bus.
   libatspi answers an unreachable bus with `g_error()`, which is

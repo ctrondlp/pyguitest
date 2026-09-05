@@ -31,7 +31,7 @@ from .capabilities import TIERS, Tier
 from .compat import LEGACY
 from .hints import advice, detect_distro, hints_for
 from .inspect import format_tree, tree_data
-from .session import toolkit_accessibility
+from .session import assistive_technology_enabled, toolkit_accessibility
 
 _CALL = re.compile(r"\b(" + "|".join(sorted(LEGACY, key=len, reverse=True)) + r")\b")
 
@@ -226,6 +226,11 @@ def _debug_data(gui) -> dict:
         # library is installed, which is a different claim from the bus
         # answering, and a bug report about "no elements" needs both.
         "a11y_bus": a11y_bus_probe(),
+        # The Chromium half: an Electron or Chrome window is absent from
+        # the accessibility tree entirely -- no application node, not just
+        # no frame -- while this is false. See
+        # session.assistive_technology_enabled.
+        "assistive_technology": assistive_technology_enabled(),
     }
 
 
@@ -302,6 +307,16 @@ def _format_debug(data: dict) -> str:
             "here; install at-spi2-core or start at-spi-bus-launcher",
             None: "not asked (no gdbus) -- AT-SPI is attempted anyway",
         }[data["a11y_bus"]]
+    )
+    lines.append(
+        "chromium a11y "
+        + {
+            True: "an AT is announced, so Chromium/Electron apps publish elements",
+            False: "org.a11y.Status.IsEnabled is false -- Chromium and "
+            "Electron apps (VS Code, Chrome, Slack) publish NO elements "
+            "at all, though windows() still lists their windows",
+            None: "not readable (no gdbus, or no accessibility bus)",
+        }[data["assistive_technology"]]
     )
     lines.append(
         "toolkit      "
