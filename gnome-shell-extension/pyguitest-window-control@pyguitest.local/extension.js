@@ -24,11 +24,12 @@
 // real PNG, confirming the API pair works at all. That first run also
 // found the composited image was the actor's full allocation, not the
 // window: get_buffer_rect() vs get_frame_rect() showed +50px on both
-// axes, matching Mutter's invisible CSD-shadow margin. The crop that
-// corrects it is live-validated now, on two machines that disagreed --
-// see _captureModern, which crops relative to the actor because
-// buffer_rect turned out not to describe the painted area everywhere.
+// axes, matching Mutter's invisible CSD-shadow margin. Both capture
+// paths crop for that now, and both are live-validated: _captureModern
+// on Shell 51 (a developer desktop) and _captureLegacy on Shell 46 (a CI
+// runner, the only place it can run at all).
 
+import Cairo from 'gi://cairo';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Shell from 'gi://Shell';
@@ -327,7 +328,7 @@ class PyguitestService {
         }
 
         if (typeof actor.get_image === 'function')
-            this._captureLegacy(actor, reply, path);
+            this._captureLegacy(window, actor, reply, path);
         else
             this._captureModern(window, actor, reply, path);
     }
@@ -339,7 +340,7 @@ class PyguitestService {
     // portal and raises no consent dialog because this code is already
     // inside gnome-shell. This is the path validated against a live
     // shell -- see the file header.
-    _captureLegacy(actor, reply, path) {
+    _captureLegacy(window, actor, reply, path) {
         let surface;
         try {
             surface = actor.get_image(null);
@@ -352,16 +353,70 @@ class PyguitestService {
             return;
         }
 
+        // get_image() returns the actor's whole allocation, shadow margin
+        // included -- the same thing paint_to_content() does on Shell >=51,
+        // and for the same reason. That was suspected here for months and
+        // could not be checked: this path does not exist on Shell >=51, so
+        // the machine this extension is developed on cannot run it. A CI
+        // runner on Shell 46 finally did, and produced a 628x429 image for
+        // a 600x400 window -- a 28x29 margin, matching what Shell 51
+        // reports for the same GTK4 window to the pixel.
+        //
+        // So the crop belongs on both paths. Cairo does it here, where
+        // there is a surface rather than a texture: paint the original into
+        // a frame-sized surface at a negative offset, and write that.
+        let output = surface;
+        let context = null;
         try {
             if (typeof surface.writeToPNG !== 'function') {
                 reply(false, 'this GJS build cannot write PNG from a surface');
                 return;
             }
-            surface.writeToPNG(path);
+            const buffer = window.get_buffer_rect();
+            const frame = window.get_frame_rect();
+            // Device pixels per logical unit, from the surface actually
+            // returned -- the same reasoning as _captureModern's, and the
+            // same reason it is taken from one axis: it is a scale factor,
+            // and computing it per-axis is what let a margin pose as one.
+            const scale = buffer.width > 0
+                ? surface.getWidth() / buffer.width : 1;
+            const cropX = Math.round((frame.x - buffer.x) * scale);
+            const cropY = Math.round((frame.y - buffer.y) * scale);
+            const cropW = Math.round(frame.width * scale);
+            const cropH = Math.round(frame.height * scale);
+            printerr(`pyguitest capture (legacy): frame=` +
+                `${frame.width}x${frame.height}+${frame.x}+${frame.y} ` +
+                `buffer=${buffer.width}x${buffer.height}+${buffer.x}+` +
+                `${buffer.y} surface=${surface.getWidth()}x` +
+                `${surface.getHeight()} scale=${scale.toFixed(3)} ` +
+                `crop=${cropW}x${cropH}+${cropX}+${cropY}`);
+            // Only when there is something to trim, and only when the crop
+            // actually fits: a surface that already matches the frame needs
+            // no second copy, and anything that does not add up is better
+            // written whole than written wrong.
+            const fits = cropW > 0 && cropH > 0 &&
+                cropX >= 0 && cropY >= 0 &&
+                cropX + cropW <= surface.getWidth() &&
+                cropY + cropH <= surface.getHeight();
+            const trims = cropW !== surface.getWidth() ||
+                cropH !== surface.getHeight();
+            if (fits && trims) {
+                output = new Cairo.ImageSurface(
+                    Cairo.Format.ARGB32, cropW, cropH);
+                context = new Cairo.Context(output);
+                context.setSourceSurface(surface, -cropX, -cropY);
+                context.paint();
+                output.flush();
+            }
+            output.writeToPNG(path);
         } catch (e) {
             reply(false, `could not write ${path}: ${e}`);
             return;
         } finally {
+            if (context && typeof context.$dispose === 'function')
+                context.$dispose();
+            if (output !== surface && typeof output.finish === 'function')
+                output.finish();
             if (typeof surface.finish === 'function')
                 surface.finish();
         }

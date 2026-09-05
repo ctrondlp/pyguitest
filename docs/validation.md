@@ -421,6 +421,16 @@ Three findings came out of getting there, all now handled:
   still 0×0. The validation script now waits for a sized window; a caller
   doing `wait_for_window()` then `geometry()` can see the same 0×0.
 
+**The CI runner is GNOME Shell 46, not 51**, which turns out to be the
+most useful thing about it. The two capture paths in the extension are
+split by shell version -- `_captureLegacy` uses `Meta.WindowActor.
+get_image()`, which Mutter 51 removed -- so a developer machine on 51 and
+a runner on 46 exercise *different code*, and neither can run the other's.
+That is how the legacy path's uncropped capture was finally caught after
+months as an unconfirmed comment: nothing here could execute it. Read a
+green CI run as covering Shell 46, and the desktop runs above as covering
+51; they are complementary, not redundant.
+
 What it does not cover: input injection reaching a client, anything
 needing the portal's consent dialog (there is nobody to click it), and
 every non-GNOME desktop.
