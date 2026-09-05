@@ -128,14 +128,18 @@ exception is the portal job, which installs `python3-dbusmock` and
 those tests *skip*, since a green job that proved nothing is worse than a
 red one.
 
-"No compositor" is now half true. A `compositor` job runs the GNOME Shell
-extension validation inside `headless-session.sh`, which is the whole
-COMPOSITOR tier — window control, capture and events — with nobody
-watching. It is on `workflow_dispatch` and a nightly schedule rather than
-on pushes, because whether a GitHub runner can host `gnome-shell
---headless` at all is untested: headless mode needs no DRM master, which
-was the part that mattered locally, but a runner has no logind session
-either. Move it onto pushes once it has a track record.
+"No compositor" is no longer true. A `compositor` job runs the GNOME Shell
+extension validation inside `headless-session.sh` — the whole COMPOSITOR
+tier, window control, capture and events, with nobody watching. It runs on
+pushes to main, on a nightly schedule and on demand, but not on pull
+requests, where five minutes of `apt` would not earn its keep.
+
+Worth knowing when you read a result: **the runner is GNOME Shell 46 and a
+Fedora desktop is 51**, and the extension's two capture paths are split by
+exactly that version — `_captureLegacy` uses an API Mutter 51 removed. So
+CI and your desktop execute *different code*, and neither can run the
+other's. That is how the legacy path's uncropped capture was found after
+months as an unconfirmed comment.
 
 ## Documentation is tested too
 

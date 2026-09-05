@@ -186,13 +186,17 @@ jobs:
     # output attached, so scripts/headless-session.sh can run the same
     # validation unattended. It passes on a Fedora 45 developer machine.
     #
-    # NOT on pushes or pull requests, deliberately. Whether a GitHub runner
-    # can host it at all is untested -- headless mode needs no DRM master,
-    # which is the part that mattered locally, but a runner also has no
-    # logind session, and the local run registered with GDM and monitored
-    # one. So this is dispatch-and-nightly until it has a track record;
-    # move it into `needs` for `publish` once it has one.
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    # Runs on pushes to main now, having earned it: a runner hosts the
+    # headless shell without complaint, and the job found two real bugs
+    # this desktop structurally could not -- the runner is GNOME Shell 46
+    # and a developer machine is 51, and the two capture paths are split
+    # by exactly that version, so neither can execute the other's code.
+    #
+    # Not on pull requests, which is the one exclusion: five minutes of
+    # apt on every PR is a poor trade, and main catches it either way. The
+    # earlier gate (dispatch and nightly only) is what made a green badge
+    # misleading -- the job it skipped was the interesting one.
+    if: github.event_name != 'pull_request'
     steps:
       - uses: actions/checkout@v5
 

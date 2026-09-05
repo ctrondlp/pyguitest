@@ -383,7 +383,8 @@ own session bus, so it neither collides with a running shell nor shows
 anything on the display, and runs a command inside it.
 
 `./scripts/headless-session.sh ./scripts/validate-gnome-extension.sh` is
-green end to end: 9 of 9 shell-level checks, and the whole
+green end to end — on a Fedora desktop and, since 2026-09-05, on a GitHub
+runner: 9 of 9 shell-level checks, and the whole
 `GnomeShellBackend` battery under them — `move_window` leaving size
 alone, `resize_window` leaving position alone, the two composing over six
 rounds, a 600×400 PNG from `capture()` matching the window exactly, the
