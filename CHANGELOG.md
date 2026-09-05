@@ -133,6 +133,44 @@ All notable changes to pyguitest are recorded here. The format follows
   goes to the journal and never reached the log the CI job keeps, which is
   why the first attempt at this diagnostic printed nothing at all.
 
+- `scripts/clipboard-reader.py` and a `--wayland-witness` flag on
+  `_portal_clipboard_validate.py`: a **native Wayland client** that reads
+  the clipboard, which is the witness that script never had. On GNOME its
+  only outside reader is `xclip` through XWayland, so every clipboard
+  result recorded so far is really "as seen from X11" -- and whether a
+  Wayland app sees what the portal wrote was left unanswered.
+
+  Opt-in, because it has to open a window: a Wayland client is offered the
+  selection through `wl_data_device` only while it holds keyboard focus,
+  so a windowless reader is handed nothing and would report an empty
+  clipboard whether or not the write worked. It also retries rather than
+  reading once, which is not defensive padding -- GNOME denies focus to a
+  window whose process was spawned from a script, and measured, an
+  unfocused reader hangs indefinitely where an empty clipboard errors
+  immediately. Retrying means clicking the window part-way through works.
+
+- `examples/_sync_under_load_validate.py`: what `sync()` is worth on a
+  busy machine. The existing 2.2ms measurement was taken idle, which shows
+  only the pleasant half -- that sync() is cheaper than the 0.3s sleep it
+  replaced. The direction that justifies the feature is a sleep being too
+  *short* under load, which is flakiness rather than waste, and nothing
+  had measured it. This compares round-trip latency idle against every
+  core saturated and reports how often the round trip beat that sleep.
+  It measures a bare ping/pong, and says so: real use is inject-then-sync,
+  where the PONG also waits for the queue, so every number is a lower
+  bound.
+
+  Its first run corrected the 2.2ms figure this package has been quoting.
+  One sample is not a latency: over 50, the idle round trip runs a median
+  of 11.6ms with a p95 of 43.8ms, so 2.2ms was the lucky end of the
+  spread and the honest margin against the 0.3s sleep is ~26x rather than
+  ~130x. It also failed to reproduce the case it was built for -- with
+  every core saturated the round trip did not degrade at all (median
+  6.8ms, nothing over 0.3s, nothing returning False), because the round
+  trip is IPC latency rather than userspace CPU work and Mutter outranks
+  the load. Loading the *compositor* is the lever that would test it. All
+  recorded in docs/validation.md rather than left as a green tick.
+
 - `scripts/probe-window.py`: one plain GTK4 window, held open until killed,
   for the window-control checks to point at.
   `validate-gnome-extension.sh` spawns it when nothing is open -- which is

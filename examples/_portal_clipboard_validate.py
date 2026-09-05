@@ -49,7 +49,14 @@ this script picks its reader by hand instead of asking
 `tools.CLIPBOARD_TOOLS` -- that helper excludes `xclip` on a Wayland
 session on principle, and for window enumeration it is right to.
 
-    python3 _portal_clipboard_validate.py
+**A native Wayland reader is opt-in**, because it has to open a window.
+`--wayland-witness` additionally spawns `scripts/clipboard-reader.py`,
+which is a real Wayland client and therefore the only thing that can
+answer "does a Wayland app see what the portal wrote" -- `xclip` answers
+that question only for X11. It appears on screen for about a second; that
+is why it is a flag rather than the default.
+
+    python3 _portal_clipboard_validate.py [--wayland-witness]
 """
 
 import os
@@ -66,6 +73,9 @@ TOOL_TIMEOUT = 5.0
 """Bound on each external tool call. A paste that needs longer than this
 has already failed the thing being tested -- a real one is a round trip to
 a compositor on the same machine."""
+
+WAYLAND_WITNESS = "--wayland-witness" in sys.argv[1:]
+"""Whether to also ask a native Wayland client. Opt-in: it opens a window."""
 
 SETTLE = 3.0
 """Seconds `read_until` will keep re-reading before giving up. Long enough
@@ -228,6 +238,24 @@ def write_external(argv, text):
     return True
 
 
+def read_wayland(reader):
+    """Ask the native Wayland client what it sees. Its one output line."""
+    try:
+        done = subprocess.run(
+            [sys.executable, reader], capture_output=True, timeout=30, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"ERROR the reader could not run: {exc}"
+    return next(
+        (
+            text
+            for text in done.stdout.decode("utf-8", "replace").splitlines()
+            if text.startswith(("CLIPBOARD ", "ERROR "))
+        ),
+        "",
+    )
+
+
 def marker(label):
     """A value nothing else on this desktop will have put there."""
     return f"pyguitest-portal-clipboard-{label}-{int(time.time())}"
@@ -362,6 +390,32 @@ record(
 )
 print(f"  SelectionTransfer fired {transfers.count} time(s) in total")
 
+if WAYLAND_WITNESS:
+    # The question xclip cannot answer. Everything above is "as seen from
+    # X11", through Mutter's selection bridge; this is a Wayland client
+    # being offered the selection directly, which is the case a
+    # Wayland-first package actually cares about.
+    print("\n[2b] the same value, read by a native Wayland client")
+    reader = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "..",
+        "scripts",
+        "clipboard-reader.py",
+    )
+    before_witness = transfers.count
+    line = read_wayland(reader)
+    record(
+        "a Wayland client reads it too",
+        line == f"CLIPBOARD {second!r}",
+        line or "the reader printed nothing recognisable",
+    )
+    # Same reasoning as everywhere else here: a matching read with no
+    # transfer behind it came from a cache, not from this process.
+    print(
+        f"  SelectionTransfer fired "
+        f"{transfers.count - before_witness} time(s) for that read"
+    )
+
 # ------------------------------------------------------------- phase 3: PRIMARY
 
 print("\n[3] PRIMARY, which this interface does not have")
@@ -397,11 +451,25 @@ record(
 )
 if after_close == second and not served_after_close:
     print(
-        "  NOTE: the content is still pasteable, but no transfer came from\n"
-        "  here to produce it -- something downstream cached the bytes. On\n"
-        "  GNOME that is Mutter's XWayland selection bridge. A native\n"
-        "  Wayland client may well see nothing; this witness cannot tell."
+        "  NOTE: the content is still pasteable through xclip, but no\n"
+        "  transfer came from here to produce it -- something downstream\n"
+        "  cached the bytes. On GNOME that is Mutter's XWayland bridge."
     )
+    if WAYLAND_WITNESS:
+        # The question the X11 witness could only shrug at: a cache on the
+        # XWayland side says nothing about what a Wayland client sees, and
+        # that is the case the portal path exists to serve.
+        wayland_after = read_wayland(reader)
+        still_there = wayland_after == f"CLIPBOARD {second!r}"
+        print(f"  a Wayland client after close(): {wayland_after or '(nothing)'}")
+        print(
+            "  => the cache is XWayland-side only; the selection is gone for\n"
+            "     Wayland clients, which is what set_clipboard() documents"
+            if not still_there
+            else "  => a Wayland client still sees it, so the cache is not\n"
+            "     XWayland-side alone -- worth chasing before relying on\n"
+            "     the documented lifetime"
+        )
 print(f"  external read after close: {after_close!r}")
 print(f"  SelectionTransfer fired {transfers.count} time(s) altogether")
 

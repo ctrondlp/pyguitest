@@ -291,10 +291,30 @@ read as a claim you cannot check.
   operations unreachable (see the caveat at the end of this file), now
   exercised live for a new operation rather than only unit-tested.
 
-  Still unmeasured: what `sync()` is worth under load. This ran against an
-  idle desktop, where the round trip is fast and the sleep was pure waste;
-  the case that matters is a busy compositor, where the sleep is sometimes
-  too *short*. Nothing here shows that.
+  **Measured 2026-09-05, and it corrects the 2.2ms above**
+  (`examples/_sync_under_load_validate.py`, 50 samples per phase). One
+  sample is not a latency: idle, the same round trip runs a **median of
+  11.6ms, p95 43.8ms, max 61ms**. 2.2ms was the lucky end of that spread,
+  and the honest comparison against the 0.3s sleep is roughly 26x at the
+  median rather than 130x — still an enormous margin, and still a fact
+  where the sleep was a hope.
+
+  The load result is the interesting one, and it does **not** support the
+  hypothesis it was built to test. With all 7 cores saturated the round
+  trip did not degrade at all: median **6.8ms**, p95 23.4ms, max 71.2ms.
+  Nothing exceeded 0.3s and nothing returned `False`. The median actually
+  *improved* under load — almost certainly CPU frequency scaling, where an
+  idle core has to wake from a low-power state and a loaded one is already
+  boosted.
+
+  So the claim "under load a fixed sleep is sometimes too short" remains
+  unproven, and the reason is that **CPU saturation is the wrong lever**.
+  The EIS round trip is IPC latency, not userspace CPU work, and Mutter is
+  scheduled ahead of the load anyway. Testing the hypothesis properly needs
+  the *compositor* busy — heavy damage and repaint, many windows, or a
+  large batch of events queued ahead of the ping so the PONG has to wait
+  for them. The script measures bare round trips and says so; that is a
+  lower bound, and the queue is the part not yet measured.
 
   The run also confirmed `eiinput` composes with `gnomeshell` on GNOME at
   all — the script had only ever named `windows` alongside it, which is

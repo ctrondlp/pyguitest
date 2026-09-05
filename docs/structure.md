@@ -17,7 +17,8 @@ pyguitest/
 ├── scripts/                    generators and live-validation helpers
 │   ├── gen-api-docs.py         writes docs/api.md from the source
 │   ├── headless-session.sh     runs a command inside a private headless GNOME
-│   └── probe-window.py         one plain window for the checks to point at
+│   ├── probe-window.py         one plain window for the checks to point at
+│   └── clipboard-reader.py     a native Wayland client that reads the clipboard
 ├── gnome-shell-extension/       pyguitest-window-control; opt-in, live-verified
 ├── docs/
 │   ├── README.md               index into this folder, for anyone landing here directly
