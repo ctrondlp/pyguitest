@@ -442,10 +442,27 @@ class X11Backend(GUIBackend):
                             handle=child,
                             backend=self,
                             title=title,
+                            app_id=self._app_id(child),
                             pid=self._pid(child),
                         )
                     )
         return found
+
+    def _app_id(self, window):
+        """A window's application identity from WM_CLASS, or empty.
+
+        WM_CLASS is a pair -- the instance name, then the class -- and the
+        class is what this reports, because that is what sway and Hyprland
+        already call the `app_id` of an X11 client. The same application is
+        then named the same however it was listed, which is the whole point of
+        having the field: titles drift while this does not, so it is the
+        identity a script should match on when a title cannot be trusted.
+        """
+        try:
+            pair = window.get_wm_class()
+        except Exception:
+            return ""
+        return (pair[-1] or "") if pair else ""
 
     def _pid(self, window):
         """The owning process id from _NET_WM_PID, or None."""
@@ -628,7 +645,17 @@ class X11Backend(GUIBackend):
         focus = self._display.get_input_focus().focus
         if isinstance(focus, int):
             return None
-        return Window(handle=focus, backend=self, title=self._title(focus))
+        # Carries the same identity fields as a listed window. Without them a
+        # caller had to decide whether a window came from windows() or from
+        # here before it could rely on `app_id` or `pid` being populated, and
+        # nothing said so.
+        return Window(
+            handle=focus,
+            backend=self,
+            title=self._title(focus),
+            app_id=self._app_id(focus),
+            pid=self._pid(focus),
+        )
 
     def is_window_viewable(self, window):
         """Whether `window` is mapped and actually showing on screen.

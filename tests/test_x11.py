@@ -57,8 +57,18 @@ class FakeClientMessage:
 
 
 class FakeWindow:
-    def __init__(self, name="", children=(), geom=(0, 0, 100, 100), root_pos=None):
+    def __init__(
+        self,
+        name="",
+        children=(),
+        geom=(0, 0, 100, 100),
+        root_pos=None,
+        wm_class=None,
+    ):
         self._name = name
+        # (instance, class), as python-xlib returns it; None for a window that
+        # never set the property, which is what a bare X client looks like.
+        self._wm_class = wm_class
         self._children = list(children)
         self._geom = geom
         # Absolute, root-relative position. Defaults to the geometry's own
@@ -83,6 +93,9 @@ class FakeWindow:
 
     def get_wm_name(self):
         return self._name
+
+    def get_wm_class(self):
+        return self._wm_class
 
     def set_wm_name(self, name):
         self._name = name
@@ -160,7 +173,11 @@ class FakeWindow:
 class FakeDisplay:
     def __init__(self, *a, **kw):
         _ROOT.sent_events = []
-        self.editor = FakeWindow("Editor", geom=(0, 0, 800, 600))
+        self.editor = FakeWindow(
+            "Editor", geom=(0, 0, 800, 600), wm_class=("gedit", "Gedit")
+        )
+        # Deliberately without a WM_CLASS: plenty of X clients set none, and
+        # the property is optional in ICCCM.
         self.browser = FakeWindow("Browser", geom=(800, 0, 400, 600))
         # Sized to match screen() deliberately: a root whose live
         # geometry disagrees with the connection-setup screen record is
@@ -437,6 +454,25 @@ class TestWindows(X11TestCase):
 
     def test_pid_comes_from_net_wm_pid(self):
         self.assertEqual(self.gui.windows()[0].pid, 4242)
+
+    def test_app_id_comes_from_the_wm_class_class(self):
+        # WM_CLASS is (instance, class) and the class is what sway and
+        # Hyprland already report as an X11 client's app_id, so the same
+        # application is named the same however it was listed.
+        self.assertEqual(self.gui.windows()[0].app_id, "Gedit")
+
+    def test_a_window_with_no_wm_class_has_an_empty_app_id(self):
+        # The property is optional in ICCCM and plenty of clients set none.
+        # Empty is the honest answer; app_id is documented as "" when unknown.
+        self.assertEqual(self.gui.windows()[1].app_id, "")
+
+    def test_the_active_window_carries_the_same_identity_as_a_listed_one(self):
+        # It used to carry only a title, so whether app_id and pid were
+        # populated depended on which call the Window came from, and nothing
+        # said so.
+        active = self.gui.active_window()
+        self.assertEqual(active.app_id, "Gedit")
+        self.assertEqual(active.pid, 4242)
 
     def test_geometry(self):
         self.assertEqual(self.gui.geometry(self.gui.windows()[1]), (800, 0, 400, 600))

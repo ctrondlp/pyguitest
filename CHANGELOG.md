@@ -7,6 +7,23 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`Window.app_id` is populated on X11**, from `WM_CLASS`. It was documented
+  and empty there, so the one identity that does *not* drift was unavailable
+  on the one backend where titles drift most — and `Window`'s own docstring
+  points at `app_id` as what to match on when a title cannot be trusted.
+
+  WM_CLASS is a pair, the instance name then the class, and the class is what
+  this reports, because that is already what sway and Hyprland call an X11
+  client's `app_id`. The same application is then named the same however it
+  was listed. A window that sets no WM_CLASS at all — the property is optional
+  in ICCCM — still reports `""`.
+
+  `active_window()` now carries `app_id` and `pid` too. It returned a Window
+  with only a title, so whether those fields were populated depended on which
+  call the Window came from, with nothing saying so.
+
 ### Fixed
 
 - **`button()` found nothing on a modern desktop**, and every other role
