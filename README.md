@@ -198,6 +198,7 @@ absent. Everything after `record` is passed straight through, so
 flags works unchanged.
 
 [recorder]: https://github.com/ctrondlp/pyguitest-recorder
+[testable-guis]: https://github.com/ctrondlp/pyguitest-recorder/blob/main/docs/testable-guis.md
 
 ## Documentation
 
@@ -207,6 +208,10 @@ flags works unchanged.
   distribution, and how capture picks a path
 - [docs/input.md](docs/input.md) — injecting pointer and keyboard input:
   permissions, daemons, keymap safety, libei and the portal
+- [testable-guis.md][testable-guis] — how to build a GUI that can be tested
+  at all: the accessibility work that lets a test name a button instead of
+  clicking a coordinate. Written to be handed to application developers;
+  lives in the [recorder][] repository
 - [docs/validation.md](docs/validation.md) — what has been run against a real
   desktop, and what has not
 - [docs/design.md](docs/design.md) — why the API is not a port, and the
