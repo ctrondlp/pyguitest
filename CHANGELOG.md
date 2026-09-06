@@ -7,6 +7,36 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **`button()` found nothing on a modern desktop**, and every other role
+  lookup was one at-spi2 rename away from the same fate. at-spi2 renamed
+  `ATSPI_ROLE_PUSH_BUTTON` to `ATSPI_ROLE_BUTTON`, keeping the integer (43)
+  and the old symbol as an alias; `atspi_role_get_name` follows the new nick,
+  so the *number* never moved and the *string* did. `Session.button` asks for
+  `Role.PUSH_BUTTON` — `"push button"` — which at-spi2-core 2.61.1 does not
+  emit for anything, and in fact no longer knows as a role name at all.
+
+  Measured live against gnome-calculator on a private X server: thirty
+  buttons in the tree, all publishing enum 43, and `gui.button("C")` raised
+  `ElementNotFound` for every one of them while
+  `gui.element(role="button", name="C")` found them. This is not a toolkit or
+  application quirk — the string is produced by at-spi2 from the enum, so
+  every application on a given version reports the same spelling whatever it
+  was written in, and the breakage arrived with an at-spi2 upgrade rather
+  than with any change here.
+
+  Role lookups now match every spelling of a role rather than the one asked
+  for (`roles.spellings`), symmetrically: a script asking for `"button"` has
+  to match a desktop that says `"push button"` just as much as the reverse,
+  since a test written on one machine is run on another. dogtail met this
+  first and its own `button()` accepts both, noting they are "represented by
+  the same integer". `Role`'s values are unchanged, so nothing written
+  against them needs touching.
+
+  Audited against every role name at-spi2 2.61.1 emits: `PUSH_BUTTON` was the
+  only one of `Role`'s constants with no live counterpart.
+
 ## [0.4.0] — 2026-09-05
 
 ### Added

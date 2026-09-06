@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..capabilities import Capability, CapabilitySet
 from ..errors import BackendUnavailable, CapabilityUnsupported
-from ..roles import Role
+from ..roles import Role, spellings
 from ..session import SessionType
 from .base import GUIBackend, Window
 
@@ -388,9 +388,13 @@ def _build_predicate(role, name, enabled, visible, description, predicate):
     GenericPredicate(roleName=role, name=name) call with one that also knows
     about state and arbitrary caller logic, without needing two code paths.
     """
+    wanted = None if role is None else spellings(role)
 
     def matches(node):
-        if role is not None and node.roleName != role:
+        # Compared against every spelling of the role, not just the one asked
+        # for: at-spi2 renamed push button to button without changing the
+        # integer, so the string a desktop reports depends on its version.
+        if wanted is not None and node.roleName not in wanted:
             return False
         if name is not None and not _matches_text(node.name, name):
             return False

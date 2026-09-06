@@ -11,9 +11,12 @@ reads as intent rather than as a magic string, and so a typo fails at import
 rather than silently matching nothing::
 
     gui.find_element(role=Role.PUSH_BUTTON, name="OK").click()
+
+Those strings are not as stable as they look, which is what `spellings` is
+for -- see its docstring.
 """
 
-__all__ = ["Role"]
+__all__ = ["Role", "spellings"]
 
 
 class Role:
@@ -78,3 +81,37 @@ class Role:
 
     CHOICE_ROLES = (COMBO_BOX, LIST, MENU, PAGE_TAB_LIST)
     """Roles that present a set of choices."""
+
+
+_ALIASES = (frozenset({"push button", "button"}),)
+"""Groups of names that are the same role under different at-spi2 versions.
+
+at-spi2 renamed `ATSPI_ROLE_PUSH_BUTTON` to `ATSPI_ROLE_BUTTON`, keeping the
+integer (43) and the old symbol as an alias, and `atspi_role_get_name` follows
+the new nick. So the *number* never moved and the *string* did: 2.61.1 reports
+"button" and knows no role named "push button" at all, while older versions
+report "push button". Measured live on at-spi2-core 2.61.1 (Fedora 45), where
+`gui.button()` consequently matched none of gnome-calculator's thirty buttons.
+
+This is not a toolkit or application quirk -- the role is produced by at-spi2
+from the enum, so every application on a given version reports the same
+spelling whatever it was written in. dogtail met it first and its own
+`button()` accepts both, noting they are "represented by the same integer".
+
+Audited against every role name at-spi2 2.61.1 emits: this is the only one of
+`Role`'s constants with no live counterpart. Add a group here if that ever
+stops being true.
+"""
+
+_SPELLINGS = {name: group for group in _ALIASES for name in group}
+
+
+def spellings(role: str) -> frozenset[str]:
+    """Every name the accessibility bus might report for `role`.
+
+    Deliberately symmetric: a script that asks for "button" has to match a
+    desktop that says "push button" just as much as the other way round, since
+    a test written on one machine is run on another, and a recording outlives
+    the at-spi2 it was made against.
+    """
+    return _SPELLINGS.get(role, frozenset({role}))

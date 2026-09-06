@@ -749,6 +749,49 @@ every non-GNOME desktop.
 Every python-xlib call the X11 backend makes has also been checked against
 the installed library — names, signatures and return shapes.
 
+## Run live on a private X server (Xvfb) against GTK4
+
+Fedora 45, at-spi2-core 2.61.1, gtk4 4.23.3, gnome-calculator 51~beta, on a
+throwaway Xvfb with an accessibility bus of its own. Two findings, both of
+which changed code.
+
+**The role name for a push button has moved, and `button()` was matching
+nothing.** at-spi2 renamed `ATSPI_ROLE_PUSH_BUTTON` to `ATSPI_ROLE_BUTTON`,
+keeping the integer and the old symbol as an alias; the name string follows
+the new nick:
+
+```
+Atspi.Role.PUSH_BUTTON     == 43                     # integer unchanged
+Atspi.Role(43).value_name  == 'ATSPI_ROLE_BUTTON'    # renamed
+Atspi.role_get_name(43)    == 'button'               # so the string moved
+```
+
+gnome-calculator publishes enum 43 for all thirty of its buttons, so it is
+behaving correctly; `gui.button("C")` raised `ElementNotFound` for every one
+while `gui.element(role="button", name="C")` found them. Since at-spi2
+produces the string from the enum, this is version-dependent and
+toolkit-independent — not a GTK4 or application quirk. Role lookups accept
+both spellings now. **Confirmed fixed against the same live application.**
+
+**Hit-testing cannot find a widget on GTK4, because extents carry no
+position.** Every element reports `(0, 0, width, height)` — `'C'`, `'↑n'` and
+`'7'` all `(0, 0, 64, 44)`. `element_at` therefore descends to the `frame` and
+stops, for essentially every point: measured across three unrelated
+applications, gnome-calculator 48/49 sampled points, baobab 42/49,
+gnome-text-editor 48/49. The accessible tree itself is complete (108 nodes
+for the calculator), so this is a Component-interface gap rather than a
+missing bridge. `ELEMENT_GEOMETRY` is accurate about sizes and useless for
+positions here, and nothing above it can recover what was never published.
+
+**Per-widget focus, by contrast, works on a bare X server.**
+`focus_tracking_works()` returns true and Tab walks real widgets — `text ''`
+→ `button 'Backspace'` → `button 'C'` → `toggle button '↑n'`. The finding
+recorded above for GNOME Shell 50.4, that only the shell's own toplevel
+carries FOCUSED, is a property of the *shell* rather than of the toolkits:
+with no shell running, applications publish it properly. Not established:
+whether a click moves focus to the clicked widget — the test was invalidated
+by the extents finding, since every button reported the same rectangle.
+
 ## Not run live
 
 - **The wlroots compositor IPC backends** — sway, Hyprland, niri. Their

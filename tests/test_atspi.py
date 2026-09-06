@@ -14,6 +14,7 @@ from unittest import mock
 
 from pyguitest.capabilities import Capability
 from pyguitest.errors import BackendUnavailable, CapabilityUnsupported
+from pyguitest.roles import Role, spellings
 from pyguitest.session import SessionType, detect
 
 
@@ -502,6 +503,37 @@ class TestElements(AtspiTestCase):
         gui = self.backend()
         self.assertIsNone(gui.find_element(role="slider"))
 
+    def test_a_button_is_found_whichever_name_atspi_gives_it(self):
+        # at-spi2 renamed ATSPI_ROLE_PUSH_BUTTON to ATSPI_ROLE_BUTTON without
+        # changing the integer, so the string a desktop reports depends on its
+        # version. Measured on at-spi2-core 2.61.1: gnome-calculator publishes
+        # enum 43 for all thirty of its buttons and the bus names it "button",
+        # so Session.button -- which asks for "push button" -- matched none.
+        gui = self.backend()
+        self.assertEqual(
+            [e.name for e in gui.find_elements(role="button")], ["OK", "Cancel"]
+        )
+
+    def test_a_button_reported_by_the_new_name_answers_to_the_old_one(self):
+        # The direction that actually broke: the desktop says "button" and
+        # Role.PUSH_BUTTON is what every existing script and Session.button
+        # asks with.
+        self.button.roleName = "button"
+        gui = self.backend()
+        found = gui.find_element(role=Role.PUSH_BUTTON, name="OK")
+        self.assertIsNotNone(found)
+        self.assertEqual(found.name, "OK")
+
+    def test_a_role_with_no_alias_still_has_to_match_exactly(self):
+        # The aliasing is a fixed table of names at-spi2 itself moved, not
+        # fuzzy matching: "check" must not find a "check box".
+        gui = self.backend()
+        self.assertEqual(gui.find_elements(role="check"), [])
+        self.assertEqual(
+            [e.name for e in gui.find_elements(role="check box")],
+            ["Enable notifications"],
+        )
+
     def test_click_needs_no_coordinates_or_injection(self):
         gui = self.backend()
         gui.find_element(name="OK").click()
@@ -669,3 +701,19 @@ class TestElementGeometry(AtspiTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRoleSpellings(unittest.TestCase):
+    """The table behind the role aliasing, on its own."""
+
+    def test_the_two_button_spellings_are_one_role(self):
+        self.assertEqual(spellings("button"), spellings("push button"))
+        self.assertIn("button", spellings(Role.PUSH_BUTTON))
+
+    def test_an_unaliased_role_is_only_itself(self):
+        self.assertEqual(spellings("check box"), frozenset({"check box"}))
+
+    def test_an_unknown_role_is_passed_through_rather_than_dropped(self):
+        # A toolkit may publish a role this table has never heard of, and
+        # asking for it has to keep working.
+        self.assertEqual(spellings("gadget"), frozenset({"gadget"}))
