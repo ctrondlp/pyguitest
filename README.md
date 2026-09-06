@@ -166,9 +166,10 @@ pyguitest doctor              # what to install to unlock more
 pyguitest debug               # everything needed to diagnose a bug report
 pyguitest inspect             # the accessible tree of every open window
 pyguitest migrate script.pl   # what porting a Perl script involves
+pyguitest record              # hand off to pyguitest-recorder, if installed
 ```
 
-All five also work as `python -m pyguitest …` without installing.
+All six also work as `python -m pyguitest …` without installing.
 
 `pyguitest debug` is what to paste into a bug report: package and Python
 versions, every environment probe (not only the ones that came back true),
@@ -187,6 +188,16 @@ writing a script first. `--window TITLE_REGEX` narrows it to one application;
 The migration scanner reports the tier of every X11::GUITest call in a source
 file and exits non-zero if any call has no Wayland path, so a port can be gated
 in CI.
+
+`pyguitest record` is an alias for [pyguitest-recorder][recorder], which
+records desktop activity and writes the pyguitest script for it. That tool is
+a separate package -- pyguitest does not depend on it, and installing pyguitest
+does not install it -- so the subcommand reports how to install it if it is
+absent. Everything after `record` is passed straight through, so
+`pyguitest record --help` is the recorder's own help and every one of its
+flags works unchanged.
+
+[recorder]: https://github.com/ctrondlp/pyguitest-recorder
 
 ## Documentation
 

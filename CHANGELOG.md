@@ -7,6 +7,43 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`pyguitest record` hands off to pyguitest-recorder**, if it is installed.
+  The recorder is where a session is captured and a script written for it;
+  it was reachable only under its own name, which is one more thing to know
+  about before it can be found. It is now a subcommand of the tool people
+  already have.
+
+  An alias, not an integration. The recorder depends on pyguitest, so nothing
+  on this side may depend on it back: it is imported when the subcommand runs
+  and not before, and the rest of the command line is passed through unread
+  rather than mirrored by a parser here. The whole contract is that
+  `pyguitest_recorder.cli.main(argv)` exists and returns an exit status, so a
+  recorder flag added later works through the alias with no change here and no
+  version floor to keep in step. `pyguitest record --help` is the recorder's
+  own help for the same reason — the handoff happens before this parser is
+  built, so `--help` and `--version` belong to the recorder too.
+
+  `record` is listed in `pyguitest --help` whether or not the recorder is
+  installed. Help output that varies by machine is harder to document, and the
+  reader who most needs to learn the recorder exists is the one who does not
+  have it.
+
+  Where it is absent, the subcommand reports how to install it rather than
+  raising, the way every other gap in that file is reported, and points at
+  `pyguitest-recorder --doctor` for whether this desktop can be recorded at
+  all. That question has a real answer — the recorder captures through
+  XRecord, which a pure Wayland session cannot offer — but it is the
+  recorder's answer to give, and repeating it here would be a claim to keep in
+  step with a package this one does not depend on.
+
+  An ImportError does not on its own mean the recorder is absent: it imports
+  pyguitest, and on 3.10 tomli. Only a missing module in the recorder's own
+  namespace is reported as "not installed", because telling someone to install
+  a package they already have sends them the wrong way; anything else is
+  printed as the error it was.
+
 ## [0.5.0] — 2026-09-06
 
 ### Added

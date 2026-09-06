@@ -5,9 +5,15 @@
     pyguitest debug              everything needed to diagnose a bug report
     pyguitest inspect            the accessible tree of every open window
     pyguitest migrate script.pl  what porting that script involves
+    pyguitest record             hand off to pyguitest-recorder, if installed
 
 Also runnable as `python -m pyguitest` when the package is on the path but the
 console script is not installed.
+
+`record` is an alias, not an integration. The recorder is its own package and
+depends on this one, so nothing here may depend on it back: it is imported
+only when the subcommand is used, and its command line is passed through
+unread rather than mirrored by a parser on this side. See _record().
 
 The migration scan is a lexical pass over Perl sources: it finds X11::GUITest
 calls and reports the tier each lands in, so the cost of a port can be read off
@@ -49,6 +55,12 @@ _ENV_VARS_OF_INTEREST = (
     "SWAYSOCK",
     "HYPRLAND_INSTANCE_SIGNATURE",
 )
+
+_RECORDER = "pyguitest_recorder"
+"""Import name of the recorder `record` hands off to.
+
+Its distribution name is pyguitest-recorder; this is the module name, which
+is what an ImportError reports and what _record() matches against."""
 
 _OS_RELEASE = pathlib.Path("/etc/os-release")
 _HOST_OS_RELEASE = pathlib.Path("/run/host/os-release")
@@ -428,8 +440,64 @@ def _scan(paths):
     return 1 if blocked else 0
 
 
+def _record(argv):
+    """Hand the rest of the command line to pyguitest-recorder.
+
+    The whole contract with the recorder is this one call: it exposes
+    `main(argv)` and returns an exit status. Flags are neither parsed nor
+    listed here, so one added there later works through this alias with no
+    change on this side and no version floor to keep in step -- which is the
+    point, since the packages are released separately.
+
+    The import is local for the same reason `record` is not a dependency:
+    the recorder requires pyguitest, and importing it at module scope would
+    close that loop. A missing recorder is reported as install advice rather
+    than a traceback, the way every other gap in this file is.
+
+    Which module went missing decides what to say. The recorder imports
+    pyguitest and, on 3.10, tomli, so an ImportError from here does not on
+    its own mean the recorder is absent -- and telling someone to install a
+    package they already have sends them the wrong way. Only a name in the
+    recorder's own namespace earns the install line; anything else is
+    reported as itself.
+
+    The install line stops short of promising the recorder would work here.
+    It captures through XRecord today, which a pure Wayland session cannot
+    offer, but that is the recorder's fact to state and its own `--doctor`
+    is built to state it -- repeating it on this side would be a claim to
+    keep in step with a package this one does not depend on.
+    """
+    try:
+        from pyguitest_recorder.cli import main as record_main
+    except ImportError as exc:
+        missing = getattr(exc, "name", None) or ""
+        if missing == _RECORDER or missing.startswith(f"{_RECORDER}."):
+            print(
+                "pyguitest record needs the recorder, which ships separately:\n"
+                "    pip install pyguitest-recorder\n"
+                "Whether this desktop can be recorded is a separate question"
+                " -- `pyguitest-recorder --doctor` answers it.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"pyguitest record: the recorder is installed but will not "
+                f"import -- {exc}",
+                file=sys.stderr,
+            )
+        return 2
+    return record_main(argv)
+
+
 def main(argv=None):
     """Entry point for `python -m pyguitest`."""
+    argv = sys.argv[1:] if argv is None else list(argv)
+    # Dispatched before the parser is even built: everything after `record`
+    # belongs to the recorder, `--help` and `--version` included, and this
+    # parser has never heard of any of it.
+    if argv and argv[0] == "record":
+        return _record(argv[1:])
+
     parser = argparse.ArgumentParser(
         prog="pyguitest", description=__doc__.split("\n")[0]
     )
@@ -451,6 +519,14 @@ def main(argv=None):
     )
     migrate = sub.add_parser("migrate", help="scan Perl sources for X11::GUITest calls")
     migrate.add_argument("paths", nargs="+")
+    # Registered for the subcommand listing only -- main() dispatches `record`
+    # before this parser runs, so nothing here ever parses it. Listed whether
+    # or not the recorder is installed: help output that varies by machine is
+    # harder to document, and the readers who most need to find the recorder
+    # are the ones who do not have it yet.
+    sub.add_parser(
+        "record", add_help=False, help="record a session (needs pyguitest-recorder)"
+    )
 
     args = parser.parse_args(argv)
     if args.command == "migrate":
