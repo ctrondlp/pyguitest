@@ -821,20 +821,44 @@ class Session:
         """Return every open window."""
         return self.backend.windows()
 
-    def find_windows(self, title: str) -> list[Window]:
-        """Return every window whose title matches the `title` regex."""
-        pattern = re.compile(title)
-        return [w for w in self.backend.windows() if pattern.search(w.title)]
+    def find_windows(
+        self, title: str | None = None, *, app_id: str | None = None
+    ) -> list[Window]:
+        """Every window matching `title` (regex) and/or `app_id` (exact).
 
-    def find_window(self, title: str) -> Window:
-        """Return the first window matching the `title` regex.
+        At least one of `title`/`app_id` is required. Given both, a window
+        must satisfy each -- title is a regex over an identifier that can
+        drift after a window opens (see Window's docstring), app_id an exact
+        match against one that should not. `app_id` is empty on backends
+        that never fill it (see Window.app_id); nothing matches `app_id=""`
+        on purpose, since that is "unset", not a real identifier.
+        """
+        if title is None and app_id is None:
+            raise ValueError("find_windows needs title, app_id, or both")
+        pattern = re.compile(title) if title is not None else None
+        return [
+            w
+            for w in self.backend.windows()
+            if (pattern is None or pattern.search(w.title))
+            and (app_id is None or (w.app_id and w.app_id == app_id))
+        ]
+
+    def find_window(
+        self, title: str | None = None, *, app_id: str | None = None
+    ) -> Window:
+        """The first window matching `title` (regex) and/or `app_id`.
 
         Raises WindowNotFound if nothing matches, so a script stops where the
-        mistake is.
+        mistake is. See find_windows for how `title`/`app_id` combine.
         """
-        found = self.find_windows(title)
+        found = self.find_windows(title, app_id=app_id)
         if not found:
-            raise WindowNotFound(f"no window with a title matching {title!r}")
+            wanted = ", ".join(
+                f"{k}={v!r}"
+                for k, v in (("title", title), ("app_id", app_id))
+                if v is not None
+            )
+            raise WindowNotFound(f"no window matching {wanted}")
         return found[0]
 
     def window_element(self, title: str) -> Element:
@@ -883,28 +907,42 @@ class Session:
             time.sleep(interval)
 
     def wait_for_window(
-        self, title: str, timeout: float | None = None, interval: float = 0.5
+        self,
+        title: str | None = None,
+        timeout: float | None = None,
+        interval: float = 0.5,
+        *,
+        app_id: str | None = None,
     ) -> Window | None:
-        """Block until a window matching the `title` regex appears.
+        """Block until a window matching `title` (regex) and/or `app_id`.
+
+        See find_windows for how `title`/`app_id` combine; at least one is
+        required.
 
         Delegates to the backend's own event-driven implementation where
-        Capability.WINDOW_EVENTS is available (sway today) -- real
-        notification, not polling. Everywhere else, this polls find_windows
+        Capability.WINDOW_EVENTS is available (sway today) and only `title`
+        was asked for -- real notification, not polling. Everywhere else,
+        including any call that names `app_id`, this polls find_windows
         every `interval` seconds instead, so a script does not need to know
         which case it is in, or hand-roll the poll loop itself: checking for
         WINDOW_EVENTS and falling back to a fixed sleep was exactly the
         mistake examples/04_drive_an_editor.py made before this existed.
+        `app_id` always polls because the event-driven backends only ever
+        learned to match a title.
 
         `timeout` bounds the wait in seconds; None waits indefinitely.
         Returns the matched Window, or None if `timeout` elapses first --
         not WindowNotFound, since polling for something that may simply not
         exist *yet* is the expected outcome here, unlike find_window.
         """
-        if self.supports(Capability.WINDOW_EVENTS):
+        if title is None and app_id is None:
+            raise ValueError("wait_for_window needs title, app_id, or both")
+        if app_id is None and self.supports(Capability.WINDOW_EVENTS):
+            assert title is not None  # guarded above: app_id is None here
             return self.backend.wait_for_window(title, timeout)
 
         def first_match() -> Window | None:
-            found = self.find_windows(title)
+            found = self.find_windows(title, app_id=app_id)
             return found[0] if found else None
 
         return self._poll_until(first_match, timeout, interval)

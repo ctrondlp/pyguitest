@@ -89,8 +89,8 @@ class FakeBackend(GUIBackend):
             FakeElement(Role.FRAME, "Preferences"),
         ]
         self._windows = [
-            Window("a", self, title="Document - Editor"),
-            Window("b", self, title="Firefox"),
+            Window("a", self, title="Document - Editor", app_id="org.editor.Editor"),
+            Window("b", self, title="Firefox", app_id="firefox"),
         ]
 
     @property
@@ -360,6 +360,35 @@ class TestWindowFinders(unittest.TestCase):
         with self.assertRaises(WindowNotFound):
             session().find_window("NoSuchApp")
 
+    def test_find_window_by_app_id_alone(self):
+        self.assertEqual(session().find_window(app_id="firefox").title, "Firefox")
+
+    def test_app_id_is_an_exact_match_not_a_regex(self):
+        # "fire" is a substring, not the whole app_id -- unlike title, which
+        # is deliberately regex.
+        self.assertEqual(session().find_windows(app_id="fire"), [])
+
+    def test_title_and_app_id_together_both_must_match(self):
+        gui = session()
+        self.assertEqual(
+            gui.find_windows("Firefox", app_id="firefox")[0].title, "Firefox"
+        )
+        self.assertEqual(gui.find_windows("Firefox", app_id="org.editor.Editor"), [])
+
+    def test_neither_title_nor_app_id_is_an_error(self):
+        with self.assertRaises(ValueError):
+            session().find_windows()
+        with self.assertRaises(ValueError):
+            session().find_window()
+
+    def test_empty_app_id_matches_nothing_rather_than_every_unset_window(self):
+        # A window whose backend never fills app_id defaults to "" -- that
+        # is "unset", not a real identifier, so it must not be findable by
+        # asking for app_id="".
+        gui = session()
+        gui.backend._windows.append(Window("c", gui.backend, title="Untitled"))
+        self.assertEqual(gui.find_windows(app_id=""), [])
+
 
 class TestWaitForWindow(unittest.TestCase):
     """The generic fallback: polling find_windows when there is no event feed.
@@ -418,6 +447,41 @@ class TestWaitForWindow(unittest.TestCase):
         window = gui.wait_for_window("Editor", timeout=5)
         self.assertEqual(gui.backend.asked, ("Editor", 5))
         self.assertEqual(window.title, "Document - Editor")
+
+    def test_app_id_always_polls_even_when_window_events_is_supported(self):
+        # The event-driven backends only ever learned to match a title, so
+        # naming app_id -- with or without a title -- must not reach them.
+        class EventBackend(FakeBackend):
+            @property
+            def capabilities(self):
+                return CapabilitySet(
+                    set(FakeBackend.capabilities.fget(self))
+                    | {Capability.WINDOW_EVENTS}
+                )
+
+            def wait_for_window(self, title, timeout):
+                raise AssertionError("app_id must not delegate to the backend")
+
+        gui = pyguitest.Session(EventBackend(), pyguitest.detect())
+        window = gui.wait_for_window(app_id="firefox", timeout=1, interval=0.01)
+        self.assertEqual(window.title, "Firefox")
+
+    def test_by_app_id_alone(self):
+        gui = session()
+        window = gui.wait_for_window(app_id="firefox", timeout=1, interval=0.01)
+        self.assertEqual(window.title, "Firefox")
+
+    def test_title_and_app_id_together_both_must_match(self):
+        gui = session()
+        self.assertIsNone(
+            gui.wait_for_window(
+                "Firefox", app_id="org.editor.Editor", timeout=0.05, interval=0.01
+            )
+        )
+
+    def test_neither_title_nor_app_id_is_an_error(self):
+        with self.assertRaises(ValueError):
+            session().wait_for_window()
 
 
 class TestWaitWindowClose(unittest.TestCase):

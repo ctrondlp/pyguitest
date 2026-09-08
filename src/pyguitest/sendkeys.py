@@ -131,25 +131,37 @@ class KeySender:
     # -- the loop ----------------------------------------------------------
 
     def send(self, keys: str) -> None:
-        """Walk `keys`, acting on each character of the grammar."""
-        i, n = 0, len(keys)
-        while i < n:
-            char = keys[i]
-            if char == "{":
-                content, i = self.scan_brace(keys, i)
-                self.brace(content)
-                continue
-            if char == ")":
-                self.release_held()
+        """Walk `keys`, acting on each character of the grammar.
+
+        Releases any modifier still held on the way out, success or not.
+        Without the `finally`, an exception raised mid-group -- an
+        unmapped character inside `%(...)`, say -- left that modifier
+        held on the real keyboard with nothing left in this call to
+        release it; same for `keys` itself ending before its own closing
+        `)`. On a well-formed string that runs to completion, `held` is
+        already empty by the time this runs, so it is a no-op there.
+        """
+        try:
+            i, n = 0, len(keys)
+            while i < n:
+                char = keys[i]
+                if char == "{":
+                    content, i = self.scan_brace(keys, i)
+                    self.brace(content)
+                    continue
+                if char == ")":
+                    self.release_held()
+                    i += 1
+                    continue
+                step = self.character(char, keys, i, n)
+                if step is not None:
+                    i = step
+                    continue
                 i += 1
-                continue
-            step = self.character(char, keys, i, n)
-            if step is not None:
-                i = step
-                continue
-            i += 1
-            if not self.grouped:
-                self.release_held()
+                if not self.grouped:
+                    self.release_held()
+        finally:
+            self.release_held()
 
     def character(self, char: str, keys: str, i: int, n: int) -> int | None:
         """Act on one ordinary character.
