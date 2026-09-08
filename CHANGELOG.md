@@ -90,6 +90,27 @@ All notable changes to pyguitest are recorded here. The format follows
   differently, and the compositor's own answer is the one already agreeing
   with `geometry()` and `screens()`.
 
+- **X11 `type_text()` typed the wrong character for anything in keyboard
+  group 2** — an AltGr-only symbol, on any layout that has one. It held
+  Shift for any non-zero shift level, but level 2/3 is a different physical
+  key (AltGr on most layouts), so a group-2 character came out as its
+  group-1 neighbour instead, silently. It now holds whichever key the
+  server assigns that role — `ISO_Level3_Shift` under XKB, falling back to
+  the older `Mode_switch` — and raises `CapabilityUnsupported` for a
+  character in a group this server has no switch key for at all, rather
+  than typing the wrong one.
+
+  Underneath that, a more foundational bug: **python-xlib's `Xlib.XK`
+  module never actually resolved `"ISO_Level3_Shift"` by name**, on any
+  server, because it auto-loads only the `miscellany` and `latin1` keysym
+  groups at import time and that name lives in a separate `xkb` group
+  nothing here ever loaded. Confirmed live (python-xlib 0.33):
+  `press_key("ISO_Level3_Shift")` raised `ValueError: unknown key name`
+  before this fix — which means `send_keys("&e")`-style explicit AltGr
+  modifiers, documented as already working, had never actually reached a
+  real server either. The `xkb` keysym group is now loaded once when
+  python-xlib is imported, fixing both call paths from the same root.
+
 ## [0.5.0] — 2026-09-06
 
 ### Added

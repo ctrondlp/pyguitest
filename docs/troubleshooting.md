@@ -110,11 +110,14 @@ detection when only keymap-unsafe ones are present. Prefer `wdotool`,
 through the server's own keymap. [input.md](input.md#keymap-safety) explains
 the ranking, and `pyguitest doctor` says which tools you have.
 
-A separate, narrower case: characters that need a group switch (AltGr on many
-layouts) rather than Shift. If a specific accented or symbol character comes
-out wrong on X11 while ordinary letters are fine, that is a known bug in the
-X11 backend's `type_text()`; `send_keys("&e")`-style explicit modifiers are
-the workaround.
+A separate, narrower case, now fixed: characters that need a group switch
+(AltGr on many layouts) rather than Shift. `type_text()` holds the server's
+own group-switch key for those, not Shift, and raises `CapabilityUnsupported`
+for a character in a keyboard group the server has no switch key for at all,
+rather than typing the wrong (group-1) character silently. If a character
+still comes out wrong, check `gui._group_switch_keycode()` for `None` first —
+that means this X server has no `ISO_Level3_Shift` or `Mode_switch` key at
+all, which no workaround here can supply.
 
 ## CapabilityUnsupported on a window operation
 
