@@ -319,7 +319,7 @@ jobs:
   publish:
     name: publish to PyPI
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [tests, lint, imagemagick, portal, build]
+    needs: [tests, lint, imagemagick, portal, compositor, build]
     runs-on: ubuntu-latest
     # Must match the environment named in the PyPI publisher config. A
     # required reviewer on it makes each publish a deliberate approval

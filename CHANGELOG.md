@@ -7,6 +7,22 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Lookup windows by `app_id`, not just title.** `find_windows`/`find_window`/
+  `wait_for_window` all gained an `app_id` keyword; `title` is now optional on
+  each, guarded against neither being given. `title` stays a regex match,
+  `app_id` is an exact match — a window's app_id should not drift the way a
+  title can (see `Window`'s docstring), so it gets the stricter comparison.
+  Given both, a window must satisfy each. `app_id=""` matches nothing on
+  purpose, since an empty `app_id` means a backend never filled it in, not a
+  real identifier to search for. `wait_for_window` still delegates to a
+  backend's own event-driven implementation (`Capability.WINDOW_EVENTS`) when
+  only `title` is given; naming `app_id` always polls, since none of those
+  backends learned to match on it. Closes the last piece of the app_id work —
+  `X11Backend` and `GnomeShellBackend` already fill the field; this is what
+  reads it back.
+
 ## [0.6.0] — 2026-09-08
 
 ### Added

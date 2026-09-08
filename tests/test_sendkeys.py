@@ -132,6 +132,28 @@ class TestModifiers(unittest.TestCase):
             + [("release", "Control_L")],
         )
 
+    def test_exception_mid_group_still_releases_the_held_modifier(self):
+        # "\x01" resolves to nothing in resolve_char_key's ASCII table, so
+        # this raises with Control_L already held -- before the fix, the
+        # ValueError propagated straight out of send() and nothing left in
+        # that call ever released it.
+        gui = session()
+        with self.assertRaises(ValueError):
+            gui.send_keys("^(\x01)")
+        self.assertEqual(
+            gui.backend.events, [("press", "Control_L"), ("release", "Control_L")]
+        )
+
+    def test_unterminated_group_still_releases_the_held_modifier(self):
+        # No closing ")" at all -- not an exception, just malformed input
+        # that leaves `grouped` true when the string runs out.
+        gui = session()
+        gui.send_keys("^(a")
+        self.assertEqual(
+            gui.backend.events,
+            [("press", "Control_L")] + tap("a") + [("release", "Control_L")],
+        )
+
 
 class TestBraceSets(unittest.TestCase):
     def test_abbreviated_alias(self):
