@@ -96,6 +96,14 @@ class Capability(Enum):
         "of sleeping and hoping; proves delivery to the compositor, never "
         "that the application processed or repainted them",
     )
+    INPUT_CAPTURE = (
+        Tier.PRIVILEGED,
+        "Learn where the pointer is from a real crossing of a screen edge "
+        "the caller sets up, exclusively diverting real input for the "
+        "length of one activation; not a query -- see Session."
+        "wait_for_pointer_activation, which can return None rather than "
+        "answer at all if nobody moves the pointer there in time",
+    )
 
     # -- T3: per-desktop window backends -----------------------------------
     WINDOW_LIST = (Tier.COMPOSITOR, "Enumerate toplevels, read titles and app ids")

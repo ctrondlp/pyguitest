@@ -426,6 +426,19 @@ rounds, a 600×400 PNG from `capture()` matching the window exactly, the
 `new`/`title`/`close` window events, and `window_at()` hitting the right
 window. Nobody clicked anything.
 
+**Re-run 2026-09-08 (GNOME Shell 51.rc) after adding `app_id`.** The
+extension's `ListWindows` gained a tenth field, `wm_class`, appended rather
+than inserted so an older extension and a newer Python still agree on the
+first nine — the validation script now checks for it two ways: the
+introspected D-Bus signature (`a(uisiiiibbs)`) and, live, that a real window
+actually carries a non-empty `app_id` (the spawned probe window answered
+`'local.pyguitest.ProbeWindow'`). Both passed, and the whole battery around
+them still did too — the same run is what caught that `GnomeShellBackend.
+geometry()` had an exact 9-element tuple unpack that the new tenth field
+would have broken outright; fixed to a trailing `*_rest` before this run,
+confirmed by the geometry battery still passing with it in place. 10 of 10
+shell-level checks; see `metadata.json`'s `"0.4.0-appid"`.
+
 Two things it settles that the plan could only guess at. The headless
 backend does **not** object to the seat situation — the open question that
 decided whether pyguitest could have CI at all. And the GNOME Shell
@@ -822,6 +835,69 @@ over a genuine Gio connection — real D-Bus calls and a real
 against a real `dbus-daemon` and real PyGObject. That proves the plumbing
 between `PortalBackend` and a portal-shaped service. It proves nothing about
 the real daemon, GNOME's or KDE's backend implementation, or the dialog.
+- **`inputcapture`'s consent negotiation only** — see the dedicated section
+  below for the live activation attempts themselves, which are past this.
+  A unit test already raised the real consent dialog by accident once
+  during development: an early draft of a python-libei test omitted the
+  "force the PyGObject import to fail" patch its sibling test already used,
+  reached the real session bus instead of a fake one, and approved before
+  the mistake was caught. No pointer barriers had been set and `Enable()`
+  was never reached, so nothing was actually captured — but it is why
+  `wait_for_pointer_activation` returns `None` on timeout rather than being
+  able to hang a caller who did not know what they were starting, and why
+  live-testing this deliberately, not by accident, mattered enough to do.
+
+## `inputcapture`: two live attempts, negotiation confirmed, activation still open
+
+2026-09-08, GNOME Shell (Wayland), run by the user directly —
+`examples/_inputcapture_validate.py`, never by an agent session, for the
+reason its own docstring gives: *approving* this consent dialog exclusively
+diverts the approver's own pointer away from their desktop, which is a
+trade only they should decide to make.
+
+**What is confirmed working:** negotiation end to end (the consent dialog,
+`InputCaptureSession.negotiate()`, `capabilities offered: ['INPUT_CAPTURE']`);
+`zones()` reporting a real single-monitor layout (`(1920, 1080, 0, 0)`,
+`zone_set=0`); the perimeter-barrier arithmetic, which matches the portal
+spec's own worked examples for a 1920×1080 screen exactly —
+`(1,0,0,1919,0)`, `(2,0,1080,1919,1080)`, `(3,0,0,0,1079)`,
+`(4,1920,0,1920,1079)` for top/bottom/left/right; and the timeout path
+itself, which returned cleanly (`disable()` ran, no hang, no crash).
+
+**What did not happen, across four attempts:** activation. Runs 1-3 all
+timed out at the full 30s window: all four screen corners; a single edge
+(right side) under sustained pressure for several seconds rather than a
+quick touch; and a third repeat after the `failed_barriers` fix below
+landed, which raised no error — confirming every barrier really was
+accepted, not silently refused.
+
+**One real bug found and fixed as a direct result**, after run 2, before
+run 3: `set_pointer_barriers()`'s `failed_barriers` return value — which
+barrier ids the compositor refused — was being discarded entirely.
+`wait_for_pointer_activation()` now raises `PyGUITestError` immediately if
+every barrier was refused, rather than calling `Enable()` anyway and
+waiting out the full timeout for an activation that could never come. Run
+3 raised nothing and still timed out, which is what ruled this out as the
+explanation for runs 1-2 rather than confirming it.
+
+**Run 4 is conclusive: the compositor never emits `Activated` at all.**
+`gdbus monitor --session --dest org.freedesktop.portal.Desktop` ran
+throughout a fourth attempt and captured zero signal traffic beyond the
+bus-name ownership announcement at startup — not a delivery failure on
+this package's side (there was nothing on the bus to fail to deliver), and
+not a subscription bug (`_wait_for_signal` subscribes correctly; there was
+simply nothing to subscribe to that ever fired). Every piece this project
+owns is now confirmed correct: negotiation, zone geometry, barrier
+arithmetic matching the spec's own worked examples, barrier *acceptance*
+by the compositor, and clean timeout/disable behavior. **The gap is on the
+compositor's side** — Mutter accepts `SetPointerBarriers` and `Enable()`
+per spec, on GNOME Shell 51.rc (a release candidate, not a stable
+release), but its own crossing-detection logic does not appear to ever
+decide a barrier was crossed and never emits `Activated` in response to
+real pointer movement against a real screen edge. Not something this
+codebase can fix; worth checking again against a stable GNOME release, and
+a reasonable candidate for an upstream Mutter bug report if it persists
+there too.
 
 ## Why the live runs mattered
 

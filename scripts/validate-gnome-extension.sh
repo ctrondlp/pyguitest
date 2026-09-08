@@ -98,6 +98,13 @@ for m in ListWindows; do
 done
 
 if gdbus introspect --session --dest org.gnome.Shell --object-path "$OBJ" 2>/dev/null \
+    | grep -q "a(uisiiiibbs)"; then
+  ok "ListWindows carries wm_class -- shell is running 0.4.0-appid or later"
+else
+  bad "ListWindows has no wm_class field -- shell is running an extension older than 0.4.0-appid; app_id will read empty"
+fi
+
+if gdbus introspect --session --dest org.gnome.Shell --object-path "$OBJ" 2>/dev/null \
     | grep -q "WindowEvent"; then
   ok "WindowEvent signal is in the introspected interface"
 else
@@ -164,6 +171,14 @@ if not wins:
         sys.exit(1)
     print(f"  {G} probe window opened: {b.geometry(wins[0])[2:]} at "
           f"{b.geometry(wins[0])[:2]}")
+
+named = [w for w in wins if w.app_id]
+if named:
+    print(f"  {G} app_id populated: {named[0].app_id!r}")
+else:
+    print(f"  {R} every window has an empty app_id -- extension older than "
+          f"0.4.0-appid, or every window genuinely sets no WM_CLASS")
+    rc = 1
 
 # The D-Bus tuple has no maximized/tiled flag, so a window that will not
 # move (typically maximized) cannot be filtered out ahead of time -- only

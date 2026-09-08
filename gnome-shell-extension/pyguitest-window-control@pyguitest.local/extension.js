@@ -44,15 +44,20 @@ const OBJECT_PATH = '/org/gnome/Shell/Extensions/Pyguitest';
 // window the user drags by hand is not yanked back. See MoveResizeWindow.
 const PENDING_USEC = 1000 * 1000; // 1s, in microseconds
 
-// Window tuple: (id, pid, title, x, y, width, height, minimized, focused).
-// id is Meta.Window's own stable_sequence -- a monotonically increasing
-// integer Mutter assigns per window and keeps stable for its lifetime,
-// unlike an X11 id, which is only meaningful for windows that have one.
+// Window tuple: (id, pid, title, x, y, width, height, minimized, focused,
+// wmClass). id is Meta.Window's own stable_sequence -- a monotonically
+// increasing integer Mutter assigns per window and keeps stable for its
+// lifetime, unlike an X11 id, which is only meaningful for windows that
+// have one. wmClass is appended, not inserted, so an older Python talking
+// to this extension still unpacks the first nine fields correctly, and a
+// newer Python talking to an older (pre-wmClass) extension can tell the two
+// signatures apart by tuple length rather than breaking outright -- see
+// GnomeShellBackend._window.
 const IFACE_XML = `
 <node>
   <interface name="org.gnome.Shell.Extensions.Pyguitest">
     <method name="ListWindows">
-      <arg type="a(uisiiiibb)" direction="out" name="windows"/>
+      <arg type="a(uisiiiibbs)" direction="out" name="windows"/>
     </method>
     <method name="MoveResizeWindow">
       <arg type="u" direction="in" name="id"/>
@@ -198,6 +203,7 @@ class PyguitestService {
                 rect.height,
                 window.minimized,
                 window.has_focus(),
+                window.get_wm_class() ?? '',
             ]);
         }
         return result;

@@ -66,7 +66,7 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T")
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 __all__ = [
     "connect",
@@ -1619,6 +1619,32 @@ class Session:
         exactly the false confidence it exists to remove.
         """
         return self.backend.sync(timeout=timeout)
+
+    def wait_for_pointer_activation(
+        self, timeout: float | None = None
+    ) -> tuple[float, float] | None:
+        """Block for one real crossing of a screen edge, and return where.
+
+        Not a query, and deliberately not spelled `pointer_position()`:
+        Capability.INPUT_CAPTURE (the `inputcapture` backend, opt-in --
+        `connect(backend="inputcapture")`) can only ever answer this at the
+        moment the compositor itself decides to divert input here, which
+        happens when a human's actual pointer physically moves across one
+        of the screen's edges. There is no way to trigger that on demand,
+        so this can legitimately block for as long as `timeout` allows
+        waiting for someone to do that -- and once it happens, **every
+        physical or logical pointer/keyboard/touch device the compositor
+        chose to divert stops reaching the desktop at all** until this
+        method has read the answer and released it, which it does as its
+        very next step. Call this only when that trade is genuinely wanted,
+        never as a drop-in replacement for a synchronous position read.
+
+        Returns the pointer's position in the coordinate space `Screen`
+        reports, or None if `timeout` elapsed with nobody crossing an edge
+        -- the ordinary outcome, matching every other `wait_for_*` method
+        here, not an error. `timeout=None` waits indefinitely.
+        """
+        return self.backend.wait_for_pointer_activation(timeout=timeout)
 
     def screens(self) -> list[Screen]:
         """Every output, in advertised order."""

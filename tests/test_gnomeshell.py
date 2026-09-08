@@ -183,7 +183,11 @@ class FakeProxy:
         i = self._index(wid)
         if i is None:
             return FakeReply((False,))
-        self.windows = [(*w[:8], w[0] == wid) for w in self.windows]
+        # w[9:] preserves wm_class (or nothing, for a plain 9-tuple window)
+        # -- rebuilding only the first 8 fields plus the new focused value
+        # would silently drop it, the same trap the real extension's own
+        # tolerant unpacking exists to avoid on the Python side.
+        self.windows = [(*w[:8], w[0] == wid, *w[9:]) for w in self.windows]
         return FakeReply((True,))
 
     def _MinimizeWindow(self, wid, minimize):
@@ -349,6 +353,36 @@ class TestWindows(GnomeShellTestCase):
     def test_active_window_is_none_when_nothing_is_focused(self):
         self.proxy.windows = [(*_EDITOR[:8], False)]
         self.assertIsNone(self.gui.active_window())
+
+    def test_app_id_comes_from_wm_class_on_an_extension_that_sends_it(self):
+        # The tenth field, appended by "0.4.0-appid" -- see _window.
+        self.proxy.windows = [(*_EDITOR, "gedit")]
+        self.assertEqual(self.gui.windows()[0].app_id, "gedit")
+
+    def test_app_id_is_empty_against_an_older_extension(self):
+        # _EDITOR is the plain nine-field tuple every other test in this
+        # file already uses -- this just names the guarantee explicitly:
+        # an extension installed before wm_class existed must not break a
+        # Python built after it, only leave app_id unanswered.
+        self.assertEqual(self.gui.windows()[0].app_id, "")
+
+    def test_geometry_still_works_when_the_extension_sends_wm_class(self):
+        self.proxy.windows = [(*_EDITOR, "gedit"), (*_BROWSER, "firefox")]
+        window = self.gui.windows()[1]
+        self.assertEqual(self.gui.geometry(window), (800, 0, 400, 600))
+
+    def test_activating_a_window_does_not_drop_its_app_id(self):
+        self.proxy.windows = [(*_EDITOR, "gedit"), (*_BROWSER, "firefox")]
+        browser = self.gui.windows()[1]
+        self.gui.activate_window(browser)
+        refreshed = {w.title: w.app_id for w in self.gui.windows()}
+        self.assertEqual(refreshed, {"Editor": "gedit", "Browser": "firefox"})
+
+    def test_the_active_window_carries_the_same_app_id_as_a_listed_one(self):
+        # Both go through _window, but nothing enforced that -- see the
+        # matching X11Backend test this mirrors.
+        self.proxy.windows = [(*_EDITOR, "gedit"), (*_BROWSER, "firefox")]
+        self.assertEqual(self.gui.active_window().app_id, "gedit")
 
 
 class TestPlacement(GnomeShellTestCase):

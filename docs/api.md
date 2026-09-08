@@ -161,6 +161,7 @@ Raise on failure with a message naming what was actually found, for use directly
 | `lower_window(window: Window)` | `WINDOW_LOWER` | X11 | Replaces LowerWindow -- no foreign-toplevel protocol offers this. |
 | `pointer_position()` | `POINTER_QUERY` | X11 | The global pointer position. Replaces GetMousePos. |
 | `set_window_title(window: Window, title: str)` | `WINDOW_TITLE_SET` | X11 | Replaces SetWindowName. Impersonation is possible under X11. |
+| `wait_for_pointer_activation(timeout: float \| None = None)` | `INPUT_CAPTURE` |  | Block for one real crossing of a screen edge, and return where. |
 
 ## Forwarded to the backend
 
@@ -314,6 +315,7 @@ Wayland prevents by design, which is why those rows are X11 only.
 | `KEY_EVENT` | T4 | LibeiBackend, PortalBackend, ToolInputBackend, UinputBackend, X11Backend | Keycode press and release |
 | `TEXT_ENTRY` | T4 | LibeiBackend, PortalBackend, ToolInputBackend, UinputBackend, X11Backend | Typing characters; needs a backend-controlled keymap, which raw uinput lacks |
 | `INPUT_SYNC` | T4 | LibeiBackend | Confirm the compositor has consumed the events sent so far, instead of sleeping and hoping; proves delivery to the compositor, never that the application processed or repainted them |
+| `INPUT_CAPTURE` | T4 | InputCaptureBackend | Learn where the pointer is from a real crossing of a screen edge the caller sets up, exclusively diverting real input for the length of one activation; not a query -- see Session.wait_for_pointer_activation, which can return None rather than answer at all if nobody moves the pointer there in time |
 | `WINDOW_LIST` | T3 | AtspiBackend, GnomeShellBackend, X11Backend | Enumerate toplevels, read titles and app ids |
 | `WINDOW_EVENTS` | T3 | GnomeShellBackend, KWinEventsBackend, NiriBackend, SwayBackend | Subscribe to open/close/title-change instead of polling |
 | `WINDOW_STATE` | T3 | AtspiBackend, GnomeShellBackend, X11Backend | Read minimized and activated state |

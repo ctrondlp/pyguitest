@@ -675,6 +675,19 @@ class GUIBackend(ABC):
         self.require(Capability.INPUT_SYNC)
         raise NotImplementedError
 
+    def wait_for_pointer_activation(
+        self, timeout: float | None
+    ) -> tuple[float, float] | None:
+        """Block for one real crossing of a screen edge.
+
+        Not a query -- see `Session.wait_for_pointer_activation` for what
+        this actually promises, and why a successful answer means the
+        user's real input was exclusively diverted for as long as the
+        compositor held it.
+        """
+        self.require(Capability.INPUT_CAPTURE)
+        raise NotImplementedError
+
     # -- windows (T3) ------------------------------------------------------
 
     def windows(self) -> list[Window]:

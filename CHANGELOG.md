@@ -7,6 +7,8 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-09-08
+
 ### Added
 
 - **`pyguitest record` hands off to pyguitest-recorder**, if it is installed.
@@ -82,6 +84,74 @@ All notable changes to pyguitest are recorded here. The format follows
   `GUIBackend` now carries the same `self.require(capability)`-gated stub
   these six share with the rest of the interface, so that inconsistency is
   gone too.
+
+- **`Window.app_id` is now populated on GNOME too**, closing the gap left
+  when X11 got the same fix in 0.5.0. The Shell extension's `ListWindows`
+  gained a tenth field, `wm_class` — appended, not inserted, so an older
+  extension and a newer Python still agree on the first nine — and
+  `GnomeShellBackend._window` reads it when present, leaving `app_id` empty
+  against an extension installed before this landed rather than breaking.
+  Needs the extension reinstalled (`scripts/validate-gnome-extension.sh
+  --install`); see `gnome-shell-extension/README.md`. Live-validated inside
+  `scripts/headless-session.sh` on GNOME Shell 51.rc — see
+  `docs/validation.md` — which is also what caught a real bug the extension
+  change would otherwise have introduced: `GnomeShellBackend.geometry()`
+  unpacked the D-Bus tuple at an exact width, which the new tenth field
+  would have broken for every caller, not only ones asking for `app_id`.
+
+- **`Session.wait_for_pointer_activation()`**, the read half of pointer
+  access on Wayland — new `Capability.INPUT_CAPTURE` and the opt-in
+  `inputcapture` backend (`connect(backend="inputcapture")`), over
+  `org.freedesktop.portal.InputCapture` via python-libei's new
+  `InputCaptureSession`. Deliberately not named `pointer_position()` and not
+  folded into `Capability.POINTER_QUERY`: unlike X11's synchronous read, this
+  can only ever answer at the moment the compositor decides to divert input
+  here — which happens when a human's actual pointer physically crosses a
+  screen edge the caller set up, and which **exclusively diverts every
+  physical or logical device the compositor chose** away from the desktop
+  until the answer is read and released. Folding that into the existing
+  synchronous-query method under the same capability would have let a caller
+  reasonably expecting X11's immediate answer hang indefinitely instead — the
+  same "silently does something different than the name promises" failure
+  this project's whole capability model exists to prevent. Returns `None` on
+  timeout, matching every other `wait_for_*` method, rather than raising: a
+  human simply not moving the pointer there in time is the ordinary outcome,
+  not an error.
+
+  The barrier placement is the one piece of business logic pyguitest owns
+  rather than python-libei: barriers ring the bounding box of every zone
+  the portal reports, exact for one zone or a simple rectangular layout,
+  an approximation (not the true polygon boundary) for an L-shaped or
+  otherwise non-rectangular multi-monitor arrangement — flagged in the
+  backend's own docstring rather than assumed away.
+
+  **First live run (2026-09-08) found a real bug within the first two
+  attempts.** `set_pointer_barriers()` reports which barrier ids the
+  compositor refused, via `failed_barriers` — and `wait_for_pointer_
+  activation()` discarded that return value outright, so a caller left with
+  no barrier actually standing would `Enable()` anyway and then wait out
+  the full timeout for an activation that could never come, indistinguishable
+  from "nobody moved the pointer there yet." Two live runs against a real
+  GNOME session both timed out with nothing to say why. Now checked before
+  `Enable()` is ever called: if every barrier was refused, this raises
+  `PyGUITestError` immediately naming which ids failed, rather than waiting
+  blind. A *partial* refusal still proceeds — some edges standing is still a
+  real chance of activation, and only a total refusal means nothing could
+  ever trigger. It was not the cause of the original timeouts, as it turned
+  out — a third run raised nothing, confirming every barrier was genuinely
+  accepted, not silently refused — but it is a real fix regardless, and
+  worth keeping.
+
+  **The actual cause, confirmed live in a fourth run:** the compositor
+  itself never emits `Activated`. `gdbus monitor` on the session bus
+  throughout a real attempt captured no signal traffic at all, ruling out
+  both a delivery failure and a subscription bug on this side. Every piece
+  this package owns checks out — geometry, sequencing, barrier acceptance,
+  clean timeout handling — and the gap is Mutter's own crossing-detection
+  logic on GNOME Shell 51.rc (a release candidate) not deciding a real
+  barrier crossing occurred. Not fixable here; see `docs/validation.md`
+  for the full run-by-run record, kept in case it recurs on a stable
+  release or is worth reporting upstream.
 
 ### Changed
 

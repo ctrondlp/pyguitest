@@ -265,15 +265,30 @@ class GnomeShellBackend(GUIBackend):
     def _list_windows(self):
         """The extension's raw window tuples.
 
-        Each is (id, pid, title, x, y, width, height, minimized, focused).
+        Each is (id, pid, title, x, y, width, height, minimized, focused,
+        wm_class) against an extension carrying the app_id field (see
+        metadata.json's "0.4.0-appid"), or the same minus wm_class against
+        an older one -- see _window for how the two are told apart.
         """
         (raw,) = self._call("ListWindows")
         return raw
 
     def _window(self, raw):
-        """Build a Window from one ListWindows tuple."""
-        wid, pid, title, *_rest = raw
-        return Window(handle=wid, backend=self, title=title, pid=pid or None)
+        """Build a Window from one ListWindows tuple.
+
+        wm_class -- the tenth field -- is appended, not inserted, exactly so
+        this can tell an old extension from a new one by tuple length
+        instead of breaking on a signature it does not recognise: a Python
+        built for the wm_class field still reads title/pid/geometry
+        correctly from an extension that predates it, just with app_id
+        empty, the same "unknown" every other backend reports for a window
+        with no WM_CLASS at all.
+        """
+        wid, pid, title, *rest = raw
+        wm_class = rest[6] if len(rest) > 6 else ""
+        return Window(
+            handle=wid, backend=self, title=title, pid=pid or None, app_id=wm_class
+        )
 
     def windows(self):
         """Every open window."""
@@ -389,8 +404,11 @@ class GnomeShellBackend(GUIBackend):
     def geometry(self, window):
         """A window's (x, y, width, height) in screen coordinates."""
         self.require(Capability.WINDOW_GEOMETRY)
-        _id, _pid, _title, x, y, width, height, _minimized, _focused = self._find(
-            window
+        # Trailing *_rest rather than an exact 9-tuple unpack: an extension
+        # carrying wm_class (see _window) sends a tenth field, and this must
+        # not break just because it does not need to read it.
+        _id, _pid, _title, x, y, width, height, _minimized, _focused, *_rest = (
+            self._find(window)
         )
         return (x, y, width, height)
 

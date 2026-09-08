@@ -66,7 +66,7 @@ atspi = ["dogtail>=2.0"]        # element automation. NB: dogtail declares no
                                 # the distro. See README INSTALL.
 x11   = ["python-xlib>=0.33"]   # X11 backend, incl. FreeBSD/Solaris
 uinput = ["evdev>=1.9"]         # last-resort input where no tool is installed
-eiinput = ["python-libei[portal]>=0.4.0"]
+eiinput = ["python-libei[portal]>=0.5.0"]
                                    # libei input backend (opt-in). 0.4.0 is
                                    # the floor because a negotiation that
                                    # fails part-way left its portal session

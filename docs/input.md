@@ -166,10 +166,12 @@ takes only a device-type bitmask and so cannot express `persist_mode` or
 `restore_token` (see `backends/eiinput.py`'s module docstring, and
 upstream's own note that liboeffis is "intentionally kept simple"). That
 negotiation lived in this package until it was upstreamed in python-libei
-0.3.0; the `eiinput` extra requires 0.4.0, which is where a negotiation
-that fails part-way stopped leaving its portal session open behind it, and
-where the timeout below came to bound every leg of a round trip rather than
-only the wait for the portal's reply. The extra also pulls in PyGObject,
+0.3.0; 0.4.0 is where a negotiation that fails part-way stopped leaving its
+portal session open behind it, and where the timeout below came to bound
+every leg of a round trip rather than only the wait for the portal's
+reply. The `eiinput` extra requires **0.5.0**, one further bump, for
+`InputCaptureSession` -- the read direction the opt-in `inputcapture`
+backend uses, described further down. The extra also pulls in PyGObject,
 which that module needs. `libeis` is only needed to run
 `tests/test_eiinput_libei.py`, not at runtime.
 
@@ -406,6 +408,48 @@ Returns `True` once confirmed and `False` on timeout, matching
 `CapabilityUnsupported` where no backend can round trip, rather than
 quietly returning `False` and handing back the false confidence it exists
 to remove.
+
+## Reading the pointer on Wayland: `wait_for_pointer_activation()`
+
+Every other capability in this section injects. `Capability.INPUT_CAPTURE`
+is the one that reads: the opt-in `inputcapture` backend
+(`connect(backend="inputcapture")`) negotiates
+`org.freedesktop.portal.InputCapture`, needs `python-libei[portal]>=0.5.0`
+(the `eiinput` extra also covers it), and offers exactly one operation:
+
+```python
+gui = pyguitest.connect(backend="inputcapture")  # a real consent dialog
+position = gui.wait_for_pointer_activation(timeout=30.0)
+if position is not None:
+    x, y = position
+    ...
+```
+
+**This is not `pointer_position()`, and could not honestly be spelled that
+way.** X11's version answers synchronously, any time it is called; this
+can only ever answer at the moment the compositor decides to divert input
+here, which happens when a real human's pointer physically crosses a
+screen edge `wait_for_pointer_activation` set a barrier on. There is no
+way to trigger that on demand, so the call can legitimately block for as
+long as `timeout` allows waiting for someone to do that — and once it
+happens, **every physical or logical pointer, keyboard or touch device the
+compositor chose to divert stops reaching the desktop at all** until this
+method reads the answer and releases it, which it does as its very next
+step, before anything else runs. Returns `None` on timeout rather than
+raising — matching every other `wait_for_*` method here — since nobody
+moving the pointer there in time is the ordinary outcome, not an error.
+
+Call this only when that trade is genuinely wanted. It is not a drop-in
+replacement for a synchronous position read, and composing it into an
+automatic `connect()` would let a caller who never asked for it divert
+their own input by surprise — which is exactly why the backend is opt-in
+and never auto-selected, the same rule `eiinput` and `portal` follow.
+
+**Never live-validated** — see `docs/validation.md`'s "Not run live"
+section. Verifying it needs a human who has deliberately accepted that
+their own input will be diverted, not merely someone who clicked Allow on
+a dialog; `examples/_inputcapture_validate.py` is written for exactly that
+person to run themselves.
 
 ## When injected input appears to do nothing
 

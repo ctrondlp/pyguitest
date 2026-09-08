@@ -35,6 +35,9 @@ class Fake(GUIBackend):
     def set_clipboard(self, text):
         self.set_clipboard_calls = text
 
+    def wait_for_pointer_activation(self, timeout):
+        return (self.marker, timeout)
+
     def close(self):
         self.closed = True
 
@@ -77,6 +80,19 @@ class TestComposite(unittest.TestCase):
         self.assertEqual(composite.get_clipboard(), "wl-copy")
         composite.set_clipboard("hello")
         self.assertEqual(clipboard.set_clipboard_calls, "hello")
+
+    def test_wait_for_pointer_activation_routes_to_the_providing_member(self):
+        # Regression guard for the composite-dispatch invariant: a new
+        # capability with no _DISPATCH entry is unreachable through a
+        # composite while supports() still says yes.
+        inputcapture = Fake(
+            "inputcapture", {Capability.INPUT_CAPTURE}, marker="inputcapture"
+        )
+        composite = CompositeBackend([self.elements, self.input, inputcapture])
+        self.assertIn(Capability.INPUT_CAPTURE, composite.capabilities)
+        self.assertEqual(
+            composite.wait_for_pointer_activation(timeout=5.0), ("inputcapture", 5.0)
+        )
 
     def test_registration_order_decides_a_contested_capability(self):
         # A compositor IPC backend registered first should win WINDOW_GEOMETRY

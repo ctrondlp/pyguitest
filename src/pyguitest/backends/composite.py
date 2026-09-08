@@ -68,6 +68,7 @@ _DISPATCH = {
     "release_key": Capability.KEY_EVENT,
     "type_text": Capability.TEXT_ENTRY,
     "sync": Capability.INPUT_SYNC,
+    "wait_for_pointer_activation": Capability.INPUT_CAPTURE,
     "windows": Capability.WINDOW_LIST,
     "active_window": Capability.WINDOW_STATE,
     "is_window_viewable": Capability.WINDOW_STATE,

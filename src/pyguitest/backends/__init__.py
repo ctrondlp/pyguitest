@@ -721,6 +721,27 @@ def _eiinput_factory(environment, **options):
 register(_eiinput_factory, "eiinput", priority=80, opt_in=True)
 
 
+def _inputcapture_factory(environment, **options):
+    """Build the InputCapture portal backend, by name only.
+
+    opt_in=True for the same reason as portal/eiinput, with a sharper edge:
+    a *successful* activation of this backend's one operation exclusively
+    diverts the user's real pointer input away from their desktop for as
+    long as it takes to release it. Use connect(backend="inputcapture")
+    deliberately. A missing PyGObject, a declined dialog, or any other
+    construction failure raises `BackendUnavailable` naming the real
+    reason -- see `register`'s docstring on what happens to that.
+    """
+    from . import inputcapture as _inputcapture
+
+    if not _inputcapture.available():
+        return None
+    return _inputcapture.InputCaptureBackend(**options)
+
+
+register(_inputcapture_factory, "inputcapture", priority=80, opt_in=True)
+
+
 def _portalcapture_factory(environment, **options):
     """Build the Screenshot portal capture backend, by name only.
 
