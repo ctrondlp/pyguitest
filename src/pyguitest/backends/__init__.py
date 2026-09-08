@@ -298,50 +298,150 @@ _FALLBACK_SCREEN_SIZE = (1920, 1080)
 """Used only when the real geometry cannot be determined at all."""
 
 
+def _query(argv):
+    """Stdout of a short-lived query tool."""
+    import subprocess
+
+    return subprocess.run(argv, capture_output=True, text=True, timeout=2).stdout
+
+
+def _xrandr_size():
+    """The X screen's current size, or None.
+
+    Also the answer for a Wayland session that has XWayland: the
+    compositor sizes the X root to its own layout, so xrandr reports what
+    the compositor decided rather than what X thinks. See _screen_size for
+    when that is worth asking.
+    """
+    import re
+    import shutil
+
+    if not shutil.which("xrandr"):
+        return None
+    match = re.search(r"current (\d+) x (\d+)", _query(["xrandr", "--current"]))
+    return (int(match.group(1)), int(match.group(2))) if match else None
+
+
+def _wlroots_size():
+    """The output layout's bounding box on sway or Hyprland, or None."""
+    import json
+    import shutil
+
+    rects = []
+    if shutil.which("swaymsg"):
+        rects = [
+            o["rect"]
+            for o in json.loads(_query(["swaymsg", "-t", "get_outputs", "-r"]))
+        ]
+    elif shutil.which("hyprctl"):
+        rects = json.loads(_query(["hyprctl", "monitors", "-j"]))
+    if not rects:
+        return None
+    return (
+        max(r["x"] + r["width"] for r in rects),
+        max(r["y"] + r["height"] for r in rects),
+    )
+
+
+def _mutter_size():
+    """The logical layout's bounding box on GNOME, or None.
+
+    Mutter's DisplayConfig answers any session-bus client without an
+    extension or a portal prompt, which is what makes it askable from
+    here, before any backend exists. The module it lives in owns the
+    arithmetic, which GnomeShellBackend.screens() shares.
+    """
+    from . import displayconfig
+
+    return displayconfig.layout_size()
+
+
+def _kscreen_size():
+    """The output layout's bounding box on KDE, or None.
+
+    Parses `kscreen-doctor -o`, not its JSON, and that is deliberate:
+    libkscreen serialises the panel's mode as `size` and leaves the
+    logical size out of the JSON altogether, so reconstructing the layout
+    from it means redoing the scale and rotation arithmetic that
+    `Output::geometry()` has already done. The human-readable listing is
+    the only place that rect is printed.
+
+    The colour escapes around each label are stripped rather than assumed
+    absent, since the tool writes them whether or not stdout is a
+    terminal. A disabled output prints an invalid geometry -- `0,0 0x0` --
+    which contributes nothing to a box measured from the origin, so
+    nothing here has to filter those separately.
+    """
+    import re
+    import shutil
+
+    if not shutil.which("kscreen-doctor"):
+        return None
+    listing = re.sub(r"\x1b\[[0-9;]*m", "", _query(["kscreen-doctor", "-o"]))
+    rects = [
+        tuple(int(group) for group in match.groups())
+        for match in re.finditer(r"Geometry:\s*(-?\d+),(-?\d+)\s+(\d+)x(\d+)", listing)
+    ]
+    if not rects:
+        return None
+    return (
+        max(x + width for x, _y, width, _height in rects),
+        max(y + height for _x, y, _width, height in rects),
+    )
+
+
 def _screen_size(environment):
     """Best-effort (width, height) of the session's screen space.
 
     uinput's absolute-pointer axes must be declared with a fixed maximum at
     device creation time, and that maximum only means the right thing if it
     matches the real display: on a 4K output a device declared for 1920x1080
-    makes every move_mouse() land somewhere else on screen. This queries the
-    session's own tools for the actual bounding box before falling back to
-    the historical constant, rather than guessing blind.
+    makes every move_mouse() land somewhere else on screen. This asks the
+    session's own authority for the actual bounding box before falling back
+    to the historical constant, rather than guessing blind.
+
+    There is no portable question to ask, so each compositor family gets the
+    source that can answer for it: swaymsg or hyprctl on wlroots, Mutter's
+    DisplayConfig on GNOME, kscreen-doctor on KDE. The last two were the
+    gap -- a default GNOME or KDE Wayland session matched none of the
+    branches here and silently took the constant, which is wrong on every
+    desktop that is not 1920x1080 and says nothing when it is.
+
+    A compositor-native source is tried first, ahead of xrandr, on purpose:
+    GNOME and sway both size XWayland's X root to their own logical layout,
+    so under fractional scaling xrandr and the compositor's own answer can
+    round differently, and the compositor's answer is the one `geometry()`
+    and `screens()` already agree with. xrandr is the fallback for X11 and
+    XWayland sessions -- the only source at all on plain X11, and the one
+    left to try when a Wayland compositor's own answer did not arrive
+    (kscreen-doctor not installed, PyGObject missing, some other compositor
+    entirely).
+
+    Every source is best-effort and may return None; a source that raises
+    is treated the same way, since the only thing worse than not knowing
+    the screen size here is failing to build an input backend over it.
     """
-    import json
-    import shutil
     import subprocess
 
     from ..session import Compositor, SessionType
 
-    def run(argv):
-        return subprocess.run(argv, capture_output=True, text=True, timeout=2).stdout
+    sources = []
+    if environment.compositor is Compositor.WLROOTS:
+        sources.append(_wlroots_size)
+    elif environment.compositor is Compositor.MUTTER:
+        sources.append(_mutter_size)
+    elif environment.compositor is Compositor.KWIN:
+        sources.append(_kscreen_size)
+    if environment.session_type in (SessionType.X11, SessionType.XWAYLAND):
+        sources.append(_xrandr_size)
 
-    try:
-        if environment.session_type in (
-            SessionType.X11,
-            SessionType.XWAYLAND,
-        ) and shutil.which("xrandr"):
-            import re
-
-            match = re.search(r"current (\d+) x (\d+)", run(["xrandr", "--current"]))
-            if match:
-                return (int(match.group(1)), int(match.group(2)))
-        if environment.compositor is Compositor.WLROOTS:
-            rects = []
-            if shutil.which("swaymsg"):
-                rects = [
-                    o["rect"]
-                    for o in json.loads(run(["swaymsg", "-t", "get_outputs", "-r"]))
-                ]
-            elif shutil.which("hyprctl"):
-                rects = json.loads(run(["hyprctl", "monitors", "-j"]))
-            if rects:
-                right = max(r["x"] + r["width"] for r in rects)
-                bottom = max(r["y"] + r["height"] for r in rects)
-                return (right, bottom)
-    except (OSError, ValueError, KeyError, subprocess.TimeoutExpired):
-        pass
+    for source in sources:
+        try:
+            size = source()
+        except (OSError, ValueError, KeyError, subprocess.TimeoutExpired):
+            continue
+        if size:
+            return size
     return _FALLBACK_SCREEN_SIZE
 
 

@@ -44,6 +44,23 @@ All notable changes to pyguitest are recorded here. The format follows
   a package they already have sends them the wrong way; anything else is
   printed as the error it was.
 
+### Fixed
+
+- **The screen size uinput sizes its device for no longer silently guesses
+  1920x1080 on GNOME or KDE Wayland.** `_screen_size()` branched only on
+  xrandr (X11/XWayland) and swaymsg/hyprctl (wlroots), so a default GNOME or
+  KDE Wayland session matched nothing and took the historical fallback
+  constant without saying so — every `move_mouse()` on any other resolution
+  landed somewhere else on screen. GNOME is now asked through Mutter's own
+  `DisplayConfig` (the same source `GnomeShellBackend.screens()` already
+  used, now shared via a new `backends.displayconfig` module — no shell
+  extension needed, since Mutter answers `GetCurrentState` to any session-bus
+  client unprompted), and KDE through `kscreen-doctor -o`. A compositor's own
+  answer is preferred over xrandr where both exist, since under fractional
+  scaling XWayland's X root and the compositor's logical layout can round
+  differently, and the compositor's own answer is the one already agreeing
+  with `geometry()` and `screens()`.
+
 ## [0.5.0] — 2026-09-06
 
 ### Added

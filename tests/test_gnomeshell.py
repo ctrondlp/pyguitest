@@ -223,11 +223,11 @@ def _monitor(connector, modes):
     return ((connector, "vendor", "product", "serial"), modes, {})
 
 
-def _logical(connectors, scale=1.0, transform=0, primary=True):
+def _logical(connectors, scale=1.0, transform=0, primary=True, x=0, y=0):
     """One logical monitor: (x, y, scale, transform, primary, specs, props)."""
     return (
-        0,
-        0,
+        x,
+        y,
         scale,
         transform,
         primary,

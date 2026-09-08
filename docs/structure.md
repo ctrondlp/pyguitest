@@ -54,6 +54,7 @@ pyguitest/
 │       ├── null.py             tier-1 only, for CI and dead sessions
 │       ├── windows.py          sway, Hyprland, niri, KDE window control
 │       ├── gnomeshell.py       window control via a GNOME Shell extension
+│       ├── displayconfig.py    Mutter's DisplayConfig, no shell extension needed
 │       ├── portalrequest.py    the XDG portal request/response dance, shared
 │       ├── portal.py           input via the RemoteDesktop XDG portal
 │       ├── portalcapture.py    screenshots via the Screenshot XDG portal

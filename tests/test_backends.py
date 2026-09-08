@@ -1,4 +1,5 @@
 import dataclasses
+import json
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -600,17 +601,30 @@ class TestScreenSize(unittest.TestCase):
     Absolute axes are declared once and cannot be changed, so a device
     built for 1920x1080 on a 4K output makes every move_mouse land
     somewhere else. Guessing is the failure being avoided.
+
+    A test that wants only xrandr in play must pin `compositor=Compositor.
+    NONE` explicitly rather than relying on `_env`'s default: this file's
+    machine runs GNOME with a reachable session bus, so `_env`'s default
+    `XDG_CURRENT_DESKTOP=GNOME` resolves to `Compositor.MUTTER`, and an
+    unpinned test here reaches the *real* desktop's DisplayConfig instead
+    of the mock -- caught only because the real answer and the fallback
+    constant happened to both be 1920x1080 on this box, which let one such
+    test pass for the wrong reason before this note was added.
     """
 
     def test_it_falls_back_rather_than_raising_when_nothing_answers(self):
         with mock.patch("shutil.which", return_value=None):
-            size = backends._screen_size(_env(session_type=SessionType.WAYLAND))
+            size = backends._screen_size(
+                _env(session_type=SessionType.WAYLAND, compositor=Compositor.NONE)
+            )
         self.assertEqual(size, backends._FALLBACK_SCREEN_SIZE)
 
     def test_a_broken_tool_falls_back_too(self):
         with mock.patch("shutil.which", return_value="/usr/bin/xrandr"):
             with mock.patch("subprocess.run", side_effect=OSError("boom")):
-                size = backends._screen_size(_env(session_type=SessionType.X11))
+                size = backends._screen_size(
+                    _env(session_type=SessionType.X11, compositor=Compositor.NONE)
+                )
         self.assertEqual(size, backends._FALLBACK_SCREEN_SIZE)
 
     def test_xrandr_output_is_parsed_when_it_works(self):
@@ -619,5 +633,129 @@ class TestScreenSize(unittest.TestCase):
                 "subprocess.run",
                 return_value=SimpleNamespace(stdout="Screen 0: current 3840 x 2160"),
             ):
-                size = backends._screen_size(_env(session_type=SessionType.X11))
+                size = backends._screen_size(
+                    _env(session_type=SessionType.X11, compositor=Compositor.NONE)
+                )
         self.assertEqual(size, (3840, 2160))
+
+    def _which(self, present):
+        """A shutil.which stand-in that only knows about `present`."""
+
+        def which(name):
+            return f"/usr/bin/{name}" if name == present else None
+
+        return which
+
+    def test_sway_output_is_parsed(self):
+        outputs = json.dumps(
+            [
+                {"rect": {"x": 0, "y": 0, "width": 1920, "height": 1080}},
+                {"rect": {"x": 1920, "y": 0, "width": 1280, "height": 1024}},
+            ]
+        )
+        with mock.patch("shutil.which", self._which("swaymsg")):
+            with mock.patch(
+                "subprocess.run", return_value=SimpleNamespace(stdout=outputs)
+            ):
+                size = backends._screen_size(
+                    _env(
+                        session_type=SessionType.WAYLAND, compositor=Compositor.WLROOTS
+                    )
+                )
+        self.assertEqual(size, (3200, 1080))
+
+    def test_hyprctl_is_used_when_swaymsg_is_absent(self):
+        monitors = json.dumps([{"x": 0, "y": 0, "width": 2560, "height": 1440}])
+        with mock.patch("shutil.which", self._which("hyprctl")):
+            with mock.patch(
+                "subprocess.run", return_value=SimpleNamespace(stdout=monitors)
+            ):
+                size = backends._screen_size(
+                    _env(
+                        session_type=SessionType.WAYLAND, compositor=Compositor.WLROOTS
+                    )
+                )
+        self.assertEqual(size, (2560, 1440))
+
+    def test_mutter_display_config_is_asked_on_gnome(self):
+        # The gap this whole method exists to close: a default GNOME
+        # Wayland session matched none of the old branches and silently
+        # took the fallback constant.
+        with mock.patch(
+            "pyguitest.backends.displayconfig.layout_size", return_value=(3840, 2160)
+        ):
+            size = backends._screen_size(
+                _env(session_type=SessionType.WAYLAND, compositor=Compositor.MUTTER)
+            )
+        self.assertEqual(size, (3840, 2160))
+
+    def test_mutter_answering_nothing_falls_back(self):
+        with mock.patch(
+            "pyguitest.backends.displayconfig.layout_size", return_value=None
+        ):
+            with mock.patch("shutil.which", return_value=None):
+                size = backends._screen_size(
+                    _env(session_type=SessionType.WAYLAND, compositor=Compositor.MUTTER)
+                )
+        self.assertEqual(size, backends._FALLBACK_SCREEN_SIZE)
+
+    def test_kscreen_doctor_output_is_parsed(self):
+        # Colour escapes are part of real kscreen-doctor output whether or
+        # not stdout is a terminal, and a disabled output's invalid
+        # geometry must not corrupt the box.
+        listing = (
+            "Output: 1 DP-1\n"
+            "\t\x1b[33mGeometry: \x1b[0m0,0 1920x1080\n"
+            "Output: 2 HDMI-1\n"
+            "\t\x1b[33mGeometry: \x1b[0m1920,0 1280x1024\n"
+            "Output: 3 DP-2\n"
+            "\t\x1b[33mGeometry: \x1b[0m0,0 0x0\n"
+        )
+        with mock.patch("shutil.which", self._which("kscreen-doctor")):
+            with mock.patch(
+                "subprocess.run", return_value=SimpleNamespace(stdout=listing)
+            ):
+                size = backends._screen_size(
+                    _env(session_type=SessionType.WAYLAND, compositor=Compositor.KWIN)
+                )
+        self.assertEqual(size, (3200, 1080))
+
+    def test_a_compositor_native_answer_is_preferred_over_xrandr(self):
+        # Under fractional scaling, GNOME sizes XWayland's X root to its own
+        # logical layout, but rounds independently -- xrandr and Mutter's
+        # own DisplayConfig can disagree by a pixel. The compositor's own
+        # answer must win, or it would rarely be used at all: xrandr nearly
+        # always succeeds whenever XWayland is running.
+        with mock.patch("shutil.which", return_value="/usr/bin/xrandr"):
+            with mock.patch(
+                "subprocess.run",
+                return_value=SimpleNamespace(stdout="Screen 0: current 1919 x 1079"),
+            ):
+                with mock.patch(
+                    "pyguitest.backends.displayconfig.layout_size",
+                    return_value=(1920, 1080),
+                ):
+                    size = backends._screen_size(
+                        _env(
+                            session_type=SessionType.XWAYLAND,
+                            compositor=Compositor.MUTTER,
+                        )
+                    )
+        self.assertEqual(size, (1920, 1080))
+
+    def test_xrandr_is_the_fallback_when_the_native_source_is_silent(self):
+        with mock.patch("shutil.which", return_value="/usr/bin/xrandr"):
+            with mock.patch(
+                "subprocess.run",
+                return_value=SimpleNamespace(stdout="Screen 0: current 1920 x 1080"),
+            ):
+                with mock.patch(
+                    "pyguitest.backends.displayconfig.layout_size", return_value=None
+                ):
+                    size = backends._screen_size(
+                        _env(
+                            session_type=SessionType.XWAYLAND,
+                            compositor=Compositor.MUTTER,
+                        )
+                    )
+        self.assertEqual(size, (1920, 1080))
