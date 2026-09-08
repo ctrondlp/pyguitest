@@ -184,6 +184,7 @@ One node of the accessible tree, as every backend agrees to expose it.
 | Member | What it does |
 |--------|--------------|
 | `actions` | The names of the actions this element offers, e.g. 'click'. |
+| `alive` | Whether the underlying widget still exists. |
 | `checkable` | Whether the element has a check box, radio button, or toggle. |
 | `checked` | Whether a check box, radio button, or toggle is set. |
 | `child(role: str \| None = None, name: str \| None = None)` | Return the first descendant matching role and/or name, or None. |

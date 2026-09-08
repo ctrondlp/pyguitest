@@ -133,6 +133,76 @@ class TestSelection(unittest.TestCase):
         self.assertTrue(second.closed)
 
 
+class TestSelectionLogging(unittest.TestCase):
+    """Backend selection is the one place a backend can drop out silently.
+
+    No exception reaches connect(), nothing about a declined or absent
+    factory shows up in the final capability set -- "why doesn't this
+    desktop have window listing" had no answer without a debug log at
+    exactly this point. Uses assertLogs rather than mocking the logger, so
+    a change to the message text does not need a change here too, only a
+    change to what is actually asserted.
+    """
+
+    def setUp(self):
+        from pyguitest import backends
+
+        self.backends = backends
+        original = list(backends._REGISTRY)
+        backends._REGISTRY.clear()
+        self.addCleanup(backends._REGISTRY.extend, original)
+        self.addCleanup(backends._REGISTRY.clear)
+
+    def test_a_declining_factory_is_logged_with_its_reason(self):
+        def factory(env):
+            raise BackendUnavailable("no display server")
+
+        self.backends.register(factory, "declines", priority=100)
+        with self.assertLogs("pyguitest.backends", level="DEBUG") as ctx:
+            select(detect())
+        self.assertTrue(
+            any("declines" in m and "no display server" in m for m in ctx.output)
+        )
+
+    def test_a_factory_returning_none_is_logged(self):
+        self.backends.register(lambda env: None, "not-applicable", priority=100)
+        with self.assertLogs("pyguitest.backends", level="DEBUG") as ctx:
+            select(detect())
+        self.assertTrue(any("not-applicable" in m for m in ctx.output))
+
+    def test_a_successful_composition_is_logged_at_info(self):
+        from pyguitest.backends.base import GUIBackend
+        from pyguitest.capabilities import CapabilitySet
+
+        class Fake(GUIBackend):
+            name = "fake"
+            capabilities = property(lambda self: CapabilitySet())
+
+        self.backends.register(lambda env: Fake(), "fake", priority=100)
+        with self.assertLogs("pyguitest.backends", level="INFO") as ctx:
+            select(detect())
+        self.assertTrue(any("fake" in m for m in ctx.output))
+
+    def test_falling_back_to_null_is_logged_as_a_warning(self):
+        with self.assertLogs("pyguitest.backends", level="WARNING") as ctx:
+            backend = select(detect())
+        self.assertIsInstance(backend, NullBackend)
+        self.assertTrue(any("no backend for" in m for m in ctx.output))
+
+    def test_a_named_backend_is_logged_too(self):
+        from pyguitest.backends.base import GUIBackend
+        from pyguitest.capabilities import CapabilitySet
+
+        class Fake(GUIBackend):
+            name = "fake"
+            capabilities = property(lambda self: CapabilitySet())
+
+        self.backends.register(lambda env: Fake(), "fake", priority=100)
+        with self.assertLogs("pyguitest.backends", level="DEBUG") as ctx:
+            select(detect(), "fake")
+        self.assertTrue(any("fake" in m for m in ctx.output))
+
+
 class TestNamedComposition(unittest.TestCase):
     """`select(env, ["a", "b"])` -- composing exactly the backends named.
 

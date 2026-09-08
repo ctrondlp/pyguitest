@@ -7,6 +7,7 @@ can always name one, and detection is only the default.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 
 from ..errors import BackendUnavailable, PyGUITestError
@@ -39,6 +40,11 @@ __all__ = [
     "select",
     "available",
 ]
+
+_logger = logging.getLogger(__name__)
+"""Never configured from here -- see `_auto_build` and `select` for what
+this records. An application wires up handlers and levels; this package
+only ever calls `.debug()`/`.info()`/`.warning()` on a logger of its own."""
 
 _REGISTRY: list[tuple[int, str, Callable, bool]] = []
 
@@ -163,7 +169,7 @@ def _build_named(environment, names, options):
     return built
 
 
-def _auto_build(factory, environment):
+def _auto_build(name, factory, environment):
     """Build via `factory` for automatic composition, or None if it fails.
 
     The counterpart to `_build_named` not catching: this is the one place
@@ -175,11 +181,24 @@ def _auto_build(factory, environment):
     `_build_named` instead, which lets the same exception -- carrying
     whatever specific reason the factory raised it for -- propagate
     verbatim rather than being discarded and replaced.
+
+    Both ways of declining are logged at debug level, with `name` -- the
+    registry has it, `factory` alone does not -- because this is the one
+    place a backend can drop out of a session silently otherwise: no
+    exception reaches `connect()`, nothing about it is in the final
+    capability set, and "why doesn't this desktop have window listing"
+    has no answer without it.
     """
     try:
-        return factory(environment)
-    except BackendUnavailable:
+        built = factory(environment)
+    except BackendUnavailable as exc:
+        _logger.debug("backend %r declined: %s", name, exc)
         return None
+    if built is None:
+        _logger.debug("backend %r does not apply to this session", name)
+    else:
+        _logger.debug("backend %r built", name)
+    return built
 
 
 def select(environment, name=None, options=None):
@@ -205,6 +224,7 @@ def select(environment, name=None, options=None):
     caller asked for.
     """
     if isinstance(name, str):
+        _logger.debug("connecting named backend %r", name)
         return _combine(_build_named(environment, [name], {name: dict(options or {})}))
 
     if name is not None:
@@ -219,6 +239,7 @@ def select(environment, name=None, options=None):
             # A second copy could never win a capability the first already
             # serves, so this is a mistake rather than a preference.
             raise ValueError(f"backend names repeat: {', '.join(sorted(duplicates))}")
+        _logger.debug("connecting named backends %s", names)
         return _combine(
             _build_named(environment, names, _named_options(names, options))
         )
@@ -230,17 +251,24 @@ def select(environment, name=None, options=None):
     members = [
         b
         for b in (
-            _auto_build(f, environment) for _, _, f, opt_in in _REGISTRY if not opt_in
+            _auto_build(name, f, environment)
+            for _, name, f, opt_in in _REGISTRY
+            if not opt_in
         )
         if b is not None
     ]
     if members:
+        _logger.info(
+            "composed %d backend(s): %s", len(members), [m.name for m in members]
+        )
         return _combine(members)
 
-    return NullBackend(
+    reason = (
         f"no backend for a {environment.session_type.value} session "
         f"on {environment.compositor.value}"
     )
+    _logger.warning("%s", reason)
+    return NullBackend(reason)
 
 
 def _atspi_factory(environment):

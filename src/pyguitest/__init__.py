@@ -33,7 +33,7 @@ import tempfile
 import time
 from collections import Counter
 from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from . import backends, compat, inspect
 from .app import Application
@@ -63,6 +63,8 @@ if TYPE_CHECKING:
     # and importing it here would make that eager for every user of the
     # package, including the ones on a backend that never touches it.
     from .backends.windows import WindowEvent
+
+_T = TypeVar("_T")
 
 __version__ = "0.5.0"
 
@@ -854,6 +856,32 @@ class Session:
                     return candidate
         raise WindowNotFound(f"no window with a title matching {title!r}")
 
+    def _poll_until(
+        self,
+        producer: Callable[[], _T | None],
+        timeout: float | None,
+        interval: float,
+    ) -> _T | None:
+        """Call `producer()` every `interval` seconds until it is truthy.
+
+        The shape shared by every wait_* method below: each is either "poll
+        for X and return it once found" (a window, an element, a pid) or
+        "poll until X is true" (gone, closed) -- both are this same loop
+        with a different producer and, for the second kind, a producer that
+        returns a plain `True` sentinel rather than the thing itself.
+        `timeout=None` waits indefinitely. Private: a caller wanting the
+        matched value back, not just whether one arrived, has no public
+        equivalent of this today -- wait_until only reports True/False.
+        """
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            found = producer()
+            if found:
+                return found
+            if deadline is not None and time.monotonic() >= deadline:
+                return None
+            time.sleep(interval)
+
     def wait_for_window(
         self, title: str, timeout: float | None = None, interval: float = 0.5
     ) -> Window | None:
@@ -874,14 +902,12 @@ class Session:
         """
         if self.supports(Capability.WINDOW_EVENTS):
             return self.backend.wait_for_window(title, timeout)
-        deadline = None if timeout is None else time.monotonic() + timeout
-        while True:
+
+        def first_match() -> Window | None:
             found = self.find_windows(title)
-            if found:
-                return found[0]
-            if deadline is not None and time.monotonic() >= deadline:
-                return None
-            time.sleep(interval)
+            return found[0] if found else None
+
+        return self._poll_until(first_match, timeout, interval)
 
     def is_window_open(self, window: Window) -> bool:
         """Whether `window` is still in the window list.
@@ -937,12 +963,11 @@ class Session:
                 if event.change == "close" and event.window == window:
                     return True
             return not self.is_window_open(window)
-        deadline = None if timeout is None else time.monotonic() + timeout
-        while self.is_window_open(window):
-            if deadline is not None and time.monotonic() >= deadline:
-                return False
-            time.sleep(interval)
-        return True
+
+        def closed() -> bool | None:
+            return True if not self.is_window_open(window) else None
+
+        return bool(self._poll_until(closed, timeout, interval))
 
     def wait_until(
         self,
@@ -959,13 +984,7 @@ class Session:
         timeout; never raises on timeout, matching
         wait_for_window/wait_window_close.
         """
-        deadline = None if timeout is None else time.monotonic() + timeout
-        while True:
-            if predicate():
-                return True
-            if deadline is not None and time.monotonic() >= deadline:
-                return False
-            time.sleep(interval)
+        return bool(self._poll_until(predicate, timeout, interval))
 
     def wait_for_element(
         self,
@@ -984,14 +1003,12 @@ class Session:
         not exist yet is the expected outcome, the same reasoning
         wait_for_window uses.
         """
-        deadline = None if timeout is None else time.monotonic() + timeout
-        while True:
+
+        def first_match() -> Element | None:
             found = self.elements(role=role, name=name, within=within)
-            if found:
-                return found[0]
-            if deadline is not None and time.monotonic() >= deadline:
-                return None
-            time.sleep(interval)
+            return found[0] if found else None
+
+        return self._poll_until(first_match, timeout, interval)
 
     def wait_until_gone(
         self,
@@ -1008,13 +1025,12 @@ class Session:
         element is gone, False if timeout elapses first while it is still
         present.
         """
-        deadline = None if timeout is None else time.monotonic() + timeout
-        while True:
-            if not self.elements(role=role, name=name, within=within):
-                return True
-            if deadline is not None and time.monotonic() >= deadline:
-                return False
-            time.sleep(interval)
+
+        def gone() -> bool | None:
+            found = self.elements(role=role, name=name, within=within)
+            return True if not found else None
+
+        return bool(self._poll_until(gone, timeout, interval))
 
     def wait_for_file(
         self, path: str, timeout: float | None = None, interval: float = 0.5
@@ -1024,13 +1040,7 @@ class Session:
         For a process under test writing output somewhere -- an export, a
         log file -- rather than polling os.path.exists in a hand-rolled loop.
         """
-        deadline = None if timeout is None else time.monotonic() + timeout
-        while True:
-            if os.path.exists(path):
-                return True
-            if deadline is not None and time.monotonic() >= deadline:
-                return False
-            time.sleep(interval)
+        return bool(self._poll_until(lambda: os.path.exists(path), timeout, interval))
 
     def wait_for_process(
         self,
@@ -1052,14 +1062,14 @@ class Session:
         is not running".
         """
         pattern = re.compile(name) if isinstance(name, str) else name
-        deadline = None if timeout is None else time.monotonic() + timeout
-        while True:
+
+        def first_match() -> int | None:
             for pid, cmdline in _process_table().items():
                 if pattern.search(cmdline):
                     return pid
-            if deadline is not None and time.monotonic() >= deadline:
-                return None
-            time.sleep(interval)
+            return None
+
+        return self._poll_until(first_match, timeout, interval)
 
     def wait_for_idle(
         self,

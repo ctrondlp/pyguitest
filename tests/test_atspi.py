@@ -76,6 +76,7 @@ class FakeNode:
         description="",
         pid=0,
         component=True,
+        dead=False,
     ):
         self.name = name
         self.roleName = role
@@ -91,6 +92,7 @@ class FakeNode:
         self.description = description
         self._pid = pid
         self._component = component
+        self.dead = dead
         for child in self.children:
             child.parent = self
 
@@ -151,6 +153,14 @@ class _RaisingSize:
     @property
     def size(self):
         raise self._error
+
+
+class _RaisesOnDead:
+    """A node fully reaped from the bus: even asking if it is dead fails."""
+
+    @property
+    def dead(self):
+        raise RuntimeError("no accessibility bus for this node")
 
 
 class FakePredicate:
@@ -604,6 +614,24 @@ class TestElements(AtspiTestCase):
         element = gui.find_element(name="OK")
         element.node.get_process_id = lambda: (_ for _ in ()).throw(RuntimeError("no"))
         self.assertIsNone(element.pid)
+
+    def test_alive_is_true_for_an_ordinary_live_node(self):
+        gui = self.backend()
+        self.assertTrue(gui.find_element(name="OK").alive)
+
+    def test_alive_is_false_once_the_node_reports_dead(self):
+        # The regression this exists for: every property raises from
+        # wherever it is touched once the widget is gone -- an application
+        # redraw, a closed dialog -- with nothing to check first.
+        gui = self.backend()
+        element = gui.find_element(name="OK")
+        element.node.dead = True
+        self.assertFalse(element.alive)
+
+    def test_alive_is_false_when_the_node_is_fully_reaped(self):
+        # Not merely marked dead -- gone from the bus entirely, so even
+        # asking raises. That still has to answer False, not propagate.
+        self.assertFalse(self.atspi.Element(_RaisesOnDead()).alive)
 
 
 class TestElementGeometry(AtspiTestCase):

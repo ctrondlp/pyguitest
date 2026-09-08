@@ -44,6 +44,45 @@ All notable changes to pyguitest are recorded here. The format follows
   a package they already have sends them the wrong way; anything else is
   printed as the error it was.
 
+- **`Element.alive`**, so a caller holding one across time can check whether
+  the underlying widget still exists before touching it — the same question
+  `Session.is_window_open` already answers for a stale `Window`. Every other
+  `Element` property raises from wherever it is touched once the widget is
+  gone (an application redraw, a closed dialog), with nothing to check first
+  until now. Reads dogtail's own `Node.dead` rather than a raw AT-SPI state
+  flag, and folds a node fully reaped from the bus — where even asking
+  raises — into the same `False` rather than propagating the exception a
+  read-only query should not produce.
+
+- **The library now logs.** `backends/__init__.py` gets a `logging.getLogger(
+  __name__)` at debug level for every backend a plain `connect()` tries
+  during automatic composition — built, declined with its reason, or simply
+  not applicable — and at info/warning for the final composed set or the
+  fallback to `NullBackend`. Backend selection was the one place a backend
+  could drop out of a session silently: no exception reaches `connect()`,
+  nothing about it shows up in the final capability set, and "why doesn't
+  this desktop have window listing" had no answer without turning on
+  logging. Never configures handlers or levels itself — an application wires
+  those up, as always with a library logger — and, deliberately, nothing
+  here ever logs keystrokes or clipboard contents.
+
+- **Six operations only X11 serves — `pointer_position`, `is_button_pressed`,
+  `is_key_pressed`, `set_window_title`, `lower_window`, `is_window_cursor` —
+  were documented public API reachable only through `Session.__getattr__`'s
+  dynamic forward.** They worked (an X11 session composes by default), but a
+  typo in any of them type-checked clean: `__getattr__` returns `Any`, so
+  mypy accepts any attribute on `Session`. Each now has a real, written-out
+  method with a real signature.
+
+  Writing them out surfaced a separate inconsistency: `GUIBackend` declared
+  no default for any of the six, so a caller on any backend but X11 —
+  `NullBackend`, `AtspiBackend`, anything composed without X11 — got a bare
+  `AttributeError` from the failed forward, not the `CapabilityUnsupported`
+  every other operation raises for something the session cannot do.
+  `GUIBackend` now carries the same `self.require(capability)`-gated stub
+  these six share with the rest of the interface, so that inconsistency is
+  gone too.
+
 ### Changed
 
 - **The documentation is now organised around using pyguitest rather than

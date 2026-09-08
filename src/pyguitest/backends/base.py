@@ -337,6 +337,27 @@ class Element(Protocol):
         """
         ...
 
+    @property
+    def alive(self) -> bool:
+        """Whether the underlying widget still exists.
+
+        Every property above assumes this and raises from wherever it is
+        touched otherwise -- an application redraw, a closed dialog, a row
+        destroyed by a list that has scrolled past it. Checking first turns
+        that crash into a clean answer, the same shape `Session.
+        is_window_open` already gives for a stale `Window` handle: an
+        `Element` held across time should be asked this before it is used,
+        rather than assumed good.
+
+        What this cannot tell you: whether the reference has gone stale in
+        the other direction, addressing a *different* live widget that
+        happened to reuse the same identity. Nothing in this interface
+        promises identity survives a redraw at all -- there is no
+        `refresh_element`, unlike `Window`, because nothing here remembers
+        the locator that found it in the first place to search again with.
+        """
+        ...
+
     def click(self) -> None:
         """Act on the element directly -- no coordinates, no injection."""
         ...

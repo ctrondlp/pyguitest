@@ -475,6 +475,32 @@ class TestWaitWindowClose(unittest.TestCase):
         self.assertTrue(gui.wait_window_close(target, timeout=1))
 
 
+class TestPollUntil(unittest.TestCase):
+    """The private primitive every wait_* method below is now built on."""
+
+    def test_returns_the_producers_actual_value_not_just_true(self):
+        # wait_until only ever reports True/False -- this is the one place
+        # that hands back what was actually found (a Window, an Element, a
+        # pid), which is what makes wait_for_window et al. buildable on it.
+        gui = session()
+        self.assertEqual(gui._poll_until(lambda: "found it", 1, 0.01), "found it")
+
+    def test_returns_none_on_timeout_rather_than_the_last_falsy_value(self):
+        gui = session()
+        self.assertIsNone(gui._poll_until(lambda: None, 0.05, 0.01))
+
+    def test_stops_polling_the_moment_the_producer_turns_truthy(self):
+        gui = session()
+        calls = []
+
+        def producer():
+            calls.append(None)
+            return "done" if len(calls) >= 3 else None
+
+        self.assertEqual(gui._poll_until(producer, 2, 0.01), "done")
+        self.assertEqual(len(calls), 3)
+
+
 class TestWaitUntil(unittest.TestCase):
     def test_returns_true_immediately_when_predicate_is_already_true(self):
         gui = session()

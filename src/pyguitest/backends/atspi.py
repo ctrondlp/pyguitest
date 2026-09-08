@@ -294,6 +294,25 @@ class Element:
             return None
         return pid or None
 
+    @property
+    def alive(self):
+        """Whether the underlying widget still exists.
+
+        Goes through dogtail's own `Node.dead` rather than reimplementing
+        it against a raw AT-SPI state flag: dogtail decides by asking the
+        bus directly (a node with no children and no parent is as sure a
+        sign as the API gives), which does not depend on a DEFUNCT flag
+        having already been set. A node the bus can no longer reach at
+        all -- fully reaped, not merely marked dead -- raises from that
+        same call rather than answering; caught here and folded into the
+        same False, since a query this is meant to make safe should not
+        itself become the thing that raises.
+        """
+        try:
+            return not self.node.dead
+        except Exception:  # noqa: BLE001 - a dead node can fail several ways
+            return False
+
     def click(self):
         """Act on the element directly -- no coordinates, no injection."""
         self.node.click()
