@@ -31,6 +31,13 @@ class TestNullBackend(unittest.TestCase):
             lambda: self.backend.move_mouse(10, 10),
             lambda: self.backend.geometry(None),
             lambda: self.backend.type_text("x"),
+            # Tier 6: GUIBackend's raising stub for these, added alongside
+            # Session's own written-out spellings, so a backend that never
+            # overrides them (NullBackend included) fails the same typed
+            # way as every operation above -- not the AttributeError a
+            # dynamic Session.__getattr__ forward used to give.
+            lambda: self.backend.pointer_position(),
+            lambda: self.backend.set_window_title(None, "x"),
         ):
             with self.subTest(call=call):
                 with self.assertRaises(CapabilityUnsupported):
@@ -331,6 +338,92 @@ class TestSessionFacade(unittest.TestCase):
         broken = object.__new__(pyguitest.Session)
         with self.assertRaises(AttributeError):
             broken.windows()
+
+
+class TestTierSixOnSession(unittest.TestCase):
+    """Session's own spelling of the six ops only X11Backend serves.
+
+    Regression: before this, `gui.pointer_position()` and friends worked
+    only through Session.__getattr__'s dynamic forward -- correct, since
+    an X11 session composes by default, but invisible to an editor and a
+    type checker. Now each has a real, written-out Session method; this
+    checks it still reaches the same backend call with the same arguments
+    and return value, the way TestTierSixDispatch in test_composite.py
+    already checks CompositeBackend does one layer down.
+    """
+
+    def _session(self):
+        import pyguitest
+        from pyguitest.backends.base import GUIBackend
+        from pyguitest.capabilities import CapabilitySet
+
+        class Tier6Backend(GUIBackend):
+            name = "tier6"
+            capabilities = CapabilitySet(
+                {
+                    Capability.POINTER_QUERY,
+                    Capability.INPUT_STATE_QUERY,
+                    Capability.WINDOW_TITLE_SET,
+                    Capability.WINDOW_LOWER,
+                    Capability.WINDOW_CURSOR_QUERY,
+                }
+            )
+
+            def __init__(self):
+                self.calls = []
+
+            def pointer_position(self):
+                return (12, 34)
+
+            def is_button_pressed(self, button):
+                self.calls.append(("is_button_pressed", button))
+                return True
+
+            def is_key_pressed(self, key):
+                self.calls.append(("is_key_pressed", key))
+                return False
+
+            def set_window_title(self, window, title):
+                self.calls.append(("set_window_title", window, title))
+
+            def lower_window(self, window):
+                self.calls.append(("lower_window", window))
+
+            def is_window_cursor(self, window, shape):
+                self.calls.append(("is_window_cursor", window, shape))
+                return True
+
+        backend = Tier6Backend()
+        return pyguitest.Session(backend, detect()), backend
+
+    def test_every_tier_six_operation_reaches_the_backend(self):
+        gui, backend = self._session()
+        self.assertEqual(gui.pointer_position(), (12, 34))
+        self.assertTrue(gui.is_button_pressed(1))
+        self.assertFalse(gui.is_key_pressed("a"))
+        gui.set_window_title("w", "New")
+        gui.lower_window("w")
+        self.assertTrue(gui.is_window_cursor("w", 68))
+        self.assertEqual(
+            backend.calls,
+            [
+                ("is_button_pressed", 1),
+                ("is_key_pressed", "a"),
+                ("set_window_title", "w", "New"),
+                ("lower_window", "w"),
+                ("is_window_cursor", "w", 68),
+            ],
+        )
+
+    def test_an_unsupporting_backend_raises_capability_unsupported(self):
+        # Not the AttributeError a dynamic forward to a backend lacking the
+        # method used to give -- GUIBackend's new stub raises the typed
+        # error instead, same as every other Session operation.
+        import pyguitest
+
+        gui = pyguitest.Session(NullBackend(), detect())
+        with self.assertRaises(CapabilityUnsupported):
+            gui.pointer_position()
 
 
 if __name__ == "__main__":

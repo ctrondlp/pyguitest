@@ -155,6 +155,12 @@ Raise on failure with a message naming what was actually found, for use directly
 | `double_click(button: int = 1)` | `POINTER_BUTTON` |  | Press and release a mouse button twice, as one double-click. |
 | `element_at(x: int, y: int)` | `ELEMENT_GEOMETRY` |  | The deepest accessible element at a screen coordinate, or None. |
 | `extents(element: Element)` | `ELEMENT_GEOMETRY` |  | `element`'s (x, y, width, height) in screen coordinates. |
+| `is_button_pressed(button: int)` | `INPUT_STATE_QUERY` | X11 | Whether a mouse button is currently held down. |
+| `is_key_pressed(key: str)` | `INPUT_STATE_QUERY` | X11 | Whether a key is currently held down. Replaces IsKeyPressed. |
+| `is_window_cursor(window: Window, shape: int)` | `WINDOW_CURSOR_QUERY` | X11 | Whether `window` is currently showing cursor `shape`. |
+| `lower_window(window: Window)` | `WINDOW_LOWER` | X11 | Replaces LowerWindow -- no foreign-toplevel protocol offers this. |
+| `pointer_position()` | `POINTER_QUERY` | X11 | The global pointer position. Replaces GetMousePos. |
+| `set_window_title(window: Window, title: str)` | `WINDOW_TITLE_SET` | X11 | Replaces SetWindowName. Impersonation is possible under X11. |
 
 ## Forwarded to the backend
 
@@ -168,12 +174,6 @@ prevents by design lives here — on a Wayland session they raise
 |------|-------|---|--------------|
 | `find_elements(role: str \| None = None, name: str \| re.Pattern \| None = None, within: Element \| None = None, enabled: bool \| None = None, visible: bool \| None = None, description: str \| re.Pattern \| None = None, predicate: Callable[[Element], bool] \| None = None)` | `ELEMENT_TREE` |  | Search the accessible tree. |
 | `find_element(role: str \| None = None, name: str \| re.Pattern \| None = None, within: Element \| None = None, enabled: bool \| None = None, visible: bool \| None = None, description: str \| re.Pattern \| None = None, predicate: Callable[[Element], bool] \| None = None)` | `ELEMENT_TREE` |  | The first accessible element matching, or None. |
-| `pointer_position()` | `POINTER_QUERY` | X11 | The global pointer position. Replaces GetMousePos. |
-| `is_button_pressed(button)` | `INPUT_STATE_QUERY` | X11 | Whether a mouse button is currently held down. |
-| `is_key_pressed(key)` | `INPUT_STATE_QUERY` | X11 | Replaces IsKeyPressed, via the server's 256-bit keymap vector. |
-| `set_window_title(window, title)` | `WINDOW_TITLE_SET` | X11 | Replaces SetWindowName. Impersonation is possible under X11. |
-| `lower_window(window)` | `WINDOW_LOWER` | X11 | Replaces LowerWindow -- no foreign-toplevel protocol offers this. |
-| `is_window_cursor(window, shape)` | `WINDOW_CURSOR_QUERY` | X11 | Whether `window` is currently showing cursor `shape`. |
 
 ## Types
 

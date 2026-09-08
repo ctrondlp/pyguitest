@@ -769,6 +769,41 @@ class GUIBackend(ABC):
         )
         raise NotImplementedError
 
+    # -- tier 6: no path anywhere but X11 ----------------------------------
+    #
+    # Not a degraded path on Wayland, an absent one -- see Tier.NO_PATH.
+    # X11Backend is the only override any of these have ever had.
+
+    def pointer_position(self) -> tuple[int, int]:
+        """The global pointer position. Replaces GetMousePos."""
+        self.require(Capability.POINTER_QUERY)
+        raise NotImplementedError
+
+    def is_button_pressed(self, button: int) -> bool:
+        """Whether a mouse button is currently held down."""
+        self.require(Capability.INPUT_STATE_QUERY)
+        raise NotImplementedError
+
+    def is_key_pressed(self, key: str) -> bool:
+        """Whether a key is currently held down. Replaces IsKeyPressed."""
+        self.require(Capability.INPUT_STATE_QUERY)
+        raise NotImplementedError
+
+    def set_window_title(self, window: Window, title: str) -> None:
+        """Replaces SetWindowName."""
+        self.require(Capability.WINDOW_TITLE_SET)
+        raise NotImplementedError
+
+    def lower_window(self, window: Window) -> None:
+        """Replaces LowerWindow."""
+        self.require(Capability.WINDOW_LOWER)
+        raise NotImplementedError
+
+    def is_window_cursor(self, window: Window, shape: int) -> bool:
+        """Whether `window` is currently showing cursor `shape`."""
+        self.require(Capability.WINDOW_CURSOR_QUERY)
+        raise NotImplementedError
+
     # -- clipboard (T3) ----------------------------------------------------
 
     def get_clipboard(self, primary: bool = False) -> str:

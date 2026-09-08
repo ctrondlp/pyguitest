@@ -111,6 +111,29 @@ All notable changes to pyguitest are recorded here. The format follows
   real server either. The `xkb` keysym group is now loaded once when
   python-xlib is imported, fixing both call paths from the same root.
 
+- **Six operations only X11 serves — `pointer_position`,
+  `is_button_pressed`, `is_key_pressed`, `set_window_title`, `lower_window`,
+  `is_window_cursor` — were documented public API reachable only through
+  `Session.__getattr__`'s dynamic forward.** They worked (an X11 session
+  composes by default), but a typo in any of them, `gui.pointer_postion()`
+  say, type-checked clean: `__getattr__` returns `Any`, so mypy accepts
+  *any* attribute on `Session`. Each now has a real, written-out method with
+  a real signature, closing the one part of that gap this package could
+  close without hiding `__getattr__` from mypy entirely — the option that
+  remains, and was deliberately not taken, since it would also break static
+  checking on genuinely backend-specific extras like
+  `PortalBackend.restore_token`, which have no uniform Session-level
+  signature to give.
+
+  Writing them out surfaced a real, separate inconsistency: `GUIBackend`
+  declared no default for any of the six, so a caller on any backend but
+  X11 — `NullBackend`, `AtspiBackend`, anything composed without X11 — got
+  a bare `AttributeError` from the failed forward, not the
+  `CapabilityUnsupported` every other operation raises for something the
+  session cannot do. `GUIBackend` now carries the same
+  `self.require(capability)`-gated stub these six methods share with the
+  rest of the interface, so that inconsistency is gone too.
+
 ## [0.5.0] — 2026-09-06
 
 ### Added

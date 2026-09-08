@@ -87,16 +87,21 @@ _DISPATCH = {
     "element_at": Capability.ELEMENT_GEOMETRY,
     "get_clipboard": Capability.CLIPBOARD,
     "set_clipboard": Capability.CLIPBOARD,
-    # Tier 6. These have no stub on GUIBackend -- they exist only on the
-    # backend that can serve them, which today is X11Backend alone -- but
-    # they are capability-routed like everything above, so they belong
-    # here rather than being left to a caller. Without them a composite
-    # advertised POINTER_QUERY (Session.supports said yes, because a
-    # member declared it) and then answered `gui.pointer_position()` with
-    # AttributeError, since CompositeBackend has no __getattr__ to fall
-    # through to. That is the normal X11 session, not a corner case:
-    # `connect()` composes, so it hit every caller of the tier-6
-    # operations, Session.glide/drag's own origin lookup included.
+    # Tier 6. GUIBackend does now carry a raising stub for each of these
+    # (X11Backend is still the only real override), but that alone does not
+    # get them routed: a plain, inherited method is a real attribute, so
+    # CompositeBackend's own base-class copy of it would answer first and
+    # every one of these would raise NotImplementedError regardless of
+    # which member could actually serve it. They are capability-routed
+    # here, like everything above, for exactly the reason the rest of this
+    # table exists. Originally added because CompositeBackend had *no*
+    # entry for them at all: a composite advertised POINTER_QUERY
+    # (Session.supports said yes, because a member declared it) and then
+    # answered `gui.pointer_position()` with AttributeError, since
+    # CompositeBackend then had no __getattr__ to fall through to either.
+    # That was the normal X11 session, not a corner case: `connect()`
+    # composes, so it hit every caller of the tier-6 operations,
+    # Session.glide/drag's own origin lookup included.
     "pointer_position": Capability.POINTER_QUERY,
     "is_button_pressed": Capability.INPUT_STATE_QUERY,
     "is_key_pressed": Capability.INPUT_STATE_QUERY,

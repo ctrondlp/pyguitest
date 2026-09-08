@@ -1736,17 +1736,61 @@ class Session:
                 f"expected {selection} to hold {expected!r}; actual: {actual!r}"
             )
 
+    # -- tier 6: input state and window extras only X11 serves -------------
+    #
+    # Written out here rather than left to __getattr__ below, the same
+    # reasoning as the section above: an X11 session composes with other
+    # backends by default, so `gui.pointer_position()` was reachable and
+    # correct, just invisible to an editor and a type checker -- these six
+    # had no Session-level spelling at all before this, dynamic or not.
+    # GUIBackend carries a raising stub for each (X11Backend the only real
+    # override; see Tier.NO_PATH), so a caller on any other backend now
+    # gets CapabilityUnsupported the same way as every operation above,
+    # rather than the AttributeError a failed dynamic forward used to give.
+
+    def pointer_position(self) -> tuple[int, int]:
+        """The global pointer position. Replaces GetMousePos."""
+        return self.backend.pointer_position()
+
+    def is_button_pressed(self, button: int) -> bool:
+        """Whether a mouse button is currently held down."""
+        return self.backend.is_button_pressed(button)
+
+    def is_key_pressed(self, key: str) -> bool:
+        """Whether a key is currently held down. Replaces IsKeyPressed."""
+        return self.backend.is_key_pressed(key)
+
+    def set_window_title(self, window: Window, title: str) -> None:
+        """Replaces SetWindowName. Impersonation is possible under X11."""
+        self.backend.set_window_title(window, title)
+
+    def lower_window(self, window: Window) -> None:
+        """Replaces LowerWindow -- no foreign-toplevel protocol offers this."""
+        self.backend.lower_window(window)
+
+    def is_window_cursor(self, window: Window, shape: int) -> bool:
+        """Whether `window` is currently showing cursor `shape`.
+
+        Replaces IsWindowCursor. Impossible on Wayland, where cursor shape is
+        negotiated privately between client and compositor.
+        """
+        return self.backend.is_window_cursor(window, shape)
+
     # -- dynamic delegation ------------------------------------------------
 
     def __getattr__(self, attr: str) -> Any:
-        # Whatever the section above does not name: a backend's own extras
-        # (X11Backend.pointer_position, PortalBackend.restore_token) and the
-        # standard operations that already have a Session spelling. Neither
-        # is visible to an editor -- that is the cost of a dynamic forward,
-        # and why the interface itself is written out rather than left here.
-        #
-        # Unsupported operations raise CapabilityUnsupported from the
-        # backend, not AttributeError.
+        # What is left once the two sections above are: a backend's own
+        # extras with no Capability behind them at all, and so no
+        # Session-level spelling possible -- PortalBackend.restore_token is
+        # the one real example. Every operation this package actually
+        # defines a capability for is written out by now, so an attribute
+        # that lands here and does not exist on the live backend really is
+        # unsupported, or a typo, and raises plain AttributeError, the way
+        # a normal attribute lookup would -- not CapabilityUnsupported,
+        # which only a `self.require()`-gated method can raise. Invisible
+        # to an editor and a type checker either way, and always will be:
+        # a backend-specific extra cannot be given a uniform Session-level
+        # signature without inventing one for backends that lack it.
         #
         # Reads `backend` through object.__getattribute__ rather than
         # `self.backend`: this hook only runs when normal lookup has already
