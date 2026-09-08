@@ -1,28 +1,38 @@
 # pyguitest documentation
 
 pyguitest is cross-platform GUI automation for Python, the successor to
-X11::GUITest. For what it is
-and how to install it, start at the
-[project README](../README.md) — this folder is the detail that would
-otherwise drown it.
+X11::GUITest. For what it is and how to install it, start at the
+[project README](../README.md).
+
+## Start here
 
 | File | What's in it |
 |------|---------------|
-| [api.md](api.md) | Every public class, method and enum, with the capability each one requires |
-| [design.md](design.md) | Why the API is not a one-to-one port of X11::GUITest, and the decisions that follow |
+| [getting-started.md](getting-started.md) | Five minutes from nothing to a script that drives a real application — plus which API to reach for, and what X11 / Wayland / XWayland each change |
+| [recipes.md](recipes.md) | Task-shaped answers: waiting properly, forms, windows, screenshots, clipboard, CI, and an X11::GUITest cheat sheet |
+| [troubleshooting.md](troubleshooting.md) | Symptom first: nothing is found, nothing is typed, nothing is captured |
+
+## Reference
+
+| File | What's in it |
+|------|---------------|
+| [api.md](api.md) | Every public class, method and enum, with the capability each one requires. Generated from the source |
 | [install.md](install.md) | What each backend needs, per distribution — the companion to `pyguitest doctor` |
 | [input.md](input.md) | Injecting pointer and keyboard input: permissions, keymap safety, libei, the portal |
-| [structure.md](structure.md) | The repository layout, file by file |
 | [validation.md](validation.md) | What has actually been run against a real desktop, and what has not |
-| [wayland-audit.md](wayland-audit.md) | The audit of all 50 X11::GUITest exports that this project's API design derives from |
-| [upstream.md](upstream.md) | The two protocol gaps worth filing upstream, written as issue text |
-| [adr-001-dependencies.md](adr-001-dependencies.md) | Why libraries were chosen as they were |
-| [adr-002-transports.md](adr-002-transports.md) | Why sockets replaced CLI tools for the compositor IPC backends |
+| [ai-assistants.md](ai-assistants.md) | Rules for a coding assistant generating pyguitest code |
 
-Reach for the ADRs when a design choice looks arbitrary and you want the
-reasoning; reach for `validation.md` before trusting a claim about what
-works on your desktop specifically; reach for everything else when you
-already know which piece you need more detail on.
+Reach for `validation.md` before trusting a claim about what works on your
+desktop specifically — it is the record of what was run, where, and what
+broke.
 
+## Design and internals
+
+[developers/](developers/) holds the rationale and the internals: why the API
+is not a port, the audit it derives from, the two ADRs, the repository
+structure, and the protocol gaps worth taking upstream. None of it is needed
+to use the library.
+
+Working *on* pyguitest rather than with it: [CONTRIBUTING.md](../CONTRIBUTING.md).
 The GNOME Shell extension has its own docs at
 [gnome-shell-extension/README.md](../gnome-shell-extension/README.md).

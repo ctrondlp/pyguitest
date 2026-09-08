@@ -84,8 +84,8 @@ def _gio():
     """Import Gio (and GLib, for Variant construction), or return None.
 
     Same PyGObject dependency the atspi/gnomeshell backends already need
-    -- see docs/adr-001-dependencies.md -- so this adds nothing new to
-    install, just a new use of it.
+    -- see docs/developers/adr-001-dependencies.md -- so this adds nothing
+    new to install, just a new use of it.
     """
     try:
         import gi

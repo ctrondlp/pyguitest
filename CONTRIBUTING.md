@@ -2,7 +2,8 @@
 
 Everything here is about working *on* pyguitest. For using it, see
 [README.md](README.md); for how the pieces fit together, see
-[docs/structure.md](docs/structure.md) and the two ADRs beside it.
+[docs/developers/structure.md](docs/developers/structure.md) and the two ADRs
+beside it.
 
 Requires Python 3.10 or newer — 3.9 reached end-of-life in October 2025.
 
@@ -154,11 +155,13 @@ extra without documenting it fails the suite.
 ## Where things live
 
 The annotated file tree is in
-[docs/structure.md](docs/structure.md#layout), along with how a call flows
-through the layers, the backend registry and its opt-in gating, and
-[what adding a backend involves](docs/structure.md#adding-a-backend).
+[docs/developers/structure.md](docs/developers/structure.md#layout), along
+with how a call flows through the layers, the backend registry and its opt-in
+gating, and
+[what adding a backend involves](docs/developers/structure.md#adding-a-backend).
 Why the dependencies and transports are what they are:
-[ADR 001](docs/adr-001-dependencies.md), [ADR 002](docs/adr-002-transports.md).
+[ADR 001](docs/developers/adr-001-dependencies.md),
+[ADR 002](docs/developers/adr-002-transports.md).
 
 ## Releasing
 

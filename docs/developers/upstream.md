@@ -13,7 +13,7 @@ each states what we do today instead, so the cost of the gap is concrete
 rather than theoretical.
 
 Evidence for every claim about this machine is in
-[validation.md](validation.md); the probes were re-run on 2026-09-04
+[validation.md](../validation.md); the probes were re-run on 2026-09-04
 against GNOME Shell / Mutter 51 on Fedora 45.
 
 ---

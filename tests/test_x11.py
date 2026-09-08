@@ -234,13 +234,16 @@ class FakeDisplay:
         self.closed = True
 
     # A small, deliberately asymmetric keymap: keycode 38 carries both
-    # levels of 'a'/'A' (an ordinary shifted key), the rest are single-level.
-    # Keysyms outside this table have no keycode, exercising the "unmapped"
-    # rejection path.
+    # levels of 'a'/'A' (an ordinary shifted key), keycode 40 carries all
+    # four -- 'd'/'D' in group 1, 'e'/'E' in group 2, the AltGr-only shape
+    # -- and the rest are single-level. Keysyms outside this table have no
+    # keycode, exercising the "unmapped" rejection path.
     _KEYCODE_LEVELS = {
         38: [0x61, 0x41],  # a, A
         56: [0x62, 0x42],  # b, B
+        40: [0x64, 0x44, 0x65, 0x45],  # d, D, e, E
         50: [0xFFE1],  # Shift_L
+        92: [0xFE03],  # ISO_Level3_Shift
         36: [0xFF0D],  # Return
         23: [0xFF09],  # Tab
     }
@@ -289,6 +292,8 @@ _NAMED_KEYSYMS = {
     "Tab": 0xFF09,
     "Escape": 0xFF1B,
     "BackSpace": 0xFF08,
+    "ISO_Level3_Shift": 0xFE03,
+    "Mode_switch": 0xFF7E,
 }
 
 
@@ -308,7 +313,7 @@ def _fake_string_to_keysym(name):
     return 0
 
 
-def install_fake_xlib():
+def install_fake_xlib(load_keysym_group=None):
     xlib = types.ModuleType("Xlib")
     X = types.ModuleType("Xlib.X")
     for i, name in enumerate(
@@ -336,6 +341,11 @@ def install_fake_xlib():
     X.XYBitmap, X.XYPixmap, X.ZPixmap = 0, 1, 2
     XK = types.ModuleType("Xlib.XK")
     XK.string_to_keysym = _fake_string_to_keysym
+    XK.load_keysym_group_calls = []
+    if load_keysym_group is None:
+        XK.load_keysym_group = XK.load_keysym_group_calls.append
+    else:
+        XK.load_keysym_group = load_keysym_group
     display = types.ModuleType("Xlib.display")
     display.Display = FakeDisplay
     ext = types.ModuleType("Xlib.ext")
@@ -369,6 +379,43 @@ def install_fake_xlib():
             "Xlib.protocol.event": event,
         },
     )
+
+
+class TestXkbKeysymLoading(unittest.TestCase):
+    """`Xlib.XK` needs the 'xkb' group loaded before ISO_Level3_Shift exists.
+
+    Confirmed live, on python-xlib 0.33: `XK` auto-loads only 'miscellany'
+    and 'latin1' at import time, so without this, both `MODIFIER_KEYS["&"]`
+    (send_keys()'s AltGr syntax) and `_group_switch_keycode()` fail to
+    resolve the one keysym name each exists for -- `press_key(
+    "ISO_Level3_Shift")` raised `ValueError: unknown key name` on a real
+    server before this fix.
+    """
+
+    def test_the_xkb_group_is_loaded_on_construction(self):
+        patcher = install_fake_xlib()
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        from pyguitest.backends import x11
+
+        gui = x11.X11Backend()
+        self.addCleanup(gui.close)
+        self.assertIn("xkb", gui._XK.load_keysym_group_calls)
+
+    def test_a_load_failure_does_not_break_construction(self):
+        # A defensive swallow, not a hard dependency: an unresolvable
+        # keysym name is already an ordinary, handled outcome for both of
+        # this group's callers.
+        def raising(group):
+            raise RuntimeError("boom")
+
+        patcher = install_fake_xlib(load_keysym_group=raising)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        from pyguitest.backends import x11
+
+        gui = x11.X11Backend()
+        gui.close()
 
 
 class X11TestCase(unittest.TestCase):
@@ -643,6 +690,60 @@ class TestInput(X11TestCase):
         self.assertEqual(keycodes[2:], [shift, b, b, shift])
         shift_presses = [etype for etype, detail, _kw in events if detail == shift]
         self.assertEqual(shift_presses, [self.gui._X.KeyPress, self.gui._X.KeyRelease])
+
+    def test_a_group_2_character_holds_the_group_switch_key_not_shift(self):
+        # The bug: 'e' lives at level 2 (keyboard group 2, an AltGr-only
+        # symbol on a real layout), and the old code held Shift for any
+        # non-zero level, which types the *group-1* character at that same
+        # keycode instead -- wrong output with no error raised.
+        self.gui.type_text("e")
+        events = list(self.gui._display.events)
+        group_switch, e = (
+            self.gui._group_switch_keycode(),
+            self.gui._keycode("e"),
+        )
+        self.assertEqual(
+            [detail for _etype, detail, _kw in events],
+            [group_switch, e, e, group_switch],
+        )
+        shift = self.gui._keycode("Shift_L")
+        self.assertNotIn(shift, [detail for _etype, detail, _kw in events])
+
+    def test_a_group_2_shifted_character_holds_both_modifiers(self):
+        # 'E' is level 3: group 2 *and* shifted, so both keys are held,
+        # Shift first (outermost), and released in the reverse order.
+        self.gui.type_text("E")
+        events = list(self.gui._display.events)
+        shift = self.gui._keycode("Shift_L")
+        group_switch = self.gui._group_switch_keycode()
+        e = self.gui._keycode("E")
+        self.assertEqual(
+            [detail for _etype, detail, _kw in events],
+            [shift, group_switch, e, e, group_switch, shift],
+        )
+
+    def test_a_group_2_character_with_no_group_switch_key_raises(self):
+        # Rather than silently dropping the modifier and typing the wrong,
+        # group-1 character -- the exact failure mode being fixed, just
+        # moved one level rather than eliminated -- a server with no
+        # ISO_Level3_Shift or Mode_switch key at all refuses the character.
+        from pyguitest.errors import CapabilityUnsupported
+
+        with mock.patch.object(self.gui, "_group_switch_keycode", return_value=None):
+            with self.assertRaises(CapabilityUnsupported):
+                self.gui.type_text("e")
+
+    def test_the_older_mode_switch_keysym_is_a_fallback(self):
+        # Some servers have no ISO_Level3_Shift key at all and expose only
+        # the core-protocol Mode_switch for the same role. Shadows the
+        # table with an instance copy -- it is a class attribute shared by
+        # every FakeDisplay, and mutating it in place would leak into
+        # every other test.
+        table = dict(self.gui._display._KEYSYM_TO_KEYCODE)
+        del table[0xFE03]  # no ISO_Level3_Shift
+        table[0xFF7E] = 92  # Mode_switch instead
+        self.gui._display._KEYSYM_TO_KEYCODE = table
+        self.assertEqual(self.gui._group_switch_keycode(), 92)
 
     def test_control_characters_resolve_by_name_not_codepoint(self):
         # string_to_keysym("\n") finds no keysym named "\n" and returns

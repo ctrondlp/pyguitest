@@ -12,7 +12,7 @@ and TEXT_ENTRY warns. `eiinput.py` is the path that escapes this: libei hands
 the client the compositor's own XKB keymap, and `xkb.py` compiles it, so
 typing there is a lookup rather than a guess. It is opt-in (it can raise a
 consent dialog), so this backend remains the in-process option for sessions
-where nobody can click Allow. See `docs/adr-002-transports.md`.
+where nobody can click Allow. See `docs/developers/adr-002-transports.md`.
 
 Creating the device needs write access to /dev/uinput, normally via the
 `input` group.

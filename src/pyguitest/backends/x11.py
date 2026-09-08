@@ -32,6 +32,7 @@ is what cropping a full-screen shot down to a window's geometry actually
 gets you everywhere else.
 """
 
+import contextlib
 import os
 import tempfile
 import time
@@ -56,13 +57,30 @@ _CONTROL_KEYSYMS = {
 
 
 def _xlib():
-    """Import python-xlib, or return None."""
+    """Import python-xlib, or return None.
+
+    Also loads the 'xkb' keysym group into `Xlib.XK`, which the module does
+    not do on its own: it auto-loads only 'miscellany' and 'latin1' at
+    import time, and ISO_Level3_Shift -- the AltGr key most layouts use for
+    keyboard group 2 -- lives in 'xkb'. Confirmed live, on python-xlib
+    0.33: without this, `XK.string_to_keysym("ISO_Level3_Shift")` returns
+    NoSymbol, which silently broke two things at once -- `MODIFIER_KEYS
+    ["&"]` for `send_keys()`'s explicit AltGr syntax, and this backend's own
+    `_group_switch_keycode()` -- neither of which had ever actually reached
+    a real server. A load failure is swallowed rather than raised: both of
+    those callers already treat an unresolvable keysym name as "this
+    server or library has no such key", not as a hard error, and calling
+    it again costs nothing worth guarding against -- it only re-copies
+    names into a module dict.
+    """
     try:
         from Xlib import XK, X, display
         from Xlib.ext import xtest
         from Xlib.protocol import event
     except Exception:
         return None
+    with contextlib.suppress(Exception):
+        XK.load_keysym_group("xkb")
     return X, XK, display, xtest, event
 
 
@@ -290,53 +308,99 @@ class X11Backend(GUIBackend):
         codepoint = ord(char)
         return codepoint if codepoint <= 0xFF else 0x01000000 | codepoint
 
+    def _keysym_keycode(self, name):
+        """keysym_to_keycode for a key name, or None if the server has no such key."""
+        keysym = self._XK.string_to_keysym(name)
+        if not keysym:
+            return None
+        return self._display.keysym_to_keycode(keysym) or None
+
+    def _group_switch_keycode(self):
+        """Whatever key switches to keyboard group 2 on this server, or None.
+
+        `get_keyboard_mapping`'s third and fourth slots per keycode are
+        group 2 -- reached by holding ISO_Level3_Shift under XKB (the AltGr
+        key on most layouts, and what `MODIFIER_KEYS["&"]` already presses
+        for `send_keys()`), or the older core-protocol Mode_switch on a
+        server with no XKB key of that name.
+        """
+        return self._keysym_keycode("ISO_Level3_Shift") or self._keysym_keycode(
+            "Mode_switch"
+        )
+
     def _resolve_char(self, char):
-        """Return (keycode, shift_level) for `char`, or None if unmapped."""
+        """Return (keycode, modifier keycodes) for `char`.
+
+        The modifiers come from which of the four legacy-protocol shift
+        levels `get_keyboard_mapping` assigned the keysym to: level 0 needs
+        none, level 1 needs Shift, and levels 2/3 -- keyboard group 2 --
+        need whatever key switches groups (see _group_switch_keycode), with
+        Shift added too at level 3. Holding Shift for every non-zero level,
+        as this used to, typed the wrong character for anything in group 2
+        -- an AltGr-only symbol on any layout that has one.
+
+        Raises CapabilityUnsupported for a character with no keycode at all
+        in the current map, or one in group 2 on a server with no
+        group-switch key to reach it, rather than pressing keycode 0 or
+        typing the wrong, unshifted character.
+        """
         keysym = self._char_keysym(char)
         keycode = self._display.keysym_to_keycode(keysym)
         if keycode == 0:
-            return None
+            raise CapabilityUnsupported(
+                Capability.TEXT_ENTRY,
+                self.name,
+                f"{char!r} has no keycode in the server's current keymap",
+            )
         levels = self._display.get_keyboard_mapping(keycode, 1)[0]
         try:
             level = levels.index(keysym)
         except ValueError:
             level = 0
-        return keycode, level
+        modifiers = []
+        if level in (1, 3):
+            modifiers.append(self._keycode("Shift_L"))
+        if level in (2, 3):
+            group_switch = self._group_switch_keycode()
+            if group_switch is None:
+                raise CapabilityUnsupported(
+                    Capability.TEXT_ENTRY,
+                    self.name,
+                    f"{char!r} is in keyboard group 2, and this server has "
+                    "no ISO_Level3_Shift or Mode_switch key to reach it",
+                )
+            modifiers.append(group_switch)
+        return keycode, tuple(modifiers)
 
     def type_text(self, text, delay=0.0, allow_keymap_unsafe=True):
         """Type `text`, pausing `delay` seconds between characters.
 
         Keymap-correct by construction: each character is resolved to a
-        keysym and then to whatever keycode and shift level the *server's
-        current map* assigns it, with Shift_L held for any non-zero level.
-        This is what uinput cannot do, and why the audit ranks scancode
-        injection last. `allow_keymap_unsafe` is accepted and ignored: X11 is
-        never keymap-unsafe, so there is nothing for it to refuse.
+        keysym and then to whatever keycode and modifier keys the *server's
+        current map* assigns it -- Shift for an ordinary shifted key, and
+        the server's own group-switch key (AltGr on most layouts) for one
+        in keyboard group 2, never the two confused with each other. This
+        is what uinput cannot do, and why the audit ranks scancode
+        injection last. `allow_keymap_unsafe` is accepted and ignored: X11
+        is never keymap-unsafe, so there is nothing for it to refuse.
 
         Raises CapabilityUnsupported for a character with no keycode at all
-        in the current map, rather than pressing keycode 0 and typing
-        nothing. There is no fallback here for that case (xdotool handles it
-        by temporarily remapping a spare keycode); this backend does not
+        in the current map, or one whose keysym lives in a keyboard group
+        this server has no switch key for -- see _resolve_char -- rather
+        than pressing keycode 0 or typing the wrong character silently.
+        There is no fallback here for the first case (xdotool handles it by
+        temporarily remapping a spare keycode); this backend does not
         mutate the server's keyboard mapping.
         """
         self.require(Capability.TEXT_ENTRY)
-        shift = self._keycode("Shift_L")
         for char in text:
-            resolved = self._resolve_char(char)
-            if resolved is None:
-                raise CapabilityUnsupported(
-                    Capability.TEXT_ENTRY,
-                    self.name,
-                    f"{char!r} has no keycode in the server's current keymap",
-                )
-            keycode, level = resolved
-            needs_shift = level != 0
-            if needs_shift:
-                self._display.xtest_fake_input(self._X.KeyPress, shift)
+            keycode, modifiers = self._resolve_char(char)
+            for mod in modifiers:
+                self._display.xtest_fake_input(self._X.KeyPress, mod)
             self._display.xtest_fake_input(self._X.KeyPress, keycode)
             self._display.xtest_fake_input(self._X.KeyRelease, keycode)
-            if needs_shift:
-                self._display.xtest_fake_input(self._X.KeyRelease, shift)
+            for mod in reversed(modifiers):
+                self._display.xtest_fake_input(self._X.KeyRelease, mod)
             if delay:
                 self._sync()
                 time.sleep(delay)

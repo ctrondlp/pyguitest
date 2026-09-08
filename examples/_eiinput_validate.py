@@ -13,8 +13,8 @@ reached.
 session and will raise a genuine "Allow this app to control your input?"
 consent dialog the moment it is constructed -- click Allow when it
 appears; this script cannot do that for you, and there is no way around
-it (see docs/adr-002-transports.md on why `eiinput` is opt-in and never
-auto-selected).
+it (see docs/developers/adr-002-transports.md on why `eiinput` is opt-in
+and never auto-selected).
 
 `LibeiBackend` is input-only -- it has no window-management capabilities of
 its own, unlike `KdotoolBackend` or `gnomeshell` -- so window discovery and

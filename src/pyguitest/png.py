@@ -6,11 +6,12 @@ GetImage hands back a buffer, and encoding it is the only step between that
 buffer and the file every other capture path returns.
 
 Pillow would do this in a line. It is deliberately not a dependency: this
-package has no hard dependencies at all (see docs/adr-001-dependencies.md),
-and the PNG a screenshot needs is the format's simplest case -- 8-bit RGB,
-no palette, no interlacing, no ancillary chunks. zlib and struct cover it in
-under a hundred lines, which is a smaller cost than an image library that
-would otherwise be pulled in for this one function.
+package has no hard dependencies at all (see
+docs/developers/adr-001-dependencies.md), and the PNG a screenshot needs is
+the format's simplest case -- 8-bit RGB, no palette, no interlacing, no
+ancillary chunks. zlib and struct cover it in under a hundred lines, which
+is a smaller cost than an image library that would otherwise be pulled in
+for this one function.
 
 Format per RFC 2083: an 8-byte signature, then length-prefixed, CRC-suffixed
 chunks. IHDR describes the image, IDAT carries zlib-compressed scanlines

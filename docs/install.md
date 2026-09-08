@@ -67,8 +67,8 @@ it directly needs a D-Bus call session detection deliberately avoids (see
 
 The `portal` row is the exception: `doctor` says nothing about it, because it
 is opt-in and never autodetected — see
-[Backend registry](structure.md#backend-registry) for why `connect()` never
-reaches it on its own.
+[Backend registry](developers/structure.md#backend-registry) for why
+`connect()` never reaches it on its own.
 
 ## Distribution packages (pip cannot supply these)
 

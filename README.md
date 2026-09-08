@@ -15,8 +15,13 @@ nothing here has to be taken on trust.
 
 Because desktops differ in what they permit, what a session can do is
 discovered at runtime rather than assumed — `gui.supports(...)` is how you
-ask, and [docs/design.md](docs/design.md) is why the API is shaped that way
-instead of being a one-to-one port.
+ask, and [docs/developers/design.md](docs/developers/design.md) is why the
+API is shaped that way instead of being a one-to-one port.
+
+**New here?** [docs/getting-started.md](docs/getting-started.md) is five
+minutes from nothing to a working script. [docs/recipes.md](docs/recipes.md)
+answers "how do I…", and [docs/troubleshooting.md](docs/troubleshooting.md)
+answers "why didn't that work".
 
 ## Install
 
@@ -202,28 +207,37 @@ flags works unchanged.
 
 ## Documentation
 
+**Start here**
+
+- [docs/getting-started.md](docs/getting-started.md) — five minutes to a
+  working script, which API to reach for, and what X11, Wayland and XWayland
+  each change
+- [docs/recipes.md](docs/recipes.md) — task-shaped answers: waiting properly,
+  forms, windows, screenshots, CI, and an X11::GUITest cheat sheet
+- [docs/troubleshooting.md](docs/troubleshooting.md) — symptom first: nothing
+  found, nothing typed, nothing captured
+
+**Reference**
+
 - [docs/api.md](docs/api.md) — the full API reference: every public class,
   method and enum, with the capability each one needs
 - [docs/install.md](docs/install.md) — what each backend needs, per
   distribution, and how capture picks a path
 - [docs/input.md](docs/input.md) — injecting pointer and keyboard input:
   permissions, daemons, keymap safety, libei and the portal
+- [docs/validation.md](docs/validation.md) — what has been run against a real
+  desktop, and what has not
+- [docs/ai-assistants.md](docs/ai-assistants.md) — rules for a coding
+  assistant generating pyguitest code
 - [testable-guis.md][testable-guis] — how to build a GUI that can be tested
   at all: the accessibility work that lets a test name a button instead of
   clicking a coordinate. Written to be handed to application developers;
   lives in the [recorder][] repository
-- [docs/validation.md](docs/validation.md) — what has been run against a real
-  desktop, and what has not
-- [docs/design.md](docs/design.md) — why the API is not a port, and the
-  decisions that follow from that
-- [docs/structure.md](docs/structure.md) — the file tree, how a call flows
-  through the layers, and the backend registry
-- [ADR 001](docs/adr-001-dependencies.md) — why these libraries
-- [ADR 002](docs/adr-002-transports.md) — why sockets replaced CLI tools
-- [docs/wayland-audit.md](docs/wayland-audit.md) — the audit all of this
-  derives from: all 50 X11::GUITest exports, classified
-- [docs/upstream.md](docs/upstream.md) — the two Wayland protocol gaps worth
-  taking upstream, written as issue text
+
+**Design and internals** — [docs/developers/](docs/developers/): why the API
+is not a port, the audit of all 50 X11::GUITest exports it derives from, the
+two ADRs, the repository structure, and the protocol gaps worth taking
+upstream.
 
 ## Contributing
 

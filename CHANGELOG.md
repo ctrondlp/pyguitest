@@ -44,6 +44,35 @@ All notable changes to pyguitest are recorded here. The format follows
   a package they already have sends them the wrong way; anything else is
   printed as the error it was.
 
+### Changed
+
+- **The documentation is now organised around using pyguitest rather than
+  around how it was built.** Four independent external reviews landed on the
+  same finding: the technical depth was there (they rated accuracy 9-9.5 out
+  of 10) but a new reader met the rationale before the instructions, and had
+  no task-shaped path at all. Nothing was deleted; what changed is what a
+  reader meets first.
+
+  New: `docs/getting-started.md` (five minutes to a working script, plus a
+  "which API should I use?" table, the locator hierarchy, and what X11,
+  Wayland and XWayland each change), `docs/recipes.md` (task-shaped answers,
+  including waiting-instead-of-sleeping and an X11::GUITest cheat sheet), and
+  `docs/troubleshooting.md` (symptom first, with the two live-measured
+  XWayland caveats promoted out of `validation.md`'s tail where nobody
+  debugging would have found them).
+
+  Also new: `docs/ai-assistants.md`, a rules list for a coding assistant
+  generating pyguitest code — written because the failure mode there is
+  specific and repeatable (sleeps instead of waits, coordinates instead of
+  elements, and invented method names, which `Session.__getattr__` means a
+  type checker cannot catch).
+
+  Moved: `design.md`, `structure.md`, `wayland-audit.md`, `upstream.md` and
+  both ADRs now live under `docs/developers/`, with the references in the
+  source docstrings and `pyproject.toml` updated to match. `api.md`,
+  `install.md`, `input.md` and `validation.md` stay where they were — they
+  are reference material, and two of them are linked from other repositories.
+
 ### Fixed
 
 - **The screen size uinput sizes its device for no longer silently guesses

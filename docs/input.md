@@ -201,8 +201,8 @@ whole combined-session negotiation built on the misreading before a `busctl
 ## `portal`: input through xdg-desktop-portal
 
 `connect(backend="portal")` — deliberately not part of automatic detection
-at all; see [Backend registry](structure.md#backend-registry) — talks to
-`org.freedesktop.portal.RemoteDesktop` for keyboard and pointer
+at all; see [Backend registry](developers/structure.md#backend-registry) —
+talks to `org.freedesktop.portal.RemoteDesktop` for keyboard and pointer
 button/scroll injection, with every method transcribed from the actual
 portal XML rather than assumed. It is the furthest out of the backends; see
 [validation.md](validation.md) for exactly how far it has been driven.
@@ -399,7 +399,7 @@ the pointer processed them, laid out, or repainted is a separate question,
 and `gui.wait_until(lambda: ...)` on the state you actually care about is
 what answers it. `sync()` removes one source of flakiness underneath that,
 not all of them. There is no protocol anywhere in this stack that reports
-"the client repainted" — see `docs/wayland-audit.md`.
+"the client repainted" — see `docs/developers/wayland-audit.md`.
 
 Returns `True` once confirmed and `False` on timeout, matching
 `wait_for_window` and the rest of the wait family; it raises

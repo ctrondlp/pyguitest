@@ -1,9 +1,9 @@
 """Capabilities and the tier scale.
 
 The tiers come from the audit of all 50 X11::GUITest exports in
-docs/wayland-audit.md. They are ordered by implementation cost: each costs
-strictly more than the one above it, and NO_PATH cannot be bought at any price
-short of being the compositor.
+docs/developers/wayland-audit.md. They are ordered by implementation cost:
+each costs strictly more than the one above it, and NO_PATH cannot be bought
+at any price short of being the compositor.
 
 A Capability is the unit a backend declares support for. Capabilities are
 deliberately coarser than the legacy function list -- the audit's conclusion was

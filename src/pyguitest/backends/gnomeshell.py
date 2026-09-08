@@ -45,8 +45,8 @@ def _gio():
     """Import Gio (and GLib, for Variant construction), or return None.
 
     Same PyGObject dependency the atspi extra already needs -- see
-    docs/adr-001-dependencies.md -- so this adds nothing new to install,
-    just a new use of it.
+    docs/developers/adr-001-dependencies.md -- so this adds nothing new to
+    install, just a new use of it.
     """
     try:
         import gi

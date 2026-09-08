@@ -572,7 +572,7 @@ class NiriCLI:
         that is the only place clap accepts them.
 
         Still unexercised against a live niri, like the rest of this
-        transport -- see docs/structure.md.
+        transport -- see docs/developers/structure.md.
         """
         argv = ["niri", "msg", "action", _kebab(name)]
         positional = []

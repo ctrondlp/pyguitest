@@ -1,9 +1,9 @@
 """pyguitest -- cross-platform GUI automation.
 
 Successor to X11::GUITest. The shape of this API follows an audit of all 50 of
-that module's exports against Wayland (docs/wayland-audit.md), whose finding
-was that a faithful port is the wrong target: 13 functions carry over unchanged,
-6 have no path on any compositor, and the rest change shape.
+that module's exports against Wayland (docs/developers/wayland-audit.md), whose
+finding was that a faithful port is the wrong target: 13 functions carry over
+unchanged, 6 have no path on any compositor, and the rest change shape.
 
 Two things follow, and both are visible in the API.
 
@@ -1074,8 +1074,8 @@ class Session:
         "Idle" means its CPU usage stayed under `cpu_threshold` (a fraction
         of one core) across `samples` consecutive polls -- CPU-idle, not
         "the UI stopped changing"; no backend here has an event stream to
-        watch for the latter (see docs/wayland-audit.md for what Wayland
-        actually exposes). Useful after e.g. clicking "Export" and waiting
+        watch for the latter (see docs/developers/wayland-audit.md for what
+        Wayland actually exposes). Useful after e.g. clicking "Export" and waiting
         for the exporting process to stop working before checking its
         output. A pid that has already exited counts as idle immediately --
         but a pid whose CPU time cannot be *read* raises rather than

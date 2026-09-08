@@ -71,7 +71,7 @@ The one area where Wayland's core protocol answers the same question X11 did. Ev
 
 ## Input injection
 
-Mechanically the easiest group to make work and the most consequential to get wrong. All eight reduce to one backend decision, discussed under [the keymap trap](#keymap) below.
+Mechanically the easiest group to make work and the most consequential to get wrong. All eight reduce to one backend decision, discussed under [the keymap trap](#the-keymap-trap) below.
 
 | Function | X11 implementation | Wayland path | Tier |
 |---|---|---|---|

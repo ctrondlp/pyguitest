@@ -22,16 +22,22 @@ pyguitest/
 ├── gnome-shell-extension/       pyguitest-window-control; opt-in, live-verified
 ├── docs/
 │   ├── README.md               index into this folder, for anyone landing here directly
+│   ├── getting-started.md      five minutes from nothing to a working script
+│   ├── recipes.md              task-shaped answers, and the X11::GUITest cheat sheet
+│   ├── troubleshooting.md      symptom first: what broke, why, what to do
 │   ├── api.md                  generated reference: every public name and its capability
-│   ├── design.md               why the API is not a port, and what follows
-│   ├── wayland-audit.md        the audit all of this derives from
-│   ├── upstream.md             two protocol gaps, written as issue text
 │   ├── install.md              what each backend needs, per distribution
 │   ├── input.md                injecting input: permissions, keymaps, libei
 │   ├── validation.md           what has been run against a real desktop
-│   ├── adr-001-dependencies.md why libraries were chosen as they were
-│   ├── adr-002-transports.md   why sockets replaced CLI tools
-│   └── structure.md            this file
+│   ├── ai-assistants.md        rules for a coding assistant writing pyguitest code
+│   └── developers/             rationale and internals; nothing needed to use the library
+│       ├── README.md           index into this folder
+│       ├── design.md           why the API is not a port, and what follows
+│       ├── wayland-audit.md    the audit all of this derives from
+│       ├── upstream.md         two protocol gaps, written as issue text
+│       ├── adr-001-dependencies.md why libraries were chosen as they were
+│       ├── adr-002-transports.md   why sockets replaced CLI tools
+│       └── structure.md        this file
 ├── src/pyguitest/
 │   ├── capabilities.py         the tier scale and capabilities
 │   ├── xkb.py                  keymap lookup: which key types which character
@@ -348,7 +354,7 @@ against a live session -- the sway and Hyprland JSON schemas are
 reconstructions from their documentation, and niri's is transcribed from the
 `niri-ipc` crate's serde types, all unexercised against a real compositor.
 UinputBackend has not been driven live either. KWin's `KdotoolBackend` has
-since been run live -- see [validation.md](validation.md).
+since been run live -- see [validation.md](../validation.md).
 
 X11Backend largely has. On a real X11 session: whole-screen capture (the
 one capability real X11 has that XWayland does not), window control, and the

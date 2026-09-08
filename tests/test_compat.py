@@ -9,7 +9,8 @@ from pyguitest.backends.composite import _DISPATCH
 from pyguitest.capabilities import Capability, Tier
 from pyguitest.compat import LEGACY, by_tier, portable, unavailable
 
-# The audit's distribution. If these change, docs/wayland-audit.md is stale.
+# The audit's distribution. If these change, docs/developers/wayland-audit.md
+# is stale.
 AUDITED = {
     Tier.PORTABLE: 9,
     Tier.DIRECT: 4,
