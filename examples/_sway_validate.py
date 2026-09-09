@@ -25,6 +25,20 @@ from pyguitest import Capability
 from pyguitest.errors import BackendUnavailable
 
 
+def _target_pid(window, fallback_pid):
+    """window.pid, or `fallback_pid` if the compositor never reported one.
+
+    window_events() builds Window objects straight from a raw IPC event
+    payload's "container" dict (backends/windows.py:270) -- unlike
+    windows()'s _window() helper, it does not filter down to nodes that
+    carry a pid -- so window.pid can genuinely be None. Flagged in PR
+    review: os.kill(None, ...) raises TypeError, which
+    contextlib.suppress(ProcessLookupError) does not catch, so this must
+    be resolved before the kill rather than papered over after it.
+    """
+    return window.pid if window.pid is not None else fallback_pid
+
+
 def _settle(get, want, timeout=2.0):
     """Poll `get()` until it equals `want`, or return its last value.
 
@@ -146,14 +160,16 @@ try:
     print(f"  window_at({rx + 5}, {ry + 5}) -> {hit!r}")
     hit_ok = hit is not None and hit.handle == window.handle
 
+    kill_pid = _target_pid(window, process.pid)
+    kill_source = "sway-reported" if window.pid is not None else "launcher fallback"
     print(
-        f"\nkilling pid={window.pid} (sway's own, not necessarily {process.pid}) "
-        "and waiting for its close event..."
+        f"\nkilling pid={kill_pid} ({kill_source}) and waiting for its close event..."
     )
-    # window.pid, from sway's own tree, not process.pid: see the note above
-    # -- a D-Bus-activated launcher can already be gone by now.
+    # window.pid, from sway's own tree, not process.pid, when sway reports
+    # one: see the note above -- a D-Bus-activated launcher can already be
+    # gone by now.
     with contextlib.suppress(ProcessLookupError):
-        os.kill(window.pid, signal.SIGTERM)
+        os.kill(kill_pid, signal.SIGTERM)
     got_close = False
     for event in gui.window_events(timeout=8):
         print(f"  event: {event.change} -> {event.window!r}")
@@ -188,7 +204,7 @@ try:
 finally:
     if window is not None:
         with contextlib.suppress(ProcessLookupError):
-            os.kill(window.pid, signal.SIGKILL)
+            os.kill(_target_pid(window, process.pid), signal.SIGKILL)
     # The launcher process itself: usually already exited (see above), but
     # waited on regardless so it is never left as a zombie.
     try:
