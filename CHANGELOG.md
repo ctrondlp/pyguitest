@@ -7,6 +7,8 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-09-09
+
 ### Added
 
 - **Lookup windows by `app_id`, not just title.** `find_windows`/`find_window`/
