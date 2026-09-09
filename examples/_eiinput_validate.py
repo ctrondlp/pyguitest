@@ -45,6 +45,7 @@ that injection failed silently.
     python3 _eiinput_validate.py
 """
 
+import re
 import shutil
 import sys
 import time
@@ -113,7 +114,9 @@ try:
     # app name on some desktops and only "Untitled Document" on others.
     # On a miss, say what *was* on screen -- "never opened a window" alone
     # is a dead end when the window is right there under another name.
-    window = windows_gui.wait_for_window("(?i)gedit|Untitled Document", timeout=10)
+    window = windows_gui.wait_for_window(
+        re.compile("(?i)gedit|Untitled Document"), timeout=10
+    )
     if window is None:
         seen = ", ".join(repr(w.title) for w in windows_gui.windows()) or "none"
         sys.exit(

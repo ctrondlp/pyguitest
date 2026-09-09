@@ -11,17 +11,57 @@ All notable changes to pyguitest are recorded here. The format follows
 
 - **Lookup windows by `app_id`, not just title.** `find_windows`/`find_window`/
   `wait_for_window` all gained an `app_id` keyword; `title` is now optional on
-  each, guarded against neither being given. `title` stays a regex match,
-  `app_id` is an exact match — a window's app_id should not drift the way a
-  title can (see `Window`'s docstring), so it gets the stricter comparison.
-  Given both, a window must satisfy each. `app_id=""` matches nothing on
-  purpose, since an empty `app_id` means a backend never filled it in, not a
-  real identifier to search for. `wait_for_window` still delegates to a
-  backend's own event-driven implementation (`Capability.WINDOW_EVENTS`) when
-  only `title` is given; naming `app_id` always polls, since none of those
-  backends learned to match on it. Closes the last piece of the app_id work —
-  `X11Backend` and `GnomeShellBackend` already fill the field; this is what
-  reads it back.
+  each, guarded against neither being given. `title` matches as described
+  below, `app_id` is an exact match — a window's app_id should not drift the
+  way a title can (see `Window`'s docstring), so it gets the stricter
+  comparison. Given both, a window must satisfy each. `app_id=""` matches
+  nothing on purpose, since an empty `app_id` means a backend never filled it
+  in, not a real identifier to search for. `wait_for_window` still delegates
+  to a backend's own event-driven implementation (`Capability.WINDOW_EVENTS`)
+  when only `title` is given; naming `app_id` always polls, since none of
+  those backends learned to match on it. Closes the last piece of the app_id
+  work — `X11Backend` and `GnomeShellBackend` already fill the field; this is
+  what reads it back.
+
+### Changed
+
+- **Raised the `eiinput` extra's `python-libei` floor to 0.5.1.** Some
+  compositors (GNOME 50) report `org.freedesktop.portal.InputCapture` at
+  version 0 despite implementing the interface completely, which made
+  `InputCaptureSession.negotiate()` refuse to run at all. 0.5.1 negotiates a
+  v1 `CreateSession` fallback in that case instead — v1 covers every method
+  this backend needs except `Start`, at the cost of session persistence
+  (`persist_mode`/`restore_token` are v2-only and now raise
+  `PortalVersionError` on a v1 session rather than being silently ignored).
+
+- **A plain-string `title` on `find_windows`/`find_window`/`wait_for_window`/
+  `window_element` now matches literally, as a substring, instead of always
+  being compiled as a regex.** Found live, validating against a real KDE
+  Plasma 6 / KWin session: `window_element(window.title)` — the most natural
+  way to scope an element search to a `Window` already in hand — raised
+  `WindowNotFound` for GNOME Text Editor's own default title, "New Document
+  (Draft) - Text Editor", because `(Draft)` reads as a regex capture group
+  and the literal parentheses never match themselves. Pass a compiled
+  `re.compile(...)` for real regex power (alternation, anchors, flags); a
+  plain string is escaped first, the same convention `elements()`/`element()`
+  already use for `name`/`description`. `examples/02_find_windows.py` (whose
+  whole point is FindWindowLike.pl-style regex matching) and
+  `examples/_eiinput_validate.py` (a `(?i)a|b` alternation) both updated to
+  pass a compiled pattern explicitly.
+
+### Fixed
+
+- **`Element.click()` crashed with a `gnome-ponytail-daemon` `RuntimeError`
+  on any Wayland compositor other than GNOME.** dogtail's own `Node.click()`
+  is coordinate-based, and under Wayland it always synthesizes that click
+  through GNOME's ponytail daemon — absent on KDE/KWin, sway, Hyprland, and
+  niri, where it raised before ever reaching AT-SPI. Found and fixed live
+  against a real Qt6/KF6 application (KCalc) on KDE Plasma 6 / KWin, the
+  first live AT-SPI run against a Qt application: `click()` now falls back to
+  AT-SPI's own action interface (`doActionNamed("Press")`/`"click"`) when
+  dogtail's click raises that specific error and the element offers one of
+  those actions, which needs no coordinates or daemon at all. An unrelated
+  `RuntimeError` is still raised as-is.
 
 ## [0.6.0] — 2026-09-08
 

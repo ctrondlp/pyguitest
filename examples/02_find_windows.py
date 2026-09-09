@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """List open windows and find one by title.
 
-The equivalent of X11::GUITest's FindWindowLike.pl. Titles are matched as
-regular expressions, exactly as they were there.
+The equivalent of X11::GUITest's FindWindowLike.pl. A plain string title
+matches as a literal substring (see Session.find_windows); this script
+compiles the CLI argument as a regular expression explicitly, matching
+FindWindowLike.pl's own behavior and letting "." (the default, with no
+argument) list every window.
 
     python3 examples/02_find_windows.py
     python3 examples/02_find_windows.py Firefox
 """
 
+import re
 import sys
 
 import pyguitest
@@ -23,7 +27,7 @@ if not gui.supports(Capability.WINDOW_LIST):
         "out of the box."
     )
 
-pattern = sys.argv[1] if len(sys.argv) > 1 else "."
+pattern = re.compile(sys.argv[1] if len(sys.argv) > 1 else ".")
 
 for window in gui.find_windows(pattern):
     print(f"{window.title!r}  app_id={window.app_id!r}  pid={window.pid}")

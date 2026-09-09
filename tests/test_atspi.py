@@ -77,6 +77,8 @@ class FakeNode:
         pid=0,
         component=True,
         dead=False,
+        actions=None,
+        click_raises=None,
     ):
         self.name = name
         self.roleName = role
@@ -93,6 +95,9 @@ class FakeNode:
         self._pid = pid
         self._component = component
         self.dead = dead
+        self.actions = actions or {}
+        self.actions_performed = []
+        self._click_raises = click_raises
         for child in self.children:
             child.parent = self
 
@@ -110,7 +115,12 @@ class FakeNode:
         return self._pid
 
     def click(self):
+        if self._click_raises is not None:
+            raise self._click_raises
         self.clicked = True
+
+    def doActionNamed(self, name):
+        self.actions_performed.append(name)
 
     def grabFocus(self):
         self.focused = True
@@ -548,6 +558,49 @@ class TestElements(AtspiTestCase):
         gui = self.backend()
         gui.find_element(name="OK").click()
         self.assertTrue(self.button.clicked)
+
+    def test_click_falls_back_to_the_action_interface_without_ponytail(self):
+        # dogtail's own click() is coordinate-based and needs GNOME's
+        # ponytail daemon to synthesize it under Wayland -- absent on every
+        # other Wayland compositor (confirmed live against KDE Plasma 6 /
+        # KWin). Element.click() should recover via AT-SPI's own action
+        # interface instead of surfacing dogtail's daemon-not-found error.
+        node = FakeNode(
+            name="5",
+            role="push button",
+            actions={"Press": {}, "SetFocus": {}},
+            click_raises=RuntimeError(
+                "Error in ponytail initiation might be cause by several reasons"
+            ),
+        )
+        self.atspi.Element(node).click()
+        self.assertEqual(node.actions_performed, ["Press"])
+        self.assertFalse(node.clicked)
+
+    def test_click_reraises_an_unrelated_runtime_error(self):
+        # Only the ponytail failure is worked around -- anything else out of
+        # dogtail's click() is a real error and must not be swallowed.
+        node = FakeNode(
+            name="5",
+            role="push button",
+            actions={"Press": {}},
+            click_raises=RuntimeError("some other failure"),
+        )
+        with self.assertRaises(RuntimeError):
+            self.atspi.Element(node).click()
+        self.assertEqual(node.actions_performed, [])
+
+    def test_click_reraises_ponytail_failure_with_no_usable_action(self):
+        node = FakeNode(
+            name="5",
+            role="push button",
+            actions={"ShowMenu": {}},
+            click_raises=RuntimeError(
+                "Error in ponytail initiation might be cause by several reasons"
+            ),
+        )
+        with self.assertRaises(RuntimeError):
+            self.atspi.Element(node).click()
 
     def test_focused_reads_the_node_s_focus_state(self):
         gui = self.backend()
