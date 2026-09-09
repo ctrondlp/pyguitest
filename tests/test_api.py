@@ -351,7 +351,22 @@ class TestWindowIdentity(unittest.TestCase):
 class TestWindowFinders(unittest.TestCase):
     def test_find_windows_matches_a_regex(self):
         self.assertEqual(len(session().find_windows("Editor")), 1)
-        self.assertEqual(len(session().find_windows(".")), 2)
+        self.assertEqual(len(session().find_windows(re.compile("."))), 2)
+
+    def test_find_windows_treats_a_plain_string_literally(self):
+        # A plain string is escaped before matching (as elements()/element()
+        # already do for name/description), so a title containing regex
+        # metacharacters can be round-tripped back in and still match
+        # itself. Found live: GNOME Text Editor's own default title, "New
+        # Document (Draft) - Text Editor", does not match itself unescaped,
+        # since "(Draft)" reads as a capture group. "." has no special
+        # meaning here unless the caller opts in with re.compile.
+        self.assertEqual(session().find_windows("."), [])
+        gui = session()
+        gui.backend._windows.append(Window("c", gui.backend, title="Q&A (Draft)"))
+        self.assertEqual(
+            [w.title for w in gui.find_windows("Q&A (Draft)")], ["Q&A (Draft)"]
+        )
 
     def test_find_window_returns_the_first_match(self):
         self.assertEqual(session().find_window("Fire").title, "Firefox")
@@ -363,9 +378,10 @@ class TestWindowFinders(unittest.TestCase):
     def test_find_window_by_app_id_alone(self):
         self.assertEqual(session().find_window(app_id="firefox").title, "Firefox")
 
-    def test_app_id_is_an_exact_match_not_a_regex(self):
-        # "fire" is a substring, not the whole app_id -- unlike title, which
-        # is deliberately regex.
+    def test_app_id_is_an_exact_match_not_a_substring(self):
+        # "fire" is a substring, not the whole app_id -- unlike a plain
+        # string title, which matches as a literal substring (or pass a
+        # compiled regex for full pattern power).
         self.assertEqual(session().find_windows(app_id="fire"), [])
 
     def test_title_and_app_id_together_both_must_match(self):

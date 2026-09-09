@@ -172,6 +172,25 @@ _PS_TIMEOUT = 5
 """Seconds to allow `ps`. Bounded because it backs a polling loop."""
 
 
+def _title_pattern(title: str | re.Pattern[str]) -> re.Pattern[str]:
+    """A compiled regex for matching a window/element title.
+
+    A plain string is escaped first, so it matches itself literally as a
+    substring -- round-tripping a real `Window.title` back into
+    find_window/wait_for_window/window_element must not silently
+    misinterpret it as regex syntax, which any title containing `()`,
+    `.`, `+`, `[]` and the rest otherwise would (found live: GNOME Text
+    Editor's own default title, "New Document (Draft) - Text Editor",
+    does not match itself unescaped, since `(Draft)` reads as a capture
+    group). An already-compiled `re.Pattern` is used as-is, for callers who
+    want real regex power -- the same convention `elements`/`element` use
+    for `name`/`description` via `_matches_text`.
+    """
+    if isinstance(title, re.Pattern):
+        return title
+    return re.compile(re.escape(title))
+
+
 def _ps(*argv: str) -> subprocess.CompletedProcess[str] | None:
     """Run `ps`, returning its result, or None if it could not be run.
 
@@ -822,20 +841,23 @@ class Session:
         return self.backend.windows()
 
     def find_windows(
-        self, title: str | None = None, *, app_id: str | None = None
+        self, title: str | re.Pattern[str] | None = None, *, app_id: str | None = None
     ) -> list[Window]:
-        """Every window matching `title` (regex) and/or `app_id` (exact).
+        """Every window matching `title` and/or `app_id` (exact).
 
         At least one of `title`/`app_id` is required. Given both, a window
-        must satisfy each -- title is a regex over an identifier that can
-        drift after a window opens (see Window's docstring), app_id an exact
-        match against one that should not. `app_id` is empty on backends
-        that never fill it (see Window.app_id); nothing matches `app_id=""`
+        must satisfy each. `title` takes a plain string (matched literally,
+        as a substring -- see _title_pattern) or a compiled regex (matched
+        with `.search()`), the same convention `elements`/`element` use for
+        `name`/`description` -- over an identifier that can drift after a
+        window opens (see Window's docstring). `app_id` is an exact match
+        against one that should not drift; it is empty on backends that
+        never fill it (see Window.app_id), and nothing matches `app_id=""`
         on purpose, since that is "unset", not a real identifier.
         """
         if title is None and app_id is None:
             raise ValueError("find_windows needs title, app_id, or both")
-        pattern = re.compile(title) if title is not None else None
+        pattern = _title_pattern(title) if title is not None else None
         return [
             w
             for w in self.backend.windows()
@@ -844,12 +866,13 @@ class Session:
         ]
 
     def find_window(
-        self, title: str | None = None, *, app_id: str | None = None
+        self, title: str | re.Pattern[str] | None = None, *, app_id: str | None = None
     ) -> Window:
-        """The first window matching `title` (regex) and/or `app_id`.
+        """The first window matching `title` and/or `app_id`.
 
         Raises WindowNotFound if nothing matches, so a script stops where the
-        mistake is. See find_windows for how `title`/`app_id` combine.
+        mistake is. See find_windows for how `title`/`app_id` combine and
+        what `title` accepts.
         """
         found = self.find_windows(title, app_id=app_id)
         if not found:
@@ -861,19 +884,21 @@ class Session:
             raise WindowNotFound(f"no window matching {wanted}")
         return found[0]
 
-    def window_element(self, title: str) -> Element:
-        """The accessible Element for the window matching the `title` regex.
+    def window_element(self, title: str | re.Pattern[str]) -> Element:
+        """The accessible Element for the window matching `title`.
 
         Scopes an element search to one window via `within=`:
 
             gui.element(role=Role.CHECK_BOX, name="Enable",
                         within=gui.window_element("Preferences"))
 
+        `title` takes a plain string (matched literally, as a substring) or
+        a compiled regex (matched with `.search()`) -- see find_windows.
         Distinct from find_window, which returns a Window -- the backend-
         agnostic handle used for geometry and placement, not element search.
         Raises WindowNotFound if nothing matches, matching find_window.
         """
-        pattern = re.compile(title)
+        pattern = _title_pattern(title)
         for role in Role.WINDOW_ROLES:
             for candidate in self.elements(role=role):
                 if pattern.search(candidate.name or ""):
@@ -908,16 +933,16 @@ class Session:
 
     def wait_for_window(
         self,
-        title: str | None = None,
+        title: str | re.Pattern[str] | None = None,
         timeout: float | None = None,
         interval: float = 0.5,
         *,
         app_id: str | None = None,
     ) -> Window | None:
-        """Block until a window matching `title` (regex) and/or `app_id`.
+        """Block until a window matching `title` and/or `app_id`.
 
-        See find_windows for how `title`/`app_id` combine; at least one is
-        required.
+        See find_windows for how `title`/`app_id` combine and what `title`
+        accepts; at least one is required.
 
         Delegates to the backend's own event-driven implementation where
         Capability.WINDOW_EVENTS is available (sway today) and only `title`
@@ -939,7 +964,12 @@ class Session:
             raise ValueError("wait_for_window needs title, app_id, or both")
         if app_id is None and self.supports(Capability.WINDOW_EVENTS):
             assert title is not None  # guarded above: app_id is None here
-            return self.backend.wait_for_window(title, timeout)
+            # Backends take a plain str and compile it as a regex themselves
+            # (see e.g. KWinEventsBackend.wait_for_window) -- pass the
+            # escaped-if-literal source rather than the raw title, so this
+            # path matches find_windows' behavior for a title containing
+            # regex metacharacters instead of silently diverging from it.
+            return self.backend.wait_for_window(_title_pattern(title).pattern, timeout)
 
         def first_match() -> Window | None:
             found = self.find_windows(title, app_id=app_id)

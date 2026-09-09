@@ -314,8 +314,26 @@ class Element:
             return False
 
     def click(self):
-        """Act on the element directly -- no coordinates, no injection."""
-        self.node.click()
+        """Act on the element directly -- no coordinates, no injection.
+
+        dogtail's own `Node.click()` is coordinate-based even here, and
+        under Wayland it synthesizes that click through GNOME's
+        ponytail daemon -- absent on every other Wayland compositor
+        (KDE/KWin, sway, Hyprland, niri), where it raises a RuntimeError
+        before ever reaching AT-SPI. Falls back to AT-SPI's own action
+        interface in that case, which needs no coordinates or daemon at
+        all -- confirmed live against KDE Plasma 6 / KWin.
+        """
+        try:
+            self.node.click()
+        except RuntimeError as error:
+            if "ponytail" not in str(error).lower():
+                raise
+            actions = self.node.actions or {}
+            name = next((a for a in actions if a.lower() in ("click", "press")), None)
+            if name is None:
+                raise
+            self.node.doActionNamed(name)
 
     def focus(self):
         """Give the element keyboard focus."""

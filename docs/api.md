@@ -48,7 +48,7 @@ The recommended way to drive an application: match on what a widget is and what 
 | `element(role: str \| None = None, name: str \| re.Pattern[str] \| None = None, within: Element \| None = None, enabled: bool \| None = None, visible: bool \| None = None, description: str \| re.Pattern[str] \| None = None, predicate: Callable[[Element], bool] \| None = None)` | `ELEMENT_TREE` |  | Return the first element matching every given filter. |
 | `elements(role: str \| None = None, name: str \| re.Pattern[str] \| None = None, within: Element \| None = None, enabled: bool \| None = None, visible: bool \| None = None, description: str \| re.Pattern[str] \| None = None, predicate: Callable[[Element], bool] \| None = None)` | `ELEMENT_TREE` |  | Return every accessible element matching every given filter. |
 | `root_element()` | `ELEMENT_TREE` |  | The accessible-tree root. The replacement for the X11 window tree. |
-| `window_element(title: str)` | `ELEMENT_TREE` |  | The accessible Element for the window matching the `title` regex. |
+| `window_element(title: str \| re.Pattern[str])` | `ELEMENT_TREE` |  | The accessible Element for the window matching `title`. |
 | `focused()` | `ELEMENT_TREE` |  | The accessible element that currently has keyboard focus, or None. |
 | `focus_tracking_works()` | `ELEMENT_TREE` |  | Whether this desktop actually publishes per-widget keyboard focus. |
 
@@ -80,8 +80,8 @@ The recommended way to drive an application: match on what a widget is and what 
 | Call | Needs | | What it does |
 |------|-------|---|--------------|
 | `windows()` | `WINDOW_LIST` |  | Return every open window. |
-| `find_window(title: str \| None = None, app_id: str \| None = None)` | `WINDOW_LIST` |  | The first window matching `title` (regex) and/or `app_id`. |
-| `find_windows(title: str \| None = None, app_id: str \| None = None)` | `WINDOW_LIST` |  | Every window matching `title` (regex) and/or `app_id` (exact). |
+| `find_window(title: str \| re.Pattern[str] \| None = None, app_id: str \| None = None)` | `WINDOW_LIST` |  | The first window matching `title` and/or `app_id`. |
+| `find_windows(title: str \| re.Pattern[str] \| None = None, app_id: str \| None = None)` | `WINDOW_LIST` |  | Every window matching `title` and/or `app_id` (exact). |
 | `active_window()` | `WINDOW_STATE` |  | The currently focused window, or None. |
 | `window_at(x: int, y: int, screen: int = 0)` | `WINDOW_AT_POINT` |  | The topmost window covering a screen coordinate, or None. |
 | `geometry(window: Window)` | `WINDOW_GEOMETRY` |  | `window`'s (x, y, width, height) in screen coordinates. |
@@ -129,7 +129,7 @@ Every `wait_*` call polls on an interval unless the backend can do better; `time
 | `wait_until(predicate: Callable[[], bool], timeout: float \| None = None, interval: float = 0.5)` |  |  | Block until predicate() is truthy, or timeout elapses. |
 | `wait_for_element(role: str \| None = None, name: str \| None = None, within: Element \| None = None, timeout: float \| None = None, interval: float = 0.5)` | `ELEMENT_TREE` |  | Block until an element matching role/name appears. |
 | `wait_until_gone(role: str \| None = None, name: str \| None = None, within: Element \| None = None, timeout: float \| None = None, interval: float = 0.5)` | `ELEMENT_TREE` |  | Block until no element matches role/name/within, or timeout. |
-| `wait_for_window(title: str \| None = None, timeout: float \| None = None, interval: float = 0.5, app_id: str \| None = None)` | `WINDOW_LIST` — uses `WINDOW_EVENTS` if present |  | Block until a window matching `title` (regex) and/or `app_id`. |
+| `wait_for_window(title: str \| re.Pattern[str] \| None = None, timeout: float \| None = None, interval: float = 0.5, app_id: str \| None = None)` | `WINDOW_LIST` — uses `WINDOW_EVENTS` if present |  | Block until a window matching `title` and/or `app_id`. |
 | `wait_window_close(window: Window, timeout: float \| None = None, interval: float = 0.5)` | `WINDOW_LIST` — uses `WINDOW_EVENTS` if present |  | Block until `window` (from find_window or wait_for_window) closes. |
 | `wait_for_process(name: str \| re.Pattern[str], timeout: float \| None = None, interval: float = 0.5)` |  |  | Block until a process matching `name` is running, or timeout. |
 | `wait_for_idle(pid: int, timeout: float \| None = None, interval: float = 0.2, samples: int = 3, cpu_threshold: float = 0.01)` |  |  | Block until `pid` looks CPU-idle, or timeout. |

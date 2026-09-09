@@ -66,16 +66,23 @@ atspi = ["dogtail>=2.0"]        # element automation. NB: dogtail declares no
                                 # the distro. See README INSTALL.
 x11   = ["python-xlib>=0.33"]   # X11 backend, incl. FreeBSD/Solaris
 uinput = ["evdev>=1.9"]         # last-resort input where no tool is installed
-eiinput = ["python-libei[portal]>=0.5.0"]
-                                   # libei input backend (opt-in). 0.4.0 is
-                                   # the floor because a negotiation that
-                                   # fails part-way left its portal session
-                                   # open before it, which nothing on this
-                                   # side can clean up -- negotiate() raises
-                                   # rather than handing back the object
-                                   # whose close() would -- and because the
-                                   # timeout below only bounds every leg of
-                                   # a round trip from that version. The
+eiinput = ["python-libei[portal]>=0.5.1"]
+                                   # libei input backend (opt-in). 0.5.1 is
+                                   # the floor because InputCapture reports
+                                   # version 0 on some compositors (e.g.
+                                   # GNOME 50) despite implementing the
+                                   # complete interface, and only 0.5.1
+                                   # negotiates a v1 CreateSession fallback
+                                   # instead of refusing to run; it also
+                                   # carries the 0.4.0 portal-session-leak
+                                   # fix, where a negotiation that fails
+                                   # part-way left its session open with
+                                   # nothing on this side able to clean it
+                                   # up -- negotiate() raises rather than
+                                   # handing back the object whose close()
+                                   # would, and the timeout below only
+                                   # bounds every leg of a round trip from
+                                   # that version. The
                                    # [portal] extra is PyGObject, which
                                    # libei.portal needs to negotiate the
                                    # RemoteDesktop session -- previously this

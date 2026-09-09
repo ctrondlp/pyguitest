@@ -749,6 +749,156 @@ every non-GNOME desktop.
   produced exactly the windows a real `kdotool search .` also listed.
   Used in the shipped script instead of `windowList()` for that reason.
 
+## Run live on KDE Plasma 6 / KWin, genuinely native Wayland
+
+A separate box from the KDE session above: a real graphical login
+(`kwin_wayland`, not `_wrapper`'s XWayland-only mode -- `WAYLAND_DISPLAY` set,
+`XDG_SESSION_TYPE=wayland`, `XDG_CURRENT_DESKTOP=KDE`), confirmed before
+anything else ran by reading `kwin_wayland`'s own argv and the session's
+`systemctl --user show-environment`. Answers roadmap item 13: every run
+above this section forced things through XWayland (`X11Backend`, or GTK
+apps launched under `GDK_BACKEND=x11`) or, for the section itself, ran in a
+session labelled "(XWayland)" outright; nothing in this file had yet driven
+a real KWin **Wayland** session end to end, and no Qt application had ever
+met the AT-SPI backend at all.
+
+**Note for reaching this session over SSH**: unlike a plain login shell, a
+bare `ssh` here does not inherit `WAYLAND_DISPLAY`/`XDG_CURRENT_DESKTOP`/
+`XDG_SESSION_TYPE` from the graphical session's systemd user environment --
+`pyguitest doctor` reports `session unknown` / `compositor none` until those
+three (plus `DBUS_SESSION_BUS_ADDRESS`, as on the GNOME 50 box) are exported
+from `systemctl --user show-environment`, at which point it correctly
+reports `session wayland` / `compositor kwin (KDE)`.
+
+- **`KdotoolBackend`** -- `windows()`, `geometry()`, `active_window()`,
+  `activate_window()`, `move_window()`, `resize_window()`, `window_at()`
+  (hit and miss), `minimize_window()`/restore, and `is_window_viewable()`'s
+  deliberate refusal, all re-confirmed against a real KWin **Wayland**
+  session via `examples/_kdotool_validate.py`. No difference from the
+  XWayland run above -- kdotool talks to KWin's own scripting interface
+  either way, not to X.
+- **`KWinEventsBackend`** -- re-confirmed both at the script level
+  (`scripts/validate-kwin-events.sh`, 7/7) and through the backend class
+  (`examples/_kwin_events_validate.py`): an already-open window found
+  immediately with no event needed, a freshly spawned window's `new` event,
+  and its `close` event after termination. Also unaffected by XWayland vs
+  native Wayland, for the same reason.
+- **Screen capture (spectacle)** and **clipboard (`wl-copy`)** -- both work:
+  a whole-desktop screenshot, a window cropped from it via `WINDOW_GEOMETRY`,
+  and a clipboard round trip, none of which had been re-checked specifically
+  under native Wayland on this desktop before.
+- **AT-SPI against a real Qt6/KF6 application (KCalc) -- the first time any
+  Qt application has met this backend.** The accessible tree is fully
+  reachable: 235 nodes, every expected role present (`button`, `check box`,
+  `combo box`, `list`, `menu bar`, `radio button`, `scroll bar`, `text`, and
+  more). Two real findings came out of driving it, not just listing it:
+  - **Numeric and operator buttons publish their accessible name as the
+    spelled-out English word, not the glyph on the button face**: `"Five"`,
+    `"Add"`, `"Subtract"`, `"Multiply"`, `"Divide"`, `"Equals"`, `"Decimal
+    point"`, `"Percentage"`, `"All clear"`, and so on -- never `"5"`, `"+"`,
+    `"="`. GTK's own calculator does the opposite (`gui.button("C")` already
+    documented above as matching a literal glyph). Anything written against
+    Qt/KDE apps with `gui.button("5")`-style code needs the spelled-out name
+    instead; this is a toolkit naming convention, not a bug, and confirmed
+    specific to number/operator keys -- named function keys (`"Sine"`,
+    `"log"`, `"mod"`, memory slots `"C1"`-`"C6"`) already read naturally.
+  - **A real bug, found and fixed**: `Element.click()` raised a
+    `gnome-ponytail-daemon` `RuntimeError` for every button tried. Root
+    cause confirmed by reading dogtail's own source (`Node.click()` in
+    `dogtail/tree.py`, `click()` in `dogtail/rawinput.py`): under Wayland it
+    unconditionally routes a synthetic coordinate click through GNOME's
+    ponytail daemon, with no other path, regardless of desktop -- so this is
+    not KDE-specific, it would hit sway, Hyprland and niri identically, and
+    nothing in this file had driven `Element.click()` under Wayland at all
+    before now to notice. Confirmed via `AtspiBackend`'s own `_pyatspi`/
+    `geometry()` precedent (which documents the same daemon for a different
+    call, `Component.get_size`/`get_position`, and has no fallback because
+    none exists there) that `click()` is different: AT-SPI's action
+    interface reaches the same button with no coordinates and no daemon at
+    all. `Element.click()` now tries `node.click()` first and, only on that
+    specific ponytail `RuntimeError`, falls back to `doActionNamed("Press"
+    or "click")` if the element offers one; an unrelated `RuntimeError` is
+    still raised as-is. **Verified end to end, real click() this time, not
+    the do_action() workaround**: pressed "Seven", "Multiply", "Two",
+    "Equals" on a real KCalc window, and `7×2=14` read back correctly from
+    the accessible tree afterward.
+- **A second real bug, found and fixed, unrelated to Qt**: `window_element
+  (window.title)` -- the natural way to scope an element search to a
+  `Window` already in hand -- raised `WindowNotFound` against GNOME Text
+  Editor's own default title, `"New Document (Draft) - Text Editor"`,
+  because `find_window`/`wait_for_window`/`window_element` compiled `title`
+  as a regex unconditionally, and `(Draft)` reads as a capture group: the
+  literal parentheses never match themselves. `re.compile(title).search
+  (title)` on that exact string reproduces it in isolation, `False`.
+  Confirmed as a real, general footgun (not a one-off): `elements()`/
+  `element()`'s own docstring already claimed to mirror "the same
+  convention find_window uses" for `name`/`description` -- treat a plain
+  string as a literal match, a compiled `re.Pattern` as real regex -- but
+  find_window never actually did that; it always compiled a plain string as
+  regex. Fixed to actually match: a plain string is escaped first (literal
+  substring match), a compiled pattern is used as-is. Existing regex-reliant
+  callers updated to pass one explicitly: `examples/02_find_windows.py`
+  (built specifically to demonstrate FindWindowLike.pl-style regex title
+  matching) and `examples/_eiinput_validate.py` (an `(?i)a|b` alternation).
+- **A third, separate finding on the same GNOME Text Editor window, NOT
+  fixed because there is nothing on pyguitest's side to fix**: even after
+  the regex fix above, `window_element("Text Editor")` still could not find
+  it. Direct inspection (`gui.elements(role="frame")`) showed why: this
+  native-Wayland GTK4 window's AT-SPI **frame node has an empty name**
+  entirely -- not a matching problem, there is nothing to match. Confirmed
+  by process: every element belonging to the editor's own pid (97 of them)
+  was enumerable and correct -- the running application, its "document
+  restored" notification bar, its internal panels -- but none with a
+  `frame`/`window`/`dialog` role carried this window's title, or any name
+  at all. Contrast with KCalc immediately above, where `window_element
+  ("KCalc")` worked correctly on the first try: a Qt6/KF6 application's
+  AT-SPI frame under KWin publishes its title; this GTK4 application's does
+  not. `type_text()` into the window still worked throughout (uinput
+  injects independently of AT-SPI), so the practical impact is scoped to
+  `window_element()`-based scoping for a foreign-toolkit app specifically,
+  not to window management or input generally. Not root-caused further --
+  plausibly the same class of gap as the already-documented Electron/AT-SPI
+  membership disagreement below, where a toplevel a compositor tracks is
+  not the same thing an accessibility bridge chooses to publish, though the
+  mechanism here (an empty name rather than a missing node) is different
+  enough that this is recorded as its own finding rather than assumed to be
+  the same bug.
+- **A live, human-observed note, not independently measured**: driving
+  KCalc's buttons one at a time via AT-SPI actions was visibly slow to
+  someone watching the session directly, more than the same sequence of
+  calls felt on other boxes in this file. Recorded as reported rather than
+  benchmarked -- it could be AT-SPI action dispatch, this VM's own display
+  pipeline (VirtualBox, software rendering -- `VMware: No 3D enabled` /
+  `libEGL warning: egl: failed to create dri2 screen` appeared in every run
+  here), or something else; worth a real measurement if it matters later.
+- **`eiinput` (`LibeiBackend`) against `xdg-desktop-portal-kde`, this time on
+  genuinely native Wayland** -- every earlier KDE `eiinput` run in this file
+  was on the session labelled "(XWayland)" above. `connect(backend=
+  ["eiinput", "windows"])` negotiated a real `RemoteDesktop` portal session,
+  a human watching the session clicked through KDE's consent dialog, and
+  `move_mouse`/`click`/`scroll`/`type_text`/`sync` all completed against a
+  real `gedit` window with no error (`sync()` returning `True` in 0.5ms).
+  Offered capabilities matched the XWayland run: `INPUT_SYNC`, `KEY_EVENT`,
+  `POINTER_BUTTON`, `POINTER_MOVE`, `POINTER_SCROLL`, `TEXT_ENTRY`.
+- **The KWin private EIS bypass (`org.kde.KWin.EIS.RemoteDesktop.
+  connectToEIS`) verified live for the first time.** Identified by reading
+  `xdg-desktop-portal-kde`'s own `src/remotedesktop.cpp` months earlier, with
+  no KDE box available to confirm it; this box is the first chance. Called
+  directly on the plain session bus -- no portal, no `Session`/`Request`
+  object, nothing `xdg-desktop-portal-kde` itself would go through --
+  `connectToEIS(7)` (the `KEYBOARD|POINTER|TOUCHSCREEN` bitmask the portal's
+  own `DeviceType` enum uses) returned a real Unix socket fd (confirmed via
+  `fstat`: `S_IFSOCK`) and a cookie, **with no consent dialog of any kind**,
+  in well under a second. `disconnect(cookie)` released it cleanly
+  afterward. Confirms the finding exactly as read from source: this is a
+  genuine, working, dialog-free path to an EIS connection, distinct from
+  `eiinput`'s own portal-mediated `ConnectToEIS` immediately above. Not
+  wired into `eiinput.py` or python-libei -- that is real integration work
+  (an alternative fd source alongside the portal negotiation path,
+  `backends/eiinput.py` docs the shape it would take), deliberately left as
+  a follow-up rather than done in the same pass as verifying the bypass
+  itself works at all.
+
 ## Run live on a real X11 session
 
 - Whole-screen capture — the one capability a real X11 session has that
