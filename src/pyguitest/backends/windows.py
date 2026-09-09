@@ -186,14 +186,27 @@ class SwayBackend(_WindowBackend):
         return self._command(window, "focus")
 
     def move_window(self, window, x, y):
-        """Move a window's top-left corner to (x, y)."""
+        """Move a window's top-left corner to (x, y).
+
+        `floating enable` first, chained via "," so it shares this call's
+        `[con_id=]` criteria: confirmed live that a freshly opened window is
+        tiled by default, where `move absolute position` silently no-ops
+        against the tiling layout instead of placing it. Already-floating
+        windows are unaffected -- sway's own `floating enable` is a no-op
+        once a container is floating.
+        """
         self.require(Capability.WINDOW_PLACEMENT)
-        return self._command(window, f"move absolute position {x} {y}")
+        return self._command(window, f"floating enable, move absolute position {x} {y}")
 
     def resize_window(self, window, width, height):
-        """Resize a window to `width` by `height`."""
+        """Resize a window to `width` by `height`.
+
+        `floating enable` first -- see `move_window`; a tiled window's
+        `resize set` is constrained by its siblings rather than by this
+        call's request.
+        """
         self.require(Capability.WINDOW_RESIZE)
-        return self._command(window, f"resize set {width} {height}")
+        return self._command(window, f"floating enable, resize set {width} {height}")
 
     def minimize_window(self, window, minimized=True):
         """Minimize via the scratchpad.
