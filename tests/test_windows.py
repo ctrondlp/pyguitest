@@ -345,6 +345,23 @@ class TestSway(unittest.TestCase):
         self.assertIn("resize", commands[1])
         self.assertIn("focus", commands[2])
 
+    def test_move_and_resize_float_the_container_first(self):
+        # Confirmed live against a real sway (2026-09-08): a freshly opened
+        # window is tiled by default, where "move absolute position" and
+        # "resize set" alone silently no-op against the tiling layout
+        # instead of taking effect. "," chains "floating enable" onto the
+        # same call so it shares this one's [con_id=] criteria.
+        window = self.gui.windows()[0]
+        self.gui.move_window(window, 40, 50)
+        self.gui.resize_window(window, 800, 600)
+        move_command, resize_command = self.transport.commands
+        self.assertEqual(
+            move_command, "[con_id=7] floating enable, move absolute position 40 50"
+        )
+        self.assertEqual(
+            resize_command, "[con_id=7] floating enable, resize set 800 600"
+        )
+
     def test_screens_report_scale(self):
         screens = self.gui.screens()
         self.assertEqual([s.name for s in screens], ["HDMI-1", "DP-2"])
