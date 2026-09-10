@@ -1169,24 +1169,36 @@ waiting out the full timeout for an activation that could never come. Run
 3 raised nothing and still timed out, which is what ruled this out as the
 explanation for runs 1-2 rather than confirming it.
 
-**Run 4 is conclusive: the compositor never emits `Activated` at all.**
+**Run 4 at the time: the compositor never emits `Activated` at all.**
 `gdbus monitor --session --dest org.freedesktop.portal.Desktop` ran
 throughout a fourth attempt and captured zero signal traffic beyond the
-bus-name ownership announcement at startup — not a delivery failure on
-this package's side (there was nothing on the bus to fail to deliver), and
-not a subscription bug (`_wait_for_signal` subscribes correctly; there was
-simply nothing to subscribe to that ever fired). Every piece this project
-owns is now confirmed correct: negotiation, zone geometry, barrier
-arithmetic matching the spec's own worked examples, barrier *acceptance*
-by the compositor, and clean timeout/disable behavior. **The gap is on the
-compositor's side** — Mutter accepts `SetPointerBarriers` and `Enable()`
-per spec, on GNOME Shell 51.rc (a release candidate, not a stable
-release), but its own crossing-detection logic does not appear to ever
-decide a barrier was crossed and never emits `Activated` in response to
-real pointer movement against a real screen edge. Not something this
-codebase can fix; worth checking again against a stable GNOME release, and
-a reasonable candidate for an upstream Mutter bug report if it persists
-there too.
+bus-name ownership announcement at startup. Read then as proof there was
+nothing to subscribe to, which pointed at Mutter: it accepts
+`SetPointerBarriers` and `Enable()` per spec, on GNOME Shell 51.rc, but its
+own crossing-detection logic appeared to never decide a barrier was
+crossed. A Mutter GitLab ticket (`work_items/5038`) was filed on that
+conclusion.
+
+**Correction: this was our own bug, not Mutter's — the ticket is now
+closed.** An xdg-desktop-portal developer pointed out the actual mistake:
+`InputCaptureSession.wait_for_activation()`/`wait_for_deactivation()` (in
+python-libei) subscribed to `Activated`/`Deactivated` with the *session
+handle* as the D-Bus object path, but the portal emits both signals on its
+own object (`/org/freedesktop/portal/desktop`), identifying the session
+from the signal's payload instead. That subscription matched nothing, on
+every attempt, indistinguishable from the compositor's side staying silent
+— which is exactly how "the compositor never emits `Activated`" got
+misdiagnosed here, then carried into the ticket above. The `gdbus monitor`
+evidence this section leaned on doesn't corroborate either reading any
+more either: it was later found blind on this box's own session bus even
+against a signal known to have fired, so "zero signal traffic" was never
+proof of anything happening (or not) on the bus in the first place. Fixed
+in python-libei (subscribes on the portal object now, filters the
+payload's session handle) — merged, not yet independently re-run live
+against a real compositor with the fix in place, so whether
+`wait_for_pointer_activation()` now actually returns on a real edge
+crossing here is still open. Treat the "Mutter never emits `Activated`"
+claim above as superseded by this, not as a second, independent finding.
 
 ## Why the live runs mattered
 

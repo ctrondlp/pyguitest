@@ -593,6 +593,22 @@ class TestClipboard(unittest.TestCase):
         self.assertIn("could not be read as text", message)
         self.assertIn("text/plain;charset=utf-8", message)
 
+    def test_call_for_fd_wraps_a_dbus_failure_as_backend_unavailable(self):
+        # Mirrors portalrequest.call()'s own wrapping: _call_for_fd talks to
+        # D-Bus directly (call_with_unix_fd_list_sync, not portalrequest.call,
+        # since a fd reply needs the unix-fd-list variant), so it needs the
+        # same try/except rather than inheriting the fix for free.
+        class UnimplementedClipboardConnection(FakeConnection):
+            def call_with_unix_fd_list_sync(self, *args, **kwargs):
+                raise RuntimeError(
+                    "GDBus.Error:org.freedesktop.DBus.Error.UnknownMethod: "
+                    "No such interface 'org.freedesktop.portal.Clipboard'"
+                )
+
+        self.connection = UnimplementedClipboardConnection()
+        with self.assertRaises(BackendUnavailable):
+            self._gui()._call_for_fd("SelectionRead", "(os)", ("/session/1", "text"))
+
     def test_undecodable_bytes_do_not_raise(self):
         # Another application owns the selection and can put anything on
         # it; a UnicodeDecodeError here would be pyguitest's fault-looking

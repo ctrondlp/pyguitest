@@ -85,6 +85,17 @@ def call(modules, connection, interface, method, signature, args):
     RemoteDesktop nor Screenshot -- so a caller who trusted that heuristic
     needs a clean, typed failure here rather than an unwrapped D-Bus
     exception escaping the package's own error model.
+
+    Deliberately catches every failure the same way, transient or not:
+    `CompositeBackend._grab` treats a `PyGUITestError` from a member as
+    permanent and blacklists that member for the rest of the composite's
+    lifetime, which now also happens for a momentary portal hiccup, not
+    just a genuinely missing interface. Accepted, not fixed here -- it
+    widens a tradeoff `_grab` already makes deliberately ("the failure is
+    a property of the installation, not of the moment"), and the
+    alternative -- a raw `GLib.Error` crashing the whole composite capture
+    outright, which is what happened before this wrapping existed -- is
+    worse.
     """
     Gio, GLib = modules
     parameters = GLib.Variant(signature, args)

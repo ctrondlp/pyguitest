@@ -480,6 +480,17 @@ class TestWindows(AtspiTestCase):
         self.frame.showing = False
         self.assertFalse(gui.is_window_viewable(window))
 
+    def test_an_application_that_exited_is_skipped_not_fatal(self):
+        # Mirrors element_at's own _DeadApplication test: an app closing
+        # between the application list and reading its children is
+        # ordinary, and every window this call is still able to answer
+        # about is still answerable.
+        gui = self.backend()
+        gui._tree.root.children.insert(0, _DeadApplication())
+        windows = gui.windows()
+        self.assertEqual(len(windows), 1)
+        self.assertEqual(windows[0].app_id, "gedit")
+
 
 class TestActiveWindow(AtspiTestCase):
     """A missing pyatspi must raise typed, not crash active_window().

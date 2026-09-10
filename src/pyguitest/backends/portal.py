@@ -395,18 +395,23 @@ class PortalBackend(GUIBackend):
                 "the portal session is closed; construct another "
                 "PortalBackend to use the clipboard again"
             )
-        reply, fd_list = self._connection.call_with_unix_fd_list_sync(
-            _BUS_NAME,
-            _OBJECT_PATH,
-            _CLIPBOARD_INTERFACE,
-            method,
-            self._GLib.Variant(signature, args),
-            self._GLib.VariantType.new("(h)"),
-            self._Gio.DBusCallFlags.NONE,
-            -1,
-            None,
-            None,
-        )
+        try:
+            reply, fd_list = self._connection.call_with_unix_fd_list_sync(
+                _BUS_NAME,
+                _OBJECT_PATH,
+                _CLIPBOARD_INTERFACE,
+                method,
+                self._GLib.Variant(signature, args),
+                self._GLib.VariantType.new("(h)"),
+                self._Gio.DBusCallFlags.NONE,
+                -1,
+                None,
+                None,
+            )
+        except Exception as exc:
+            raise BackendUnavailable(
+                f"the portal call {_CLIPBOARD_INTERFACE}.{method} failed: {exc}"
+            ) from exc
         (index,) = reply.unpack()
         # A reply can arrive with no descriptors attached at all -- seen on
         # GNOME for a `SelectionRead` the owner had nothing to answer with,

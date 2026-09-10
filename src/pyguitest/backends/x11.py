@@ -993,7 +993,14 @@ class X11Backend(GUIBackend):
         self.require(Capability.WINDOW_AT_POINT)
         match = None
         for window in self.windows():
-            wx, wy, width, height = self.geometry(window)
+            try:
+                wx, wy, width, height = self.geometry(window)
+            except WindowNotFound:
+                # A window closing between the listing above and this
+                # per-window read is ordinary -- one gone window unrelated
+                # to the point asked about must not fail the whole hit
+                # test for every other window still open.
+                continue
             if wx <= x < wx + width and wy <= y < wy + height:
                 match = window
         return match

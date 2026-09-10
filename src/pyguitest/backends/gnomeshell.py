@@ -214,11 +214,26 @@ class GnomeShellBackend(GUIBackend):
         return window.handle if isinstance(window, Window) else window
 
     def _call(self, method, signature=None, args=None):
-        """Call `method` on the extension, unpacking its GVariant reply."""
+        """Call `method` on the extension, unpacking its GVariant reply.
+
+        Only `__init__`'s own probe call used to be wrapped -- every later
+        call through this method could still let a raw `GLib.Error` escape
+        (the extension disabled, or GNOME Shell restarted, mid-session),
+        unlike the rest of this package's D-Bus-backed backends. Wrapped
+        here so every caller (`windows()`, `geometry()`, `move_window()`,
+        etc.) gets the same typed failure without repeating the try/except
+        at each call site.
+        """
         parameters = self._GLib.Variant(signature, args) if signature else None
-        reply = self._proxy.call_sync(
-            method, parameters, self._Gio.DBusCallFlags.NONE, _CALL_TIMEOUT_MS, None
-        )
+        try:
+            reply = self._proxy.call_sync(
+                method, parameters, self._Gio.DBusCallFlags.NONE, _CALL_TIMEOUT_MS, None
+            )
+        except Exception as exc:
+            raise BackendUnavailable(
+                f"the pyguitest-window-control GNOME Shell extension call "
+                f"{method} failed: {exc}"
+            ) from exc
         return reply.unpack()
 
     # -- outputs -----------------------------------------------------------

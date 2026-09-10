@@ -225,9 +225,11 @@ class Environment:
         portal will not actually work. What changed instead: a portal call
         against an interface nobody implements now raises the typed
         BackendUnavailable (see backends/portalrequest.py's call()) rather
-        than a raw D-Bus exception, so a wrong answer here fails cleanly
-        through connect(backend="portalcapture") instead of surfacing an
-        error outside this package's own model.
+        than a raw D-Bus exception -- PortalCaptureBackend negotiates
+        nothing at construction, so a wrong answer here still lets
+        connect(backend="portalcapture") succeed; the clean failure lands
+        on the first actual capture() call instead, not surfacing an error
+        outside this package's own model.
         """
         if self.capture_tools:
             return True

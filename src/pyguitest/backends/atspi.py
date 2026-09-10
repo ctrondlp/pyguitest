@@ -667,7 +667,17 @@ class AtspiBackend(GUIBackend):
         self.require(Capability.WINDOW_LIST)
         found = []
         for app in self._tree.root.applications():
-            for frame in app.children:
+            try:
+                frames = app.children
+            except Exception:  # noqa: BLE001 - a dead application is not an error
+                # Mirrors _hits_in's own guard: an application exiting
+                # between the app list and this read is ordinary, and
+                # taking the whole listing down with it would make every
+                # other caller (find_windows, wait_for_window, is_window_
+                # open, wait_window_close) fail for reasons having nothing
+                # to do with the window they actually asked about.
+                continue
+            for frame in frames:
                 if frame.roleName in Role.WINDOW_ROLES:
                     found.append(
                         Window(
