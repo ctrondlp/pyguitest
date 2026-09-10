@@ -21,7 +21,7 @@ from __future__ import annotations
 import contextlib
 import uuid
 
-from ..errors import PortalTimeout
+from ..errors import BackendUnavailable, PortalTimeout
 
 __all__ = [
     "gio",
@@ -74,20 +74,36 @@ def available():
 
 
 def call(modules, connection, interface, method, signature, args):
-    """Call one portal method, returning its raw GVariant reply."""
+    """Call one portal method, returning its raw GVariant reply.
+
+    Raises BackendUnavailable, not a raw GLib.Error, when the call itself
+    fails -- most notably when the running portal backend does not
+    implement `interface` at all. `Environment.has_portal` only means a
+    portal *service* is reachable, not that a given interface is behind
+    it -- xdg-desktop-portal-gtk, the fallback used where a desktop ships no
+    interface-specific backend of its own, was found to implement neither
+    RemoteDesktop nor Screenshot -- so a caller who trusted that heuristic
+    needs a clean, typed failure here rather than an unwrapped D-Bus
+    exception escaping the package's own error model.
+    """
     Gio, GLib = modules
     parameters = GLib.Variant(signature, args)
-    return connection.call_sync(
-        BUS_NAME,
-        OBJECT_PATH,
-        interface,
-        method,
-        parameters,
-        None,
-        Gio.DBusCallFlags.NONE,
-        -1,
-        None,
-    )
+    try:
+        return connection.call_sync(
+            BUS_NAME,
+            OBJECT_PATH,
+            interface,
+            method,
+            parameters,
+            None,
+            Gio.DBusCallFlags.NONE,
+            -1,
+            None,
+        )
+    except Exception as exc:
+        raise BackendUnavailable(
+            f"the portal call {interface}.{method} failed: {exc}"
+        ) from exc
 
 
 def close_session(modules, connection, session_handle):
