@@ -872,11 +872,19 @@ class Session:
     def find_window(
         self, title: str | re.Pattern[str] | None = None, *, app_id: str | None = None
     ) -> Window:
-        """The first window matching `title` and/or `app_id`.
+        """The topmost window matching `title` and/or `app_id`.
 
         Raises WindowNotFound if nothing matches, so a script stops where the
         mistake is. See find_windows for how `title`/`app_id` combine and
         what `title` accepts.
+
+        Same "last of windows() wins" convention window_at() uses for hit-
+        testing, not the first: windows() is ordered bottom-to-top by
+        _NET_CLIENT_LIST_STACKING, and more than one window can legitimately
+        share a title (confirmed live on Xfce -- xfce4-panel alone can hold
+        several same-titled toplevels, including ones parked off-screen).
+        Taking the first used to hand back whichever happened to sit at the
+        bottom of that list, which was reliably the wrong, invisible one.
         """
         found = self.find_windows(title, app_id=app_id)
         if not found:
@@ -886,7 +894,7 @@ class Session:
                 if v is not None
             )
             raise WindowNotFound(f"no window matching {wanted}")
-        return found[0]
+        return found[-1]
 
     def window_element(self, title: str | re.Pattern[str]) -> Element:
         """The accessible Element for the window matching `title`.
@@ -975,11 +983,11 @@ class Session:
             # regex metacharacters instead of silently diverging from it.
             return self.backend.wait_for_window(_title_pattern(title).pattern, timeout)
 
-        def first_match() -> Window | None:
+        def topmost_match() -> Window | None:
             found = self.find_windows(title, app_id=app_id)
-            return found[0] if found else None
+            return found[-1] if found else None
 
-        return self._poll_until(first_match, timeout, interval)
+        return self._poll_until(topmost_match, timeout, interval)
 
     def is_window_open(self, window: Window) -> bool:
         """Whether `window` is still in the window list.

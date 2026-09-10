@@ -240,7 +240,7 @@ def _scroll_argv(name: str, dx: int, dy: int) -> list[str]:
 def _xdotool_like(name: str) -> CommandTable:
     """Wdotool deliberately mirrors xdotool's command surface."""
     return {
-        "move": lambda x, y: [name, "mousemove", str(x), str(y)],
+        "move": lambda x, y: [name, "mousemove", "--", str(x), str(y)],
         "button_down": lambda b: [name, "mousedown", str(b)],
         "button_up": lambda b: [name, "mouseup", str(b)],
         "scroll": lambda dx, dy: _scroll_argv(name, dx, dy),

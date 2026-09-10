@@ -80,7 +80,7 @@ The recommended way to drive an application: match on what a widget is and what 
 | Call | Needs | | What it does |
 |------|-------|---|--------------|
 | `windows()` | `WINDOW_LIST` |  | Return every open window. |
-| `find_window(title: str \| re.Pattern[str] \| None = None, app_id: str \| None = None)` | `WINDOW_LIST` |  | The first window matching `title` and/or `app_id`. |
+| `find_window(title: str \| re.Pattern[str] \| None = None, app_id: str \| None = None)` | `WINDOW_LIST` |  | The topmost window matching `title` and/or `app_id`. |
 | `find_windows(title: str \| re.Pattern[str] \| None = None, app_id: str \| None = None)` | `WINDOW_LIST` |  | Every window matching `title` and/or `app_id` (exact). |
 | `active_window()` | `WINDOW_STATE` |  | The currently focused window, or None. |
 | `window_at(x: int, y: int, screen: int = 0)` | `WINDOW_AT_POINT` |  | The topmost window covering a screen coordinate, or None. |

@@ -120,8 +120,22 @@ were not running.
 
 Launching the application with `--force-renderer-accessibility` is the
 better fix for a test that starts it. Setting the property true works
-across the board but costs those applications real performance. `pyguitest
-debug` reports the value on its `chromium a11y` line.
+across the board — for an application already running, not just ones a
+test launches itself — but costs those applications real performance for as
+long as it stays set, session-wide:
+
+```sh
+gdbus call --session --dest org.a11y.Bus --object-path /org/a11y/bus \
+    --method org.freedesktop.DBus.Properties.Set org.a11y.Status IsEnabled "<true>"
+```
+
+Verified live (2026-09-10): flips `IsEnabled` from `<false>` to `<true>`
+immediately, `Set` itself replying with nothing. There is no corresponding
+`Set ... "<false>"` shown here on purpose — pyguitest itself only ever reads
+this property (see `assistive_technology_enabled()`'s docstring), and
+turning it back off is the same call with `"<false>"` in place of `"<true>"`
+if the performance cost stops being worth it. `pyguitest debug` reports the
+value on its `chromium a11y` line either way.
 
 ### On KDE, one more step that is not a package
 
