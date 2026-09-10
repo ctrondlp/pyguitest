@@ -128,7 +128,7 @@ The single most common way to write a flaky GUI test is `time.sleep(2)`.
 Every wait in pyguitest is a wait for something *observable*:
 
 ```python
-gui.wait_for_window("Save As", timeout=10)   # not sleep(2)
+gui.wait_for_window("Save As", timeout=10)  # not sleep(2)
 gui.wait_for_element(name="Export complete", timeout=30)
 gui.wait_until(lambda: gui.get_clipboard() == "copied", timeout=5)
 ```

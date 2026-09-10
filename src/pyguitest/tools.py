@@ -137,7 +137,11 @@ class ExternalTool:
         argv = [path, *_VERSION_ARGS.get(self.name, ("--version",))]
         try:
             result = subprocess.run(
-                argv, capture_output=True, text=True, timeout=_VERSION_TIMEOUT
+                argv,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=_VERSION_TIMEOUT,
             )
         except (OSError, subprocess.TimeoutExpired):
             return None

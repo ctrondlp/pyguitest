@@ -700,7 +700,11 @@ class KdotoolBackend(_WindowBackend):
         """Run `argv` and return stdout, raising if it fails or hangs."""
         try:
             result = subprocess.run(
-                argv, capture_output=True, text=True, timeout=DEFAULT_TIMEOUT
+                argv,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=DEFAULT_TIMEOUT,
             )
         except subprocess.TimeoutExpired as exc:
             raise PyGUITestError(f"{' '.join(argv)} timed out") from exc

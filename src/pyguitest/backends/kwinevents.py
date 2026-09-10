@@ -249,7 +249,11 @@ class KWinEventsBackend(GUIBackend):
         """Run a kdotool command, returning its stripped stdout, or ''."""
         try:
             result = subprocess.run(
-                argv, capture_output=True, text=True, timeout=_SUBPROCESS_TIMEOUT
+                argv,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=_SUBPROCESS_TIMEOUT,
             )
         except (OSError, subprocess.TimeoutExpired):
             return ""

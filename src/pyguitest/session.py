@@ -373,6 +373,23 @@ def _classify(env: Mapping[str, str]) -> SessionType:
     return SessionType.HEADLESS if not declared else SessionType.UNKNOWN
 
 
+def _desktop_name(env: Mapping[str, str]) -> str:
+    """The desktop's own name for itself, for display rather than matching.
+
+    XDG_CURRENT_DESKTOP is authoritative where set, but a session started
+    through an older or minimal display manager -- or a hand-rolled
+    ~/.xinitrc -- may only export XDG_SESSION_DESKTOP, or the legacy
+    DESKTOP_SESSION. Same three variables _compositor searches, read here in
+    priority order for one display string instead of as a keyword haystack.
+    """
+    return (
+        env.get("XDG_CURRENT_DESKTOP")
+        or env.get("XDG_SESSION_DESKTOP")
+        or env.get("DESKTOP_SESSION")
+        or ""
+    )
+
+
 def _compositor(env: Mapping[str, str], session_type: SessionType) -> Compositor:
     """Identify the compositor family from the desktop name."""
     desktop = env.get("XDG_CURRENT_DESKTOP", "")
@@ -440,6 +457,7 @@ def toolkit_accessibility() -> bool | None:
             ["gsettings", "get", _INTERFACE_SCHEMA, _TOOLKIT_ACCESSIBILITY_KEY],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=_GSETTINGS_TIMEOUT,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -505,6 +523,7 @@ def assistive_technology_enabled() -> bool | None:
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=_GSETTINGS_TIMEOUT,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -617,7 +636,7 @@ def detect(env: Mapping[str, str] | None = None) -> Environment:
     return Environment(
         session_type=session_type,
         compositor=compositor,
-        desktop=env.get("XDG_CURRENT_DESKTOP", ""),
+        desktop=_desktop_name(env),
         display=env.get("DISPLAY", ""),
         wayland_display=env.get("WAYLAND_DISPLAY", ""),
         has_libei=_lib("ei"),

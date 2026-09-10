@@ -51,7 +51,7 @@ absent, wait on something observable instead.
 
 ```python
 gui.button("Export").click()
-gui.wait_for_file("/tmp/export.csv", timeout=30)   # the observable outcome
+gui.wait_for_file("/tmp/export.csv", timeout=30)  # the observable outcome
 ```
 
 ## Finding and driving a window
@@ -74,7 +74,7 @@ are by handle and backend, never by title), but its *title* is whatever it
 was when you looked:
 
 ```python
-editor = gui.refresh_window(editor)      # None if it has closed
+editor = gui.refresh_window(editor)  # None if it has closed
 if gui.is_window_open(editor):
     x, y, w, h = gui.geometry(editor)
 ```
@@ -176,8 +176,8 @@ untouched, so your test runner still reports the real failure.
 gui.set_clipboard("hello")
 assert gui.get_clipboard() == "hello"
 
-gui.assert_clipboard("hello")            # raises ClipboardMismatch, with detail
-gui.get_clipboard(primary=True)          # the X11 PRIMARY selection
+gui.assert_clipboard("hello")  # raises ClipboardMismatch, with detail
+gui.get_clipboard(primary=True)  # the X11 PRIMARY selection
 ```
 
 Clipboard access is `Capability.CLIPBOARD` and is served by a portal or by a
@@ -188,13 +188,14 @@ process owns is the case most likely to surprise you — see
 ## Keyboard, focus and tab order
 
 ```python
-gui.type_text("Hello")                  # characters
-gui.send_keys("^(a)^(c)")               # Ctrl-A, Ctrl-C
+gui.type_text("Hello")  # characters
+gui.send_keys("^(a)^(c)")  # Ctrl-A, Ctrl-C
 gui.tap_key("Return")
-gui.press_key("shift"); gui.release_key("shift")
+gui.press_key("shift")
+gui.release_key("shift")
 
-gui.press_tab()                          # advance focus
-gui.press_tab(reverse=True)              # Shift+Tab
+gui.press_tab()  # advance focus
+gui.press_tab(reverse=True)  # Shift+Tab
 
 gui.assert_focused(name="Email")
 gui.assert_tab_order(["Name", "Email", "Country", "Submit"])
@@ -217,9 +218,9 @@ if gui.focus_tracking_works():
 ## Scrolling and dragging
 
 ```python
-gui.scroll(dy=3)      # three detents up
-gui.scroll(dy=-3)     # three detents down
-gui.scroll(dx=1)      # one detent right
+gui.scroll(dy=3)  # three detents up
+gui.scroll(dy=-3)  # three detents down
+gui.scroll(dx=1)  # one detent right
 ```
 
 Units are **whole wheel detents** on every backend, and **`dy > 0` is up** —
@@ -232,7 +233,7 @@ events rather than a jump:
 
 ```python
 gui.drag((120, 400), (600, 400))
-gui.glide(600, 400, duration=0.4)        # move without pressing anything
+gui.glide(600, 400, duration=0.4)  # move without pressing anything
 ```
 
 ## Asserting the UI is accessible at all

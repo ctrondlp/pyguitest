@@ -151,6 +151,7 @@ class ToolClipboardBackend(GUIBackend):
                 stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
                 stderr=subprocess.PIPE if capture else subprocess.DEVNULL,
                 text=True,
+                encoding="utf-8",
                 timeout=_SUBPROCESS_TIMEOUT,
             )
         except subprocess.TimeoutExpired as exc:

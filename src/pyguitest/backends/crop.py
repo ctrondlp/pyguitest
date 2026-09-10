@@ -72,7 +72,11 @@ def _run(command):
     """Run a crop, raising if ImageMagick reports failure or hangs."""
     try:
         result = subprocess.run(
-            command, capture_output=True, text=True, timeout=_SUBPROCESS_TIMEOUT
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=_SUBPROCESS_TIMEOUT,
         )
     except FileNotFoundError as exc:
         raise PyGUITestError(
