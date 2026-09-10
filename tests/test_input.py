@@ -33,7 +33,7 @@ class TestCommandConstruction(unittest.TestCase):
         self.assertEqual(
             self.runner.calls,
             [
-                ["wdotool", "mousemove", "100", "200"],
+                ["wdotool", "mousemove", "--", "100", "200"],
                 ["wdotool", "mousedown", "1"],
                 ["wdotool", "type", "--", "hello"],
             ],

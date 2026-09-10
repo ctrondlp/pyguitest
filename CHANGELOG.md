@@ -9,6 +9,24 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ### Fixed
 
+- **`find_window`/`wait_for_window` could resolve a title to the wrong
+  window when more than one shared it.** Both took `found[0]`, the *first*
+  match — which `windows()` returns bottom-to-top by stacking order, so this
+  was reliably the *bottom* of the stack, not the *top* `window_at()` already
+  treats as "the" window for hit-testing. Found live on Xfce/xfwm4: three
+  real toplevels all share the literal title `xfce4-panel` (the visible bar,
+  a second real panel, and an unexplained off-screen decoy at
+  `(-9999,-9999)`), and title lookup reliably grabbed the invisible decoy —
+  every relative-offset click a recorded script made against "the panel"
+  landed off-screen. Now takes `found[-1]`, the topmost match, matching
+  `window_at()`'s own documented convention; verified this is the right call
+  live, across several minutes of real desktop activity, before changing it.
+  Companion fix, needed regardless of the above: the xdotool `mousemove`
+  command builder now inserts `--` before the positional x/y arguments, so a
+  legitimate negative coordinate (a multi-monitor layout with a
+  negative-origin screen) is not misparsed by xdotool's own CLI parser as an
+  unrecognized flag.
+
 - **Window control was unusable on a desktop with no compositor-specific
   window backend — Xfce, and any other plain X11 window manager.** A `Window`
   is backend-private, so whichever member answers `windows()` also has to be
