@@ -7,6 +7,48 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Window control was unusable on a desktop with no compositor-specific
+  window backend — Xfce, and any other plain X11 window manager.** A `Window`
+  is backend-private, so whichever member answers `windows()` also has to be
+  able to answer `move_window`/`resize_window`/`minimize_window` for that same
+  `Window`. Registration priority alone did not express that: AT-SPI lists
+  windows and outranks `X11Backend`, but cannot place one, so on a session
+  where no compositor IPC backend or Shell extension exists to outrank both,
+  `windows()` returned AT-SPI handles that only `X11Backend` could be asked to
+  move — and it crashed inside python-xlib's own struct packing, below the
+  level anything here could catch or report. The composite now prefers a
+  member that can place windows for the four capabilities both kinds offer
+  (`WINDOW_LIST`, `WINDOW_STATE`, `WINDOW_GEOMETRY`, `WINDOW_ACTIVATE`),
+  falling back to plain priority when no member can place windows at all.
+  GNOME, KDE and sway are unaffected: their own window backends already
+  outrank AT-SPI *and* offer placement, so the invariant held there by
+  construction — which is why this went unnoticed until a live Xfce run.
+  Found and fixed on Ubuntu 24.04 / Xfce (xfwm4).
+
+- **`doctor` recommended nothing on a real X11 session that had only
+  `ydotool` installed.** The input-injection hint fired only when *no* input
+  tool was present at all, so a keymap-unsafe `ydotool` that could not even
+  open `/dev/uinput` counted as "something is installed, nothing to suggest" —
+  while `xdotool`, which needs neither uinput nor any permission setup on
+  X11, went unmentioned. It now asks whether the tool that actually suits
+  this session is present, rather than whether any tool at all is. The
+  fallback branch (no better packaged option than `ydotool` exists) keeps its
+  original behaviour. Found on Ubuntu 24.04 / Xfce.
+
+- **`GnomeShellBackend` could hang `connect()` forever on a slow-starting
+  compositor.** Its D-Bus calls to the `pyguitest-window-control` extension
+  used `call_sync(..., -1, ...)` — "wait forever". Found live on an
+  underpowered Ubuntu 24.04 VM (software-rendered `vmwgfx`): the extension's
+  D-Bus name and object can become reachable while Mutter's own
+  display/compositor state is still settling, and a call landing in that
+  window then blocks indefinitely — reproduced with a bare `gdbus call`, so
+  it is not specific to PyGObject or to this backend's own code. Fixed with a
+  bounded 5-second timeout; every caller already turns a raised error into a
+  normal `BackendUnavailable`/"cannot capture" result, so this trades an
+  unrecoverable hang for a fast, catchable one.
+
 ## [0.7.0] — 2026-09-09
 
 ### Added

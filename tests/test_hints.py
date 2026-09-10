@@ -519,6 +519,25 @@ class TestToolRecommendationsAreKeyedByCompositor(unittest.TestCase):
         text = advice(self._x11(), distro="debian")
         self.assertNotIn("ydotoold", text)
 
+    def test_x11_still_recommends_xdotool_when_only_ydotool_is_present(self):
+        # Confirmed live on Ubuntu 24.04/Xfce: a real X11 session with
+        # ydotool installed but /dev/uinput unwritable used to get no input
+        # hint at all, because "some input tool exists" short-circuited the
+        # recommendation -- even though xdotool, which this exact session
+        # can use without touching /dev/uinput, was never suggested.
+        env = dataclasses.replace(self._x11(), input_tools=("ydotool",))
+        input_hint = next(
+            h
+            for h in hints_for(env, distro="debian")
+            if h.component == "input injection"
+        )
+        self.assertIn("xdotool", input_hint.command)
+
+    def test_x11_says_nothing_once_xdotool_is_already_present(self):
+        env = dataclasses.replace(self._x11(), input_tools=("xdotool",))
+        components = [h.component for h in hints_for(env, distro="debian")]
+        self.assertNotIn("input injection", components)
+
     def test_mutter_still_recommends_ydotool_as_the_true_last_resort(self):
         # Unchanged from before: Mutter implements no wlroots protocol, so
         # ydotool genuinely is the only packaged option there.

@@ -40,6 +40,20 @@ _BUS_NAME = "org.gnome.Shell"
 _OBJECT_PATH = "/org/gnome/Shell/Extensions/Pyguitest"
 _INTERFACE = "org.gnome.Shell.Extensions.Pyguitest"
 
+# A call to this extension never leaves the local session bus, so it should
+# always be near-instant -- but "always" assumed a shell whose compositor had
+# finished starting. Caught live on an underpowered VM (software-rendered
+# vmwgfx, Ubuntu 24.04): the extension's D-Bus name and object can become
+# reachable, and even a `gdbus call` against it can then hang indefinitely,
+# while Mutter's own display/compositor state is still settling -- reproduced
+# outside Python entirely, so this is not a PyGObject-side issue. `call_sync`
+# with -1 ("wait forever") turned that race into an unrecoverable hang inside
+# GnomeShellBackend's constructor. A bounded timeout instead raises a GLib
+# timeout error, which every caller here already turns into a normal
+# BackendUnavailable/"cannot capture" result -- see __init__ and
+# _probe_capture -- rather than one slow compositor start hanging connect().
+_CALL_TIMEOUT_MS = 5000
+
 
 def _gio():
     """Import Gio (and GLib, for Variant construction), or return None.
@@ -203,7 +217,7 @@ class GnomeShellBackend(GUIBackend):
         """Call `method` on the extension, unpacking its GVariant reply."""
         parameters = self._GLib.Variant(signature, args) if signature else None
         reply = self._proxy.call_sync(
-            method, parameters, self._Gio.DBusCallFlags.NONE, -1, None
+            method, parameters, self._Gio.DBusCallFlags.NONE, _CALL_TIMEOUT_MS, None
         )
         return reply.unpack()
 

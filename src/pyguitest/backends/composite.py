@@ -8,7 +8,12 @@ each call to whichever member actually provides the capability.
 Precedence is registration order, so a higher-priority backend wins a capability
 both provide. That matters for WINDOW_GEOMETRY: AT-SPI's coordinates are
 unreliable under Wayland, so a compositor IPC backend that also offers it should
-be preferred.
+be preferred -- and, see _window_family_provider, when no compositor IPC
+backend exists at all, so should X11Backend, for a reason plain priority
+cannot express: a Window is backend-private, so whichever member answers
+`windows()` has to be able to answer move_window/resize_window/etc for that
+same Window too, or a caller who never asked for a specific backend gets a
+handle nothing here can safely act on.
 
 One operation genuinely needs two members at once. `capture(window=...)` is
 the join of a window's rectangle and the pixels covering it, and on most
@@ -191,6 +196,58 @@ class CompositeBackend(GUIBackend):
                 return member
         return None
 
+    # Capabilities a Window from windows()/wait_for_window() gets used with
+    # elsewhere -- if the member answering one of these cannot also place
+    # windows, a Window it issues cannot safely reach move_window/
+    # resize_window/minimize_window/etc, which only a full window-control
+    # member (a compositor IPC backend, or X11Backend) provides. See
+    # _window_family_provider.
+    _WINDOW_FAMILY = frozenset(
+        {
+            Capability.WINDOW_LIST,
+            Capability.WINDOW_STATE,
+            Capability.WINDOW_GEOMETRY,
+            Capability.WINDOW_ACTIVATE,
+        }
+    )
+
+    def _window_family_provider(self, capability):
+        """Like provider(), but a Window-issuing member must also place windows.
+
+        AT-SPI can list/query windows on every desktop this package
+        supports, and normally loses this tie anyway -- a compositor IPC
+        backend or the GNOME Shell extension outranks it and offers window
+        placement too, so the invariant X11Backend's own capabilities
+        docstring states ("only ever receives windows it issued itself")
+        holds by construction. It does not hold when neither exists:
+        confirmed live on Xfce (xfwm4) -- no compositor-specific window
+        backend, so plain priority handed WINDOW_LIST to AT-SPI, while
+        WINDOW_PLACEMENT is X11Backend-only. move_window then received an
+        AT-SPI frame reference where it needed an Xlib window, and crashed
+        deep in python-xlib's own struct packing rather than raising
+        anything this package could catch.
+
+        Only steps in for the four capabilities AT-SPI and a window-control
+        member both offer -- everything else `_delegate` dispatches
+        (input, capture, clipboard...) is unaffected, since a member's
+        priority for those has nothing to do with which one can move a
+        window.
+        """
+        normal = self.provider(capability)
+        if (
+            capability not in self._WINDOW_FAMILY
+            or normal is None
+            or Capability.WINDOW_PLACEMENT in normal.capabilities
+        ):
+            return normal
+        for member in self.members:
+            if (
+                capability in member.capabilities
+                and Capability.WINDOW_PLACEMENT in member.capabilities
+            ):
+                return member
+        return normal
+
     def member(self, name):
         """The member backend called `name`.
 
@@ -226,7 +283,7 @@ class CompositeBackend(GUIBackend):
         return {
             cap.name: provider.name
             for cap in Capability
-            if (provider := self.provider(cap)) is not None
+            if (provider := self._window_family_provider(cap)) is not None
         }
 
     @staticmethod
@@ -466,7 +523,9 @@ class CompositeBackend(GUIBackend):
         lines = [f"composite of {len(self.members)} backend(s)"]
         for member in self.members:
             served = sorted(
-                cap.name for cap in member.capabilities if self.provider(cap) is member
+                cap.name
+                for cap in member.capabilities
+                if self._window_family_provider(cap) is member
             )
             summary = ", ".join(served) or "nothing (shadowed)"
             lines.append(f"  {member.name}: {summary}")
@@ -478,7 +537,7 @@ def _delegate(attr, capability):
 
     def method(self, *args, **kwargs):
         """Call the member that provides this capability."""
-        provider = self.provider(capability)
+        provider = self._window_family_provider(capability)
         if provider is None:
             raise CapabilityUnsupported(
                 capability, self.name, "no member backend provides it"
