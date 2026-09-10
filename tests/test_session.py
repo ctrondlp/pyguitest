@@ -83,6 +83,33 @@ class TestCompositorDetection(unittest.TestCase):
         self.assertIs(e.compositor, Compositor.OTHER)
 
 
+class TestDesktopName(unittest.TestCase):
+    def test_xdg_current_desktop_wins(self):
+        e = detect(
+            env(
+                DISPLAY=":0",
+                XDG_CURRENT_DESKTOP="XFCE",
+                XDG_SESSION_DESKTOP="xfce",
+                DESKTOP_SESSION="xfce",
+            )
+        )
+        self.assertEqual(e.desktop, "XFCE")
+
+    def test_falls_back_to_xdg_session_desktop(self):
+        e = detect(env(DISPLAY=":0", XDG_SESSION_DESKTOP="xfce"))
+        self.assertEqual(e.desktop, "xfce")
+
+    def test_falls_back_to_desktop_session(self):
+        # A bare startx/~/.xinitrc launch: no display manager sets either
+        # XDG variable, only the legacy one some window managers export.
+        e = detect(env(DISPLAY=":0", DESKTOP_SESSION="i3"))
+        self.assertEqual(e.desktop, "i3")
+
+    def test_empty_when_nothing_names_it(self):
+        e = detect(env(DISPLAY=":0"))
+        self.assertEqual(e.desktop, "")
+
+
 class TestAssistiveTechnologyProbe(unittest.TestCase):
     """Why a Chromium window can be listed but have no elements at all."""
 

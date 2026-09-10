@@ -330,7 +330,9 @@ def _query(argv):
     """Stdout of a short-lived query tool."""
     import subprocess
 
-    return subprocess.run(argv, capture_output=True, text=True, timeout=2).stdout
+    return subprocess.run(
+        argv, capture_output=True, text=True, encoding="utf-8", timeout=2
+    ).stdout
 
 
 def _xrandr_size():

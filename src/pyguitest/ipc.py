@@ -178,7 +178,11 @@ class SwayCLI:
         """Run `argv` and return stdout, raising if it fails or hangs."""
         try:
             result = subprocess.run(
-                argv, capture_output=True, text=True, timeout=DEFAULT_TIMEOUT
+                argv,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=DEFAULT_TIMEOUT,
             )
         except subprocess.TimeoutExpired as exc:
             raise OSError(f"{' '.join(argv)} timed out") from exc
@@ -195,7 +199,11 @@ class SwayCLI:
         readline() blocks with no way to bound how long it waits.
         """
         process = subprocess.Popen(
-            argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
         )
         # stdout=PIPE guarantees a pipe, but Popen's own type only promises
         # one when text/bytes mode is known statically, which it is not

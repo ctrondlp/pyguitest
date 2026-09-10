@@ -210,7 +210,11 @@ def _ps(*argv: str) -> subprocess.CompletedProcess[str] | None:
     """
     try:
         return subprocess.run(
-            ["ps", *argv], capture_output=True, text=True, timeout=_PS_TIMEOUT
+            ["ps", *argv],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=_PS_TIMEOUT,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None

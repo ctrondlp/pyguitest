@@ -112,7 +112,11 @@ class ToolImageSearchBackend(GUIBackend):
         """
         try:
             result = subprocess.run(
-                argv, capture_output=True, text=True, timeout=_SUBPROCESS_TIMEOUT
+                argv,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=_SUBPROCESS_TIMEOUT,
             )
         except subprocess.TimeoutExpired as exc:
             raise PyGUITestError(f"{' '.join(argv)} timed out") from exc

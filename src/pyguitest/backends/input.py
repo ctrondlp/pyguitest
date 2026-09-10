@@ -382,7 +382,11 @@ class ToolInputBackend(GUIBackend):
         """Run `argv`, raising if the tool reports failure or hangs."""
         try:
             result = subprocess.run(
-                argv, capture_output=True, text=True, timeout=self._timeout
+                argv,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=self._timeout,
             )
         except subprocess.TimeoutExpired as exc:
             raise PyGUITestError(f"{shlex.join(argv)} timed out") from exc

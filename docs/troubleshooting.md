@@ -61,7 +61,7 @@ Ask directly:
 ```python
 from pyguitest.session import assistive_technology_enabled
 
-print(assistive_technology_enabled())   # False is the usual answer
+print(assistive_technology_enabled())  # False is the usual answer
 ```
 
 `pyguitest debug` reports the same thing on its `chromium a11y` line. The fix
@@ -126,7 +126,7 @@ offer that operation, and pyguitest refuses to pretend otherwise rather than
 doing nothing quietly.
 
 ```python
-print(gui.report())        # the whole support table for this session
+print(gui.report())  # the whole support table for this session
 gui.supports(Capability.WINDOW_PLACEMENT)
 ```
 
@@ -232,7 +232,7 @@ everywhere else the rectangle is looked up and cut out of a full-screen
 capture, which includes whatever covers it.
 
 ```python
-gui.supports(Capability.WINDOW_CAPTURE)   # True = the native, un-occluded path
+gui.supports(Capability.WINDOW_CAPTURE)  # True = the native, un-occluded path
 ```
 
 **Capture failed entirely.** Capture needs either a tool, a portal, or the

@@ -91,7 +91,11 @@ class ToolCaptureBackend(GUIBackend):
         """Run `argv`, raising if the tool reports failure or hangs."""
         try:
             result = subprocess.run(
-                argv, capture_output=True, text=True, timeout=_SUBPROCESS_TIMEOUT
+                argv,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=_SUBPROCESS_TIMEOUT,
             )
         except subprocess.TimeoutExpired as exc:
             # Deliberately short, and deliberately free of advice about
