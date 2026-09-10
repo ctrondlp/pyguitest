@@ -538,6 +538,20 @@ class TestWindows(X11TestCase):
         self.assertEqual(self.gui.window_at(900, 50).title, "Browser")
         self.assertIsNone(self.gui.window_at(5000, 5000))
 
+    def test_a_window_closing_between_the_listing_and_the_geometry_read_is_skipped(
+        self,
+    ):
+        # A real race, not a hypothetical: windows() lists what exists at
+        # that instant, and window_at() then reads each one's geometry in a
+        # second, separate round trip -- a window closing in between must
+        # not fail the whole hit test for every other window still open.
+        class ClosesBeforeGeometry(FakeWindow):
+            def get_geometry(self):
+                raise Exception("BadWindow")
+
+        self.gui._display.root._children.append(ClosesBeforeGeometry("Closing"))
+        self.assertEqual(self.gui.window_at(50, 50).title, "Editor")
+
     def test_move_sends_net_moveresize_window_not_a_raw_configure(self):
         # Regression: a raw ConfigureWindow request sets position relative
         # to whatever the window manager reparented the client under, not

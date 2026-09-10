@@ -484,6 +484,23 @@ class TestUnavailable(unittest.TestCase):
         self.assertIn("not installed or not enabled", str(ctx.exception))
 
 
+class TestCallFailsAfterConstruction(GnomeShellTestCase):
+    """Only __init__'s own probe used to be wrapped -- a later call was not.
+
+    The extension can stop answering mid-session (disabled, or GNOME Shell
+    restarted) after construction already succeeded; every _call()-backed
+    method must still fail as BackendUnavailable, not a raw GLib.Error.
+    """
+
+    def test_a_call_that_fails_after_construction_is_wrapped(self):
+        def call_sync(*a, **kw):
+            raise RuntimeError("GDBus.Error:org.freedesktop.DBus.Error.NoReply")
+
+        self.gui._proxy.call_sync = call_sync
+        with self.assertRaises(BackendUnavailable):
+            self.gui.windows()
+
+
 class TestScreens(unittest.TestCase):
     """Outputs come from Mutter's DisplayConfig, not from the extension.
 

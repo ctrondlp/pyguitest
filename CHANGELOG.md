@@ -59,12 +59,47 @@ All notable changes to pyguitest are recorded here. The format follows
   when this heuristic turned out to be wrong; `backends/portalrequest.py`'s
   shared `call()`, used by both `PortalBackend` and `PortalCaptureBackend`,
   did not — an unimplemented interface let Gio's `GLib.Error` escape
-  unwrapped. It now raises `BackendUnavailable`, so `connect(backend=
-  "portalcapture")` following a `doctor` recommendation that turns out wrong
-  fails the same way every other unsupported backend does. Found while
-  investigating `can_capture`'s portal fallback; not yet reproduced against a
-  live portal missing `Screenshot`, only against a fake connection modelling
-  the same D-Bus failure.
+  unwrapped. It now raises `BackendUnavailable`, so following a `doctor`
+  recommendation that turns out wrong fails the same way every other
+  unsupported backend does — on the first real portal call
+  (`PortalCaptureBackend` negotiates nothing at construction, so
+  `connect(backend="portalcapture")` still succeeds either way; the clean
+  failure lands on the first `capture()`). Found while investigating
+  `can_capture`'s portal fallback; not yet reproduced against a live portal
+  missing `Screenshot`, only against a fake connection modelling the same
+  D-Bus failure. `PortalBackend._call_for_fd` (the Clipboard fd-returning
+  calls) talks to D-Bus directly rather than through the shared `call()`,
+  so it needed the same fix separately — caught by review, not live, and
+  harmless until now since both existing callers already wrapped it in
+  their own broad `except Exception`.
+
+- **`GnomeShellBackend` could leak a raw `GLib.Error` from any call after
+  construction, not just at construction time.** `__init__`'s own probe
+  call was wrapped as `BackendUnavailable`, but `_call()` itself was not —
+  so the extension being disabled, or GNOME Shell restarting, mid-session
+  raised unwrapped out of `windows()`, `geometry()`, `move_window()`, and
+  every other method that goes through it. The exact bug class just fixed
+  for the portal backends above, not extended here until a repo-wide sweep
+  caught it. Fixed at the same choke point (`_call()` itself), so every
+  caller gets the typed failure without repeating the try/except.
+
+- **`AtspiBackend.windows()` crashed the whole window list if any one
+  application had exited.** `_hits_in()` (used by `element_at()`) already
+  guards the identical per-application walk for exactly this reason — an
+  app closing mid-walk is ordinary — but `windows()` read `app.children`
+  with no guard, so it took every other application's windows down with
+  it. Backs `find_windows`/`wait_for_window`/`is_window_open`/
+  `wait_window_close`, so this could fire on any automated run where an
+  application happens to close at the wrong moment. Fixed with the same
+  guard `_hits_in()` already uses.
+
+- **`X11Backend.window_at()` crashed the whole hit test if any one window
+  closed between being listed and having its geometry read.** `geometry()`
+  already raises the typed `WindowNotFound` for exactly this case, but
+  `window_at()` didn't catch it, so one window closing mid-hit-test failed
+  the lookup for every other window still open, including the one actually
+  under the point asked about. Fixed by skipping a window that raises
+  `WindowNotFound` rather than propagating it.
 
 ## [0.7.0] — 2026-09-09
 

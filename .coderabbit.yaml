@@ -1,0 +1,14 @@
+# yaml-language-server: $schema=https://storage.googleapis.com/coderabbit_public_assets/schema.v2.json
+reviews:
+  pre_merge_checks:
+    docstrings:
+      # This check has no per-path exclusion, and cannot see that
+      # pyproject.toml's own ruff config *deliberately* ignores
+      # D100-D107 (missing docstrings) under tests/*: every test in this
+      # suite relies on a descriptive name instead, by design. Scoring a
+      # diff's test methods against an 80% docstring threshold fights
+      # that convention on every PR that adds tests -- which is most of
+      # them -- for no gain, since real source-code coverage is already
+      # enforced by ruff's pydocstyle rules in the binding CI gate
+      # (./scripts/pre-commit-test.sh), which IS path-aware.
+      mode: "off"
