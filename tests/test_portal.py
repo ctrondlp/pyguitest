@@ -921,6 +921,68 @@ class TestRequestTimeout(unittest.TestCase):
         self.assertIsNone(FakeMainLoop.pending_timeout)
 
 
+class TestRequestFailure(unittest.TestCase):
+    """A portal that does not implement the requested interface at all.
+
+    `Environment.has_portal` only means a portal service answers the
+    session bus -- not that every interface a caller wants is implemented
+    behind it. xdg-desktop-portal-gtk, the generic fallback used where a
+    desktop ships no interface-specific backend of its own, was found on a
+    real box to implement neither RemoteDesktop nor Screenshot -- so this
+    is a real, not hypothetical, way for a portal call to fail.
+    """
+
+    def setUp(self):
+        patcher = install_fake_gi()
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        from pyguitest.backends import portalrequest
+
+        self.portalrequest = portalrequest
+        self.modules = (
+            sys.modules["gi.repository"].Gio,
+            sys.modules["gi.repository"].GLib,
+        )
+
+    def _unimplemented_connection(self):
+        """A connection whose call_sync raises, like a real unknown interface."""
+
+        class UnimplementedConnection(FakeConnection):
+            def call_sync(self, *args, **kwargs):
+                raise RuntimeError(
+                    "GDBus.Error:org.freedesktop.DBus.Error.UnknownMethod: "
+                    "No such interface"
+                )
+
+        return UnimplementedConnection()
+
+    def test_call_wraps_the_failure_as_backend_unavailable(self):
+        with self.assertRaises(BackendUnavailable) as ctx:
+            self.portalrequest.call(
+                self.modules,
+                self._unimplemented_connection(),
+                "org.freedesktop.portal.Screenshot",
+                "Screenshot",
+                "(sa{sv})",
+                ("", {}),
+            )
+        self.assertIn("Screenshot", str(ctx.exception))
+
+    def test_request_wraps_the_same_failure(self):
+        # request() calls call() to get the handle -- the same failure has
+        # to surface the same way through the higher-level helper the
+        # backends actually use.
+        with self.assertRaises(BackendUnavailable):
+            self.portalrequest.request(
+                self.modules,
+                self._unimplemented_connection(),
+                "org.freedesktop.portal.RemoteDesktop",
+                "CreateSession",
+                "(a{sv})",
+                ({},),
+            )
+
+
 def _closed_sessions(connection):
     """Object paths Session.Close() was sent to, in order."""
     return [path for method, path in connection.call_paths if method == "Close"]

@@ -211,6 +211,23 @@ class Environment:
         at all beyond PyGObject. Reporting "no screen capture" on a session
         that has either would send someone off to install a tool they do
         not need.
+
+        The portal route is the least certain of the three: has_portal is
+        `_portal()`'s own "a portal service is reachable" heuristic, not
+        proof that its Screenshot interface is actually implemented behind
+        it -- confirmed false on a real box where the running backend was
+        xdg-desktop-portal-gtk, which implements neither Screenshot nor
+        RemoteDesktop. Narrowing has_portal further would need either a
+        live D-Bus introspection call at detect() time (a real dependency
+        this package has deliberately avoided so far) or a per-desktop
+        allowlist with no live evidence yet for anything but GNOME/Mutter
+        -- so this can still answer True on a session where the Screenshot
+        portal will not actually work. What changed instead: a portal call
+        against an interface nobody implements now raises the typed
+        BackendUnavailable (see backends/portalrequest.py's call()) rather
+        than a raw D-Bus exception, so a wrong answer here fails cleanly
+        through connect(backend="portalcapture") instead of surfacing an
+        error outside this package's own model.
         """
         if self.capture_tools:
             return True

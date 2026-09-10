@@ -18,7 +18,7 @@ from unittest import mock
 from urllib.parse import quote
 
 from pyguitest.capabilities import Capability
-from pyguitest.errors import PermissionRequired, PyGUITestError
+from pyguitest.errors import BackendUnavailable, PermissionRequired, PyGUITestError
 from test_portal import FakeConnection, install_fake_gi
 
 
@@ -154,6 +154,24 @@ class TestFailures(PortalCaptureTestCase):
     def test_any_other_response_code_raises(self):
         gui = self.backend(ScreenshotConnection(code=2))
         with self.assertRaises(PyGUITestError):
+            gui.capture()
+
+    def test_a_portal_that_does_not_implement_screenshot_fails_cleanly(self):
+        # Environment.can_capture's portal fallback only knows a portal
+        # *service* is reachable, not that this desktop's backend actually
+        # implements Screenshot -- confirmed false on a real box running
+        # xdg-desktop-portal-gtk, which implements neither Screenshot nor
+        # RemoteDesktop. Following can_capture's advice there must fail as
+        # a typed BackendUnavailable, not an unwrapped D-Bus exception.
+        class NoScreenshotConnection(ScreenshotConnection):
+            def call_sync(self, *args, **kwargs):
+                raise RuntimeError(
+                    "GDBus.Error:org.freedesktop.DBus.Error.UnknownMethod: "
+                    "No such interface 'org.freedesktop.portal.Screenshot'"
+                )
+
+        gui = self.backend(NoScreenshotConnection())
+        with self.assertRaises(BackendUnavailable):
             gui.capture()
 
     def test_success_with_no_uri_is_not_treated_as_success(self):

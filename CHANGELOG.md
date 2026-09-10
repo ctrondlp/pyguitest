@@ -49,6 +49,23 @@ All notable changes to pyguitest are recorded here. The format follows
   normal `BackendUnavailable`/"cannot capture" result, so this trades an
   unrecoverable hang for a fast, catchable one.
 
+- **A portal call against an interface the running portal backend does not
+  implement raised a raw D-Bus exception instead of a typed error.**
+  `Environment.can_capture`'s `has_portal` heuristic only means a portal
+  *service* answers the session bus, not that a given interface is
+  implemented behind it — confirmed on a real box where the
+  running backend, `xdg-desktop-portal-gtk`, implements neither `Screenshot`
+  nor `RemoteDesktop`. `eiinput`'s own negotiation already degraded cleanly
+  when this heuristic turned out to be wrong; `backends/portalrequest.py`'s
+  shared `call()`, used by both `PortalBackend` and `PortalCaptureBackend`,
+  did not — an unimplemented interface let Gio's `GLib.Error` escape
+  unwrapped. It now raises `BackendUnavailable`, so `connect(backend=
+  "portalcapture")` following a `doctor` recommendation that turns out wrong
+  fails the same way every other unsupported backend does. Found while
+  investigating `can_capture`'s portal fallback; not yet reproduced against a
+  live portal missing `Screenshot`, only against a fake connection modelling
+  the same D-Bus failure.
+
 ## [0.7.0] — 2026-09-09
 
 ### Added
