@@ -381,35 +381,53 @@ def hints_for(
                 packages=clipboard_package,
             )
     uinput_usable = environment.uinput_writable and environment.has_evdev
-    if not environment.input_tools and not uinput_usable:
-        # ydotool is ranked last in tools.py precisely because it is
-        # keymap-unsafe; recommending it unconditionally here contradicts
-        # that ranking on any desktop that has a better option. xdotool
-        # (X11, via XTest) and wtype (wlroots, typing only) are both
-        # ordinarily packaged, unlike wdotool below.
-        #
-        # X11 and not XWayland, deliberately -- the one place in this
-        # package where that narrowing is not about capture. Discovery does
-        # accept xdotool under XWayland (it carries a real X connection, and
-        # it outranks ydotool), so this recommends a tool less than the
-        # composite would use. That is the point: on a Wayland session
-        # xdotool reaches only the X clients, so recommending it to someone
-        # who has no input path at all would hand them one that silently
-        # ignores every native Wayland window. ydotool is keymap-unsafe but
-        # reaches everything, and the hint says so.
-        input_package: str | None
-        if environment.session_type is SessionType.X11:
-            input_package = "xdotool"
-            ydotool_is_last_resort = False
-        elif environment.compositor is Compositor.WLROOTS:
-            input_package = "wtype"
-            ydotool_is_last_resort = False
-        else:
-            # Same fallback as capture: on an unrecognised distribution
-            # there is no package name to give, but ydotool is still the
-            # tool to go looking for -- naming it beats naming nothing.
-            input_package = family.get("input") or "ydotool"
-            ydotool_is_last_resort = True
+    # ydotool is ranked last in tools.py precisely because it is
+    # keymap-unsafe; recommending it unconditionally here contradicts
+    # that ranking on any desktop that has a better option. xdotool
+    # (X11, via XTest) and wtype (wlroots, typing only) are both
+    # ordinarily packaged, unlike wdotool below.
+    #
+    # X11 and not XWayland, deliberately -- the one place in this
+    # package where that narrowing is not about capture. Discovery does
+    # accept xdotool under XWayland (it carries a real X connection, and
+    # it outranks ydotool), so this recommends a tool less than the
+    # composite would use. That is the point: on a Wayland session
+    # xdotool reaches only the X clients, so recommending it to someone
+    # who has no input path at all would hand them one that silently
+    # ignores every native Wayland window. ydotool is keymap-unsafe but
+    # reaches everything, and the hint says so.
+    input_package: str | None
+    if environment.session_type is SessionType.X11:
+        input_package = "xdotool"
+        ydotool_is_last_resort = False
+    elif environment.compositor is Compositor.WLROOTS:
+        input_package = "wtype"
+        ydotool_is_last_resort = False
+    else:
+        # Same fallback as capture: on an unrecognised distribution
+        # there is no package name to give, but ydotool is still the
+        # tool to go looking for -- naming it beats naming nothing.
+        input_package = family.get("input") or "ydotool"
+        ydotool_is_last_resort = True
+    # On the X11/wlroots branches, a genuinely better, ordinarily-packaged
+    # tool is being named, so "is *that one* already present" is the right
+    # question -- checked against "is anything at all on PATH", a real X11
+    # session with only ydotool installed (present, but keymap-unsafe and
+    # needing /dev/uinput) used to pass and get no hint at all, even though
+    # xdotool, which needs neither uinput nor its permissions, was one
+    # apt-get away. Confirmed live on Ubuntu 24.04/Xfce.
+    #
+    # The fallback branch is different: there is no better packaged
+    # alternative to name (wdotool exists but "no distribution packages
+    # it yet"), so any already-present tool -- even a hypothetical one a
+    # test pins that is not literally "ydotool" -- is the same "nothing to
+    # suggest" case the original bare `not environment.input_tools` meant.
+    already_adequate = (
+        bool(environment.input_tools)
+        if ydotool_is_last_resort
+        else input_package in environment.input_tools
+    )
+    if not already_adequate and not uinput_usable:
         input_command = (
             f"{installer} {input_package}" if installer and input_package else None
         )

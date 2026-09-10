@@ -696,6 +696,32 @@ class TestCaptureCapabilityIsProbed(GnomeShellTestCase):
         self.assertNotIn(Capability.SCREEN_CAPTURE, gui.capabilities)
 
 
+class TestCallTimeout(GnomeShellTestCase):
+    """`_call` must never ask `call_sync` to wait forever.
+
+    A local D-Bus call to this extension can hang indefinitely, live, if
+    Mutter's own display/compositor state is not yet ready when it arrives
+    -- confirmed with a bare `gdbus call`, so it is not specific to
+    PyGObject or to this backend's own code. A bounded timeout turns that
+    hang into a normal, catchable error instead of blocking construction
+    forever. See _CALL_TIMEOUT_MS.
+    """
+
+    def test_call_sync_receives_the_bounded_timeout(self):
+        seen = []
+        real_call_sync = self.proxy.call_sync
+
+        def spy(method, parameters, flags, timeout, cancellable):
+            seen.append(timeout)
+            return real_call_sync(method, parameters, flags, timeout, cancellable)
+
+        self.proxy.call_sync = spy
+        self.gui.windows()
+        self.assertTrue(seen)
+        self.assertTrue(all(t == self.module._CALL_TIMEOUT_MS for t in seen))
+        self.assertNotEqual(-1, self.module._CALL_TIMEOUT_MS)
+
+
 class TestCaptureWindow(GnomeShellTestCase):
     """The one prompt-free capture path on GNOME Wayland."""
 

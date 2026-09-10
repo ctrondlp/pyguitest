@@ -468,6 +468,149 @@ class TestWindowHandlesStayWithTheirOwnBackend(unittest.TestCase):
         self.assertEqual(self.x11.calls[0]["region"], (10, 20, 300, 200))
 
 
+class TestWindowFamilyPrefersAFullServiceMember(unittest.TestCase):
+    """A window-listing member must also be able to move what it lists.
+
+    That holds even when it is not the highest-priority member for those
+    specific capabilities.
+
+    The live failure this pins, found on Xfce (xfwm4): no compositor-specific
+    window backend exists there, so plain priority handed WINDOW_LIST to
+    AT-SPI (registered ahead of X11Backend). move_window then received an
+    AT-SPI frame reference where X11Backend needed an Xlib window, and
+    crashed inside python-xlib's own struct packing -- not a typed error
+    this package could catch, unlike the analogous capture()/_geometry_of
+    bug TestWindowHandlesStayWithTheirOwnBackend guards above.
+    """
+
+    class Atspi(GUIBackend):
+        """Lists/queries windows on every desktop; cannot place one."""
+
+        name = "atspi"
+        capabilities = CapabilitySet(
+            {
+                Capability.WINDOW_LIST,
+                Capability.WINDOW_STATE,
+                Capability.WINDOW_GEOMETRY,
+                Capability.WINDOW_ACTIVATE,
+            }
+        )
+
+        def __init__(self):
+            self.calls = []
+
+        def windows(self):
+            return [Window(handle="atspi-frame", backend=self, title="Editor")]
+
+        def geometry(self, window):
+            self.calls.append(("geometry", window))
+            return (0, 0, 100, 100)
+
+        def activate_window(self, window):
+            self.calls.append(("activate_window", window))
+
+        def is_window_viewable(self, window):
+            self.calls.append(("is_window_viewable", window))
+            return True
+
+    class X11(GUIBackend):
+        """Lists and controls windows; handles must be its own object."""
+
+        name = "x11"
+        capabilities = CapabilitySet(
+            {
+                Capability.WINDOW_LIST,
+                Capability.WINDOW_STATE,
+                Capability.WINDOW_GEOMETRY,
+                Capability.WINDOW_ACTIVATE,
+                Capability.WINDOW_PLACEMENT,
+                Capability.WINDOW_RESIZE,
+            }
+        )
+
+        def __init__(self):
+            self.calls = []
+
+        def windows(self):
+            return [Window(handle=object(), backend=self, title="Editor")]
+
+        def _check(self, window):
+            if isinstance(getattr(window, "handle", window), str):
+                raise AssertionError("got a handle from another backend")
+
+        def move_window(self, window, x, y):
+            self._check(window)
+            self.calls.append(("move_window", window, x, y))
+
+        def resize_window(self, window, width, height):
+            self._check(window)
+            self.calls.append(("resize_window", window, width, height))
+
+        def geometry(self, window):
+            self._check(window)
+            self.calls.append(("geometry", window))
+            return (10, 20, 300, 200)
+
+        def activate_window(self, window):
+            self._check(window)
+            self.calls.append(("activate_window", window))
+
+        def is_window_viewable(self, window):
+            self._check(window)
+            self.calls.append(("is_window_viewable", window))
+            return True
+
+    def setUp(self):
+        # AT-SPI registered first, matching its real higher priority (90
+        # vs X11Backend's 40) -- the exact ordering that produced the bug.
+        self.atspi = self.Atspi()
+        self.x11 = self.X11()
+        self.composite = CompositeBackend([self.atspi, self.x11])
+
+    def test_windows_comes_from_the_full_service_member(self):
+        (window,) = self.composite.windows()
+        self.assertIs(window.backend, self.x11)
+
+    def test_move_window_succeeds_on_the_window_windows_returned(self):
+        (window,) = self.composite.windows()
+        self.composite.move_window(window, 50, 60)
+        self.assertEqual(self.x11.calls, [("move_window", window, 50, 60)])
+
+    def test_resize_window_succeeds_on_the_window_windows_returned(self):
+        (window,) = self.composite.windows()
+        self.composite.resize_window(window, 700, 500)
+        self.assertEqual(self.x11.calls, [("resize_window", window, 700, 500)])
+
+    def test_geometry_activate_and_viewable_stay_on_the_same_member_too(self):
+        (window,) = self.composite.windows()
+        self.composite.geometry(window)
+        self.composite.activate_window(window)
+        self.composite.is_window_viewable(window)
+        self.assertEqual(self.atspi.calls, [])
+        self.assertEqual(
+            [call[0] for call in self.x11.calls],
+            ["geometry", "activate_window", "is_window_viewable"],
+        )
+
+    def test_unrelated_capabilities_are_not_affected(self):
+        # The preference is scoped to the four window-family capabilities
+        # AT-SPI and a control-capable member both offer -- anything else
+        # dispatched through the composite keeps ordinary priority.
+        text_tool = Fake("input:wdotool", {Capability.TEXT_ENTRY}, marker="tool")
+        composite = CompositeBackend([self.atspi, self.x11, text_tool])
+        self.assertEqual(composite.type_text("hi"), ("tool", "hi"))
+
+    def test_falls_back_to_plain_priority_when_no_member_can_place_windows(self):
+        # Same shape as the existing registration-order test above, but
+        # through _window_family_provider: with nobody offering
+        # WINDOW_PLACEMENT at all, the highest-priority WINDOW_LIST member
+        # wins exactly as before this fix.
+        other_atspi = self.Atspi()
+        composite = CompositeBackend([self.atspi, other_atspi])
+        (window,) = composite.windows()
+        self.assertIs(window.backend, self.atspi)
+
+
 class TestCaptureSurvivesABrokenBackend(unittest.TestCase):
     """One installed-but-broken tool must not take capture down.
 

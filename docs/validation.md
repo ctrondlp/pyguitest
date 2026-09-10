@@ -899,6 +899,145 @@ reports `session wayland` / `compositor kwin (KDE)`.
   a follow-up rather than done in the same pass as verifying the bypass
   itself works at all.
 
+## Run live on Ubuntu 24.04 LTS (GNOME Shell 46, Wayland)
+
+Answers roadmap item 14 (Debian/Ubuntu LTS). A VirtualBox VM, not a physical
+machine — `vmwgfx`/`gbm` software rendering, per Mutter's own startup log —
+which matters below: this box is measurably slower and more timing-variable
+than every other machine this file records, and that is exactly what
+surfaced a real bug nothing else had. Ubuntu's own session mode
+(`XDG_CURRENT_DESKTOP=ubuntu:GNOME`), not vanilla GNOME; reached over SSH, so
+`DBUS_SESSION_BUS_ADDRESS`/`XDG_SESSION_TYPE`/`XDG_RUNTIME_DIR` needed
+exporting by hand first, same as the GNOME 50 and KDE-native-Wayland boxes.
+
+**Full gate green**: Python 3.12.3, the whole suite plus ruff/format/mypy,
+via `pip install -e '.[dev,atspi,x11,uinput]'` in a `--system-site-packages`
+venv (`python3-pyatspi`/`gir1.2-atspi-2.0`/`python3-evdev` all come from
+`apt`, per docs/install.md's own table). `tests/test_portal_dbusmock.py` ran
+for real too — 4/4, not skipped, against a genuine private `dbus-daemon`.
+
+**Compositor tier, via `headless-session.sh`**: installed
+`pyguitest-window-control`, then `validate-gnome-extension.sh` passed every
+check — window list/move/resize/activate/minimize, a real captured PNG, and
+real `new`/`close` window events from a spawned-and-killed `gnome-text-editor`.
+No different from GNOME Shell 46 elsewhere in this file, except for how it
+was reached: see the bug below.
+
+**A real bug, found and fixed: `GnomeShellBackend` could hang `connect()`
+forever.** Its D-Bus calls to the extension used `call_sync(..., -1, ...)`
+— "wait forever" — on the assumption that a call over the local session bus
+is always near-instant. On this VM it measurably is not, always: the
+extension's D-Bus name and object can become reachable (satisfying
+`headless-session.sh`'s own readiness wait) while Mutter's own
+display/compositor state is still settling, and a call landing in that
+window then blocks with no reply, ever. Confirmed **outside pyguitest and
+outside Python entirely** — a bare `gdbus call ... CaptureWindow 0 ''`
+against a freshly-started headless shell hung past a 15-second `timeout`,
+proving this is a live GNOME Shell/Mutter timing race on this hardware, not
+a PyGObject or `call_sync` usage bug. Non-deterministic across runs of the
+identical command: a fresh headless shell sometimes answered inside
+milliseconds, sometimes never. Fixed with a bounded 5-second timeout
+(`_CALL_TIMEOUT_MS` in `gnomeshell.py`) — every caller already turns a raised
+D-Bus error into a normal `BackendUnavailable`/"cannot capture" result, so
+this trades an unrecoverable hang for a fast, catchable one. **Verified live
+on this box**: re-running the exact scenario that hung before (a
+just-auto-enabled extension, immediately probed) now returns in a few
+seconds instead of never.
+
+**AT-SPI window discovery, activation, and resize, confirmed correct against
+a real `gnome-text-editor`**: `windows()`, `wait_for_window()`,
+`activate_window()`, and `resize_window()`/`geometry()`'s settle-and-read-back
+all matched a live window exactly as documented elsewhere in this file.
+
+**A caveat, not a pyguitest bug: `dogtail`'s own import can hang inside
+`headless-session.sh`'s default mode, on this VM specifically.**
+`dogtail.tree` imports `gi.overrides.Gdk` at module load, and that import
+hung (confirmed via `faulthandler.dump_traceback_later`, stuck inside
+`Gdk.py`'s own module body) when `pyguitest.connect()` first pulled in
+`AtspiBackend` immediately after a fresh headless shell came up **with
+XWayland enabled** (`headless-session.sh`'s default — matching what CI's own
+compositor job uses, which has never reported this). Passing `--no-x11`
+made it disappear every time it was tried; the same command that hung also
+succeeded instantly on other runs with X11 left enabled, so this reads as an
+XWayland-readiness race that a real login session (XWayland already up for
+the whole session's lifetime) or CI's comparatively faster runner rarely
+hits, not a deterministic break. Nothing in this repository owns GDK's
+import-time behavior, so this is recorded as a caveat for headless testing
+on similarly slow/virtualized hardware — prefer `--no-x11` there when the
+command does not need XWayland — rather than something fixed here.
+
+**Typed input needs the `input` group, exactly as `pyguitest doctor` already
+says.** This user account was not a member of it, so `ydotool`
+(`type_text()`'s only available mechanism here — no `ydotoold`, no writable
+`/dev/uinput`) failed with a clear, specific error rather than hanging or
+misbehaving: `doctor`'s existing diagnostic was correct and sufficient,
+nothing new to fix.
+
+**One environment-specific footgun, not a pyguitest bug**: Ubuntu 24.04 does
+not install `gedit` — it ships `gnome-text-editor` instead, whose window
+title is `"... - Text Editor"`, not `"... - gnome-text-editor"`. Any script
+that (like `examples/06_a_real_test.py`) reuses its launch command as the
+`wait_for_window` title match — a fine assumption for `gedit`, where the
+literal string appears in the title — needs a different string on a desktop
+whose editor is `gnome-text-editor`; `wait_for_window` itself matched
+correctly once given text the title actually contains.
+
+## Run live on Xfce (xfwm4) — a real X11 session under a non-Mutter WM
+
+Answers roadmap item 15. The same Ubuntu 24.04 VM as the section above,
+switched from GNOME to Xfce: `lightdm` → `xfce4-session` → `xfwm4` on a real
+`Xorg :0`, `XDG_SESSION_TYPE=x11`, no Wayland compositor anywhere, so
+`pyguitest doctor` reports `session x11 / compositor none`. That last part is
+the whole point of this run, and nothing else in this file has it: every
+other desktop here has a *compositor-specific* window backend (the GNOME
+Shell extension, kdotool, swaymsg) that outranks everything else and serves
+the whole window family from one place. Xfce has none, which is what made
+plain registration priority visible as the load-bearing thing it had
+quietly become.
+
+**The real bug this found: window control was unusable, and failed below the
+level anything here could report.** A `Window` is backend-private, so the
+member answering `windows()` also has to be able to answer
+`move_window`/`resize_window`/`minimize_window` for that same `Window`.
+AT-SPI lists windows and outranks `X11Backend` (90 vs 40), but cannot place
+one — and with no compositor backend present to outrank both, `windows()`
+handed out AT-SPI frame references while `WINDOW_PLACEMENT` had only
+`X11Backend` to dispatch to. `move_window` then crashed inside python-xlib's
+own struct packing (`struct.error: required argument is not an integer`),
+not as a typed error this package could catch. This is the same hazard
+`_issuer`/`_owner` already guard for `capture()`/`_geometry_of` — the
+invariant `X11Backend`'s own capabilities docstring states, "only ever
+receives windows it issued itself" — but the generated dispatch for the rest
+of the window family never got the same protection, because on every desktop
+tested before this one it held by construction. Fixed by preferring a member
+that can place windows for the four capabilities both kinds offer
+(`WINDOW_LIST`, `WINDOW_STATE`, `WINDOW_GEOMETRY`, `WINDOW_ACTIVATE`), with
+plain priority as the fallback when nothing can place windows at all. GNOME,
+KDE and sway are provably unaffected: their own backends already outrank
+AT-SPI and offer placement.
+
+**A second, smaller finding, in `doctor` rather than in a backend.** The
+input-injection hint fired only when *no* input tool was present, so a
+`ydotool` that was installed but could not open `/dev/uinput` counted as
+"nothing to suggest" — while `xdotool`, which on X11 needs neither uinput nor
+any permission setup, went unmentioned. Fixed to ask whether the tool that
+suits *this session* is present. Worth knowing alongside it: on stock Ubuntu
+24.04 `/dev/uinput` is `root:root 0600` with no udev rule shipped by either
+`ydotool` or `python3-evdev`, so joining the `input` group changes nothing on
+its own — `doctor` already documents that trap in full, and it is why
+`xdotool` is the better answer on X11 rather than a workaround.
+
+**Everything else passed, live, against a real `xfwm4` desktop** — one
+`gnome-text-editor` driven end to end through the composed
+`atspi+input:xdotool+capture+imagesearch+x11` session: the window found and
+activated; `type_text()` reaching the document and read back through AT-SPI
+(the first keymap-safe typed-input path validated in this file that needed no
+uinput access at all); `move_window`+`resize_window` settling at exactly
+`(50, 60, 700, 500)`; `window_at()` hitting it; minimize and restore changing
+viewability both ways; a real whole-screen capture written to a PNG — the
+capability a real X11 session has and XWayland does not; and all three tier-6
+queries answering (`pointer_position`, `is_button_pressed`, `is_key_pressed`).
+
 ## Run live on a real X11 session
 
 - Whole-screen capture — the one capability a real X11 session has that
