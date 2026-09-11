@@ -115,3 +115,26 @@ class ClipboardMismatch(PyGUITestError):
 
 class ImageNotFound(PyGUITestError):
     """No match for the template image cleared the similarity threshold."""
+
+
+class ElementNotActionable(PyGUITestError):
+    """Element.click() has no way left to act on this element.
+
+    Raised where dogtail's own coordinate click needs GNOME's
+    gnome-ponytail-daemon -- absent on every other Wayland compositor -- and
+    the element's AT-SPI actions include neither "click" nor "press" to fall
+    back to. Seen on KDE's QML-based Kickoff menu, whose category labels
+    expose no Action interface at all. Coordinate-based clicking still
+    works here; only the coordinate-free path does not.
+    """
+
+    def __init__(self, role: str, name: str) -> None:
+        """Record which element neither click path could act on."""
+        self.role = role
+        self.name = name
+        super().__init__(
+            f"{role} {name!r} offers no click or press action, and this "
+            "compositor's coordinate click needs GNOME's "
+            "gnome-ponytail-daemon -- click by coordinate instead, e.g. "
+            "gui.extents(element) then gui.click()"
+        )

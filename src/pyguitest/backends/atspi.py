@@ -24,7 +24,7 @@ import subprocess
 from typing import TYPE_CHECKING, Any
 
 from ..capabilities import Capability, CapabilitySet
-from ..errors import BackendUnavailable, CapabilityUnsupported
+from ..errors import BackendUnavailable, CapabilityUnsupported, ElementNotActionable
 from ..roles import Role, spellings
 from ..session import SessionType
 from .base import GUIBackend, Window
@@ -323,6 +323,12 @@ class Element:
         before ever reaching AT-SPI. Falls back to AT-SPI's own action
         interface in that case, which needs no coordinates or daemon at
         all -- confirmed live against KDE Plasma 6 / KWin.
+
+        Some toolkits publish elements with no Action interface either --
+        KDE's QML-based Kickoff menu does this for its category labels --
+        leaving neither path able to act. Raised as ElementNotActionable
+        there rather than dogtail's raw, GNOME-specific ponytail message,
+        which names a daemon this compositor was never going to have.
         """
         try:
             self.node.click()
@@ -332,7 +338,7 @@ class Element:
             actions = self.node.actions or {}
             name = next((a for a in actions if a.lower() in ("click", "press")), None)
             if name is None:
-                raise
+                raise ElementNotActionable(self.role, self.name) from error
             self.node.doActionNamed(name)
 
     def focus(self):
