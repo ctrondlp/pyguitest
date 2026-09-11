@@ -7,6 +7,8 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-09-10
+
 ### Fixed
 
 - **`Element.click()` raised dogtail's raw, GNOME-specific ponytail error on
