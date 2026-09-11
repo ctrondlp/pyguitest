@@ -11,6 +11,23 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ### Fixed
 
+- **`UinputBackend.press_key`/`tap_key` rejected `Return`, `Escape`,
+  `Control_L` and thirteen more of this package's own documented key names,
+  and silently pressed the wrong physical key for two others.** Key names
+  here are X11 keysyms — what `GUIBackend.KEY_ALIASES` resolves its
+  abbreviations to, what `X11Backend` expects, and what the xdotool/wdotool/
+  wtype adapters all share — but this backend derived an evdev name from one
+  as `KEY_<NAME>`, which is only right where the two spellings happen to
+  agree. Found live: a recorded script replayed on a uinput session died on
+  `gui.tap_key("Return")` with `ValueError: unknown key name`. Worse, two
+  keysyms resolved to a real evdev code for the *wrong* key rather than
+  raising: X11's `Next`/`Prior` are Page Down/Up, but `KEY_NEXT`/
+  `KEY_PREVIOUS` are media track-skip controls, and X11's `Print` is Print
+  Screen while `KEY_PRINT` is a printer key — both ran cleanly and pressed
+  something else. A keysym-to-evdev table is now consulted before the
+  `KEY_<NAME>` fallback; evdev's own spellings (`ENTER`, `ESC`, …) still
+  work unchanged, since this backend's own `KEY_ALIASES` emit exactly those.
+
 - **`Element.click()` raised dogtail's raw, GNOME-specific ponytail error on
   an element AT-SPI offered no action for at all.** The existing fallback —
   added when dogtail's own coordinate click was found to need GNOME's
