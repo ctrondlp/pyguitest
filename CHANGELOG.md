@@ -9,6 +9,25 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ### Fixed
 
+- **`Element.click()` raised dogtail's raw, GNOME-specific ponytail error on
+  an element AT-SPI offered no action for at all.** The existing fallback —
+  added when dogtail's own coordinate click was found to need GNOME's
+  `gnome-ponytail-daemon`, absent on every other Wayland compositor — only
+  works when the element exposes a `click` or `press` AT-SPI action to
+  invoke instead. Some toolkits publish elements with neither: KDE's
+  QML-based Kickoff menu (`Applications > Office`, `Development`, and
+  friends) exposes its category labels with an empty Action interface,
+  confirmed live (`node.actions == {}`) on a real KDE Plasma 6 session,
+  during a recorded script's crash. With nothing to fall back to, the code
+  re-raised the original exception via a bare `raise` — which reuses
+  Python's original traceback unchanged, so the printed error looked
+  identical to "never caught" and gave no hint the fallback had even run,
+  let alone why it gave up. `Element.click()` now raises a new
+  `ElementNotActionable`, naming the element's role and name and pointing at
+  coordinate-based clicking (`gui.extents(element)` then `gui.click()`) as
+  the way forward, instead of a message about a daemon this compositor was
+  never going to have.
+
 - **`find_window`/`wait_for_window` could resolve a title to the wrong
   window when more than one shared it.** Both took `found[0]`, the *first*
   match — which `windows()` returns bottom-to-top by stacking order, so this

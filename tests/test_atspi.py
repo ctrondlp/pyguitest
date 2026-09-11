@@ -13,7 +13,11 @@ import unittest
 from unittest import mock
 
 from pyguitest.capabilities import Capability
-from pyguitest.errors import BackendUnavailable, CapabilityUnsupported
+from pyguitest.errors import (
+    BackendUnavailable,
+    CapabilityUnsupported,
+    ElementNotActionable,
+)
 from pyguitest.roles import Role, spellings
 from pyguitest.session import SessionType, detect
 
@@ -602,6 +606,11 @@ class TestElements(AtspiTestCase):
         self.assertEqual(node.actions_performed, [])
 
     def test_click_reraises_ponytail_failure_with_no_usable_action(self):
+        # KDE's QML-based Kickoff menu publishes its category labels with no
+        # Action interface at all -- ShowMenu here stands in for "something
+        # unrelated to clicking", same as having none. Raised as pyguitest's
+        # own typed error, not dogtail's raw, GNOME-specific ponytail
+        # RuntimeError, which names a daemon this compositor never had.
         node = FakeNode(
             name="5",
             role="push button",
@@ -610,8 +619,11 @@ class TestElements(AtspiTestCase):
                 "Error in ponytail initiation might be cause by several reasons"
             ),
         )
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(ElementNotActionable) as ctx:
             self.atspi.Element(node).click()
+        self.assertEqual(ctx.exception.role, "push button")
+        self.assertEqual(ctx.exception.name, "5")
+        self.assertIsInstance(ctx.exception.__cause__, RuntimeError)
 
     def test_focused_reads_the_node_s_focus_state(self):
         gui = self.backend()
