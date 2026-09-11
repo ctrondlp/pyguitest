@@ -87,6 +87,50 @@ _PLAIN = {
     "\t": "TAB",
 }
 
+_KEYSYM_NAMES = {
+    "return": "ENTER",
+    "escape": "ESC",
+    "prior": "PAGEUP",
+    "next": "PAGEDOWN",
+    "print": "SYSRQ",
+    "caps_lock": "CAPSLOCK",
+    "num_lock": "NUMLOCK",
+    "scroll_lock": "SCROLLLOCK",
+    "control_l": "LEFTCTRL",
+    "control_r": "RIGHTCTRL",
+    "alt_l": "LEFTALT",
+    "alt_r": "RIGHTALT",
+    "shift_l": "LEFTSHIFT",
+    "shift_r": "RIGHTSHIFT",
+    "meta_l": "LEFTMETA",
+    "meta_r": "RIGHTMETA",
+    "super_l": "LEFTMETA",
+    "super_r": "RIGHTMETA",
+    "iso_level3_shift": "RIGHTALT",
+}
+"""X11 keysym names that evdev spells differently, lowercased for lookup.
+
+`press_key`/`tap_key` take a key *name*, and the name this package documents
+is the X11 keysym -- what `GUIBackend.KEY_ALIASES` resolves its abbreviations
+to, what X11Backend expects, and what the xdotool/wdotool/wtype adapters all
+share. This backend speaks evdev, and deriving `KEY_<NAME>` from the keysym
+is right only where the two happen to agree.
+
+Where they do not, it failed two ways. `Return`, `Escape`, both `Control_*`
+and thirteen more raised `unknown key name` -- the loud half, and how this
+was found: a recorded script replayed on a uinput session died on
+`gui.tap_key("Return")`. Worse were the two that resolved to a real code for
+the wrong physical key: X11's `Next` and `Prior` are Page Down and Page Up,
+but `KEY_NEXT`/`KEY_PREVIOUS` are media track controls (407/412, against
+PAGEDOWN 109 and PAGEUP 104), and X11's `Print` is Print Screen while
+`KEY_PRINT` is a printer key (210, against SYSRQ 99). Those ran cleanly and
+pressed something else.
+
+Evdev spellings still work: this is consulted before the `KEY_<NAME>`
+fallback, not in place of it, so `press_key("ENTER")` is unchanged -- which
+matters because this backend's own `KEY_ALIASES` emit exactly those.
+"""
+
 
 class UinputBackend(GUIBackend):
     """A virtual keyboard and absolute pointer, held open for the session."""
@@ -255,8 +299,16 @@ class UinputBackend(GUIBackend):
     # -- keyboard ----------------------------------------------------------
 
     def _keycode(self, key):
-        """Translate a key name to its evdev code."""
-        name = key if key.startswith("KEY_") else f"KEY_{key.upper()}"
+        """Translate a key name to its evdev code.
+
+        Accepts this package's documented X11 keysym names as well as evdev's
+        own -- see `_KEYSYM_NAMES` for which of the two spellings differ, and
+        for the two that used to resolve to the wrong physical key.
+        """
+        if key.startswith("KEY_"):
+            name = key
+        else:
+            name = f"KEY_{_KEYSYM_NAMES.get(key.lower(), key.upper())}"
         code = getattr(self._ecodes, name, None)
         if code is None:
             raise ValueError(f"unknown key name {key!r}")

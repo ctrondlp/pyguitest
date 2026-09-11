@@ -51,6 +51,32 @@ def fake_evdev():
         KEY_SPACE=57,
         KEY_MINUS=12,
         KEY_SEMICOLON=39,
+        # The keys whose evdev spelling differs from the X11 keysym name the
+        # package documents, so the keysym translation can be exercised
+        # without evdev installed. Values from the same kernel header
+        # `backends/input.py`'s ydotool table was verified against.
+        KEY_ENTER=28,
+        KEY_TAB=15,
+        KEY_BACKSPACE=14,
+        KEY_PAGEDOWN=109,
+        KEY_PAGEUP=104,
+        KEY_SYSRQ=99,
+        KEY_CAPSLOCK=58,
+        KEY_NUMLOCK=69,
+        KEY_SCROLLLOCK=70,
+        KEY_LEFTCTRL=29,
+        KEY_RIGHTCTRL=97,
+        KEY_LEFTALT=56,
+        KEY_RIGHTALT=100,
+        KEY_RIGHTSHIFT=54,
+        KEY_LEFTMETA=125,
+        KEY_RIGHTMETA=126,
+        # Present so a test can prove these are *not* what a keysym picks:
+        # KEY_NEXT/KEY_PREVIOUS are media track controls, and KEY_PRINT is a
+        # printer key, not Print Screen.
+        KEY_NEXT=407,
+        KEY_PREVIOUS=412,
+        KEY_PRINT=210,
     )
     module = types.ModuleType("evdev")
     module.ecodes = ecodes
@@ -103,6 +129,50 @@ class TestKeyboard(UinputTestCase):
     def test_unknown_key_is_rejected(self):
         with self.assertRaises(ValueError):
             self.gui.press_key("nonexistent")
+
+    def test_x11_keysym_names_are_accepted(self):
+        # press_key/tap_key take the name this package documents -- the X11
+        # keysym, which is what KEY_ALIASES resolves to and what X11Backend
+        # and the xdotool/wdotool/wtype adapters all expect. Deriving
+        # KEY_<NAME> from it works only where evdev happens to agree, so a
+        # recorded script replayed on a uinput session died on
+        # `gui.tap_key("Return")`.
+        for name, code in [
+            ("Return", 28),  # KEY_ENTER, not KEY_RETURN
+            ("Escape", 1),  # KEY_ESC
+            ("Control_L", 29),  # KEY_LEFTCTRL
+            ("Shift_R", 54),
+            ("ISO_Level3_Shift", 100),  # AltGr is right Alt here
+            ("Caps_Lock", 58),
+            ("Num_Lock", 69),
+            ("Scroll_Lock", 70),
+        ]:
+            with self.subTest(name=name):
+                self.device.events.clear()
+                self.gui.press_key(name)
+                self.assertEqual(self.device.events[-1][1], code)
+
+    def test_keysyms_that_named_a_real_but_wrong_key_are_corrected(self):
+        # The dangerous half: these resolved to a genuine evdev code for the
+        # wrong physical key, so they ran cleanly and pressed something else.
+        # X11's Next/Prior are Page Down/Up, but KEY_NEXT/KEY_PREVIOUS are
+        # media track controls; X11's Print is Print Screen, KEY_PRINT is a
+        # printer key.
+        for name, code in [("Next", 109), ("Prior", 104), ("Print", 99)]:
+            with self.subTest(name=name):
+                self.device.events.clear()
+                self.gui.press_key(name)
+                self.assertEqual(self.device.events[-1][1], code)
+
+    def test_evdev_names_still_work(self):
+        # This backend's own KEY_ALIASES emit evdev spellings, so the keysym
+        # table has to be consulted before the KEY_<NAME> fallback, not
+        # instead of it.
+        for name, code in [("ENTER", 28), ("ESC", 1), ("KEY_TAB", 15)]:
+            with self.subTest(name=name):
+                self.device.events.clear()
+                self.gui.press_key(name)
+                self.assertEqual(self.device.events[-1][1], code)
 
     def test_typing_wraps_capitals_in_shift(self):
         with self.assertWarns(Warning):
