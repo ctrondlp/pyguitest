@@ -500,6 +500,63 @@ class TestWaitForWindow(unittest.TestCase):
             session().wait_for_window()
 
 
+class FocusBackend(FakeBackend):
+    """A FakeBackend that can also answer `active_window`.
+
+    A controllable, poppable sequence of answers -- WINDOW_STATE is
+    otherwise undeclared on FakeBackend, so `wait_window_focus` has nothing
+    to poll.
+    """
+
+    def __init__(self, focus_sequence=(None,)):
+        super().__init__()
+        self._focus_sequence = list(focus_sequence)
+        self.calls = 0
+
+    @property
+    def capabilities(self):
+        return CapabilitySet(
+            set(FakeBackend.capabilities.fget(self)) | {Capability.WINDOW_STATE}
+        )
+
+    def active_window(self):
+        self.calls += 1
+        if len(self._focus_sequence) > 1:
+            return self._focus_sequence.pop(0)
+        return self._focus_sequence[0]
+
+
+class TestWaitWindowFocus(unittest.TestCase):
+    def test_returns_true_immediately_when_already_focused(self):
+        backend = FocusBackend()
+        gui = pyguitest.Session(backend, pyguitest.detect())
+        target = backend._windows[0]
+        backend._focus_sequence = [target]
+        self.assertTrue(gui.wait_window_focus(target, timeout=1, interval=0.01))
+        self.assertEqual(backend.calls, 1)
+
+    def test_polls_until_the_window_actually_gains_focus(self):
+        backend = FocusBackend(focus_sequence=[None, None, None])
+        gui = pyguitest.Session(backend, pyguitest.detect())
+        target = backend._windows[0]
+        backend._focus_sequence = [None, None, target]
+        self.assertTrue(gui.wait_window_focus(target, timeout=2, interval=0.01))
+        self.assertGreaterEqual(backend.calls, 3)
+
+    def test_returns_false_on_timeout_rather_than_raising(self):
+        backend = FocusBackend(focus_sequence=[None])
+        gui = pyguitest.Session(backend, pyguitest.detect())
+        target = backend._windows[0]
+        self.assertFalse(gui.wait_window_focus(target, timeout=0.05, interval=0.01))
+
+    def test_a_different_window_holding_focus_does_not_count(self):
+        backend = FocusBackend()
+        gui = pyguitest.Session(backend, pyguitest.detect())
+        target, other = backend._windows
+        backend._focus_sequence = [other]
+        self.assertFalse(gui.wait_window_focus(target, timeout=0.05, interval=0.01))
+
+
 class TestWaitWindowClose(unittest.TestCase):
     def test_returns_true_immediately_if_already_closed(self):
         gui = session()

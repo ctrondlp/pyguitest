@@ -7,6 +7,36 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`Session.wait_window_focus(window, timeout=None, interval=0.1)`**, a new
+  primitive for blocking until a window actually holds keyboard focus.
+  Found live on a KDE Plasma 6 replay: a freshly-opened window can exist —
+  `wait_for_window` has already returned it — before the window manager has
+  actually given it focus, and `activate_window()` asks for focus once and
+  returns immediately, with no way for a caller to know whether the request
+  was honored yet. Typed text landed in the terminal a replay script was
+  itself running in because the window it had just clicked into did not
+  hold focus yet at that instant. Returns whether `window` held focus by
+  the deadline — `False` is a real answer to check, not something to guess
+  from a `None`.
+
+### Fixed
+
+- **`KdotoolBackend` never set `Window.app_id`**, unlike `X11Backend`,
+  `SwayBackend`, `HyprlandBackend`, and `NiriBackend`, which all populate it.
+  Found live on a KDE Plasma 6 replay: pyguitest-recorder generates an
+  `app_id`-based wait when a recorded window is invisible to X11 hit-testing
+  (native-Wayland popups like KDE's Kickoff menu), but that wait can never
+  succeed on this backend, since every window's `app_id` was always `""`.
+  `windows()` and `active_window()` now read it from `kdotool
+  getwindowclassname`, mirroring `X11Backend._app_id`'s WM_CLASS-class
+  convention. Note this does not make `app_id` a unique identifier on KDE:
+  a shell's desktop, panels, and popups can all share one class (confirmed
+  live: KWin's own `plasmashell` reports the same class for its desktop,
+  panel, and Kickoff popup) — callers still need another way to tell those
+  apart.
+
 ## [0.8.0] — 2026-09-10
 
 ### Fixed

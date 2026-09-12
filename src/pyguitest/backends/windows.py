@@ -737,6 +737,7 @@ class KdotoolBackend(_WindowBackend):
                 handle=handle,
                 backend=self,
                 title=self._name_of(handle),
+                app_id=self._app_id_of(handle),
             )
             for handle in self._lines(["kdotool", "search", "."])
         ]
@@ -772,7 +773,12 @@ class KdotoolBackend(_WindowBackend):
         handle = (self._runner(["kdotool", "getactivewindow"]) or "").strip()
         if not handle:
             return None
-        return Window(handle=handle, backend=self, title=self._name_of(handle))
+        return Window(
+            handle=handle,
+            backend=self,
+            title=self._name_of(handle),
+            app_id=self._app_id_of(handle),
+        )
 
     def is_window_viewable(self, window):
         """Not available: kdotool has no mapped/visibility query.
@@ -811,6 +817,23 @@ class KdotoolBackend(_WindowBackend):
         """Minimize a window, or restore it when `minimized` is False."""
         self.require(Capability.WINDOW_MINIMIZE)
         return self._act(window, "windowminimize" if minimized else "windowactivate")
+
+    def _app_id_of(self, handle):
+        """Return a window's application identity from `getwindowclassname`.
+
+        Mirrors `X11Backend._app_id`: this is the same field sway and
+        Hyprland already call `app_id`, kept stable across a title that
+        drifts. On KWin it does not distinguish a shell's own multiple
+        surfaces (e.g. plasmashell's desktop, panels, and popups all report
+        class "plasmashell") -- callers matching on this alone should not
+        assume it is unique among a single application's windows.
+        """
+        try:
+            return (
+                self._runner(["kdotool", "getwindowclassname", handle]) or ""
+            ).strip()
+        except Exception:
+            return ""
 
 
 def for_compositor(compositor):

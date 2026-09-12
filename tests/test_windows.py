@@ -18,7 +18,7 @@ from pyguitest.backends.windows import (
     for_tool,
 )
 from pyguitest.capabilities import Capability
-from pyguitest.errors import CapabilityUnsupported, WindowNotFound
+from pyguitest.errors import CapabilityUnsupported, PyGUITestError, WindowNotFound
 from pyguitest.session import Compositor
 
 SWAY_TREE = {
@@ -789,6 +789,8 @@ KDOTOOL = {
     ("kdotool", "search", "."): "{aaa-1}\n{bbb-2}\n",
     ("kdotool", "getwindowname", "{aaa-1}"): "Dolphin\n",
     ("kdotool", "getwindowname", "{bbb-2}"): "Konsole\n",
+    ("kdotool", "getwindowclassname", "{aaa-1}"): "org.kde.dolphin\n",
+    ("kdotool", "getwindowclassname", "{bbb-2}"): "konsole\n",
     ("kdotool", "getactivewindow"): "{bbb-2}\n",
     (
         "kdotool",
@@ -820,6 +822,21 @@ class TestKdotool(unittest.TestCase):
         self.assertEqual([w.title for w in windows], ["Dolphin", "Konsole"])
         self.assertEqual(windows[0].handle, "{aaa-1}")
 
+    def test_windows_carry_app_id_from_classname(self):
+        windows = self.gui.windows()
+        self.assertEqual([w.app_id for w in windows], ["org.kde.dolphin", "konsole"])
+
+    def test_app_id_is_empty_not_raising_when_classname_lookup_fails(self):
+        from pyguitest.backends.windows import KdotoolBackend
+
+        def failing_runner(argv):
+            if argv[:2] == ["kdotool", "getwindowclassname"]:
+                raise PyGUITestError("boom")
+            return KDOTOOL.get(tuple(argv), "")
+
+        gui = KdotoolBackend(runner=failing_runner)
+        self.assertEqual([w.app_id for w in gui.windows()], ["", ""])
+
     def test_xdotool_style_geometry_text_is_parsed(self):
         self.assertEqual(self.gui.geometry("{aaa-1}"), (100, 200, 800, 600))
 
@@ -833,7 +850,9 @@ class TestKdotool(unittest.TestCase):
             self.gui.geometry("{nope}")
 
     def test_active_window(self):
-        self.assertEqual(self.gui.active_window().title, "Konsole")
+        active = self.gui.active_window()
+        self.assertEqual(active.title, "Konsole")
+        self.assertEqual(active.app_id, "konsole")
 
     def test_capabilities_exclude_what_kdotool_cannot_do(self):
         # No pid lookup, no output enumeration, no event subscription.

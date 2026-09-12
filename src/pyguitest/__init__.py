@@ -1758,6 +1758,31 @@ class Session:
         """Raise and focus. There is no raise-without-focus operation."""
         self.backend.activate_window(window)
 
+    def wait_window_focus(
+        self,
+        window: Window,
+        timeout: float | None = None,
+        interval: float = 0.1,
+    ) -> bool:
+        """Block until `window` holds keyboard focus, or timeout.
+
+        A window can exist -- wait_for_window has already returned it -- for
+        a moment before the window manager actually gives it focus, e.g. a
+        freshly-opened window still animating into place. Nothing else here
+        polls for that: activate_window() asks for focus once and returns
+        immediately, so a script that clicks or types right after it cannot
+        tell whether the request was honored yet, only that it was made.
+        Seen live: typed text landing in the terminal a replay script was
+        itself running in, because the window it had just clicked into did
+        not hold focus yet at that instant.
+
+        Returns whether `window` held focus by the deadline -- False is a
+        real answer to check, not something to guess from a None.
+        """
+        return bool(
+            self._poll_until(lambda: self.active_window() == window, timeout, interval)
+        )
+
     def minimize_window(self, window: Window, minimized: bool = True) -> None:
         """Minimize a window, or restore it when `minimized` is False."""
         self.backend.minimize_window(window, minimized)
