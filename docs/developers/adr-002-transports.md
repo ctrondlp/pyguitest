@@ -125,7 +125,7 @@ never reaches it: constructing it can raise an interactive consent dialog, and
 a library that prompts as a side effect of being imported into a test suite
 would be worse than one that is slower. It has to be asked for —
 `connect(backend="eiinput")`. That leaves tiers 1–3 as the path for every
-session where no human can click Allow, headless CI included, so ADR 001's
+session where no user can click Allow, headless CI included, so ADR 001's
 tools stay exactly where they are.
 
 The `python-evdev` reasoning in the decision above is unchanged: it remains the

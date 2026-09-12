@@ -23,7 +23,7 @@ portal XML (org.freedesktop.portal.RemoteDesktop.xml in the
 xdg-desktop-portal source), not assumed. The CreateSession/SelectDevices/
 Start negotiation has now been run against a real xdg-desktop-portal
 (1.22.1, Fedora 44/GNOME) and completes; the keyboard/pointer/scroll
-methods past that point still haven't been -- Start() needs a human
+methods past that point still haven't been -- Start() needs a user
 physically present to click Allow, which this got, but exercising what
 comes after is still an open gap.
 
@@ -290,7 +290,7 @@ class PortalBackend(GUIBackend):
         Accepts an injected `connection` and/or `session_handle` for tests --
         passing `session_handle` skips negotiation (and so the consent
         dialog) entirely, which is the only way to unit test anything past
-        construction without a live portal and a human to click Allow.
+        construction without a live portal and a user to click Allow.
 
         `persist_mode` and `restore_token` are how a caller avoids being
         prompted on every launch. Ask for persistence with
@@ -454,7 +454,7 @@ class PortalBackend(GUIBackend):
         """CreateSession, SelectDevices, Start -- the one-time consent flow.
 
         Start is what actually raises the dialog; nothing here can complete
-        without a human present to answer it.
+        without a user present to answer it.
         """
         session_token = self._GLib.Variant("s", uuid.uuid4().hex)
         code, results = self._request(
@@ -474,7 +474,7 @@ class PortalBackend(GUIBackend):
             # and from here nothing else can close it: __init__ raises rather
             # than returning the object whose close() would, and the session
             # outlives the failure on the shared session-bus connection.
-            # BaseException, not Exception: Start blocks on a human answering
+            # BaseException, not Exception: Start blocks on a user answering
             # the dialog, so Ctrl-C during that wait is a routine way out --
             # and it strands an approved session exactly as a decline does.
             _portalrequest.close_session(

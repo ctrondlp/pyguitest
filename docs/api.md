@@ -301,7 +301,7 @@ What the current login actually offers.
 | `has_xtest: bool` |  |
 | `input_transport` | What will actually inject input here, whether or not it is a tool. |
 | `preferred_input` | The input *tool* to try first, or None if none is installed. |
-| `summary()` | A short human-readable description of this environment. |
+| `summary()` | A short, user-readable description of this environment. |
 | `uinput_writable: bool` |  |
 | `wayland_display: str` |  |
 

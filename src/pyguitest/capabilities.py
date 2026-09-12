@@ -214,7 +214,7 @@ class CapabilitySet(frozenset):
         return CapabilitySet(c for c in Capability if c not in self)
 
     def report(self) -> str:
-        """A human-readable support table, grouped by tier."""
+        """A user-readable support table, grouped by tier."""
         lines = []
         for tier in Tier:
             caps = sorted(

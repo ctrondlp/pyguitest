@@ -108,7 +108,7 @@ class TestCapture(PortalCaptureTestCase):
         self.assertFalse(options["interactive"].value)
 
     def test_interactive_is_opt_in_and_reaches_the_portal(self):
-        # True opens a picker and blocks on a human; it must never be the
+        # True opens a picker and blocks on a user; it must never be the
         # default for an unattended run, but a person at a REPL may want it.
         gui = self.backend(interactive=True)
         gui.capture(path=self._out())

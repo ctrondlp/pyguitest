@@ -41,7 +41,7 @@ SESSION_INTERFACE = "org.freedesktop.portal.Session"
 
 DEFAULT_TIMEOUT = 60
 """Seconds to wait for a Response before giving up, for requests that can
-show UI -- generous, since a human has to see and answer the dialog.
+show UI -- generous, since a user has to see and answer the dialog.
 
 Bounded at all because the alternative is worse than a late answer: a portal
 that accepts the call and then dies (or a Response delivered to a path

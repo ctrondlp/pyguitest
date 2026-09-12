@@ -7,6 +7,17 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **`docs/getting-started.md` promised "four ways" to act on a control and then
+  listed five.** The count is gone rather than corrected: the table is the
+  count, and a number in the sentence introducing it is one more thing to
+  update whenever a row is added. `tests/test_docs.py` gains a
+  `TestLinksAndAnchorsResolve` alongside it, which checks that every relative
+  link and every entry in a page's own table of contents in the user
+  documentation still resolves — the same quiet class of drift, and the reason
+  a renamed heading is worth failing a gate over.
+
 ## [0.9.0] — 2026-09-12
 
 ### Added
@@ -372,7 +383,7 @@ All notable changes to pyguitest are recorded here. The format follows
   `InputCaptureSession`. Deliberately not named `pointer_position()` and not
   folded into `Capability.POINTER_QUERY`: unlike X11's synchronous read, this
   can only ever answer at the moment the compositor decides to divert input
-  here — which happens when a human's actual pointer physically crosses a
+  here — which happens when the user's actual pointer physically crosses a
   screen edge the caller set up, and which **exclusively diverts every
   physical or logical device the compositor chose** away from the desktop
   until the answer is read and released. Folding that into the existing
@@ -381,7 +392,7 @@ All notable changes to pyguitest are recorded here. The format follows
   same "silently does something different than the name promises" failure
   this project's whole capability model exists to prevent. Returns `None` on
   timeout, matching every other `wait_for_*` method, rather than raising: a
-  human simply not moving the pointer there in time is the ordinary outcome,
+  user simply not moving the pointer there in time is the ordinary outcome,
   not an error.
 
   The barrier placement is the one piece of business logic pyguitest owns
@@ -752,7 +763,7 @@ All notable changes to pyguitest are recorded here. The format follows
   `gnome-shell --headless --virtual-monitor WxH` on its own session bus.
   Nothing appears on screen and a shell already running is untouched, so
   it works on a developer's desktop as well as on a bare CI runner -- and
-  it makes the COMPOSITOR tier testable without a human for the first
+  it makes the COMPOSITOR tier testable without a user for the first
   time. `./scripts/headless-session.sh ./scripts/validate-gnome-extension.sh`
   is green end to end: window move/resize composing over six rounds, a
   capture matching the window exactly, the `new`/`title`/`close` window
@@ -1210,7 +1221,7 @@ All notable changes to pyguitest are recorded here. The format follows
   too, and this time nothing could ever close it: `__init__` raises rather
   than returning the object whose `close()` would. `_negotiate_session` now
   closes it on the way out, `KeyboardInterrupt` included, since `Start`
-  blocks on a human and Ctrl-C during that wait strands an approved session
+  blocks on a user and Ctrl-C during that wait strands an approved session
   exactly as a decline does. `libei.portal` (used by the `eiinput` backend)
   had the same gap, fixed upstream in python-libei.
 
@@ -1301,7 +1312,7 @@ All notable changes to pyguitest are recorded here. The format follows
   (default 120 Hz) give the event count between them, `via` routes the path
   through waypoints, and `ease` reshapes progress but is off by default
   because constant velocity is what a flick test wants. Randomised
-  human-shaped jitter is deliberately not offered: it is a bot-detection
+  natural-looking jitter is deliberately not offered: it is a bot-detection
   evasion technique, nothing this side of the compositor looks for it, and
   a path that varies run to run buys a test suite only flakiness. Since
   `POINTER_QUERY` is tier NO_PATH everywhere but X11, `Session` now

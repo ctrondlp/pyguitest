@@ -9,7 +9,7 @@ on the wire is meant to have changed -- but the live runs recorded in
 `docs/validation.md` (GNOME 2026-08-26, KDE 2026-08-31) exercised the old
 copy, and `eiinput.py`'s own docstring is on record that refactoring a
 working negotiation is exactly the risk worth naming. This script is what
-closes that gap. It needs a human because `Start()` raises a real consent
+closes that gap. It needs a user because `Start()` raises a real consent
 dialog and blocks until someone clicks Allow.
 
 What it proves, in order:
@@ -99,7 +99,7 @@ puts the previous run's text on screen before this one types anything."""
 RESTORE_BUDGET = 3.0
 """Seconds a restore may take before it is treated as suspicious. A restore
 that skips the dialog is a couple of D-Bus round trips (python-libei
-measured 0.2s on GNOME); anything near this bound suggests a human answered
+measured 0.2s on GNOME); anything near this bound suggests a user answered
 a prompt that should never have appeared."""
 
 results: list[tuple[bool, str]] = []
@@ -426,7 +426,7 @@ def is_active(gui, window, before) -> bool:
     `windows()` reported "New Document (Draft) - Text Editor" while
     `active_window()` reported "pyguitest eiinput portal (Draft) - Text
     Editor" for the same window at the same moment, so an equality check
-    could never succeed and the run stopped to ask a human to focus a window
+    could never succeed and the run stopped to ask a user to focus a window
     that was already focused. Both reads come from a desktop where the
     editor renames itself the instant it has content, and the two sources
     notice at different times (see docs/validation.md).
@@ -459,7 +459,7 @@ def focus_editor(gui, window, before, attempts: int = 2) -> bool:
     window unfocused and merely "demanding attention".
 
     So: poll rather than sleep a fixed time (activation is asynchronous),
-    retry, and if the desktop still will not do it, ask the human who is
+    retry, and if the desktop still will not do it, ask the user who is
     already here for the consent dialog. Refusing to type is the one thing
     this must not do quietly -- but so is typing into the wrong window.
     """
@@ -687,7 +687,7 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except KeyboardInterrupt:
-        # Ctrl-C is an ordinary way to end a run that is waiting on a human,
+        # Ctrl-C is an ordinary way to end a run that is waiting on a user,
         # so it gets a summary rather than a stack trace. The editor is
         # already gone by here either way -- Editor.__exit__ runs on the way
         # out, which is the whole reason it is a context manager.

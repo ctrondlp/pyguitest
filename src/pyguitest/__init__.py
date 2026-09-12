@@ -713,7 +713,7 @@ class Session:
         The route is straight unless `via` names waypoints, and the useful
         non-straight path is a deliberate one -- crossing a particular widget
         on the way, holding the angle a GTK submenu's navigation triangle
-        wants -- not the randomised human-shaped wobble that bot-detection
+        wants -- not the randomised, natural-looking wobble that bot-detection
         evasion goes in for. That would only buy flakiness here, and nothing
         on this side of the compositor is looking for it. Waypoints are
         passed through rather than landed on exactly, since points are spaced
@@ -1903,7 +1903,7 @@ class Session:
         Capability.INPUT_CAPTURE (the `inputcapture` backend, opt-in --
         `connect(backend="inputcapture")`) can only ever answer this at the
         moment the compositor itself decides to divert input here, which
-        happens when a human's actual pointer physically moves across one
+        happens when the user's actual pointer physically moves across one
         of the screen's edges. There is no way to trigger that on demand,
         so this can legitimately block for as long as `timeout` allows
         waiting for someone to do that -- and once it happens, **every

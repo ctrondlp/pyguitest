@@ -3,6 +3,16 @@
 # packagers build from the sdist and expect the changelog and the docs that
 # the README and the source comments point at.
 include CHANGELOG.md
+# tests/test_docs.py asserts that every relative link in README.md and docs/
+# resolves, and the suite is run again out of the unpacked sdist -- where the
+# repository root those links resolve against is the unpacked directory.
+# These two are link targets the documentation cross-references, so without
+# them a packager running the suite sees links fail on files that are not
+# missing, only not shipped. The extension's source is not here: only its
+# README is a link target, and the extension is installed by hand rather than
+# shipped with the package.
+include CONTRIBUTING.md
+include gnome-shell-extension/README.md
 recursive-include docs *
 recursive-include examples *
 recursive-include scripts *

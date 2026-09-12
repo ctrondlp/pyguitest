@@ -24,6 +24,22 @@ PYPROJECT = (ROOT / "pyproject.toml").read_text()
 # README directly.
 DOCS = "\n".join((README, INSTALL, INPUT))
 
+_INLINE_LINK = re.compile(r"\]\(([^)\s]+)\)")
+_CONTENTS_ENTRY = re.compile(r"^- \[[^\]]+\]\(#([^)]+)\)$", re.MULTILINE)
+_HEADING = re.compile(r"^#{1,6} (.+)$", re.MULTILINE)
+
+
+def heading_slug(heading):
+    """The anchor a heading gets, insensitive to how a slugger trims.
+
+    Runs of dashes are collapsed and both ends stripped, so a heading naming a
+    `--flag` matches a contents entry written with one leading dash as well as
+    the two a strict slugger would produce. What is asked here is "is there a
+    section for this", not "is the anchor byte-exact".
+    """
+    text = re.sub(r"[^a-z0-9 \-_]", "", heading.strip().lower())
+    return re.sub(r"-+", "-", text.replace(" ", "-")).strip("-")
+
 
 def declared_extras():
     """Extra names from [project.optional-dependencies], without a TOML parser.
@@ -105,10 +121,6 @@ class TestExamplesAreListed(unittest.TestCase):
                 self.assertIn(script, listing)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestDistributionTableMatchesTheCode(unittest.TestCase):
     """The package table in docs/install.md must agree with hints.py.
 
@@ -188,3 +200,54 @@ class TestDistributionTableMatchesTheCode(unittest.TestCase):
             f"prose outside the table names {managers}; prefer the table or "
             "`pyguitest doctor`, which knows the reader's distribution",
         )
+
+
+class TestLinksAndAnchorsResolve(unittest.TestCase):
+    """Every cross-reference in the user documentation still lands.
+
+    Both halves have been wrong in this tree already, and neither is visible
+    to a reader until they are already lost: the README and docs/README.md
+    keep two lists of the same pages, and a heading can be renamed without
+    the contents entry pointing at it moving. The anchor comparison is
+    deliberately forgiving about leading dashes -- a heading naming a
+    `--flag` slugs with two, and a contents entry written with one is still
+    pointing at the same section.
+    """
+
+    def pages(self):
+        """The README plus every page under docs/, which is the user set."""
+        return [ROOT / "README.md", *sorted((ROOT / "docs").rglob("*.md"))]
+
+    def test_there_are_pages_to_check(self):
+        self.assertGreater(len(self.pages()), 5)
+
+    def test_relative_links_point_at_something_that_exists(self):
+        for page in self.pages():
+            for target in _INLINE_LINK.findall(page.read_text()):
+                if target.startswith(("http://", "https://", "mailto:")):
+                    continue
+                path = target.split("#", 1)[0]
+                if not path:
+                    continue
+                with self.subTest(page=page.name, target=target):
+                    self.assertTrue(
+                        (page.parent / path).exists(),
+                        f"{page.name} links to {path}, which does not exist",
+                    )
+
+    def test_each_pages_own_contents_resolves(self):
+        for page in self.pages():
+            text = page.read_text()
+            headings = {heading_slug(h) for h in _HEADING.findall(text)}
+            for anchor in _CONTENTS_ENTRY.findall(text):
+                with self.subTest(page=page.name, anchor=anchor):
+                    self.assertIn(
+                        heading_slug(anchor),
+                        headings,
+                        f"{page.name} lists #{anchor} in its contents with no "
+                        "such heading",
+                    )
+
+
+if __name__ == "__main__":
+    unittest.main()

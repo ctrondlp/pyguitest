@@ -16,7 +16,7 @@ the one piece of business logic InputCaptureSession does not own --
 choosing where to put the pointer barriers.
 
 **Never live-tested.** See `InputCaptureSession`'s own docstring in
-python-libei for why: verifying this needs a human to click through the
+python-libei for why: verifying this needs a user to click through the
 consent dialog and then accept that their pointer will be diverted away
 from their own desktop for the length of the test. Unit-tested against a
 fake backend only; see `tests/test_inputcapture.py`.

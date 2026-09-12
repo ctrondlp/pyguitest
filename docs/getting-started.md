@@ -59,7 +59,7 @@ something this session cannot do*, and it raises a typed
 
 ## Which API should I use?
 
-Four ways to say "click that thing", in the order you should reach for them:
+Ways to say "click that thing", in the order you should reach for them:
 
 | You want to… | Use | Needs | Survives a window move? |
 |---|---|---|---|

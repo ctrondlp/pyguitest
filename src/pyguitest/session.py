@@ -298,7 +298,7 @@ class Environment:
         return None
 
     def summary(self) -> str:
-        """A short human-readable description of this environment."""
+        """A short, user-readable description of this environment."""
         lines = [
             f"session      {self.session_type.value}",
             f"compositor   {self.compositor.value}"

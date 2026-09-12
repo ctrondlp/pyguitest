@@ -2,7 +2,7 @@
 
 Rules for a coding assistant generating or reviewing pyguitest scripts. They
 are written to be pasted into a `CLAUDE.md`, a Copilot instructions file, or a
-system prompt. Humans get more use out of
+system prompt. Developers get more use out of
 [getting-started.md](getting-started.md) and [recipes.md](recipes.md).
 
 The short version: **pyguitest is a capability-negotiated library, and code

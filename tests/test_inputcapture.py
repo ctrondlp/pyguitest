@@ -2,7 +2,7 @@
 
 Not exercised against a real portal anywhere in this file, and never will
 be by a unit test: see InputCaptureSession's own docstring in python-libei
-for why -- verifying it needs a human to click through a real consent
+for why -- verifying it needs a user to click through a real consent
 dialog and accept that their pointer will be diverted from their own
 desktop for the length of the test. This file proves InputCaptureBackend's
 own orchestration: negotiation, error translation, the barrier-perimeter
