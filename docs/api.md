@@ -153,8 +153,15 @@ Raise on failure with a message naming what was actually found, for use directly
 | Call | Needs | | What it does |
 |------|-------|---|--------------|
 | `double_click(button: int = 1)` | `POINTER_BUTTON` |  | Press and release a mouse button twice, as one double-click. |
+| `double_click_element(element: Element)` | `ELEMENT_GEOMETRY`, `POINTER_BUTTON`, `POINTER_MOVE` |  | Double-click a named element, which Element cannot do for itself. |
 | `element_at(x: int, y: int)` | `ELEMENT_GEOMETRY` |  | The deepest accessible element at a screen coordinate, or None. |
+| `expect_checked(role: str \| None = None, name: str \| None = None, checked: bool, timeout: float = 5.0, within: Element \| None = None)` | `ELEMENT_TREE` |  | Fail unless the named checkbox, radio button or toggle is `checked`. |
+| `expect_element(role: str \| None = None, name: str \| None = None, within: Element \| None = None, timeout: float \| None = None, interval: float = 0.5)` | `ELEMENT_TREE` |  | wait_for_element, but raises ElementNotFound instead of returning None. |
+| `expect_showing(role: str \| None = None, name: str \| None = None, timeout: float = 5.0, within: Element \| None = None)` | `ELEMENT_TREE` |  | Fail unless the named element is present and visible. |
+| `expect_text(role: str \| None = None, name: str \| None = None, equals: str, timeout: float = 5.0, within: Element \| None = None)` | `ELEMENT_TREE` |  | Fail unless the named element reads `equals`. |
+| `expect_window(title: str \| re.Pattern[str] \| None = None, timeout: float \| None = None, app_id: str \| None = None)` | `WINDOW_LIST` — uses `WINDOW_EVENTS` if present |  | wait_for_window, but raises WindowNotFound instead of returning None. |
 | `extents(element: Element)` | `ELEMENT_GEOMETRY` |  | `element`'s (x, y, width, height) in screen coordinates. |
+| `focus_window(window: Window, attempts: int = 5)` | `WINDOW_ACTIVATE`, `WINDOW_GEOMETRY`, `WINDOW_STATE` |  | Give `window` focus and confirm it actually took, best-effort. |
 | `is_button_pressed(button: int)` | `INPUT_STATE_QUERY` | X11 | Whether a mouse button is currently held down. |
 | `is_key_pressed(key: str)` | `INPUT_STATE_QUERY` | X11 | Whether a key is currently held down. Replaces IsKeyPressed. |
 | `is_window_cursor(window: Window, shape: int)` | `WINDOW_CURSOR_QUERY` | X11 | Whether `window` is currently showing cursor `shape`. |
