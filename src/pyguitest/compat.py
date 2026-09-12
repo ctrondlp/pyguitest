@@ -5,7 +5,7 @@ and the tier it lands in on Wayland. This is the audit in machine-readable
 form: docs/developers/wayland-audit.md is the same table with the reasoning.
 
 It exists so migration tooling can answer "what happens to my script?" without
-a human re-reading the audit:
+a developer re-reading the audit:
 
     from pyguitest.compat import LEGACY, unavailable
     LEGACY["GetMousePos"].tier          -> Tier.NO_PATH

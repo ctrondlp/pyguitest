@@ -128,7 +128,7 @@ jobs:
     name: portal against a real D-Bus session
     runs-on: ubuntu-latest
     # The one thing that can be exercised for real in CI. Everything else
-    # needs a compositor or a human; a private D-Bus session bus does not,
+    # needs a compositor or a user; a private D-Bus session bus does not,
     # and PortalBackend's negotiation is where a live bug was found before
     # (a missing session_handle_token crashed xdg-desktop-portal outright).
     # These tests skip themselves if anything is missing, so this job is

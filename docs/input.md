@@ -275,7 +275,7 @@ clicks the dialog *for* the user — that would defeat the reason it exists.
 dialog per run) are the lower-privilege choices when repeat-prompt annoyance
 is not worth the standing grant.
 
-For CI or other headless runs where no human can click anything at all,
+For CI or other headless runs where no user can click anything at all,
 `xdg-desktop-portal` ships fake portal backends for its own test suite that
 answer `Start()` with no UI — appropriate only inside a sandbox you control,
 never pointed at a real user's session. That is the same boundary
@@ -359,9 +359,9 @@ window it returns the last position it knew, with nothing to mark it stale
 from the wrong place and runs anyway — the one outcome the raise above
 exists to avoid. Where both are live, prefer an explicit `start`.
 
-### On "human-like" paths
+### On natural-looking paths
 
-The route is straight unless `via` names waypoints. Randomised, human-shaped
+The route is straight unless `via` names waypoints. Randomised, natural-looking
 wobble — Bézier control points and Gaussian jitter — is a bot-detection
 evasion technique, and there is nothing on this side of the compositor looking
 for it. In a test suite it buys only flakiness: a path that varies run to run
@@ -428,7 +428,7 @@ if position is not None:
 **This is not `pointer_position()`, and could not honestly be spelled that
 way.** X11's version answers synchronously, any time it is called; this
 can only ever answer at the moment the compositor decides to divert input
-here, which happens when a real human's pointer physically crosses a
+here, which happens when a real user's pointer physically crosses a
 screen edge `wait_for_pointer_activation` set a barrier on. There is no
 way to trigger that on demand, so the call can legitimately block for as
 long as `timeout` allows waiting for someone to do that — and once it
@@ -446,7 +446,7 @@ their own input by surprise — which is exactly why the backend is opt-in
 and never auto-selected, the same rule `eiinput` and `portal` follow.
 
 **Never live-validated** — see `docs/validation.md`'s "Not run live"
-section. Verifying it needs a human who has deliberately accepted that
+section. Verifying it needs a user who has deliberately accepted that
 their own input will be diverted, not merely someone who clicked Allow on
 a dialog; `examples/_inputcapture_validate.py` is written for exactly that
 person to run themselves.

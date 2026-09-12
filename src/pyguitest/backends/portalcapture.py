@@ -69,7 +69,7 @@ class PortalCaptureBackend(GUIBackend):
 
         `interactive` asks the portal to let the user choose what to shoot
         before returning. It defaults to False and should stay there for any
-        unattended run: True opens a picker and blocks until a human answers
+        unattended run: True opens a picker and blocks until a user answers
         it. It is exposed because a person driving this from a REPL may
         genuinely want it.
         """

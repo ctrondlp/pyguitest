@@ -351,8 +351,8 @@ else:
     # below, none opened one, since that depended on a person's timing
     # rather than anything this script controlled. Spawning and then
     # killing a throwaway GUI app makes both "new" and "close"
-    # deterministic instead of hoping a human acts inside a few seconds --
-    # and once spawned, letting the human listen still run: it exercises
+    # deterministic instead of hoping a user acts inside a few seconds --
+    # and once spawned, letting the user listen still run: it exercises
     # whatever this doesn't cover.
     _SPAWN_CANDIDATES = ["gnome-text-editor", "gedit", "gnome-calculator"]
     spawn_app = next((a for a in _SPAWN_CANDIDATES if shutil.which(a)), None)

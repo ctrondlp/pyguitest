@@ -16,7 +16,7 @@ part-way through left an orphaned window on the user's desktop with nothing
 holding a reference to close it; and, after that was fixed with a context
 manager, an exception raised inside `__enter__` -- which never reaches
 `__exit__`, because the `with` body was never entered -- leaking the window
-all over again. Both were found by a human noticing a window that should
+all over again. Both were found by a developer noticing a window that should
 not have been there.
 
 `Application` is that dance, written once, plus the two things the roadmap

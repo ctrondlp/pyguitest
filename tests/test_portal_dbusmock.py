@@ -67,7 +67,7 @@ def _respond_code(request_path: str, result_code: int, results: dict) -> str:
     """AddMethod code: reply with a request handle, then answer it shortly after.
 
     The real portal always answers with just a request handle immediately,
-    and only later -- once a human has answered the dialog -- fires
+    and only later -- once a user has answered the dialog -- fires
     Response on that handle. Firing Response asynchronously here (via
     GLib.timeout_add, not inline) matters for the same reason: the caller
     does not call signal_subscribe() until *after* the method call

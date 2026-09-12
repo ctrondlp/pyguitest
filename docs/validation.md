@@ -863,7 +863,7 @@ reports `session wayland` / `compositor kwin (KDE)`.
   mechanism here (an empty name rather than a missing node) is different
   enough that this is recorded as its own finding rather than assumed to be
   the same bug.
-- **A live, human-observed note, not independently measured**: driving
+- **A live, user-observed note, not independently measured**: driving
   KCalc's buttons one at a time via AT-SPI actions was visibly slow to
   someone watching the session directly, more than the same sequence of
   calls felt on other boxes in this file. Recorded as reported rather than
@@ -875,7 +875,7 @@ reports `session wayland` / `compositor kwin (KDE)`.
   genuinely native Wayland** -- every earlier KDE `eiinput` run in this file
   was on the session labelled "(XWayland)" above. `connect(backend=
   ["eiinput", "windows"])` negotiated a real `RemoteDesktop` portal session,
-  a human watching the session clicked through KDE's consent dialog, and
+  a user watching the session clicked through KDE's consent dialog, and
   `move_mouse`/`click`/`scroll`/`type_text`/`sync` all completed against a
   real `gedit` window with no error (`sync()` returning `True` in 0.5ms).
   Offered capabilities matched the XWayland run: `INPUT_SYNC`, `KEY_EVENT`,
@@ -1108,7 +1108,7 @@ by the extents finding, since every button reported the same rectangle.
   negotiation has been run against a real xdg-desktop-portal (1.22.1) and
   completes; the keyboard, pointer and scroll methods past that point have
   not. `Start()` raises an interactive consent dialog that blocks until a
-  human clicks Allow, so every step beyond it needs a person at a real
+  user clicks Allow, so every step beyond it needs a person at a real
   desktop.
 `tests/test_portal_dbusmock.py` covers the wire plumbing under that gap. It
 uses [python-dbusmock](https://github.com/martinpitt/python-dbusmock) the

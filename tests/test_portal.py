@@ -1065,7 +1065,7 @@ class TestSessionCleanup(unittest.TestCase):
         self.assertEqual(_closed_sessions(connection), ["/session/1"])
 
     def test_an_interrupted_consent_dialog_closes_the_session(self):
-        # Why the cleanup catches BaseException: Start blocks on a human,
+        # Why the cleanup catches BaseException: Start blocks on a user,
         # so Ctrl-C during that wait is a routine way out of __init__ --
         # and it strands an approved session exactly as a decline does.
         class InterruptedConnection(FakeConnection):

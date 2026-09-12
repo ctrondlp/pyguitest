@@ -23,7 +23,7 @@ For input, this script's approach is: create its own X11 window with
 python-xlib, select the key, button and motion masks on it, take input
 focus, and read back the event stream the server actually delivered.
 Every assertion is exact -- this keycode, this keysym, this button, in
-this order -- rather than a human deciding whether an xterm looked right.
+this order -- rather than a user deciding whether an xterm looked right.
 It also needs nothing installed beyond python-xlib.
 
 `move_mouse` is checked against `X11Backend.pointer_position()`, which is

@@ -254,7 +254,7 @@ def gather(gui, x, y):
 
 
 def print_report(gui, x, y, tree=False):
-    """Print everything known about the point (x, y), human-readable.
+    """Print everything known about the point (x, y), in readable form.
 
     Never raises for a missing optional capability -- reports that it is
     missing and moves on, rather than dying. That matters most for

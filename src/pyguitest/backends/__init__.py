@@ -70,7 +70,7 @@ def register(factory, name, priority=50, opt_in=False):
     `opt_in=True` excludes it from automatic composition entirely --
     reserved for a factory whose construction has a side effect no caller
     should hit by surprise, such as raising an interactive consent dialog
-    that blocks until a human answers it. It remains reachable by name.
+    that blocks until a user answers it. It remains reachable by name.
     """
     _REGISTRY.append((priority, name, factory, opt_in))
     _REGISTRY.sort(key=lambda r: -r[0])
@@ -393,7 +393,7 @@ def _kscreen_size():
     libkscreen serialises the panel's mode as `size` and leaves the
     logical size out of the JSON altogether, so reconstructing the layout
     from it means redoing the scale and rotation arithmetic that
-    `Output::geometry()` has already done. The human-readable listing is
+    `Output::geometry()` has already done. The text listing is
     the only place that rect is printed.
 
     The colour escapes around each label are stripped rather than assumed
@@ -687,7 +687,7 @@ def _portal_factory(environment, **options):
     """Build the RemoteDesktop portal backend, by name only.
 
     opt_in=True: constructing this can raise an interactive consent dialog
-    that blocks until a human clicks Allow -- a side effect no caller should
+    that blocks until a user clicks Allow -- a side effect no caller should
     hit from a plain connect(). Use connect(backend="portal") deliberately.
     A declined dialog, or any other construction failure, raises
     `BackendUnavailable` naming the real reason -- see `register`'s
@@ -707,7 +707,7 @@ def _eiinput_factory(environment, **options):
     """Build the libei pointer backend, by name only.
 
     opt_in=True for the same reason as portal: constructing this raises a
-    real RemoteDesktop consent dialog and blocks until a human answers it.
+    real RemoteDesktop consent dialog and blocks until a user answers it.
     Use connect(backend="eiinput") deliberately. A missing PyGObject, a
     declined dialog, or any other construction failure raises
     `BackendUnavailable` naming the real reason -- see `register`'s

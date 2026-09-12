@@ -183,7 +183,7 @@ whether the extension is running is a plain D-Bus call with no side effect.
 `portal` is a different kind of opt-in, and `register()` enforces it rather
 than leaving it to convention: its priority (80) is never consulted by a
 plain `connect()` at all, because *constructing* it can raise gnome's own
-interactive consent dialog and block until a human answers it -- a side
+interactive consent dialog and block until a user answers it -- a side
 effect no caller should hit from ordinary automatic detection. Passing
 `register(..., opt_in=True)` excludes a factory from the composition loop
 entirely while leaving it reachable by name, `connect(backend="portal")`, the

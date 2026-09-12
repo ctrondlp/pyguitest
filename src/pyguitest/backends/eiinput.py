@@ -139,7 +139,7 @@ PERSIST_WHILE_RUNNING = 1
 PERSIST_UNTIL_REVOKED = 2
 
 _PORTAL_TIMEOUT = 60
-"""Seconds to wait for the consent dialog -- generous, since a human has to
+"""Seconds to wait for the consent dialog -- generous, since a user has to
 see and answer it, but bounded: a portal that accepts the call and then dies
 sends no Response and no error, and an unbounded `loop.run()` waits on that
 forever with no fd to poll and nothing to interrupt it. Passed to
@@ -155,7 +155,7 @@ _SYNC_TIMEOUT = 1.0
 """Default seconds for sync() to wait for its PONG.
 
 A round trip to a compositor on the same machine, with no dialog and no
-human in it -- so this is generous by orders of magnitude, and a sync that
+user in it -- so this is generous by orders of magnitude, and a sync that
 actually reaches it means something is wrong rather than merely slow."""
 
 _SIBLING_SETTLE = 1.0

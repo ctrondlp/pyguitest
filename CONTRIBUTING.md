@@ -36,7 +36,10 @@ Really no deps: the suite passes on a machine with nothing installed and no
 capture or input tool on `PATH`. That is not a convenience, it is the claim
 under test — every display-server mechanism is probed at runtime and stands
 in as a fake here, so a stray unconditional `import` in a module that must
-stay importable without the optional extras shows up as a failure.
+stay importable without the optional extras shows up as a failure. It is the
+same suite [`./scripts/pre-commit-test.sh`](#lint-format-types) runs, through
+pytest, which collects these unittest classes; the form above needs nothing
+installed at all.
 
 ## The D-Bus tests
 
@@ -103,17 +106,32 @@ needing the portal's consent dialog, which has nobody to click it.
 
 ## Lint, format, types
 
-All configured in `pyproject.toml`:
+All configured in `pyproject.toml`, and `scripts/pre-commit-test.sh` runs all
+of it — the same checks CI runs, over the same paths:
 
 ```sh
-ruff check src tests      # lint  (pycodestyle, pyflakes, pydocstyle, bugbear…)
-ruff format src tests     # format
-mypy                      # type check
+./scripts/pre-commit-test.sh
 ```
 
-`pre-commit install` runs lint and format on every commit. The tree is
-currently clean under all three. The package ships `py.typed` (PEP 561), so
-annotations are visible to your editor and type checker.
+That is the gate to clear before committing: pytest, `ruff check`,
+`ruff format --check` and `mypy`, with a pass/fail summary and exit status 1
+when anything failed. `--full` adds the three checks whose prerequisites a
+laptop may not have — the ImageMagick comparison, the D-Bus suite against a
+real session bus, and the build with its `twine check --strict` — reporting a
+missing tool as SKIP rather than a pass, so it is safe to run anywhere.
+`-k NAME` narrows to the checks matching a name, `-v` streams output, `-q`
+prints the summary only, `-x` stops at the first failure, and `--help` lists
+them. It checks the working tree, not the index: with unstaged changes, that
+is not what `git commit` is about to record.
+
+`pre-commit install` still runs lint and format on every commit, but only
+over the *staged* files, and it rewrites them (`--fix`); the script above
+checks the whole tree read-only and adds the two the hook has no entry for,
+the test suite and `mypy`. It needs the dev extra from
+[Setting up](#setting-up) in the interpreter it points at, which is `python3`
+unless `PYTHON=...` says otherwise. The tree is currently clean under all of
+them, and the package ships `py.typed` (PEP 561), so annotations are visible
+to your editor and type checker.
 
 ## Continuous integration
 
