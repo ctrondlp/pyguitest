@@ -20,6 +20,7 @@ from pyguitest import (
     FocusMismatch,
     ImageMatch,
     ImageNotFound,
+    PyGUITestError,
     Role,
     WindowNotFound,
 )
@@ -557,6 +558,90 @@ class TestWaitWindowFocus(unittest.TestCase):
         self.assertFalse(gui.wait_window_focus(target, timeout=0.05, interval=0.01))
 
 
+class SettlingBackend(FocusBackend):
+    """A FocusBackend that also answers geometry() and activate_window().
+
+    Geometry is fixed (already settled); activate_window() records each
+    call and the *next* active_window() answer only changes once enough
+    calls have been made, so a test can assert the request was retried
+    rather than trusted the first time.
+    """
+
+    def __init__(self, activations_needed=1):
+        super().__init__(focus_sequence=[None])
+        self.activations_needed = activations_needed
+        self.activate_calls = 0
+
+    @property
+    def capabilities(self):
+        return CapabilitySet(
+            set(FocusBackend.capabilities.fget(self))
+            | {Capability.WINDOW_GEOMETRY, Capability.WINDOW_ACTIVATE}
+        )
+
+    def geometry(self, window):
+        return (0, 0, 100, 100)
+
+    def activate_window(self, window):
+        self.activate_calls += 1
+        if self.activate_calls >= self.activations_needed:
+            self._focus_sequence = [window]
+
+
+class TestExpectWindow(unittest.TestCase):
+    """expect_window: wait_for_window's raising sibling, and nothing more."""
+
+    def test_returns_the_window_once_found(self):
+        gui = session()
+        window = gui.expect_window("Editor", timeout=1)
+        self.assertEqual(window.title, "Document - Editor")
+
+    def test_raises_window_not_found_instead_of_returning_none(self):
+        gui = session()
+        with self.assertRaises(WindowNotFound):
+            gui.expect_window("NoSuchWindow", timeout=0.05)
+
+    def test_raises_by_app_id_too(self):
+        gui = session()
+        with self.assertRaises(WindowNotFound):
+            gui.expect_window(app_id="no.such.app", timeout=0.05)
+
+    def test_does_not_activate_the_window_it_finds(self):
+        # Regression, found live on MATE: expect_window used to activate
+        # every window it found. Binding the desktop while an application
+        # menu was open raised the desktop, dismissed the menu, and left
+        # every click that followed landing on nothing. A lookup must stay
+        # a lookup.
+        backend = SettlingBackend()
+        gui = pyguitest.Session(backend, pyguitest.detect())
+        gui.expect_window("Editor", timeout=1)
+        self.assertEqual(backend.activate_calls, 0)
+
+
+class TestFocusWindow(unittest.TestCase):
+    """focus_window: the activation expect_window deliberately does not do."""
+
+    def test_retries_activation_until_it_actually_takes(self):
+        backend = SettlingBackend(activations_needed=3)
+        gui = pyguitest.Session(backend, pyguitest.detect())
+        target = backend._windows[0]
+        self.assertTrue(gui.focus_window(target))
+        self.assertGreaterEqual(backend.activate_calls, 3)
+
+    def test_returns_false_when_activation_never_takes(self):
+        backend = SettlingBackend(activations_needed=99)
+        gui = pyguitest.Session(backend, pyguitest.detect())
+        self.assertFalse(gui.focus_window(backend._windows[0], attempts=2))
+        self.assertEqual(backend.activate_calls, 2)
+
+    def test_reports_false_rather_than_raising_without_the_capabilities(self):
+        # FakeBackend declares neither WINDOW_GEOMETRY nor WINDOW_ACTIVATE:
+        # not being able to ask is not a different answer from "it did not
+        # take", and must not become an exception out of a best-effort call.
+        gui = session()
+        self.assertFalse(gui.focus_window(gui.find_window("Editor")))
+
+
 class TestWaitWindowClose(unittest.TestCase):
     def test_returns_true_immediately_if_already_closed(self):
         gui = session()
@@ -699,6 +784,54 @@ class TestWaitForElement(unittest.TestCase):
         )
         self.assertEqual(element.name, "OK")
         self.assertGreaterEqual(len(calls), 3)
+
+
+class TestExpectElement(unittest.TestCase):
+    """expect_element: wait_for_element's raising sibling."""
+
+    def test_returns_the_element_once_found(self):
+        gui = session()
+        element = gui.expect_element(role=Role.PUSH_BUTTON, name="OK", timeout=1)
+        self.assertEqual(element.name, "OK")
+
+    def test_raises_element_not_found_instead_of_returning_none(self):
+        gui = session()
+        with self.assertRaises(ElementNotFound):
+            gui.expect_element(name="NoSuchElement", timeout=0.05)
+
+
+class TestExpectText(unittest.TestCase):
+    def test_passes_when_the_text_already_matches(self):
+        gui = session()
+        gui.element(name="Name").set_text("hello")
+        gui.expect_text(name="Name", equals="hello", timeout=0.2)
+
+    def test_raises_a_readable_assertion_error_otherwise(self):
+        gui = session()
+        with self.assertRaisesRegex(AssertionError, "expected 'Name' to read 'hello'"):
+            gui.expect_text(name="Name", equals="hello", timeout=0.05)
+
+
+class TestExpectChecked(unittest.TestCase):
+    def test_passes_when_already_in_the_wanted_state(self):
+        gui = session()
+        gui.expect_checked(name="Remember me", checked=False, timeout=0.2)
+
+    def test_raises_a_readable_assertion_error_otherwise(self):
+        gui = session()
+        with self.assertRaisesRegex(AssertionError, "expected .* to be checked"):
+            gui.expect_checked(name="Remember me", checked=True, timeout=0.05)
+
+
+class TestExpectShowing(unittest.TestCase):
+    def test_passes_when_already_visible(self):
+        gui = session()
+        gui.expect_showing(name="OK", timeout=0.2)
+
+    def test_raises_a_readable_assertion_error_when_not_visible(self):
+        gui = session()
+        with self.assertRaisesRegex(AssertionError, "expected .* to be showing"):
+            gui.expect_showing(role=Role.PUSH_BUTTON, name="Save", timeout=0.05)
 
 
 class TestWaitUntilGone(unittest.TestCase):
@@ -985,6 +1118,48 @@ class TestDoubleClick(unittest.TestCase):
         with mock.patch("pyguitest.time.sleep") as slept:
             gui.double_click()
         self.assertEqual(slept.call_count, 1)
+
+
+class _RecordingPointerAndExtents(_RecordingButtons):
+    """_RecordingButtons plus extents() and move_mouse(), for double_click_element."""
+
+    def __init__(self, extents_by_name):
+        super().__init__()
+        self._extents_by_name = extents_by_name
+        self.moved_to = []
+
+    @property
+    def capabilities(self):
+        return CapabilitySet(
+            set(_RecordingButtons.capabilities.fget(self))
+            | {Capability.ELEMENT_GEOMETRY, Capability.POINTER_MOVE}
+        )
+
+    def extents(self, element):
+        return self._extents_by_name.get(element.name)
+
+    def move_mouse(self, x, y, screen=0):
+        self.moved_to.append((x, y))
+
+
+class TestDoubleClickElement(unittest.TestCase):
+    def test_moves_to_the_elements_center_and_double_clicks(self):
+        element = FakeElement(Role.PUSH_BUTTON, "OK")
+        backend = _RecordingPointerAndExtents({"OK": (10, 20, 30, 40)})
+        gui = pyguitest.Session(backend, pyguitest.detect())
+        gui.double_click_element(element)
+        self.assertEqual(backend.moved_to, [(10 + 15, 20 + 20)])
+        self.assertEqual(
+            backend.events,
+            [("press", 1), ("release", 1), ("press", 1), ("release", 1)],
+        )
+
+    def test_raises_without_extents(self):
+        element = FakeElement(Role.PUSH_BUTTON, "Ghost")
+        backend = _RecordingPointerAndExtents({})
+        gui = pyguitest.Session(backend, pyguitest.detect())
+        with self.assertRaises(PyGUITestError):
+            gui.double_click_element(element)
 
 
 class TestProcessTableFallsBackToPs(unittest.TestCase):

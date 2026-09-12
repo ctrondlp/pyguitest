@@ -7,6 +7,8 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-09-12
+
 ### Added
 
 - **`Session.wait_window_focus(window, timeout=None, interval=0.1)`**, a new
@@ -20,6 +22,32 @@ All notable changes to pyguitest are recorded here. The format follows
   hold focus yet at that instant. Returns whether `window` held focus by
   the deadline — `False` is a real answer to check, not something to guess
   from a `None`.
+
+- **`Session.focus_window(window, attempts=5)`**, the activation
+  `expect_window` deliberately does not do. Waits for the window's geometry
+  to stop changing, then asks for focus more than once — a window manager
+  can drop a single `activate_window()` outright — and confirms the request
+  was honored rather than assuming, returning whether it ended up focused.
+  Never raises: a backend without `WINDOW_GEOMETRY`, `WINDOW_ACTIVATE` or
+  `WINDOW_STATE` reports `False`, since not being able to ask is not a
+  different answer from "it did not take".
+
+- **`Session.expect_window(title=None, timeout=None, *, app_id=None)`**,
+  **`expect_element(role=None, name=None, within=None, timeout=None)`**,
+  **`expect_text(role=None, name=None, *, equals, timeout=5.0, within=None)`**,
+  **`expect_checked(role=None, name=None, *, checked, timeout=5.0,
+  within=None)`**, **`expect_showing(role=None, name=None, timeout=5.0,
+  within=None)`**, and **`double_click_element(element)`**. Moved here from
+  pyguitest-recorder's generator, which used to write a private copy of
+  each into every generated script it produced -- one reimplemented a real
+  double-click on an element pyguitest itself had no primitive for
+  (`double_click_element`), and the `expect_` family are the raising
+  siblings `wait_for_window`/`wait_for_element` deliberately lack, for
+  exactly the reason `find_window` raises where `wait_for_window` returns
+  `None`: a script written against a specific recorded window or element
+  treats its absence as the failure, not a branch to handle. Generated
+  scripts now call these directly instead of carrying a private
+  implementation of each.
 
 ### Fixed
 

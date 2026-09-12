@@ -66,7 +66,7 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T")
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 __all__ = [
     "connect",
@@ -550,6 +550,32 @@ class Session:
         self.backend.release_button(button)
         self._after_event()
 
+    def double_click_element(self, element: Element) -> None:
+        """Double-click a named element, which Element cannot do for itself.
+
+        Two `element.click()` calls are not a double click: each is a
+        separate round trip over the accessibility bus, which is slower
+        than any toolkit's double-click interval, so the pair arrives as
+        two single clicks and a double-clicked folder icon simply does not
+        open.
+
+        The element is still the locator -- its rectangle is read fresh
+        each call, rather than baked in ahead of time -- and only the
+        gesture falls back to the pointer, because that is where this
+        package's real double_click lives. Needs Capability.ELEMENT_GEOMETRY.
+
+        Raises PyGUITestError if extents() has no rectangle for this element
+        -- it is not showing, or the backend reports none -- rather than
+        ElementNotActionable, which means something more specific: no click
+        or press action for element.click() to fall back to.
+        """
+        extents = self.extents(element)
+        if extents is None:
+            raise PyGUITestError(f"{element.name!r} has no extents to double-click")
+        x, y, width, height = extents
+        self.move_mouse(x + width // 2, y + height // 2)
+        self.double_click()
+
     def scroll(self, dx: int = 0, dy: int = 0) -> None:
         """Scroll by whole wheel detents: `dy` positive is up, `dx` right.
 
@@ -989,6 +1015,81 @@ class Session:
 
         return self._poll_until(topmost_match, timeout, interval)
 
+    def expect_window(
+        self,
+        title: str | re.Pattern[str] | None = None,
+        timeout: float | None = None,
+        *,
+        app_id: str | None = None,
+    ) -> Window:
+        """wait_for_window, but raises WindowNotFound instead of returning None.
+
+        The raising sibling wait_for_window deliberately lacks (see its
+        docstring): a script that already knows the window it wants exist is
+        an error, not a branch to handle, is the common case a generated
+        replay is written against. See wait_for_window for how `title`/
+        `app_id` combine and what `title` accepts.
+
+        A lookup and nothing else. It does not raise, focus, resize or
+        otherwise disturb the window it hands back -- focus_window() is for
+        that, and is deliberately a separate call: an earlier version of
+        this method activated every window it found, which is fine for an
+        application window and actively destructive for a desktop or a
+        menu. Binding the desktop while an application menu was open raised
+        the desktop, dismissed the menu, and left the clicks that followed
+        landing on nothing -- found live on MATE.
+        """
+        window = self.wait_for_window(title, timeout=timeout, app_id=app_id)
+        if window is None:
+            wanted = ", ".join(
+                f"{k}={v!r}"
+                for k, v in (("title", title), ("app_id", app_id))
+                if v is not None
+            )
+            if timeout is not None:
+                raise WindowNotFound(
+                    f"no window matching {wanted} appeared within {timeout:g}s"
+                )
+            raise WindowNotFound(f"no window matching {wanted}")
+        return window
+
+    def focus_window(self, window: Window, attempts: int = 5) -> bool:
+        """Give `window` focus and confirm it actually took, best-effort.
+
+        Three things activate_window() on its own does not do: it waits for
+        the window's geometry to stop changing first (a still-animating
+        window can be clicked at a position it is about to leave), it asks
+        more than once (a window manager can drop a single request outright,
+        focus-stealing prevention being the usual reason), and it checks
+        whether the request was honored rather than assuming. Seen live as
+        typed text landing in the terminal a replay script was itself
+        running in, because the window it had just found did not hold focus
+        yet at that instant.
+
+        Returns whether `window` ended up focused. Never raises on its own:
+        a backend without WINDOW_GEOMETRY, WINDOW_ACTIVATE or WINDOW_STATE
+        simply reports False, since not being able to ask is not a different
+        answer from "it did not take".
+        """
+        try:
+            last = self.geometry(window)
+            for _ in range(3):
+                self.wait(0.1)
+                current = self.geometry(window)
+                if current == last:
+                    break
+                last = current
+        except Exception:
+            pass
+        for _ in range(attempts):
+            try:
+                self.activate_window(window)
+                if self.wait_window_focus(window, timeout=0.1):
+                    return True
+            except Exception:
+                return False
+        return False
+
     def is_window_open(self, window: Window) -> bool:
         """Whether `window` is still in the window list.
 
@@ -1111,6 +1212,99 @@ class Session:
             return True if not found else None
 
         return bool(self._poll_until(gone, timeout, interval))
+
+    def expect_element(
+        self,
+        role: str | None = None,
+        name: str | None = None,
+        within: Element | None = None,
+        timeout: float | None = None,
+        interval: float = 0.5,
+    ) -> Element:
+        """wait_for_element, but raises ElementNotFound instead of returning None.
+
+        The raising sibling wait_for_element deliberately lacks, for the
+        same reason expect_window exists next to wait_for_window: a script
+        written against a specific recorded element treats its absence as
+        the failure, not a branch to handle.
+        """
+        element = self.wait_for_element(
+            role=role, name=name, within=within, timeout=timeout, interval=interval
+        )
+        if element is not None:
+            return element
+        wanted = ", ".join(
+            part
+            for part in (
+                f"role={role!r}" if role else "",
+                f"name={name!r}" if name else "",
+            )
+            if part
+        )
+        if timeout is not None:
+            raise ElementNotFound(
+                f"no element with {wanted} appeared within {timeout:g}s"
+            )
+        raise ElementNotFound(f"no element with {wanted}")
+
+    def expect_text(
+        self,
+        role: str | None = None,
+        name: str | None = None,
+        *,
+        equals: str,
+        timeout: float = 5.0,
+        within: Element | None = None,
+    ) -> None:
+        """Fail unless the named element reads `equals`.
+
+        Re-read until `timeout` rather than checked once: a check made
+        right after the action it verifies would otherwise race the
+        application, which has not necessarily finished redrawing by the
+        time the click returns.
+        """
+        element = self.expect_element(
+            role=role, name=name, within=within, timeout=timeout
+        )
+        if self.wait_until(lambda: element.text == equals, timeout=timeout):
+            return
+        raise AssertionError(
+            f"expected {name!r} to read {equals!r}, but it reads {element.text!r}"
+        )
+
+    def expect_checked(
+        self,
+        role: str | None = None,
+        name: str | None = None,
+        *,
+        checked: bool,
+        timeout: float = 5.0,
+        within: Element | None = None,
+    ) -> None:
+        """Fail unless the named checkbox, radio button or toggle is `checked`."""
+        element = self.expect_element(
+            role=role, name=name, within=within, timeout=timeout
+        )
+        if self.wait_until(lambda: element.checked == checked, timeout=timeout):
+            return
+        wanted = "checked" if checked else "unchecked"
+        actual = "checked" if element.checked else "unchecked"
+        raise AssertionError(f"expected {name!r} to be {wanted}, but it is {actual}")
+
+    def expect_showing(
+        self,
+        role: str | None = None,
+        name: str | None = None,
+        timeout: float = 5.0,
+        within: Element | None = None,
+    ) -> None:
+        """Fail unless the named element is present and visible."""
+        element = self.expect_element(
+            role=role, name=name, within=within, timeout=timeout
+        )
+        if self.wait_until(lambda: element.visible, timeout=timeout):
+            return
+        raise AssertionError(f"expected {name!r} to be showing, but it is not visible")
 
     def wait_for_file(
         self, path: str, timeout: float | None = None, interval: float = 0.5
