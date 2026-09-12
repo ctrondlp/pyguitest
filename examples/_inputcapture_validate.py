@@ -11,12 +11,18 @@ window as short as it can (it releases the instant it reads a position),
 but the whole point of running it is to deliberately trigger that trade
 once, on purpose. Never run this from an agent session or unattended;
 run it yourself, at a real keyboard, when you are ready to move your own
-mouse to a screen edge on request.
+mouse to a screen edge on request. On a VirtualBox guest, switch Mouse
+Integration off first (Host+I): with it on, the guest's pointer *is* the
+host's mouse, so a barrier on a screen edge can never fire and this script
+can only ever time out.
 
-`InputCaptureSession` (python-libei 0.5.0+) and this backend have never
-been run against a real portal before this script exists to do it -- see
-docs/validation.md's "Not run live" section and the class docstrings in
-both repos for why. This is the first live check.
+`InputCaptureSession` (python-libei 0.5.0+) and this backend were first run
+against a real portal by this script on 2026-09-12, and it reached
+activation -- see docs/validation.md's `inputcapture` section for that run
+and for the attempts before it that could not have worked. What stays
+scarce is the chance to run it: a run needs a user who will approve the
+dialog and then drive their own pointer. Re-running it is still worth doing
+on a different compositor, or after a change to the barrier arithmetic.
 
 What it does, in order:
 
@@ -29,10 +35,11 @@ What it does, in order:
    `wait_for_pointer_activation()` and waits (up to 30s) for that crossing
    to actually trigger capture.
 4. Reports the position the compositor handed back, and how long the wait
-   took -- the two questions this script exists to answer: does
-   `Activated` actually carry `cursor_position` on this stack (the plan's
-   original open question), and does release actually hand control back
-   promptly afterward (try moving the mouse again once it prints "done").
+   took. Both questions this script was written for are answered on the
+   stack it first ran on -- `Activated` does carry `cursor_position` there,
+   and release does hand control back promptly (move the mouse again once
+   it prints "done") -- so a run now is a re-check rather than a first look
+   at either.
 
     python3 _inputcapture_validate.py
 """
@@ -82,14 +89,17 @@ try:
     elapsed = time.monotonic() - started
 
     if position is None:
-        print(f"\nTIMED OUT after {elapsed:.1f}s -- nobody crossed an edge in time.")
+        print(f"\nTIMED OUT after {elapsed:.1f}s -- no activation arrived.")
         print(
-            "The compositor accepted every barrier (no PyGUITestError above), "
-            "so it is watching the edges -- it just never decided a crossing "
-            "happened. Try pressing the pointer firmly against one edge and "
-            "holding it there for a couple of seconds, rather than a quick "
-            "touch; if that still does nothing, this compositor's InputCapture "
-            "implementation may not be triggering barrier crossings at all yet."
+            "Only a *refused* barrier set raises above, and a partial "
+            "refusal is silent, so read this as 'no reachable trigger' rather "
+            "than 'the compositor is quiet'. Check Mouse Integration is off "
+            "(Host+I) on a VirtualBox guest -- with it on, the guest's pointer "
+            "is the host's mouse and a screen edge can never fire. Otherwise "
+            "press the pointer firmly against one edge and hold it there for a "
+            "couple of seconds rather than brushing past: GNOME Shell 51.rc "
+            "does activate on a real crossing, so a repeat timeout is worth "
+            "reporting rather than reading as 'not implemented yet'."
         )
     else:
         x, y = position

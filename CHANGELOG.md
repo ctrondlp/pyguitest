@@ -18,6 +18,39 @@ All notable changes to pyguitest are recorded here. The format follows
   documentation still resolves — the same quiet class of drift, and the reason
   a renamed heading is worth failing a gate over.
 
+- **`docs/validation.md` closed its own `inputcapture` question as "still
+  open", and `docs/input.md` called the backend "never live-validated" — both
+  were wrong by 2026-09-12.** The four earlier live attempts all pushed the
+  pointer across the screen edges, which on a VirtualBox guest is the one pair
+  *Mouse Integration* makes uncrossable: the guest's pointer is the host's
+  mouse, and once the host's own cursor leaves the VM window there is nothing
+  left to report, so the guest never sees an attempt to leave the screen and a
+  barrier there never fires. Nothing was wrong with the client on that pair —
+  it was not a reachable trigger — which is why the "Mutter never emits
+  `Activated`" reading those runs produced is now withdrawn for two independent
+  reasons rather than one. With Integration off (Host+I), the `inputcapture`
+  live-validation script reached `done` with an activation, and an independent
+  C client recorded `activation_id=1`, `barrier_id=3` and a `cursor_position`
+  lying on that armed line — so `Activated` names *which* line was crossed, not
+  only that one was. The C client also had two of its four barriers refused for
+  sitting inside the zone rather than along its outside boundary, at
+  `SetPointerBarriers` time rather than at the crossing — the spec requires a
+  barrier to sit at a zone's outside boundary and be fully contained within one,
+  and those two failed the first half. That matters for a multi-monitor session,
+  where a bounding box puts lines at no single zone's outside boundary; what
+  softens it is that a partial refusal never raises, because
+  `wait_for_pointer_activation()` only raises when *every* barrier was refused.
+  `docs/input.md`'s Mouse Integration note gains the second
+  consequence of that setting, and `docs/validation.md`'s "Not run live" list
+  is one entry shorter. Every other place that repeated the old reading is
+  corrected with it: `backends/inputcapture.py`'s module docstring now says
+  what was validated and when, `examples/_inputcapture_validate.py` no longer
+  opens by calling itself the first live check and no longer ends a timeout by
+  blaming the compositor for not triggering crossings at all — it points at
+  the uncrossable edge first — `examples/README.md` stops calling that script
+  unverified, and `tests/test_inputcapture.py`'s docstring records where the
+  live evidence lives.
+
 ## [0.9.0] — 2026-09-12
 
 ### Added
