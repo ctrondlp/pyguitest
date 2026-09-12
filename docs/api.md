@@ -162,6 +162,7 @@ Raise on failure with a message naming what was actually found, for use directly
 | `pointer_position()` | `POINTER_QUERY` | X11 | The global pointer position. Replaces GetMousePos. |
 | `set_window_title(window: Window, title: str)` | `WINDOW_TITLE_SET` | X11 | Replaces SetWindowName. Impersonation is possible under X11. |
 | `wait_for_pointer_activation(timeout: float \| None = None)` | `INPUT_CAPTURE` |  | Block for one real crossing of a screen edge, and return where. |
+| `wait_window_focus(window: Window, timeout: float \| None = None, interval: float = 0.1)` | `WINDOW_STATE` |  | Block until `window` holds keyboard focus, or timeout. |
 
 ## Forwarded to the backend
 
