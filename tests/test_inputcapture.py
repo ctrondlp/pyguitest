@@ -1,13 +1,13 @@
 """InputCaptureBackend tests against a stand-in libei.portal module.
 
 Not exercised against a real portal anywhere in this file, and never will
-be by a unit test: see InputCaptureSession's own docstring in python-libei
-for why -- verifying it needs a user to click through a real consent
-dialog and accept that their pointer will be diverted from their own
-desktop for the length of the test. This file proves InputCaptureBackend's
-own orchestration: negotiation, error translation, the barrier-perimeter
-arithmetic, and the release-before-anything-else ordering the module
-docstring promises.
+be by a unit test: verifying it needs a user to click through a real
+consent dialog and accept that their pointer will be diverted from their
+own desktop for the length of the test, so it was run live instead --
+2026-09-12, recorded in `docs/validation.md`. This file proves
+InputCaptureBackend's own orchestration: negotiation, error translation,
+the barrier-perimeter arithmetic, and the release-before-anything-else
+ordering the module docstring promises.
 """
 
 from __future__ import annotations

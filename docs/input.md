@@ -445,11 +445,15 @@ automatic `connect()` would let a caller who never asked for it divert
 their own input by surprise — which is exactly why the backend is opt-in
 and never auto-selected, the same rule `eiinput` and `portal` follow.
 
-**Never live-validated** — see `docs/validation.md`'s "Not run live"
-section. Verifying it needs a user who has deliberately accepted that
-their own input will be diverted, not merely someone who clicked Allow on
-a dialog; `examples/_inputcapture_validate.py` is written for exactly that
-person to run themselves.
+**Live-validated on 2026-09-12** — on GNOME Shell 51.rc/Wayland; see
+`docs/validation.md` for the run. `Activated` arrives and carries a
+`cursor_position`, so a timeout is no longer the outcome to expect. What has
+not changed is who can check it: verifying it needs a user who has
+deliberately accepted that their own input will be diverted, not merely
+someone who clicked Allow on a dialog, so
+`examples/_inputcapture_validate.py` is still written for that person to run
+themselves — and the Mouse Integration note below is part of making it work,
+not only part of injecting input.
 
 ## When injected input appears to do nothing
 
@@ -459,6 +463,15 @@ an absolute "VirtualBox USB Tablet" device, continuously overriding anything
 injected inside the guest — libei, uinput and ydotool alike. Symptoms are
 confusing: clicks land and hover fires, but the cursor never visibly moves.
 Turn it off with **Input → Mouse Integration** (Host+I).
+
+The same setting decides whether `wait_for_pointer_activation()` can fire at
+all. Its barriers run along the screen edges, and with Integration on the
+guest's pointer *is* the host's mouse: once the host's own cursor leaves the
+VM window there is nothing left to report, so the guest never sees an attempt
+to leave the screen and a barrier there has nothing to fire on. Push at an
+edge for as long as you like and nothing happens — the same symptom, from the
+same cause, as an injected event being overridden. The first live activation,
+on 2026-09-12, was made with Integration off.
 
 Two more checks worth running:
 

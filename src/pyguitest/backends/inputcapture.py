@@ -15,11 +15,16 @@ What is here is the translation into pyguitest's own error vocabulary and
 the one piece of business logic InputCaptureSession does not own --
 choosing where to put the pointer barriers.
 
-**Never live-tested.** See `InputCaptureSession`'s own docstring in
-python-libei for why: verifying this needs a user to click through the
-consent dialog and then accept that their pointer will be diverted away
-from their own desktop for the length of the test. Unit-tested against a
-fake backend only; see `tests/test_inputcapture.py`.
+**Live-validated 2026-09-12**, on GNOME Shell 51.rc/Wayland: the session
+negotiated, `wait_for_pointer_activation()` returned on a real edge
+crossing with a `cursor_position` the compositor supplied, and
+`release()`/`disable()`/`close()` all completed -- see `docs/validation.md`
+for that run and the independent C client that agreed with it. Chances to
+run it are still the scarce thing: verifying it needs a user to click
+through the consent dialog and then accept that their pointer will be
+diverted away from their own desktop for the length of the test, which is
+why it went unrun for as long as it did. Unit-tested against a fake backend
+as well; see `tests/test_inputcapture.py`.
 """
 
 from __future__ import annotations
@@ -143,12 +148,17 @@ class InputCaptureBackend(GUIBackend):
         Correct for the common case -- one zone, or several arranged as a
         simple rectangle -- and an approximation otherwise: the true outer
         boundary of a non-rectangular multi-monitor layout needs real
-        polygon-boundary math, which nothing here has had the chance to
-        verify against a real multi-monitor session (see the module
-        docstring on why). A bounding box still places a barrier the
-        pointer will cross on any edge movement in the common case; it can
-        place one a screen-width early past an L-shaped layout's inner
-        corner, which is flagged here rather than silently assumed away.
+        polygon-boundary math, which the live runs have not exercised
+        either -- both used a single 1920x1080 zone -- so a multi-monitor
+        session is still unverified, and is where the spec's placement rule
+        bites: a barrier must sit at the outside boundary of a zone and be
+        fully contained within one, and GNOME refused the two interior
+        lines of a four-barrier set for failing the first half, per
+        barrier, when the set was handed to `SetPointerBarriers`. A
+        bounding box still places a barrier the pointer will cross on any
+        edge movement in the common case; it can place one a screen-width
+        early past an L-shaped layout's inner corner, which is flagged here
+        rather than silently assumed away.
         """
         if not zones:
             return []

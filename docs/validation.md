@@ -1124,8 +1124,11 @@ over a genuine Gio connection — real D-Bus calls and a real
 against a real `dbus-daemon` and real PyGObject. That proves the plumbing
 between `PortalBackend` and a portal-shaped service. It proves nothing about
 the real daemon, GNOME's or KDE's backend implementation, or the dialog.
-- **`inputcapture`'s consent negotiation only** — see the dedicated section
-  below for the live activation attempts themselves, which are past this.
+- **`inputcapture` — this one has left the list**, as of 2026-09-12:
+  consent negotiation, the perimeter-barrier arithmetic and a real
+  `Activated` carrying a `cursor_position` have all been confirmed live; see
+  the dedicated section below for the attempts that could not work and the
+  two runs that did.
   A unit test already raised the real consent dialog by accident once
   during development: an early draft of a python-libei test omitted the
   "force the PyGObject import to fail" patch its sibling test already used,
@@ -1136,7 +1139,13 @@ the real daemon, GNOME's or KDE's backend implementation, or the dialog.
   able to hang a caller who did not know what they were starting, and why
   live-testing this deliberately, not by accident, mattered enough to do.
 
-## `inputcapture`: two live attempts, negotiation confirmed, activation still open
+## `inputcapture`: negotiation confirmed, activation reproduced live
+
+**The answer is at the end of this section: it works, live, twice, on
+2026-09-12.** The failed attempts come first because the reason none of them
+could produce an `Activated` is the useful part — they moved the pointer at
+the one pair of lines Mouse Integration makes uncrossable, so the client was
+never given a chance to be wrong.
 
 2026-09-08, GNOME Shell (Wayland), run by the user directly —
 `examples/_inputcapture_validate.py`, never by an agent session, for the
@@ -1157,8 +1166,12 @@ itself, which returned cleanly (`disable()` ran, no hang, no crash).
 timed out at the full 30s window: all four screen corners; a single edge
 (right side) under sustained pressure for several seconds rather than a
 quick touch; and a third repeat after the `failed_barriers` fix below
-landed, which raised no error — confirming every barrier really was
-accepted, not silently refused.
+landed, which raised no error. That is less than it was read as at the time:
+the check fires only when *every* barrier was refused, so a partial refusal
+passes through it silently — a real case rather than a hypothetical, since
+a barrier off the zone's boundary is refused outright, as the 2026-09-12
+runs below show. What those runs did establish is the useful half: at least
+one barrier really was standing, and the timeout was genuine.
 
 **One real bug found and fixed as a direct result**, after run 2, before
 run 3: `set_pointer_barriers()`'s `failed_barriers` return value — which
@@ -1194,11 +1207,71 @@ more either: it was later found blind on this box's own session bus even
 against a signal known to have fired, so "zero signal traffic" was never
 proof of anything happening (or not) on the bus in the first place. Fixed
 in python-libei (subscribes on the portal object now, filters the
-payload's session handle) — merged, not yet independently re-run live
-against a real compositor with the fix in place, so whether
-`wait_for_pointer_activation()` now actually returns on a real edge
-crossing here is still open. Treat the "Mutter never emits `Activated`"
-claim above as superseded by this, not as a second, independent finding.
+payload's session handle) — merged, and since re-run live with the fix in
+place: on 2026-09-12 `wait_for_pointer_activation()` returned on a real
+edge crossing, twice, in two different clients. So the question is closed
+rather than still open, and the "Mutter never emits `Activated`" claim above
+is superseded, as one finding corrected twice rather than as a second,
+independent one.
+
+**Activation, reproduced (2026-09-12).** The same machine and stack the
+attempts above used — GNOME Shell 51.rc on Wayland, `xdg-desktop-portal`
+1.22.1, one 1920x1080 zone — with two clients, run one after the other by
+the user directly. One thing about the gesture changed: Mouse Integration
+off (Host+I), then the pointer pushed off a screen edge and held there
+rather than crossed quickly.
+
+- **`examples/_inputcapture_validate.py` reached `done` with an
+  activation.** It negotiated, printed the zones the portal reported, armed
+  the four `_perimeter_barriers()` lines, and
+  `wait_for_pointer_activation()` returned: the script printed `ACTIVATED`
+  with a `cursor_position` the compositor had supplied. That answers the
+  last open item in this file — on this stack a real edge crossing *does*
+  produce `Activated`, the payload *does* carry a position, and the
+  subscription fix below is subscribed to something that is genuinely sent.
+  `Release`, `Disable` and `Close` all returned on the way out.
+- **An independent client agreed, in another language.** The same call
+  sequence was ported to a standalone C client in its own repository,
+  written so a report can be read without this package installed. It
+  recorded `activation_id=1`, `barrier_id=3` and
+  `cursor_position=(0.0, 37.1)`. `barrier_id=3` is the left line `x=0`
+  spanning `y=0..99`, and the reported position lies on that line and
+  inside its span, so the id, the position and the barrier that was armed
+  agree with one another: `Activated` names *which* line was crossed, not
+  only that one was. `Release` with that id was accepted, `Disable` and
+  `Close` ran, and the process exited 0.
+
+**Why the attempts above could not have produced one.** They pushed the
+pointer across the screen edges, which on this guest is the pair Mouse
+Integration makes uncrossable. The mechanism is the same one that overrides
+injected input: the guest's pointer is the host's mouse, and once the host's
+own cursor leaves the VM window there is nothing left to report, so the
+guest never sees an attempt to leave the screen and a barrier there has
+nothing to fire on. Nothing was wrong with the client on that pair — it was
+not a reachable trigger — and that is a second and stronger reason to treat
+the "Mutter never emits `Activated`" reading above as withdrawn.
+
+**What the same runs showed about which barriers stand.** The C client's
+default box is 100x100 at the origin, and two of its four lines are interior
+and out of spec. GNOME's backend refused exactly those two at
+`SetPointerBarriers` time, naming both ids in `failed_barriers`; the two
+lines that run along the screen's own edges were armed, and the activation
+came from one of them. So placement is enforced when barriers are *set*, not
+when one is crossed — and the spec is explicit about what placement means,
+which is what those two failed: *"Pointer barriers must be placed at the
+outside boundary of zones and must be fully contained within one zone."*
+Worth knowing before a multi-monitor run: a bounding box spanning several
+zones puts lines where no single zone's outside boundary is, so it is a
+shape this backend can ask for and be refused, and
+`wait_for_pointer_activation()` raises only when *every* barrier was
+refused, which leaves a partial refusal silent.
+
+**What this still does not cover.** One compositor, one screen size, one
+guest whose host pointer integration had to be switched off by hand, and a
+person driving a real mouse: no injected event was involved in the crossing,
+so what is confirmed is the trigger and the signal, not that the position
+returned is good for anything further. `eiinput` is a different backend and
+unaffected by any of this.
 
 ## Why the live runs mattered
 
