@@ -7,7 +7,44 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`Element.double_click()`**, so an element can be double-clicked without
+  going back to the session for it. An element could be clicked but not
+  double-clicked, and the reason was structural rather than an oversight:
+  AT-SPI publishes no double-click action to name, and two `click()` calls
+  are two accessibility-bus round trips — slower than any toolkit's
+  double-click interval — so the pair arrives as two single clicks and a
+  double-clicked folder icon simply never opens. The gesture therefore has
+  to come from the pointer, and the pointer belongs to the `Session`, never
+  to an element or a backend. So a session now binds itself into every
+  element it hands out, and elements made while walking the tree inherit it,
+  which is what keeps `gui.root_element().child(...)` — the locator shape a
+  recording emits — able to answer the call. `root_element()` and
+  `element_at()` needed binding explicitly, since both bypass `elements()`,
+  the single place the other eleven element factories funnel through. An
+  element taken straight from a backend still has no session to reach the
+  pointer through, and now raises `PyGUITestError` naming
+  `Session.double_click_element` rather than failing obscurely.
+  `docs/api.md` gains the row, since the `Element` protocol is rendered
+  there.
+
 ### Fixed
+
+- **`wait_for_process` reported nothing for a process that was running,
+  wherever the lookup went through `ps` rather than `/proc`, as soon as its
+  command line ran past 76 columns.** FreeBSD's `ps` truncates `args` to the
+  width it believes its output has, so `ps axo pid= -o args=` hands back
+  command lines cut mid-word — and a long one is the ordinary case, not the
+  exotic one, because an interpreter carries its own path and the whole
+  script name ahead of whatever a caller is searching for. Measured live: a
+  `python -c "..."` process with its token at the end of a command line far
+  longer than that width was reported as not running, which is the one
+  answer this method must not give by accident. The call is now
+  `ps axo pid= -o args= -ww`, the BSD spelling for "as many columns as it
+  takes", which procps honours as well; Linux reads `/proc` and never
+  reaches it. The test that found this keeps its token at the end of a long
+  command line on purpose, so it now covers the truncation.
 
 - **`docs/getting-started.md` promised "four ways" to act on a control and then
   listed five.** The count is gone rather than corrected: the table is the

@@ -24,7 +24,12 @@ import subprocess
 from typing import TYPE_CHECKING, Any
 
 from ..capabilities import Capability, CapabilitySet
-from ..errors import BackendUnavailable, CapabilityUnsupported, ElementNotActionable
+from ..errors import (
+    BackendUnavailable,
+    CapabilityUnsupported,
+    ElementNotActionable,
+    PyGUITestError,
+)
 from ..roles import Role, spellings
 from ..session import SessionType
 from .base import GUIBackend, Window
@@ -188,11 +193,21 @@ class Element:
     remains reachable for anything this does not cover.
     """
 
-    __slots__ = ("node",)
+    __slots__ = ("node", "_session")
 
-    def __init__(self, node):
-        """Wrap one dogtail node."""
+    def __init__(self, node, session=None):
+        """Wrap one dogtail node, and the session it was found through.
+
+        `session` is set by Session as it hands an element out, never by a
+        backend: a dogtail node knows nothing of the session above it, and
+        double_click needs one, since the pointer is the session's. Optional
+        so that an element taken straight from a backend is still
+        constructible -- it simply cannot double_click. Elements made while
+        walking the tree inherit it from the one they came from; see parent,
+        children and find.
+        """
         self.node = node
+        self._session = session
 
     @property
     def name(self):
@@ -208,12 +223,12 @@ class Element:
     def parent(self):
         """The containing element, or None at the root."""
         parent = self.node.parent
-        return Element(parent) if parent is not None else None
+        return Element(parent, self._session) if parent is not None else None
 
     @property
     def children(self):
         """The elements directly inside this one."""
-        return [Element(child) for child in self.node.children]
+        return [Element(child, self._session) for child in self.node.children]
 
     @property
     def visible(self):
@@ -341,6 +356,49 @@ class Element:
                 raise ElementNotActionable(self.role, self.name) from error
             self.node.doActionNamed(name)
 
+    def double_click(self):
+        """Double-click the element: locate it, then inject the gesture.
+
+        There is no accessible action to name here, the way `click` names
+        one. A double-click is a gesture on the pointer, and no toolkit
+        publishes one on the bus -- two `click()` calls are two bus round
+        trips, slower than any toolkit's double-click interval, so the pair
+        arrives as two single clicks and a double-clicked folder icon simply
+        does not open.
+
+        So the element stays the locator and the gesture falls back to the
+        pointer, where this package's real double_click lives. That happens
+        on the Session, which is the only thing holding a backend able to
+        move a pointer -- hence the delegation below, and hence `_session`.
+
+        Needs Capability.ELEMENT_GEOMETRY on top of what Session.double_click
+        needs, since the rectangle has to be read to find the point. Raises
+        PyGUITestError where `extents()` has no rectangle for this element,
+        which is what double_click_element raises, and where there is no
+        session to delegate to at all.
+        """
+        if self._session is None:
+            raise PyGUITestError(
+                f"{self.name!r} carries no session to double-click through -- "
+                "it came from a backend directly rather than from a Session. "
+                "Use gui.double_click_element(element), or take the element "
+                "from the session instead: gui.button(...), gui.element(...), "
+                "gui.root_element()"
+            )
+        self._session.double_click_element(self)
+
+    def _bind_session(self, session):
+        """Record which Session handed this element out.
+
+        Named rather than left as a plain attribute, so that Session can
+        offer it to any element type without knowing which backend built
+        it: an element with no such method simply never gets a session, and
+        double_click is the only thing that notices. Elements made while
+        walking the tree pass on whatever their source carried, which is
+        what keeps `gui.root_element().child(...)` able to double_click.
+        """
+        self._session = session
+
     def focus(self):
         """Give the element keyboard focus."""
         self.node.grabFocus()
@@ -376,7 +434,7 @@ class Element:
         from dogtail import predicate
 
         pred = predicate.GenericPredicate(roleName=role, name=name)
-        return [Element(n) for n in self.node.findChildren(pred)]
+        return [Element(n, self._session) for n in self.node.findChildren(pred)]
 
     def child(self, role=None, name=None):
         """Return the first descendant matching role and/or name, or None."""

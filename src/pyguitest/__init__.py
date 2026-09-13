@@ -259,7 +259,7 @@ def _process_cmdline(pid: int) -> str:
 def _process_table() -> dict[int, str]:
     """Every visible process, as pid -> command line.
 
-    From /proc where it works, `ps axo pid= -o args=` otherwise -- one
+    From /proc where it works, `ps axo pid= -o args= -ww` otherwise -- one
     call for the enumeration and the command lines together. Raises
     PyGUITestError when neither is available, rather than reporting an
     empty process table, which would read as "your process is not running".
@@ -269,10 +269,23 @@ def _process_table() -> dict[int, str]:
     argument, so the tidier `-o pid=,args=` asks it for a single pid column
     headed ",args=" and hands back empty command lines. Verified on FreeBSD
     15, where it made wait_for_process match nothing at all.
+
+    The `-ww` is not a style choice either. Without it, `ps` truncates
+    `args` to the width it believes the output has -- 76 columns for this
+    call on FreeBSD 15, where stdout is a pipe rather than a terminal --
+    cutting anything longer mid-word. Long is the ordinary case, not the
+    exotic one: an interpreter running a script carries its own path and the
+    whole script name ahead of whatever a caller searches for. Measured
+    live, where it made wait_for_process return None for a process that was
+    demonstrably running: the token being searched for sat at the end of the
+    line, and the end of the line was past where the cut fell. The doubled
+    flag is the BSD spelling for "as many columns as it takes", and procps
+    honours it too, so this is still one call covering every platform that
+    reaches it -- Linux takes the /proc route above and never gets here.
     """
     if _have_proc():
         return {pid: _process_cmdline(pid) for pid in _proc_pids()}
-    result = _ps("axo", "pid=", "-o", "args=")
+    result = _ps("axo", "pid=", "-o", "args=", "-ww")
     if result is None or result.returncode != 0:
         raise PyGUITestError(
             "cannot list processes: no readable /proc and no usable `ps`. "
@@ -551,7 +564,12 @@ class Session:
         self._after_event()
 
     def double_click_element(self, element: Element) -> None:
-        """Double-click a named element, which Element cannot do for itself.
+        """Double-click a named element. `element.double_click()` does the same.
+
+        The spelling for an element with no session behind it -- one taken
+        straight from a backend, where `element.double_click()` has nothing
+        to delegate to. Either reads the same to a caller; this one is also
+        what `element.double_click()` ends up calling.
 
         Two `element.click()` calls are not a double click: each is a
         separate round trip over the accessibility bus, which is slower
@@ -1328,7 +1346,7 @@ class Session:
         Session.find_window matches window titles. Returns the matched
         process's pid, or None on timeout.
 
-        Reads /proc where it is available and `ps axo pid= -o args=`
+        Reads /proc where it is available and `ps axo pid= -o args= -ww`
         otherwise, so this works on FreeBSD (no /proc unless linprocfs is
         mounted) and inside a container that hides it. Raises
         PyGUITestError if neither route works, rather than reporting an
@@ -1534,6 +1552,27 @@ class Session:
             )
         return match
 
+    def _bind(self, element: Element) -> Element:
+        """Give `element` a way back to this session, where it wants one.
+
+        `Element.double_click` has to reach the pointer, and the pointer
+        belongs to the session rather than to any element or backend -- an
+        AT-SPI element is a locator and nothing else. So every element
+        handed out here carries a reference back to this session, and
+        elements made while walking the tree inherit it from the one they
+        came from, which is what keeps `gui.root_element().child(...)` able
+        to double_click.
+
+        Offered rather than assigned: an element type with no room for the
+        reference keeps working for everything but double_click, which says
+        so itself, instead of this raising for a backend that never asked
+        for any of it.
+        """
+        binder = getattr(element, "_bind_session", None)
+        if binder is not None:
+            binder(self)
+        return element
+
     def elements(
         self,
         role: str | None = None,
@@ -1572,7 +1611,8 @@ class Session:
             )
             if value is not None
         }
-        return self.backend.find_elements(role=role, name=name, within=within, **extra)
+        found = self.backend.find_elements(role=role, name=name, within=within, **extra)
+        return [self._bind(element) for element in found]
 
     def element(
         self,
@@ -1992,7 +2032,7 @@ class Session:
 
     def root_element(self) -> Element:
         """The accessible-tree root. The replacement for the X11 window tree."""
-        return self.backend.root_element()
+        return self._bind(self.backend.root_element())
 
     def extents(self, element: Element) -> tuple[int, int, int, int] | None:
         """`element`'s (x, y, width, height) in screen coordinates.
@@ -2020,7 +2060,8 @@ class Session:
         coordinate into a locator should check that the element it got back
         really covers the point (extents() says).
         """
-        return self.backend.element_at(x, y)
+        found = self.backend.element_at(x, y)
+        return None if found is None else self._bind(found)
 
     def locate(
         self,

@@ -153,7 +153,7 @@ Raise on failure with a message naming what was actually found, for use directly
 | Call | Needs | | What it does |
 |------|-------|---|--------------|
 | `double_click(button: int = 1)` | `POINTER_BUTTON` |  | Press and release a mouse button twice, as one double-click. |
-| `double_click_element(element: Element)` | `ELEMENT_GEOMETRY`, `POINTER_BUTTON`, `POINTER_MOVE` |  | Double-click a named element, which Element cannot do for itself. |
+| `double_click_element(element: Element)` | `ELEMENT_GEOMETRY`, `POINTER_BUTTON`, `POINTER_MOVE` |  | Double-click a named element. `element.double_click()` does the same. |
 | `element_at(x: int, y: int)` | `ELEMENT_GEOMETRY` |  | The deepest accessible element at a screen coordinate, or None. |
 | `expect_checked(role: str \| None = None, name: str \| None = None, checked: bool, timeout: float = 5.0, within: Element \| None = None)` | `ELEMENT_TREE` |  | Fail unless the named checkbox, radio button or toggle is `checked`. |
 | `expect_element(role: str \| None = None, name: str \| None = None, within: Element \| None = None, timeout: float \| None = None, interval: float = 0.5)` | `ELEMENT_TREE` |  | wait_for_element, but raises ElementNotFound instead of returning None. |
@@ -202,6 +202,7 @@ One node of the accessible tree, as every backend agrees to expose it.
 | `click()` | Act on the element directly -- no coordinates, no injection. |
 | `description` | The element's longer accessible description, often a tooltip. |
 | `do_action(name: str)` | Perform a named accessible action, such as "click" or "activate". |
+| `double_click()` | Double-click the element: locate it, then inject the gesture. |
 | `enabled` | Whether the element accepts input, rather than being greyed out. |
 | `find(role: str \| None = None, name: str \| None = None)` | Search this element's descendants by role and/or name. |
 | `focus()` | Give the element keyboard focus. |
