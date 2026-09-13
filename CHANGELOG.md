@@ -7,6 +7,17 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **The README's usage example introduced window lookups as "Windows by title
+  regex."** That was the whole story when it was written; `find_window`,
+  `find_windows`, `wait_for_window` and `expect_window` have taken an `app_id`
+  since 0.7.0, which is the thing a reader reaches for when a title drifts with
+  its document — and the reason a recording replays as
+  `expect_window(app_id=...)` rather than on a title. The example now shows
+  both forms. Found while checking the recorder's claim that pyguitest could
+  only match a window by title, which the shipped API had outgrown.
+
 ## [0.10.0] — 2026-09-13
 
 ### Added
