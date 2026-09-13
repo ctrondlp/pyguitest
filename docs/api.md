@@ -80,8 +80,8 @@ The recommended way to drive an application: match on what a widget is and what 
 | Call | Needs | | What it does |
 |------|-------|---|--------------|
 | `windows()` | `WINDOW_LIST` |  | Return every open window. |
-| `find_window(title: str \| re.Pattern[str] \| None = None, app_id: str \| None = None)` | `WINDOW_LIST` |  | The topmost window matching `title` and/or `app_id`. |
-| `find_windows(title: str \| re.Pattern[str] \| None = None, app_id: str \| None = None)` | `WINDOW_LIST` |  | Every window matching `title` and/or `app_id` (exact). |
+| `find_window(title: str \| re.Pattern[str] \| None = None, app_id: str \| Sequence[str] \| None = None)` | `WINDOW_LIST` |  | The topmost window matching `title` and/or `app_id`. |
+| `find_windows(title: str \| re.Pattern[str] \| None = None, app_id: str \| Sequence[str] \| None = None)` | `WINDOW_LIST` |  | Every window matching `title` and/or `app_id` (exact). |
 | `active_window()` | `WINDOW_STATE` |  | The currently focused window, or None. |
 | `window_at(x: int, y: int, screen: int = 0)` | `WINDOW_AT_POINT` |  | The topmost window covering a screen coordinate, or None. |
 | `geometry(window: Window)` | `WINDOW_GEOMETRY` |  | `window`'s (x, y, width, height) in screen coordinates. |
@@ -129,7 +129,7 @@ Every `wait_*` call polls on an interval unless the backend can do better; `time
 | `wait_until(predicate: Callable[[], bool], timeout: float \| None = None, interval: float = 0.5)` |  |  | Block until predicate() is truthy, or timeout elapses. |
 | `wait_for_element(role: str \| None = None, name: str \| None = None, within: Element \| None = None, timeout: float \| None = None, interval: float = 0.5)` | `ELEMENT_TREE` |  | Block until an element matching role/name appears. |
 | `wait_until_gone(role: str \| None = None, name: str \| None = None, within: Element \| None = None, timeout: float \| None = None, interval: float = 0.5)` | `ELEMENT_TREE` |  | Block until no element matches role/name/within, or timeout. |
-| `wait_for_window(title: str \| re.Pattern[str] \| None = None, timeout: float \| None = None, interval: float = 0.5, app_id: str \| None = None)` | `WINDOW_LIST` — uses `WINDOW_EVENTS` if present |  | Block until a window matching `title` and/or `app_id`. |
+| `wait_for_window(title: str \| re.Pattern[str] \| None = None, timeout: float \| None = None, interval: float = 0.5, app_id: str \| Sequence[str] \| None = None)` | `WINDOW_LIST` — uses `WINDOW_EVENTS` if present |  | Block until a window matching `title` and/or `app_id`. |
 | `wait_window_close(window: Window, timeout: float \| None = None, interval: float = 0.5)` | `WINDOW_LIST` — uses `WINDOW_EVENTS` if present |  | Block until `window` (from find_window or wait_for_window) closes. |
 | `wait_for_process(name: str \| re.Pattern[str], timeout: float \| None = None, interval: float = 0.5)` |  |  | Block until a process matching `name` is running, or timeout. |
 | `wait_for_idle(pid: int, timeout: float \| None = None, interval: float = 0.2, samples: int = 3, cpu_threshold: float = 0.01)` |  |  | Block until `pid` looks CPU-idle, or timeout. |
@@ -159,7 +159,7 @@ Raise on failure with a message naming what was actually found, for use directly
 | `expect_element(role: str \| None = None, name: str \| None = None, within: Element \| None = None, timeout: float \| None = None, interval: float = 0.5)` | `ELEMENT_TREE` |  | wait_for_element, but raises ElementNotFound instead of returning None. |
 | `expect_showing(role: str \| None = None, name: str \| None = None, timeout: float = 5.0, within: Element \| None = None)` | `ELEMENT_TREE` |  | Fail unless the named element is present and visible. |
 | `expect_text(role: str \| None = None, name: str \| None = None, equals: str, timeout: float = 5.0, within: Element \| None = None)` | `ELEMENT_TREE` |  | Fail unless the named element reads `equals`. |
-| `expect_window(title: str \| re.Pattern[str] \| None = None, timeout: float \| None = None, app_id: str \| None = None)` | `WINDOW_LIST` — uses `WINDOW_EVENTS` if present |  | wait_for_window, but raises WindowNotFound instead of returning None. |
+| `expect_window(title: str \| re.Pattern[str] \| None = None, timeout: float \| None = None, app_id: str \| Sequence[str] \| None = None)` | `WINDOW_LIST` — uses `WINDOW_EVENTS` if present |  | wait_for_window, but raises WindowNotFound instead of returning None. |
 | `extents(element: Element)` | `ELEMENT_GEOMETRY` |  | `element`'s (x, y, width, height) in screen coordinates. |
 | `focus_window(window: Window, attempts: int = 5)` | `WINDOW_ACTIVATE`, `WINDOW_GEOMETRY`, `WINDOW_STATE` |  | Give `window` focus and confirm it actually took, best-effort. |
 | `is_button_pressed(button: int)` | `INPUT_STATE_QUERY` | X11 | Whether a mouse button is currently held down. |

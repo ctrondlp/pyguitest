@@ -29,6 +29,19 @@ All notable changes to pyguitest are recorded here. The format follows
   `docs/api.md` gains the row, since the `Element` protocol is rendered
   there.
 
+- **`find_window`, `find_windows`, `wait_for_window` and `expect_window`
+  take more than one `app_id`.** A window's application id is not the same
+  string on both protocols: it is the `xdg_toplevel` id on Wayland and the
+  class half of `WM_CLASS` on X11, and neither is derivable from the other —
+  `org.gnome.TextEditor` against `gnome-text-editor` — so a script replaying
+  a recording made on the other one could only name one spelling and fail, or
+  hand-roll a lookup per spelling. A sequence now matches a window whose app
+  id is any of the ids named (`app_id=("org.gnome.TextEditor",
+  "gnome-text-editor")`). Each entry stays an exact match — no substring or
+  case-folding cleverness, since the two spellings share nothing to fold — a
+  plain string behaves exactly as it did, and an empty sequence matches
+  nothing rather than everything, the reading `app_id=""` already had.
+
 ### Fixed
 
 - **`wait_for_process` reported nothing for a process that was running,

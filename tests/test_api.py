@@ -415,6 +415,34 @@ class TestWindowFinders(unittest.TestCase):
         gui.backend._windows.append(Window("c", gui.backend, title="Untitled"))
         self.assertEqual(gui.find_windows(app_id=""), [])
 
+    def test_app_id_may_be_several_ids_and_matches_any_of_them(self):
+        gui = session()
+        both = gui.find_windows(app_id=("firefox", "org.editor.Editor"))
+        self.assertEqual([w.title for w in both], ["Document - Editor", "Firefox"])
+        self.assertEqual(gui.find_window(app_id=("nope", "firefox")).title, "Firefox")
+
+    def test_the_other_protocols_spelling_is_what_finds_the_window(self):
+        # One window, two possible ids, neither derivable from the other:
+        # the class half of WM_CLASS here, the Wayland app id a replay on
+        # that protocol would report. Asking for the wrong one alone finds
+        # nothing; naming both finds it.
+        gui = session()
+        gui.backend._windows.append(
+            Window("c", gui.backend, title="Draft", app_id="gnome-text-editor")
+        )
+        self.assertEqual(gui.find_windows(app_id="org.gnome.TextEditor"), [])
+        found = gui.find_windows(app_id=("org.gnome.TextEditor", "gnome-text-editor"))
+        self.assertEqual([w.title for w in found], ["Draft"])
+
+    def test_an_empty_sequence_of_app_ids_matches_nothing(self):
+        # Same reading as app_id="": nothing named, nothing found -- rather
+        # than the filter being dropped and every window coming back.
+        self.assertEqual(session().find_windows(app_id=()), [])
+
+    def test_expect_window_takes_several_app_ids_too(self):
+        found = session().expect_window(app_id=("nope", "firefox"), timeout=0.1)
+        self.assertEqual(found.title, "Firefox")
+
 
 class TestWaitForWindow(unittest.TestCase):
     """The generic fallback: polling find_windows when there is no event feed.

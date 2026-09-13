@@ -191,6 +191,26 @@ def _title_pattern(title: str | re.Pattern[str]) -> re.Pattern[str]:
     return re.compile(re.escape(title))
 
 
+def _app_id_match(window_app_id: str, wanted: str | Sequence[str]) -> bool:
+    """Whether `window_app_id` is one of the ids `wanted` names.
+
+    One id or several. A window's application id is not the same string on
+    both protocols -- the `xdg_toplevel` id on Wayland, the class half of
+    `WM_CLASS` on X11 -- and neither is derivable from the other
+    ("org.gnome.TextEditor" against "gnome-text-editor"), so a script
+    replaying a recording made on the other one has to name both rather than
+    have a rule invented for it here. Each entry is still an exact match, not
+    a substring or a pattern, and an empty `window_app_id` matches nothing at
+    all -- that is "unset" rather than an identifier (see Window.app_id),
+    including when `wanted` names "" explicitly.
+    """
+    if not window_app_id:
+        return False
+    if isinstance(wanted, str):
+        return window_app_id == wanted
+    return window_app_id in wanted
+
+
 def _ps(*argv: str) -> subprocess.CompletedProcess[str] | None:
     """Run `ps`, returning its result, or None if it could not be run.
 
@@ -892,7 +912,10 @@ class Session:
         return self.backend.windows()
 
     def find_windows(
-        self, title: str | re.Pattern[str] | None = None, *, app_id: str | None = None
+        self,
+        title: str | re.Pattern[str] | None = None,
+        *,
+        app_id: str | Sequence[str] | None = None,
     ) -> list[Window]:
         """Every window matching `title` and/or `app_id` (exact).
 
@@ -902,9 +925,12 @@ class Session:
         with `.search()`), the same convention `elements`/`element` use for
         `name`/`description` -- over an identifier that can drift after a
         window opens (see Window's docstring). `app_id` is an exact match
-        against one that should not drift; it is empty on backends that
-        never fill it (see Window.app_id), and nothing matches `app_id=""`
-        on purpose, since that is "unset", not a real identifier.
+        against one that should not drift, and may be several ids where the
+        same window is named differently by each protocol (`app_id=("a",
+        "b")`) -- the one case a single id cannot cover: see _app_id_match. It
+        is empty on backends that never fill it (see Window.app_id), and
+        nothing matches `app_id=""` on purpose, since that is "unset", not a
+        real identifier; an empty sequence matches nothing for that reason.
         """
         if title is None and app_id is None:
             raise ValueError("find_windows needs title, app_id, or both")
@@ -913,11 +939,14 @@ class Session:
             w
             for w in self.backend.windows()
             if (pattern is None or pattern.search(w.title))
-            and (app_id is None or (w.app_id and w.app_id == app_id))
+            and (app_id is None or _app_id_match(w.app_id, app_id))
         ]
 
     def find_window(
-        self, title: str | re.Pattern[str] | None = None, *, app_id: str | None = None
+        self,
+        title: str | re.Pattern[str] | None = None,
+        *,
+        app_id: str | Sequence[str] | None = None,
     ) -> Window:
         """The topmost window matching `title` and/or `app_id`.
 
@@ -996,7 +1025,7 @@ class Session:
         timeout: float | None = None,
         interval: float = 0.5,
         *,
-        app_id: str | None = None,
+        app_id: str | Sequence[str] | None = None,
     ) -> Window | None:
         """Block until a window matching `title` and/or `app_id`.
 
@@ -1011,8 +1040,8 @@ class Session:
         which case it is in, or hand-roll the poll loop itself: checking for
         WINDOW_EVENTS and falling back to a fixed sleep was exactly the
         mistake examples/04_drive_an_editor.py made before this existed.
-        `app_id` always polls because the event-driven backends only ever
-        learned to match a title.
+        `app_id` always polls, one id or several, because the event-driven
+        backends only ever learned to match a title.
 
         `timeout` bounds the wait in seconds; None waits indefinitely.
         Returns the matched Window, or None if `timeout` elapses first --
@@ -1041,7 +1070,7 @@ class Session:
         title: str | re.Pattern[str] | None = None,
         timeout: float | None = None,
         *,
-        app_id: str | None = None,
+        app_id: str | Sequence[str] | None = None,
     ) -> Window:
         """wait_for_window, but raises WindowNotFound instead of returning None.
 
