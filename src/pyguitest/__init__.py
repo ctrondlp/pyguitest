@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import random
 import re
 import subprocess
 import tempfile
@@ -395,6 +396,85 @@ def _process_cpu_seconds(pid: int) -> tuple[float, float] | None:
     return _parse_cpu_time(result.stdout)
 
 
+def _natural_profile(fraction: float) -> float:
+    """Minimum-jerk progress: a speed ramp, as a distance fraction.
+
+    f(u) = 10u^3 - 15u^4 + 6u^5 -- the polynomial minimising the integral of
+    squared jerk (Flash & Hogan, 1985), which is the standard description of
+    one aimed movement. Its derivative is 30u^2(1-u)^2, so speed starts and
+    ends at zero and peaks in the middle: the smooth ramp up and back down
+    that a teleport has none of, and the thing a straight constant-velocity
+    line is missing however many points it is cut into.
+
+    Passed to _route as its `ease`, which is what turns it into velocity:
+    _walk spaces time evenly across the points it is given, so even spacing
+    in time over uneven spacing in distance *is* the speed profile.
+
+    Honest caveat: this profile is symmetric, and a real aim is not -- the
+    acceleration half is shorter than the deceleration half. Symmetric is
+    still the defensible default, being one published model rather than an
+    invented curve; the asymmetry that most shows is the overshoot-and-
+    correct at the end, which the `overshoot` argument models directly.
+    """
+    return 10 * fraction**3 - 15 * fraction**4 + 6 * fraction**5
+
+
+def _path_seed(
+    origin: tuple[int, int],
+    target: tuple[int, int],
+    via: Sequence[tuple[int, int]],
+) -> int:
+    """A seed built from the move itself.
+
+    So the same move always comes out the same -- a film take has to be
+    repeatable, and a test that fails one run in twenty is exactly the
+    flakiness glide()'s own docstring refuses as the price of looking
+    natural -- while a different move gets a shape of its own.
+
+    Folded from the integers directly rather than through hash(): int
+    hashing is stable between processes, but the moment a string or a bytes
+    object reaches a salted hash the value changes run to run, and this
+    depends on being reproducible.
+    """
+    seed = 0
+    for px, py in (origin, *via, target):
+        seed = (seed * 31 + px * 1000003 + py) & 0xFFFFFFFF
+    return seed
+
+
+def _dedupe(points: Sequence[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Drop consecutive repeats, keeping order -- and the last point.
+
+    Rounding a bowed path to whole pixels produces runs of one coordinate,
+    and a backend that pays per event should not be handed the same position
+    four times. Only *consecutive* duplicates go: a path that legitimately
+    returns to somewhere later keeps that point, and a repeated final point
+    collapses to itself rather than disappearing.
+    """
+    out: list[tuple[int, int]] = []
+    for point in points:
+        if not out or out[-1] != point:
+            out.append(point)
+    return out
+
+
+def _correction(past: tuple[int, int], end: tuple[int, int]) -> list[tuple[int, int]]:
+    """The slow half of an overshoot: from `past` back onto `end`.
+
+    Three points rather than one jump, because a single step back would be a
+    teleport at the end of a gesture that exists not to teleport, and a
+    compositor derives velocity from consecutive event timestamps. The last
+    of them is `end` exactly, so the caller never has to correct for it.
+    """
+    return [
+        (
+            round(past[0] + (end[0] - past[0]) * ratio),
+            round(past[1] + (end[1] - past[1]) * ratio),
+        )
+        for ratio in (0.6, 0.9, 1.0)
+    ]
+
+
 class Session:
     """A connected automation session.
 
@@ -730,6 +810,55 @@ class Session:
                 if remaining > 0:
                     time.sleep(remaining)
 
+    def _natural_leg(
+        self,
+        a: tuple[int, int],
+        b: tuple[int, int],
+        steps: int,
+        arc: float,
+        wobble: float,
+        rng: random.Random,
+    ) -> list[tuple[int, int]]:
+        """One leg of a natural path: bell-spaced, bowed, and drifting.
+
+        The straight points come from _route with the minimum-jerk profile
+        as its ease, which is where the speed ramp comes from -- see
+        _natural_profile.
+
+        The bow and the drift are then applied *perpendicular* to the leg,
+        never along it: displacing along the leg would change the speed the
+        profile has already decided. The bow is sin(pi * u), zero at both
+        ends, so an arch can never drag the path off its waypoints; the
+        drift is a slower seeded sine on top, which is the only unsteady
+        part and is what makes two moves of the same length differ.
+
+        Both amplitudes come from the seeded generator, one draw set per leg,
+        so every leg bows its own way and the whole path replays exactly.
+        """
+        straight = self._route(a, b, (), steps, _natural_profile)
+        length = math.dist(a, b)
+        if not length:
+            return straight
+        ux = (b[0] - a[0]) / length
+        uy = (b[1] - a[1]) / length
+        # Perpendicular to the leg, in screen coordinates.
+        across_x, across_y = -uy, ux
+        bow = rng.uniform(0.4, 1.0) * arc * length
+        drift = rng.uniform(0.5, 1.5) * wobble
+        phase = rng.uniform(0.0, 2 * math.pi)
+        path = []
+        for index, (x, y) in enumerate(straight, 1):
+            progress = index / steps
+            offset = bow * math.sin(math.pi * progress) + drift * math.sin(
+                phase + 2 * math.pi * progress
+            )
+            path.append((round(x + across_x * offset), round(y + across_y * offset)))
+        # Land on the waypoint. The bow is already zero here; the drift is
+        # not, and a leg that stopped short would put the next leg's arch in
+        # the wrong place -- and leave the last one short of the target.
+        path[-1] = (int(b[0]), int(b[1]))
+        return path
+
     def glide(
         self,
         x: int,
@@ -760,6 +889,10 @@ class Session:
         passed through rather than landed on exactly, since points are spaced
         by distance along the whole route.
 
+        move_mouse_naturally() is the deliberate exception to that: a shaped
+        path for a region that reacts to being crossed and for a take that has
+        to look performed, seeded so it still replays exactly.
+
         `duration` is wall-clock seconds and `rate` the points per second, so
         the two give `duration * rate` events; the default 120 Hz is in the
         range of a real mouse without flooding a backend that pays per event.
@@ -784,6 +917,181 @@ class Session:
         self._walk(
             self._route(self._origin(start), (x, y), via, steps, ease), duration, screen
         )
+        self._after_event()
+
+    def _check_natural(
+        self,
+        *,
+        duration: float | None,
+        pace: float,
+        rate: float,
+        arc: float,
+        wobble: float,
+        overshoot: float,
+        pause: float,
+        latency: float | None,
+    ) -> float:
+        """Check move_mouse_naturally's shaping arguments; resolve `latency`.
+
+        Split out rather than inlined so the ceiling ruff puts on complexity
+        is spent on the shaped path -- which is the part that has to be read
+        carefully -- instead of on eight range checks in a row, which is all
+        this is. Returns `latency` with None resolved to the session's
+        `event_delay`, so the caller cannot forget to.
+        """
+        if duration is not None and duration < 0:
+            raise ValueError(f"duration must not be negative, got {duration!r}")
+        if pace <= 0:
+            raise ValueError(f"pace must be positive, got {pace!r}")
+        if rate <= 0:
+            raise ValueError(f"rate must be positive, got {rate!r}")
+        if arc < 0:
+            raise ValueError(f"arc must not be negative, got {arc!r}")
+        if wobble < 0:
+            raise ValueError(f"wobble must not be negative, got {wobble!r}")
+        if overshoot < 0:
+            raise ValueError(f"overshoot must not be negative, got {overshoot!r}")
+        if pause < 0:
+            raise ValueError(f"pause must not be negative, got {pause!r}")
+        if latency is None:
+            latency = self.event_delay
+        if latency < 0:
+            raise ValueError(f"latency must not be negative, got {latency!r}")
+        return latency
+
+    def move_mouse_naturally(
+        self,
+        x: int,
+        y: int,
+        *,
+        duration: float | None = None,
+        pace: float = 700.0,
+        rate: float = 120.0,
+        via: Sequence[tuple[int, int]] = (),
+        start: tuple[int, int] | None = None,
+        screen: int = 0,
+        arc: float = 0.15,
+        wobble: float = 1.0,
+        overshoot: float = 0.04,
+        latency: float | None = None,
+        pause: float = 0.0,
+        seed: int | None = None,
+    ) -> None:
+        """Move the pointer the way a hand does, not the way a line does.
+
+        glide() is shaped like a machine on purpose -- straight legs, constant
+        velocity unless an `ease` says otherwise, and no wobble at all, its
+        own docstring calling the natural-looking alternative something that
+        "would only buy flakiness here". This method is the deliberate
+        exception, for the two cases where that reasoning does not hold:
+
+        * **A region that reacts to the pointer being over it.** Reveal-on-
+          hover, tooltips, enter/leave crossings and hot corners all fire on
+          the *path*, so how the pointer arrives is part of what is under
+          test rather than noise in it.
+        * **A take that has to look like a person did it** -- a desktop action
+          recorded for film, TV or a live demo, where a straight line at
+          constant speed reads as a script however good the click is.
+
+        What "like a hand" means here is four things, each a published
+        behaviour rather than a taste:
+
+        * a **speed ramp** -- minimum-jerk, accelerating out of the start and
+          decelerating into the target (see _natural_profile);
+        * an **arch** -- every leg bows perpendicular to itself, `arc` as a
+          fraction of that leg's length, so the path curves where a straight
+          line would corner;
+        * a **drift** -- `wobble` pixels of slow seeded sway across the path;
+        * an **overshoot and correction** -- `overshoot` as a fraction of the
+          last leg, which is the most recognisable part of a fast aim.
+
+        `via` are waypoints, as in glide(), with one difference: this lands on
+        each of them, where glide passes through at whatever distance-spacing
+        gives. An arch needs both of its ends known, so the bow is built per
+        leg and each leg finishes exactly on its endpoint. The final target is
+        exact for the same reason glide's is -- everything clicked afterwards
+        depends on it -- and `overshoot` reaches it by aiming the last leg
+        past it and correcting back, never by arriving and then leaving.
+
+        `duration` is wall-clock seconds; left as None it comes from the
+        distance and `pace` in pixels per second, clamped rather than scaling
+        linearly into absurdity on a long move. `rate` is events per second.
+        `latency` is the pause before the pointer starts moving, defaulting to
+        the session's own `event_delay` so one knob paces the whole script,
+        and `pause` inserts a single hesitation part-way through, which is
+        what breaks a long aim into two movements. `event_delay` is still
+        charged once at the end, as glide does, because _walk must not charge
+        it per point.
+
+        `seed` makes the whole path reproducible -- identical events for a
+        repeated take, and a test that cannot flake. Left as None it is
+        derived from the move itself (_path_seed), so the same move always
+        comes out the same while different moves differ. This is where a
+        natural-motion implementation has to be careful: unseeded randomness
+        would reintroduce exactly the flakiness glide() refuses, and make a
+        second take impossible to match.
+        """
+        latency = self._check_natural(
+            duration=duration,
+            pace=pace,
+            rate=rate,
+            arc=arc,
+            wobble=wobble,
+            overshoot=overshoot,
+            pause=pause,
+            latency=latency,
+        )
+
+        origin = self._origin(start)
+        target = (int(x), int(y))
+        corners = [origin, *((int(px), int(py)) for px, py in via), target]
+        legs = [math.dist(corners[i], corners[i + 1]) for i in range(len(corners) - 1)]
+        total = sum(legs)
+        if duration is None:
+            # Not linear in distance. A hand does take longer over a longer
+            # move, but nowhere near proportionally, and a 2000px sweep that
+            # took three seconds would be its own kind of tell.
+            duration = min(1.5, max(0.25, total / pace))
+        # Floors as glide's: one event between origin and target at least, and
+        # one per leg so no waypoint is skipped outright. Then shared out by
+        # length, so a long leg is not walked at a coarser resolution than a
+        # short one sharing the same gesture.
+        steps = max(2, len(via) + 1, round(duration * rate))
+        rng = random.Random(_path_seed(origin, target, via) if seed is None else seed)
+        shares = [max(1, round(steps * leg / total)) if total else 1 for leg in legs]
+
+        path: list[tuple[int, int]] = []
+        aimed_past: tuple[int, int] | None = None
+        for index, (a, b) in enumerate(zip(corners, corners[1:], strict=False)):
+            aim = b
+            if overshoot and index == len(legs) - 1 and legs[-1]:
+                # The last leg aims *past* the target and is then corrected
+                # onto it. That is what an overshoot is -- not a detour taken
+                # after arriving, which would read as the pointer touching
+                # the target and then leaving it again.
+                aim = (
+                    round(b[0] + (b[0] - a[0]) * overshoot),
+                    round(b[1] + (b[1] - a[1]) * overshoot),
+                )
+                aimed_past = aim if aim != b else None
+            path.extend(self._natural_leg(a, aim, shares[index], arc, wobble, rng))
+        if aimed_past is not None:
+            path.extend(_correction(aimed_past, target))
+        # The one point nothing may move.
+        path[-1] = target
+        path = _dedupe(path)
+
+        if latency:
+            time.sleep(latency)
+        if pause and len(path) > 2:
+            # A little past the middle of the movement, so the pointer is
+            # already under way when the hesitation lands.
+            split = max(1, min(len(path) - 1, round(len(path) * 0.6)))
+            self._walk(path[:split], duration * split / len(path), screen)
+            time.sleep(pause)
+            self._walk(path[split:], duration * (len(path) - split) / len(path), screen)
+        else:
+            self._walk(path, duration, screen)
         self._after_event()
 
     def drag(

@@ -7,6 +7,33 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`Session.move_mouse_naturally(x, y, via=…, …)`**, a pointer move whose
+  path is shaped rather than straight — and the reason it sits beside
+  `glide()` rather than inside it. `glide()`'s own docstring is deliberate
+  about this: its route is straight unless `via` names waypoints, and it
+  calls the natural-looking alternative "the randomised, natural-looking
+  wobble that bot-detection evasion goes in for. That would only buy
+  flakiness here". That reasoning still holds for what `glide()` is for, so
+  `glide()` is unchanged and now points at this instead. What changed is
+  that a case turned up where the path *is* the thing under test rather than
+  noise in it: a window region that reacts to the pointer being over it —
+  reveal-on-hover, tooltips, enter/leave crossings and hot corners all fire
+  on the way there rather than on arrival. Four published behaviours do the
+  shaping: a minimum-jerk speed ramp, an arch bowing each leg perpendicular
+  to itself, a few pixels of seeded drift, and an overshoot that runs past
+  the target before correcting onto it. `via` takes waypoints exactly as
+  `glide()` does, but lands on them where `glide()` passes through them,
+  because an arch needs both of its ends known. The target itself is exact,
+  since everything clicked afterwards depends on it. `duration`, `rate` and
+  the trailing `event_delay` follow the conventions already here; `latency`
+  is a new pause before the pointer starts, defaulting to the session's
+  `event_delay` so one knob still paces a script. Every path is seeded —
+  derived from the move itself unless `seed` is given — because unseeded
+  randomness here would buy back exactly the flakiness `glide()` refuses,
+  and would make a second run of the same move impossible to match.
+
 ### Fixed
 
 - **The README's usage example introduced window lookups as "Windows by title

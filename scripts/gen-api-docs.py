@@ -77,6 +77,7 @@ GROUPS: list[tuple[str, str, list[str]]] = [
         [
             "move_mouse",
             "glide",
+            "move_mouse_naturally",
             "click",
             "press_button",
             "release_button",

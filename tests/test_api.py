@@ -1,6 +1,7 @@
 """The user-facing convenience layer on Session."""
 
 import json
+import math
 import os
 import re
 import shutil
@@ -1321,6 +1322,157 @@ class TestProcessTableFallsBackToPs(unittest.TestCase):
         ):
             with self.assertRaises(pyguitest.PyGUITestError):
                 pyguitest._process_table()
+
+
+class _RecordingPath(GUIBackend):
+    """Every move_mouse call, in order, for the shaped-motion tests."""
+
+    name = "fake-path"
+
+    def __init__(self):
+        self.path = []
+
+    @property
+    def capabilities(self):
+        return CapabilitySet({Capability.POINTER_MOVE})
+
+    def move_mouse(self, x, y, screen=0):
+        self.path.append((x, y))
+
+
+class TestMoveMouseNaturally(unittest.TestCase):
+    """A shaped path -- and the same one every time, which is the point.
+
+    Asserted on the emitted coordinates rather than on wall-clock timing,
+    because all four shaping terms (ramp, arch, drift, overshoot) are
+    visible in the path itself. Timing is pinned separately, where the two
+    delays are.
+    """
+
+    def gui(self, **kwargs):
+        backend = _RecordingPath()
+        return pyguitest.Session(backend, pyguitest.detect(), **kwargs), backend
+
+    def test_it_ends_exactly_on_the_target(self):
+        # A pixel short here is a click on the wrong thing, so neither the
+        # arch nor the drift nor the overshoot may move this one point.
+        gui, backend = self.gui()
+        gui.move_mouse_naturally(400, 300, start=(0, 0))
+        self.assertEqual(backend.path[-1], (400, 300))
+        self.assertEqual(gui._pointer, (400, 300))
+
+    def test_it_arrives_as_a_stream_that_starts_near_the_origin(self):
+        gui, backend = self.gui()
+        gui.move_mouse_naturally(400, 300, start=(0, 0))
+        self.assertGreater(len(backend.path), 10)
+        self.assertLess(math.dist(backend.path[0], (0, 0)), 20)
+
+    def test_a_waypoint_is_landed_on(self):
+        # The deliberate difference from glide(), which passes through them.
+        gui, backend = self.gui()
+        gui.move_mouse_naturally(400, 0, via=[(200, 120)], start=(0, 0))
+        self.assertIn((200, 120), backend.path)
+        self.assertEqual(backend.path[-1], (400, 0))
+
+    def test_the_path_bows_off_the_straight_line(self):
+        gui, backend = self.gui()
+        gui.move_mouse_naturally(400, 0, start=(0, 0), arc=0.2, wobble=0.0)
+        self.assertTrue(any(abs(y) > 5 for _, y in backend.path))
+
+    def test_arc_zero_leaves_only_the_drift(self):
+        # The two lateral terms are separable, which is what lets them be
+        # argued about one at a time.
+        gui, backend = self.gui()
+        gui.move_mouse_naturally(400, 0, start=(0, 0), arc=0.0, wobble=6.0)
+        self.assertTrue(any(abs(y) > 1 for _, y in backend.path))
+
+    def test_an_overshoot_goes_past_the_target_and_returns_to_it(self):
+        gui, backend = self.gui()
+        gui.move_mouse_naturally(
+            400, 0, start=(0, 0), overshoot=0.2, arc=0.0, wobble=0.0
+        )
+        self.assertGreater(max(x for x, _ in backend.path), 400)
+        self.assertEqual(backend.path[-1], (400, 0))
+
+    def test_overshoot_zero_stops_on_the_target(self):
+        gui, backend = self.gui()
+        gui.move_mouse_naturally(400, 0, start=(0, 0), overshoot=0.0)
+        self.assertLessEqual(max(x for x, _ in backend.path), 400)
+
+    def test_the_same_move_replays_identically(self):
+        # The seeded default, and the reason it is seeded: a take has to be
+        # shootable twice and a test has to be trustworthy. Unseeded here
+        # would reintroduce exactly the flakiness glide() refuses.
+        paths = []
+        for _ in range(2):
+            gui, backend = self.gui()
+            gui.move_mouse_naturally(400, 300, start=(0, 0))
+            paths.append(backend.path)
+        self.assertEqual(paths[0], paths[1])
+
+    def test_a_given_seed_overrides_the_derived_one(self):
+        gui, backend = self.gui()
+        gui.move_mouse_naturally(400, 300, start=(0, 0), seed=7)
+        other, other_backend = self.gui()
+        other.move_mouse_naturally(400, 300, start=(0, 0), seed=7)
+        self.assertEqual(backend.path, other_backend.path)
+
+    def test_a_different_seed_gives_a_different_shape(self):
+        # Otherwise the default seed would be decorative and every move the
+        # same length would look like the same move.
+        gui, backend = self.gui()
+        gui.move_mouse_naturally(400, 300, start=(0, 0), seed=1)
+        other, other_backend = self.gui()
+        other.move_mouse_naturally(400, 300, start=(0, 0), seed=2)
+        self.assertNotEqual(backend.path, other_backend.path)
+
+    def test_event_count_follows_duration_and_rate(self):
+        gui, backend = self.gui()
+        gui.move_mouse_naturally(400, 300, start=(0, 0), duration=1.0, rate=100)
+        # Within the slack of per-leg rounding, the overshoot correction and
+        # colinear points collapsing in _dedupe.
+        self.assertAlmostEqual(len(backend.path), 100, delta=12)
+
+    def test_a_longer_move_takes_longer_without_scaling_linearly(self):
+        gui, backend = self.gui()
+        gui.move_mouse_naturally(60, 0, start=(0, 0))
+        short = len(backend.path)
+        other, other_backend = self.gui()
+        other.move_mouse_naturally(2400, 0, start=(0, 0))
+        self.assertGreater(len(other_backend.path), short)
+        self.assertLess(len(other_backend.path), short * 10)
+
+    def test_latency_defaults_to_the_sessions_event_delay(self):
+        gui, _ = self.gui(event_delay=0.05)
+        with mock.patch("pyguitest.time.sleep") as slept:
+            gui.move_mouse_naturally(400, 300, start=(0, 0))
+        # The reaction pause is the first sleep of all; the walk's own
+        # schedule follows it, and its trailing event_delay comes last.
+        self.assertEqual(slept.call_args_list[0].args, (0.05,))
+
+    def test_latency_can_be_overridden(self):
+        gui, _ = self.gui(event_delay=0.05)
+        with mock.patch("pyguitest.time.sleep") as slept:
+            gui.move_mouse_naturally(400, 300, start=(0, 0), latency=0.2)
+        self.assertEqual(slept.call_args_list[0].args, (0.2,))
+
+    def test_pause_adds_one_hesitation(self):
+        gui, _ = self.gui()
+        with mock.patch("pyguitest.time.sleep") as slept:
+            gui.move_mouse_naturally(400, 300, start=(0, 0), pause=0.3, latency=0.0)
+        self.assertIn(0.3, [call.args[0] for call in slept.call_args_list])
+
+    def test_it_refuses_a_negative_duration(self):
+        gui, _ = self.gui()
+        with self.assertRaises(ValueError):
+            gui.move_mouse_naturally(400, 300, start=(0, 0), duration=-1)
+
+    def test_it_refuses_a_non_positive_rate_or_pace(self):
+        gui, _ = self.gui()
+        for kwargs in ({"rate": 0}, {"pace": 0}, {"rate": -1}):
+            with self.subTest(**kwargs):
+                with self.assertRaises(ValueError):
+                    gui.move_mouse_naturally(400, 300, start=(0, 0), **kwargs)
 
 
 class TestProcHelpers(unittest.TestCase):
