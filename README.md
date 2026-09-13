@@ -1,11 +1,26 @@
 # pyguitest
 
-Cross-platform GUI automation for Python — supporting Wayland, X11, and
-XWayland.
+**Python GUI automation for real desktop applications.**
 
-pyguitest is the Python successor to
-[X11::GUITest](https://metacpan.org/pod/X11::GUITest), providing a single API
-for mouse, keyboard, windows, screenshots, and accessible UI elements.
+Automate and test Linux and BSD desktop applications from Python — even when
+the application has no automation API.
+
+Pyguitest provides one Python API for mouse, keyboard, window, screenshot, and
+accessible UI automation across Wayland, X11, and XWayland. It is the Python
+successor to [X11::GUITest](https://metacpan.org/pod/X11::GUITest).
+
+Use it to:
+
+- 🧪 Build reliable desktop GUI tests
+- 🤖 Automate repetitive desktop tasks
+- 🖱️ Control applications like a real user
+- 🔎 Find and interact with accessible UI elements
+- 📸 Capture screenshots and failure artifacts
+- 🧰 Diagnose desktop automation environments
+- 🔄 Modernize applications and test suites built around older X11 automation
+  tools
+- 🎬 Choreograph screen action for film, TV and stage — a character's typing
+  and clicking, landing on cue
 
 **Status:** every capability implemented across all backends, covering
 **every X11::GUITest export**. Much of it has been run against real GNOME
