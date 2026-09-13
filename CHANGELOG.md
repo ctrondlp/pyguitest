@@ -7,6 +7,8 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.10.1] — 2026-09-13
+
 ### Added
 
 - **`Session.move_mouse_naturally(x, y, via=…, …)`**, a pointer move whose
@@ -1947,7 +1949,8 @@ First public release.
 - A `pyguitest` command-line entry point.
 - PEP 561 type information (`py.typed`); no hard runtime dependencies.
 
-[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/ctrondlp/pyguitest/compare/v0.10.0...v0.10.1
 [0.5.0]: https://github.com/ctrondlp/pyguitest/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/ctrondlp/pyguitest/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ctrondlp/pyguitest/compare/v0.2.0...v0.3.0
