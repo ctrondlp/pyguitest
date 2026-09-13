@@ -1,3 +1,10 @@
+"""One session made of several backends, and the routing between them.
+
+Which member serves a capability two of them could, which one keeps a window
+handle it minted, and what capture does when the pieces providing it are two
+different members.
+"""
+
 import unittest
 import warnings
 

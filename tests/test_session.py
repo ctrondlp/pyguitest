@@ -1,3 +1,10 @@
+"""Session detection: display server, compositor, desktop, and input prefs.
+
+Everything downstream is decided from this, so the tests build the
+environment they mean to describe rather than reading the one they run on --
+the suite has to give the same answers on an X11 box and a Wayland one.
+"""
+
 import dataclasses
 import subprocess
 import unittest

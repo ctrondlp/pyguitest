@@ -98,6 +98,7 @@ class TransferCounter:
         backend._on_transfer = self
 
     def __call__(self, *args, **kwargs):
+        """Count one transfer, then hand it to the wrapped handler."""
         self.count += 1
         return self._inner(*args, **kwargs)
 
@@ -120,6 +121,7 @@ class SelectionReadLog:
         backend._call_for_fd = self
 
     def __call__(self, method, signature, args):
+        """Record which MIME type was asked for, and which one answered."""
         if method != "SelectionRead":
             return self._inner(method, signature, args)
         self.attempted.append(args[-1])

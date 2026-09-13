@@ -1,3 +1,10 @@
+"""Backend selection, composition, and what a composed session exposes.
+
+Priority decides who wins a contested capability, composition decides which
+member answers a given call, and the tier-six operations are checked for
+what they raise when nothing in the session can serve them.
+"""
+
 import dataclasses
 import json
 import unittest

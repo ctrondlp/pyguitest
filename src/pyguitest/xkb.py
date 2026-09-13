@@ -3,9 +3,11 @@
 This is what makes libei typing keymap-*safe*, and the reason `eiinput.py`
 can offer TEXT_ENTRY at all. Every other injection path in this package
 either sends abstract keysyms and lets the compositor resolve them
-(`portal.py`) or sends raw scancodes from a hardcoded US-layout table and
-hopes (`uinput.py`, ydotool) -- the latter types the wrong characters on a
-non-US layout, silently.
+(`portal.py`) or sends raw scancodes from a US-layout table -- which is
+`uinput.py` here, and ydotool outside this package. Scancodes carry no
+layout, so both are keymap-dependent in the same way: the constraint
+`uinput.py` already warns about for TEXT_ENTRY, rather than a flaw in either
+one, and the reason a non-US layout silently gets different characters.
 
 libei takes neither. `ei_device_keyboard_key()` wants a keycode, and the
 compositor applies *the keymap it handed the client* to interpret it. So
@@ -183,12 +185,15 @@ class Keymap:
             self._context = None
 
     def __del__(self):
+        """Release the keymap when it is collected; close() does the work."""
         self.close()
 
     def __enter__(self):
+        """Return self; nothing needs building before the first lookup."""
         return self
 
     def __exit__(self, *exc):
+        """Close the keymap on the way out, and never swallow the exception."""
         self.close()
         return False
 
@@ -279,6 +284,7 @@ class Keymap:
         return self._lib.xkb_keysym_from_name(name.encode("utf-8"), 0)
 
     def _resolve(self, keysym):
+        """The keycode and modifiers for a keysym, or None if it cannot be pressed."""
         entry = self._by_keysym.get(keysym)
         if entry is None:
             return None

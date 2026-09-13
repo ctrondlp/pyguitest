@@ -451,6 +451,7 @@ class Element:
         return False
 
     def __repr__(self):
+        """The role and name, which is how an element is written in a script."""
         return f"Element({self.role!r}, {self.name!r})"
 
 
@@ -492,6 +493,7 @@ def _build_predicate(role, name, enabled, visible, description, predicate):
     wanted = None if role is None else spellings(role)
 
     def matches(node):
+        """Whether this node has the wanted role and matches the other filters."""
         # Compared against every spelling of the role, not just the one asked
         # for: at-spi2 renamed push button to button without changing the
         # integer, so the string a desktop reports depends on its version.

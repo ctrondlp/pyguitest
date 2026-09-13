@@ -132,6 +132,7 @@ class MotionProbe:
     """
 
     def __init__(self):
+        """Open a display and make a full-screen probe window to read events on."""
         from Xlib import X
         from Xlib import display as xdisplay
 
@@ -148,11 +149,13 @@ class MotionProbe:
         )
 
     def _event_mask(self):
+        """The events the probe needs: motion, and the two crossings."""
         return (
             self.X.PointerMotionMask | self.X.EnterWindowMask | self.X.LeaveWindowMask
         )
 
     def _make(self, x, y, width, height):
+        """Create, map and raise one override-redirect window at x, y."""
         window = self.screen.root.create_window(
             x,
             y,
@@ -185,10 +188,12 @@ class MotionProbe:
         self.window = self._make(x, y, width, height)
 
     def reset(self):
+        """Forget the events collected so far, for the next phase."""
         self.motions.clear()
         self.enters = self.leaves = 0
 
     def _read(self):
+        """Read events until stopped, recording motion and both crossings."""
         while not self._stop.is_set():
             while self.display.pending_events():
                 event = self.display.next_event()
@@ -202,11 +207,13 @@ class MotionProbe:
             time.sleep(0.002)
 
     def __enter__(self):
+        """Start the reader thread and return self."""
         self._thread = threading.Thread(target=self._read, daemon=True)
         self._thread.start()
         return self
 
     def __exit__(self, *exc):
+        """Stop the reader, destroy the window, and close the display."""
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=2.0)

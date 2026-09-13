@@ -153,6 +153,7 @@ class KWinEventsBackend(GUIBackend):
         acquired = []
 
         def on_bus_acquired(connection, _name):
+            """Export the Notify method on the bus name just acquired."""
             self._connection = connection
             self._registration_id = connection.register_object(
                 _OBJECT_PATH, interface_info, self._handle_method_call, None, None
@@ -160,6 +161,7 @@ class KWinEventsBackend(GUIBackend):
             acquired.append(True)
 
         def on_name_lost(_connection, _name):
+            """Record that the bus name could not be taken."""
             acquired.append(False)
 
         self._own_name_id = self._Gio.bus_own_name(
@@ -233,6 +235,7 @@ class KWinEventsBackend(GUIBackend):
             ) from exc
 
         def unload():
+            """Unload the KWin script, best-effort: the session is going anyway."""
             # Best-effort: the session is going away either way.
             with contextlib.suppress(Exception):
                 kwin.call_sync(
@@ -296,6 +299,7 @@ class KWinEventsBackend(GUIBackend):
                     timed_out = False
 
                     def on_timeout():
+                        """Stop the loop and record that it timed out."""
                         nonlocal timed_out
                         timed_out = True
                         loop.quit()
@@ -373,7 +377,9 @@ class _Closer:
     """Wraps a zero-argument cleanup callable as a `.close()`-able object."""
 
     def __init__(self, on_close):
+        """Remember the callable to run on close."""
         self._on_close = on_close
 
     def close(self):
+        """Run the wrapped cleanup callable."""
         self._on_close()

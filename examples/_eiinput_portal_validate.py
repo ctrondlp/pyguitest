@@ -243,6 +243,7 @@ class Editor:
     """
 
     def __init__(self, gui, command: list[str]) -> None:
+        """Remember the session and the command; nothing is started yet."""
         self.gui = gui
         self.command = command
         self.app = None
@@ -252,6 +253,7 @@ class Editor:
         self.document: pathlib.Path | None = None
 
     def __enter__(self) -> Editor:
+        """Start the editor on a file of this run's own, and wait for its window."""
         # An empty file of this run's own, so the editor has a document to
         # open and therefore nothing to restore. See EDITOR.
         handle, path = tempfile.mkstemp(prefix="pyguitest-eiinput-", suffix=".txt")
@@ -272,6 +274,7 @@ class Editor:
         return self
 
     def __exit__(self, *_exc: object) -> bool:
+        """Stop the process, delete the throwaway document, keep the exception."""
         # The process half is `Application.stop()` -- terminate, bounded
         # wait, kill past it. This class only still exists for what that
         # does not cover: the throwaway document, and the window and frame
@@ -559,6 +562,7 @@ def inject(input_gui, elements_gui, editor: Editor) -> None:
 
 
 def main() -> int:
+    """Run the whole check; the exit status is the verdict."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "--editor", default=EDITOR, help=f"editor command (default: {EDITOR!r})"
@@ -676,6 +680,7 @@ def main() -> int:
 
 
 def summary() -> int:
+    """Print the pass/fail summary and return the exit status."""
     failed = [label for ok, label in results if not ok]
     print(f"\n== summary ==\n  {len(results) - len(failed)}/{len(results)} passed")
     for label in failed:

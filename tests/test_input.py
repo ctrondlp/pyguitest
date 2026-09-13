@@ -1,3 +1,10 @@
+"""CLI input adapters: the command built, and what a failure does.
+
+Command construction is checked closely because the tools disagree about
+flags, and the rest is honesty: an adapter that cannot do something has to
+say so rather than appear to have tried.
+"""
+
 import unittest
 import warnings
 

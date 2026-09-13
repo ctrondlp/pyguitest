@@ -190,6 +190,7 @@ class Capability(Enum):
     )
 
     def __str__(self) -> str:
+        """The member's name, which is how a capability is written elsewhere."""
         return self.name
 
 
@@ -228,6 +229,7 @@ class CapabilitySet(frozenset):
         return "\n".join(lines)
 
     def __repr__(self) -> str:
+        """The member names, in a form that can be pasted back into code."""
         return f"CapabilitySet({{{', '.join(sorted(c.name for c in self))}}})"
 
     # frozenset's set operators return a plain frozenset even on a
@@ -235,13 +237,17 @@ class CapabilitySet(frozenset):
     # methods this class exists for. Re-wrapped here so
     # `gui.capabilities | {...}` stays a CapabilitySet.
     def __or__(self, other) -> CapabilitySet:
+        """Union, re-wrapped so the result keeps .report() and .missing."""
         return CapabilitySet(super().__or__(other))
 
     def __and__(self, other) -> CapabilitySet:
+        """Intersection, re-wrapped for the same reason as __or__."""
         return CapabilitySet(super().__and__(other))
 
     def __sub__(self, other) -> CapabilitySet:
+        """Difference, re-wrapped for the same reason as __or__."""
         return CapabilitySet(super().__sub__(other))
 
     def __xor__(self, other) -> CapabilitySet:
+        """Symmetric difference, re-wrapped for the same reason as __or__."""
         return CapabilitySet(super().__xor__(other))

@@ -1,5 +1,9 @@
 # pyguitest
 
+[![CI](https://github.com/ctrondlp/pyguitest/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ctrondlp/pyguitest/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/pyguitest)](https://pypi.org/project/pyguitest/)
+[![License](https://img.shields.io/pypi/l/pyguitest)](https://github.com/ctrondlp/pyguitest/blob/main/LICENSE)
+
 **Python GUI automation for real desktop applications.**
 
 Automate and test Linux and BSD desktop applications from Python — even when
@@ -38,6 +42,35 @@ minutes from nothing to a working script. [docs/recipes.md](docs/recipes.md)
 answers "how do I…", and [docs/troubleshooting.md](docs/troubleshooting.md)
 answers "why didn't that work".
 
+## What pyguitest is for
+
+One Python API for driving an application that has no automation API of its
+own — a desktop program somebody else wrote, which you cannot add a test hook
+to. It works at the accessibility layer first, so a button is found by its
+role and name rather than by where it happens to be drawn, and falls back to
+coordinates only where a toolkit publishes nothing. That is the reason
+`gui.supports()` exists: the API does not promise everything works
+everywhere, it tells you what this session can do.
+
+That shape decides what it is good at and what it is not:
+
+- **Good at** applications with no API of their own, tests that have to
+  survive a redesign or a theme change, and working out why something is not
+  being found on a desktop you do not control.
+- **Not a test framework.** It is a library: no pytest plugin, no fixtures,
+  no runner. Use whatever you already use, and it will fit underneath it.
+- **Not for browsers or mobile.** Web pages have WebDriver and Playwright,
+  phones have their own tooling. This drives desktop windows on Linux and the
+  BSDs, and has no Windows or macOS backend.
+- **Not the first choice where the application can help.** If a program ships
+  a command line, a documented API or an in-app test hook, driving that is
+  faster, more stable, and says what the test means instead of what it
+  clicked. A toolkit's own test support is closer to the application than
+  this can be.
+- **Not a recorder.** [pyguitest-recorder][recorder] is a separate package
+  that writes pyguitest scripts from a recorded session, and pyguitest does
+  not depend on it.
+
 ## Install
 
 Requires Python 3.10 or newer.
@@ -74,6 +107,29 @@ picture — a per-backend requirements matrix, the distribution package table,
 and how capture chooses a path — see [docs/install.md](docs/install.md).
 Injecting input has its own setup (`/dev/uinput` permissions, the `ydotool`
 daemon, libei, portal consent): [docs/input.md](docs/input.md).
+
+## What works where
+
+Which backend serves which part of a session. This is the shape of the
+answer, not a promise about your machine: what a session actually assembled
+is what `connect()` reports, what `backend.providers()` lists, and what
+`pyguitest doctor` prints.
+
+| Session | Pointer and keys | Elements | Windows | Screenshots |
+|---|---|---|---|---|
+| X11, XWayland | `x11` (python-xlib), or a CLI tool | AT-SPI via `atspi` | X11 itself | `x11` encodes the PNG itself, so no tool is needed |
+| GNOME | a CLI tool, `uinput`, or libei (`eiinput`) | AT-SPI via `atspi` | `gnomeshell` with the extension, otherwise AT-SPI | `gnome-screenshot`, the Screenshot portal, or the extension |
+| KDE Plasma | a CLI tool, `uinput`, or libei (`eiinput`) | AT-SPI via `atspi`, once toolkit accessibility is switched on | `kdotool` | `spectacle` |
+| sway, Hyprland, niri | a CLI tool, `uinput`, or libei (`eiinput`) | AT-SPI via `atspi` | their own sockets, standard library only | `grim` |
+| Any desktop with a portal | the RemoteDesktop portal (`portal`) | — | — | the Screenshot portal (`portalcapture`) |
+| Unattended CI | `x11` under Xvfb, or a headless session | AT-SPI, where a bus is running | `gnomeshell` on a headless GNOME | `x11` |
+
+Two things the table cannot say. Whether an application publishes anything to
+AT-SPI is up to the application, and [testable-guis.md][testable-guis] is
+about that side of it. And which of these paths has actually been run against
+a real desktop is in [docs/validation.md](docs/validation.md) — that is the
+file to read before trusting any row here, and it is written to be read that
+way.
 
 ## Usage
 

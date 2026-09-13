@@ -104,6 +104,7 @@ class Screen:
         return (self.width, self.height)
 
     def __repr__(self) -> str:
+        """Index, size, and the scale or name when they are worth showing."""
         return (
             f"Screen({self.index}, {self.width}x{self.height}"
             f"{f'@{self.scale}x' if self.scale != 1.0 else ''}"
@@ -220,6 +221,7 @@ class Window:
         return hash((id(identity_scope(self.backend)), self.handle))
 
     def __repr__(self) -> str:
+        """The title, plus app_id and pid when they are known."""
         bits = [repr(self.title)]
         if self.app_id:
             bits.append(f"app_id={self.app_id!r}")
@@ -586,13 +588,16 @@ class GUIBackend(ABC):
         """Release compositor connections, portal sessions, virtual devices."""
 
     def __enter__(self: _Backend) -> _Backend:
+        """Return self; there is nothing to open."""
         return self
 
     def __exit__(self, *exc: object) -> Literal[False]:
+        """Close on the way out, and never swallow the exception."""
         self.close()
         return False
 
     def __repr__(self) -> str:
+        """The backend's name and how many capabilities it provides."""
         return f"<{type(self).__name__} {self.name!r} caps={len(self.capabilities)}>"
 
     # -- screens (T2) ------------------------------------------------------
