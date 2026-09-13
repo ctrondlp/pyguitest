@@ -1344,3 +1344,63 @@ answer, and a test asserting on it fails somewhere else entirely, or passes
 for the wrong reason. Treat a tier-6 reading under XWayland as trustworthy
 only when you know an X client is under the pointer or holding focus; on a
 real X11 session none of this applies.
+
+## Run live: `move_mouse_naturally()`, on a private Xvfb
+
+**2026-09-13, `examples/_natural_motion_validate.py`, 7/7** — Xvfb on `:99`,
+1920x1080x24, with the `x11` backend forced, since XTest needs no permissions
+and no daemon and so runs where `uinput`/`ydotool` cannot. Until this run the
+method was the one part of the package with no live evidence behind it: every
+claim about the *shape* of its path was checked only by unit tests asserting
+on the coordinates it emits, and a unit test can show that a path is curved
+without showing that a display server delivers it as many events, in order,
+where promised, at the speed a bell profile claims.
+
+What the server actually delivered, read from an override-redirect X window
+the script owns on its own connection — so these are deliveries, not
+intentions:
+
+- **76 motion events over the 0.6s run, and the last one is `(1400, 700)`
+  exactly — 0.0px off the target.** The count says it arrives as a stream; the
+  exactness says it still lands. Everything clicked afterwards depends on the
+  second, and rounding is exactly how a curved path would break it.
+- **The arch is real: 171.8px off the straight line** between the endpoints,
+  against **0.5px for a straight `glide()`** over those same endpoints. The
+  control is what makes the first number mean anything — on its own, "171.8px
+  off" could just be a moving target.
+- **The speed ramp is bell-shaped, from the server's own timestamps: 1132 px/s
+  over the first third, 2729 in the middle, 1118 over the last.** About 2.4x
+  at the peak and slow at both ends, which is the claim `_natural_profile`
+  makes and the one thing only timestamps can check.
+- **The hover case behaves as designed.** With the probe shrunk to the right
+  half of the screen and the pointer starting outside it, a shaped move inward
+  produced **1 Enter, then 16 motion events inside, then 1 Leave** — the
+  sequence a reveal-on-hover region depends on.
+
+One incidental result, recorded because it is the property the seeded default
+exists for: **the geometry was identical across two completely different
+display servers.** The first run drove a real GNOME XWayland session, the
+second a bare Xvfb, and both produced the same 76 events, the same 171.8px
+arch and the same exact landing — while the *timing* bands differed by a few
+percent, as wall-clock delivery does and as a seed deliberately does not
+touch. That is the repeatable-take guarantee measured rather than argued.
+
+The first of those two runs was not meant to be live. It was started to check
+the script's own setup path, found a `DISPLAY`, and drove the developer's real
+pointer for one move. Nothing was clicked and nothing was typed, but it is
+recorded here because a validation script that can reach a real desktop by
+accident is a thing worth knowing about, and the fix is the same one the
+number above came from: give it a private display rather than inheriting one.
+
+**What this does not cover.** The probe is a raw X window, so it proves the
+server delivered the path and that a client sees Enter/Motion/Leave around a
+boundary. It does **not** exercise a toolkit's own hover logic — a GTK
+tooltip, a Qt reveal, a hot corner in a compositor all sit above the events
+measured here, and none of them was run. And this is X11/XTest only: nothing
+here says how a shaped path reads when it arrives through `uinput`, `ydotool`
+or libei, which are the paths a native Wayland session would actually use.
+
+The third check the previous version of this section proposed — a capture at
+two points along a long move — is still not done, for a reason worth stating:
+a screenshot does not reliably contain the pointer at all, so it was the
+weakest of the three to begin with.

@@ -58,6 +58,7 @@ The recommended way to drive an application: match on what a widget is and what 
 |------|-------|---|--------------|
 | `move_mouse(x: int, y: int, screen: int = 0)` | `POINTER_MOVE` |  | Move the pointer to an absolute position. |
 | `glide(x: int, y: int, duration: float = 0.2, rate: float = 120.0, via: Sequence[tuple[int, int]] = (), start: tuple[int, int] \| None = None, ease: Callable[[float], float] \| None = None, screen: int = 0)` | `POINTER_MOVE` — uses `POINTER_QUERY` if present |  | Move the pointer to (x, y) as a stream of events, not a jump. |
+| `move_mouse_naturally(x: int, y: int, duration: float \| None = None, pace: float = 700.0, rate: float = 120.0, via: Sequence[tuple[int, int]] = (), start: tuple[int, int] \| None = None, screen: int = 0, arc: float = 0.15, wobble: float = 1.0, overshoot: float = 0.04, latency: float \| None = None, pause: float = 0.0, seed: int \| None = None)` | `POINTER_MOVE` — uses `POINTER_QUERY` if present |  | Move the pointer the way a hand does, not the way a line does. |
 | `click(button: int = 1)` | `POINTER_BUTTON` |  | Press and release a mouse button. Replaces ClickMouseButton. |
 | `press_button(button: int)` | `POINTER_BUTTON` |  | Press a mouse button. 1 is left, 2 middle, 3 right. |
 | `release_button(button: int)` | `POINTER_BUTTON` |  | Release a mouse button. |
