@@ -12,11 +12,13 @@ import types
 import unittest
 from unittest import mock
 
+import pyguitest
 from pyguitest.capabilities import Capability
 from pyguitest.errors import (
     BackendUnavailable,
     CapabilityUnsupported,
     ElementNotActionable,
+    PyGUITestError,
 )
 from pyguitest.roles import Role, spellings
 from pyguitest.session import SessionType, detect
@@ -801,6 +803,60 @@ class TestElementGeometry(AtspiTestCase):
         with self.assertRaises(CapabilityUnsupported) as ctx:
             gui.element_at(20, 30)
         self.assertIn("where it is on screen", str(ctx.exception))
+
+
+class TestElementDoubleClick(AtspiTestCase):
+    """An element reaches the pointer through the session that found it.
+
+    double_click cannot be an accessible action -- no toolkit publishes one
+    -- so the gesture has to fall back to the pointer, and the pointer is
+    the Session's. That makes the back-reference from element to session the
+    thing worth pinning: whether elements carry it, whether walking the tree
+    keeps it, and what happens when there is none.
+    """
+
+    def session(self, session_type=SessionType.X11):
+        import dataclasses
+
+        env = detect({"DISPLAY": ":0", "XDG_SESSION_TYPE": "x11"})
+        env = dataclasses.replace(env, session_type=session_type)
+        return pyguitest.Session(self.atspi.AtspiBackend(env), env)
+
+    def test_an_element_a_session_found_carries_that_session(self):
+        gui = self.session()
+        self.assertIs(gui.button("OK")._session, gui)
+
+    def test_the_tree_root_is_bound_too(self):
+        # root_element() bypasses elements(), so it has to bind as well --
+        # otherwise an element reached through it looks exactly like a
+        # bound one and fails only once double_click is called.
+        gui = self.session()
+        self.assertIs(gui.root_element()._session, gui)
+
+    def test_an_element_found_through_another_inherits_the_session(self):
+        # The locator form the recorder emits: a child of root_element().
+        gui = self.session()
+        child = gui.root_element().child(role=Role.PUSH_BUTTON, name="OK")
+        self.assertEqual(child.name, "OK")
+        self.assertIs(child._session, gui)
+
+    def test_double_click_delegates_to_the_session(self):
+        gui = self.session()
+        element = gui.button("OK")
+        with mock.patch.object(pyguitest.Session, "double_click_element") as sent:
+            element.double_click()
+        sent.assert_called_once_with(element)
+
+    def test_an_element_taken_from_the_backend_says_what_to_do_instead(self):
+        # A backend does not know which Session is above it, so this element
+        # has nowhere to delegate to. Doing nothing would be the one
+        # unacceptable answer.
+        element = self.backend().find_elements(name="OK")[0]
+        with self.assertRaises(PyGUITestError) as caught:
+            element.double_click()
+        message = str(caught.exception)
+        self.assertIn("no session", message)
+        self.assertIn("double_click_element", message)
 
 
 if __name__ == "__main__":

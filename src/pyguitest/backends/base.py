@@ -362,6 +362,25 @@ class Element(Protocol):
         """Act on the element directly -- no coordinates, no injection."""
         ...
 
+    def double_click(self) -> None:
+        """Double-click the element: locate it, then inject the gesture.
+
+        Not an accessible action, the way click is. `click` names an action
+        the toolkit publishes and lets the toolkit perform it; a
+        double-click is a gesture on the pointer, and no toolkit publishes
+        one on the bus -- two `click()` calls are two round trips, slower
+        than any toolkit's double-click interval, so the pair arrives as two
+        single clicks. So the element stays the locator and the gesture
+        falls back to the pointer, which needs the pointer capabilities on
+        top of Capability.ELEMENT_GEOMETRY.
+
+        An element a Session handed out answers this. One taken straight
+        from a backend has no session to reach the pointer through, and says
+        so rather than doing nothing; Session.double_click_element is the
+        same call spelled for that case.
+        """
+        ...
+
     def focus(self) -> None:
         """Give the element keyboard focus."""
         ...

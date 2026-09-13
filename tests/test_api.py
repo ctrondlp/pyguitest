@@ -73,6 +73,14 @@ class FakeElement:
     def choose(self, option):
         self.chosen = option
 
+    def _bind_session(self, session):
+        """Mirror atspi.Element: record the session that handed this out."""
+        self._session = session
+
+    def double_click(self):
+        """Mirror atspi.Element: the session owns the gesture, not the element."""
+        self._session.double_click_element(self)
+
 
 class FakeBackend(GUIBackend):
     name = "fake"
@@ -929,9 +937,9 @@ class TestWaitForFile(unittest.TestCase):
 
 class TestWaitForProcess(unittest.TestCase):
     def test_finds_a_running_process_by_cmdline(self):
-        # Two things here are deliberate, and this test taught both the hard
-        # way -- it failed with "31880 != 32032", having matched somebody
-        # else's process:
+        # Three things here are deliberate, and this test taught each the
+        # hard way -- it failed with "31880 != 32032", having matched
+        # somebody else's process, and it later found nothing at all:
         #
         #   * The pattern is unique to this run. Searching for "sleep"
         #     searches the whole process table for a word that any machine
@@ -940,6 +948,10 @@ class TestWaitForProcess(unittest.TestCase):
         #   * The process outlives the search rather than racing it. The
         #     original slept for 0.3s and allowed 1s to be found in, which
         #     is a bet that the machine schedules both promptly.
+        #   * The token sits at the *end* of a command line that runs past
+        #     76 columns, and that is what caught `ps` truncating `args`:
+        #     the token was the part cut off, so a process that was running
+        #     matched nothing. Do not shorten this line to make it fit.
         # Python rather than `sh -c "sleep 30 # token"`: a shell given a
         # single command execs it, which replaces argv and takes the token
         # with it, leaving nothing to search for.
@@ -1162,6 +1174,47 @@ class TestDoubleClickElement(unittest.TestCase):
             gui.double_click_element(element)
 
 
+class TestElementDoubleClick(unittest.TestCase):
+    """`element.double_click()` is double_click_element, reached from the element.
+
+    The gesture itself lives in Session.double_click_element, so what is
+    worth pinning here is the two halves of getting to it: that a session
+    binds the elements it hands out, and that the method on the element is
+    that same call rather than a second implementation of it.
+    """
+
+    def test_the_session_binds_every_element_it_hands_out(self):
+        gui = session()
+        for element in (
+            gui.button("OK"),
+            gui.element(role=Role.PUSH_BUTTON),
+            gui.elements(role=Role.ENTRY)[0],
+        ):
+            with self.subTest(element=element):
+                self.assertIs(element._session, gui)
+
+    def test_a_bound_element_double_clicks_through_its_session(self):
+        element = FakeElement(Role.PUSH_BUTTON, "OK")
+        backend = _RecordingPointerAndExtents({"OK": (10, 20, 30, 40)})
+        gui = pyguitest.Session(backend, pyguitest.detect())
+        gui._bind(element)
+        element.double_click()
+        self.assertEqual(backend.moved_to, [(25, 40)])
+        self.assertEqual(
+            backend.events,
+            [("press", 1), ("release", 1), ("press", 1), ("release", 1)],
+        )
+
+    def test_an_element_type_with_no_room_for_a_session_still_works(self):
+        # _bind offers the back-reference rather than demanding it, so a
+        # backend whose elements cannot carry one does not start raising
+        # out of elements() -- only double_click is unavailable there, and
+        # that method says so itself.
+        gui = session()
+        plain = object()
+        self.assertIs(gui._bind(plain), plain)
+
+
 class TestProcessTableFallsBackToPs(unittest.TestCase):
     """FreeBSD has no /proc unless linprocfs is mounted; ps is the way in."""
 
@@ -1177,8 +1230,10 @@ class TestProcessTableFallsBackToPs(unittest.TestCase):
         self.assertEqual(table[42], "sleep 30")
         # Two `-o` flags, not "pid=,args=": FreeBSD's ps reads everything
         # after `=` as the header for the last keyword, collapsing that to
-        # one pid column with empty command lines.
-        self.assertEqual(ran.call_args.args, ("axo", "pid=", "-o", "args="))
+        # one pid column with empty command lines. The `-ww` lifts ps's
+        # default width cap, without which a long command line comes back
+        # cut short -- see test_finds_a_running_process_by_cmdline.
+        self.assertEqual(ran.call_args.args, ("axo", "pid=", "-o", "args=", "-ww"))
 
     def test_no_proc_and_no_ps_raises_rather_than_reporting_nothing(self):
         # An empty table would read as "your process is not running", which
