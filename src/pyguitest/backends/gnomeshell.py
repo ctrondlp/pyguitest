@@ -356,6 +356,7 @@ class GnomeShellBackend(GUIBackend):
         queue: list = []
 
         def on_signal(_conn, _sender, _path, _iface, _signal, params, *_args):
+            """Queue one WindowEvent and stop the loop, if it is running."""
             queue.append(params.unpack())
             if loop.is_running():
                 loop.quit()
@@ -377,6 +378,7 @@ class GnomeShellBackend(GUIBackend):
                     timed_out = False
 
                     def on_timeout():
+                        """Stop the loop and record that it timed out."""
                         nonlocal timed_out
                         timed_out = True
                         loop.quit()

@@ -58,6 +58,7 @@ def read_clipboard(app, timeout):
     state = {"done": False, "attempts": 0, "last": ""}
 
     def finish(line):
+        """Print the answer and quit, once; later attempts are ignored."""
         if state["done"]:
             return
         state["done"] = True
@@ -65,6 +66,7 @@ def read_clipboard(app, timeout):
         app.quit()
 
     def finished(source, result):
+        """Handle one read: remember a failure, or finish with the text."""
         try:
             text = source.read_text_finish(result)
         except GLib.Error as error:
@@ -79,6 +81,7 @@ def read_clipboard(app, timeout):
         finish(f"CLIPBOARD {text!r}")
 
     def attempt():
+        """Try one read, warning once that a silent clipboard wants focus."""
         if state["done"]:
             return GLib.SOURCE_REMOVE
         state["attempts"] += 1

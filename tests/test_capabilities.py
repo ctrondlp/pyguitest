@@ -1,3 +1,9 @@
+"""The capability enum, and the set operations callers run on it.
+
+`.report()`, `.missing`, `.by_tier()`, and the set operators that would
+otherwise hand back a plain frozenset and drop those three methods.
+"""
+
 import unittest
 
 from pyguitest.capabilities import Capability, CapabilitySet, Tier

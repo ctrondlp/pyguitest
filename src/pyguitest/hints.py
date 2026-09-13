@@ -146,6 +146,7 @@ class Hint:
         self.packages = packages
 
     def __repr__(self) -> str:
+        """The component this hint is about, which is what identifies it."""
         return f"Hint({self.component!r})"
 
 
@@ -213,6 +214,7 @@ def hints_for(
     installer = family.get("install")
 
     def command(component: str) -> str | None:
+        """The install command for a component, or None if this family has none."""
         packages = family.get(component)
         return f"{installer} {packages}" if installer and packages else None
 

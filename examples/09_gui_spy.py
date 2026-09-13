@@ -95,6 +95,7 @@ _SUGAR = {
 
 
 def _contains(geometry, x, y):
+    """Whether (x, y) is inside the (x, y, width, height) geometry."""
     gx, gy, gw, gh = geometry
     return gx <= x < gx + gw and gy <= y < gy + gh
 

@@ -1,3 +1,10 @@
+"""Tool discovery and ranking: what is found, and which tool wins.
+
+The per-desktop constraints are most of it. A tool that only works under
+wlroots, or only under X11, has to be excluded where it does not apply, and
+one that needs a real X server has to be excluded rather than fail obscurely.
+"""
+
 import subprocess
 import unittest
 from unittest import mock

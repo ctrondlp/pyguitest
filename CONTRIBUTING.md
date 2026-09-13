@@ -170,6 +170,38 @@ the metadata, and every
 script in `examples/` must appear in `examples/README.md`. Adding a tool or an
 extra without documenting it fails the suite.
 
+## Writing about other projects
+
+The case for pyguitest is never made by making another tool look bad. That
+covers the docs, docstrings, commit messages, issues, and anything written
+elsewhere about the package.
+
+It is not only manners. The people already using those tools are the most
+likely readers of this one — they are already automating desktops — and the
+comparison is usually wrong besides: most of what looks like another tool's
+shortcoming is a property of the layer it works at. Typing through uinput and
+through ydotool is keymap-dependent because scancodes carry no layout, a
+constraint this package's own uinput backend shares and `uinput.py` says so.
+
+Four habits cover nearly every case:
+
+- **Compare layers and jobs, not products.** "Naming a button beats naming
+  its coordinates" says what is needed, and names nobody.
+- **Attribute a limitation to the platform.** Most of them are.
+- **State the constraint, drop the adverb.** "Typed characters follow the
+  active layout", rather than "types the wrong characters".
+- **Name another tool to build a bridge** — the dogtail adapter, the
+  X11::GUITest migration table, upstream libei — not to rank it.
+
+Where another project is a genuine alternative, say which situations it
+suits. A reader already served by it will work that out anyway; working it
+out here costs nothing and buys credibility for everything around it.
+
+*Legacy*, *deprecated* and *abandoned* are for software whose own maintainers
+have used those words first. X11::GUITest is the Perl module this API was
+audited against, and `pyguitest migrate` exists to carry its scripts across —
+an ancestor, not a punchline.
+
 ## Where things live
 
 The annotated file tree is in

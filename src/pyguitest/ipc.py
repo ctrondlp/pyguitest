@@ -81,9 +81,11 @@ class SwaySocket:
         self._sock.close()
 
     def __enter__(self):
+        """Return self; the socket is connected already."""
         return self
 
     def __exit__(self, *exc):
+        """Close the socket on the way out, and never swallow the exception."""
         self.close()
         return False
 

@@ -1,3 +1,9 @@
+"""The migration scanner: what it finds in a Perl source, and what it reports.
+
+Each call gets a tier, and the exit status is what a port can be gated on in
+CI -- so both the report and the status are checked, not only the text.
+"""
+
 import contextlib
 import io
 import tempfile

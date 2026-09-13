@@ -586,6 +586,7 @@ class Session:
         """
 
         def launch() -> subprocess.Popen[Any]:
+            """Start the command, built fresh so restart() repeats it exactly."""
             # Built fresh on every call rather than closing over a mutated
             # dict, so restart() runs the same command the same way instead
             # of inheriting whatever the first launch left behind.
@@ -1368,6 +1369,7 @@ class Session:
             return self.backend.wait_for_window(_title_pattern(title).pattern, timeout)
 
         def topmost_match() -> Window | None:
+            """The last of the matching windows, which is the topmost one."""
             found = self.find_windows(title, app_id=app_id)
             return found[-1] if found else None
 
@@ -1504,6 +1506,7 @@ class Session:
             return not self.is_window_open(window)
 
         def closed() -> bool | None:
+            """True once the window is gone, None while it is still there."""
             return True if not self.is_window_open(window) else None
 
         return bool(self._poll_until(closed, timeout, interval))
@@ -1544,6 +1547,7 @@ class Session:
         """
 
         def first_match() -> Element | None:
+            """The first element matching the filters, or None."""
             found = self.elements(role=role, name=name, within=within)
             return found[0] if found else None
 
@@ -1566,6 +1570,7 @@ class Session:
         """
 
         def gone() -> bool | None:
+            """True once nothing matches any more, None while something does."""
             found = self.elements(role=role, name=name, within=within)
             return True if not found else None
 
@@ -1696,6 +1701,7 @@ class Session:
         pattern = re.compile(name) if isinstance(name, str) else name
 
         def first_match() -> int | None:
+            """The pid of the first process whose command line matches."""
             for pid, cmdline in _process_table().items():
                 if pattern.search(cmdline):
                     return pid
@@ -2051,6 +2057,7 @@ class Session:
         """
 
         def is_focused_and_matches(e: Element) -> bool:
+            """Whether the element has focus and satisfies the caller's predicate."""
             return e.focused and (predicate is None or predicate(e))
 
         found = self.elements(
@@ -2495,6 +2502,12 @@ class Session:
     # -- dynamic delegation ------------------------------------------------
 
     def __getattr__(self, attr: str) -> Any:
+        """Delegate to the backend: its own extras, which have no capability.
+
+        Only reached once normal lookup has failed, so an attribute that
+        lands here and is not on the live backend is unsupported or a typo,
+        and raises a plain AttributeError rather than CapabilityUnsupported.
+        """
         # What is left once the two sections above are: a backend's own
         # extras with no Capability behind them at all, and so no
         # Session-level spelling possible -- PortalBackend.restore_token is
@@ -2525,13 +2538,16 @@ class Session:
         self.backend.close()
 
     def __enter__(self) -> Session:
+        """Return self; the session is already connected."""
         return self
 
     def __exit__(self, *exc: object) -> Literal[False]:
+        """Close the backend on the way out, and never swallow the exception."""
         self.close()
         return False
 
     def __repr__(self) -> str:
+        """The backend, the session type, and how many capabilities it has."""
         return (
             f"<Session backend={self.backend.name!r} "
             f"session={self.environment.session_type.value} "
@@ -2606,6 +2622,7 @@ class _CaptureOnFailure:
         return os.path.join(directory, filename)
 
     def _write_json(self, path: str, data: object) -> str:
+        """Write `data` as indented JSON and return the path it went to."""
         with open(path, "w") as handle:
             json.dump(data, handle, indent=2)
         return path
@@ -2630,6 +2647,7 @@ class _CaptureOnFailure:
             setattr(failure_object, f"{attr}_error", failure)
 
     def __enter__(self) -> _CaptureOnFailure:
+        """Return self; nothing is captured unless the block fails."""
         return self
 
     def __exit__(
@@ -2638,6 +2656,7 @@ class _CaptureOnFailure:
         exception: BaseException | None,
         traceback: TracebackType | None,
     ) -> Literal[False]:
+        """Attach the artifacts to the exception, then let it propagate."""
         if exception is None:
             return False
         failure_object: Any = exception

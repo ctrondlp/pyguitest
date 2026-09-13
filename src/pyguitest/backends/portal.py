@@ -587,6 +587,7 @@ class PortalBackend(GUIBackend):
     # -- pointer -----------------------------------------------------------
 
     def _notify_button(self, button, state):
+        """Notify the portal of a pointer button press or release."""
         try:
             code = _BUTTONS[button]
         except KeyError:
@@ -842,6 +843,7 @@ class PortalBackend(GUIBackend):
     # -- keyboard ----------------------------------------------------------
 
     def _notify_keysym(self, keysym, state):
+        """Notify the portal of a keysym press or release."""
         self._call(
             "NotifyKeyboardKeysym",
             "(oa{sv}iu)",

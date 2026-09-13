@@ -112,9 +112,11 @@ class Application:
         return self
 
     def __enter__(self) -> Application:
+        """Return self; the process already exists by the time this runs."""
         return self
 
     def __exit__(self, *_exc: object) -> Literal[False]:
+        """Stop the application on the way out, and never swallow the error."""
         # Literal[False], matching Session.__exit__: a plain `bool` lets a
         # type checker read this as "may return True", i.e. a context
         # manager that swallows the exception it was cleaning up after.
@@ -176,6 +178,11 @@ class Application:
         self.process.send_signal(signal)
 
     def __getattr__(self, attr: str) -> Any:
+        """Delegate anything unnamed to the running process.
+
+        That is how `communicate`, `args`, and whatever a future Python adds
+        to Popen stay reachable without mirroring the whole surface here.
+        """
         # Whatever the section above does not name -- `communicate`, the
         # `args` attribute, anything a future Python adds. Reads `process`
         # through object.__getattribute__ for the reason Session documents:
@@ -190,5 +197,6 @@ class Application:
         return getattr(process, attr)
 
     def __repr__(self) -> str:
+        """The command, its pid, and whether it is still running."""
         state = "running" if self.is_running() else f"exited {self.returncode}"
         return f"<Application {self.command!r} pid={self.pid} {state}>"

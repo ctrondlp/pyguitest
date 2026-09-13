@@ -186,12 +186,14 @@ def request(
     timed_out = False
 
     def on_response(_conn, _sender, _path, _iface, _signal, params, *_):
+        """Record the first reply and quit the loop; later replies are ignored."""
         if result:  # both subscriptions may fire; first reply wins
             return
         result["code"], result["results"] = params.unpack()
         loop.quit()
 
     def on_timeout():
+        """Stop the loop and record that it timed out rather than finished."""
         # Recorded rather than inferred from an empty `result` afterwards: a
         # Response carrying no results is legitimate (SelectDevices answers
         # with an empty dict), so "did this end because it timed out" has to
@@ -202,6 +204,7 @@ def request(
         return False  # one-shot; GLib drops the source when this is False
 
     def subscribe(path):
+        """Subscribe to Response on one path, keeping the handle alive."""
         subscriptions.append(
             connection.signal_subscribe(
                 BUS_NAME,

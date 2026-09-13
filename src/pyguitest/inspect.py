@@ -110,6 +110,7 @@ def _label(node, top_level):
 
 
 def _format_node(node, prefix, is_last, top_level=False):
+    """One node and its subtree, as the lines of a tree drawing."""
     connector = "└── " if is_last else "├── "
     lines = [prefix + connector + _label(node, top_level)]
     extension = "    " if is_last else "│   "

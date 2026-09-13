@@ -584,6 +584,7 @@ class LibeiBackend(GUIBackend):
         self._connection = None
 
     def _button_code(self, button):
+        """The libei button code for `button`, or ValueError if unsupported."""
         try:
             return _BUTTONS[button]
         except KeyError:

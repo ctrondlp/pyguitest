@@ -1,3 +1,10 @@
+"""The X11::GUITest migration table, and whether its replacements exist.
+
+The table is data, so it can name a replacement that has since been renamed
+or removed -- these tests are what make that claim checkable against the
+real API rather than trusted to have been right when it was written.
+"""
+
 import inspect
 import unittest
 
