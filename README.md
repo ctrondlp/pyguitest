@@ -72,8 +72,10 @@ gui.button("OK").click()
 gui.text_field("Name").set_text("Ada Lovelace")
 gui.dropdown("Country").choose("Norway")
 
-# Windows by title regex.
+# Windows by title -- a plain string, or a compiled regex -- and by app id,
+# which is what survives a title that changes with the document.
 window = gui.find_window("Editor")
+editor = gui.find_window(app_id="org.gnome.TextEditor")
 
 # Coordinates and keys, when you need them.
 gui.move_mouse(500, 300)
