@@ -271,17 +271,20 @@ def _process_table() -> dict[int, str]:
     15, where it made wait_for_process match nothing at all.
 
     The `-ww` is not a style choice either. Without it, `ps` truncates
-    `args` to the width it believes the output has -- 76 columns for this
-    call on FreeBSD 15, where stdout is a pipe rather than a terminal --
-    cutting anything longer mid-word. Long is the ordinary case, not the
-    exotic one: an interpreter running a script carries its own path and the
-    whole script name ahead of whatever a caller searches for. Measured
-    live, where it made wait_for_process return None for a process that was
-    demonstrably running: the token being searched for sat at the end of the
-    line, and the end of the line was past where the cut fell. The doubled
-    flag is the BSD spelling for "as many columns as it takes", and procps
-    honours it too, so this is still one call covering every platform that
-    reaches it -- Linux takes the /proc route above and never gets here.
+    `args` to the width it believes its output has, and that width follows
+    the terminal rather than the call: the same command came back 76 columns
+    wide in one session on FreeBSD 15 and 22 in another, with the window and
+    COLUMNS as the only difference. Whatever falls past the cut is gone
+    mid-word. Long is the ordinary case, not the exotic one: an interpreter
+    running a script carries its own path and the whole script name ahead of
+    whatever a caller searches for. Measured live, where it made
+    wait_for_process return None for a process that was demonstrably
+    running -- the token being searched for sat at the end of the line, past
+    where the cut fell. The doubled flag is the BSD spelling for "as many
+    columns as it takes", and it lifts the cap whatever the window says;
+    procps honours it too, so this is still one call covering every platform
+    that reaches it -- Linux takes the /proc route above and never gets
+    here.
     """
     if _have_proc():
         return {pid: _process_cmdline(pid) for pid in _proc_pids()}
