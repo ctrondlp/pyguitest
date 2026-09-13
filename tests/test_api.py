@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -948,10 +949,14 @@ class TestWaitForProcess(unittest.TestCase):
         #   * The process outlives the search rather than racing it. The
         #     original slept for 0.3s and allowed 1s to be found in, which
         #     is a bet that the machine schedules both promptly.
-        #   * The token sits at the *end* of a command line that runs past
-        #     76 columns, and that is what caught `ps` truncating `args`:
-        #     the token was the part cut off, so a process that was running
-        #     matched nothing. Do not shorten this line to make it fit.
+        #   * The token sits at the *end* of a command line longer than the
+        #     width `ps` decides to print, and that is what caught `ps`
+        #     truncating `args`: the token was the part cut off, so a
+        #     process that was running matched nothing. Do not shorten this
+        #     line to make it fit. The width is pinned in
+        #     test_the_real_ps_call_finds_a_long_command_line, which runs
+        #     the real `ps` rather than trusting whatever window this one
+        #     happens to run in.
         # Python rather than `sh -c "sleep 30 # token"`: a shell given a
         # single command execs it, which replaces argv and takes the token
         # with it, leaving nothing to search for.
@@ -1232,8 +1237,52 @@ class TestProcessTableFallsBackToPs(unittest.TestCase):
         # after `=` as the header for the last keyword, collapsing that to
         # one pid column with empty command lines. The `-ww` lifts ps's
         # default width cap, without which a long command line comes back
-        # cut short -- see test_finds_a_running_process_by_cmdline.
+        # cut short -- see test_the_real_ps_call_finds_a_long_command_line.
         self.assertEqual(ran.call_args.args, ("axo", "pid=", "-o", "args=", "-ww"))
+
+    def test_the_real_ps_call_finds_a_long_command_line(self):
+        # The one test here that runs the actual `ps`. Everything else in
+        # this class mocks it, so nothing else would notice procps refusing
+        # `-ww`, a width cap coming back, or the line parse losing its last
+        # argument. Patching `_have_proc` rather than `_ps` is deliberate:
+        # /proc exists on CI, so without that patch this route is never
+        # entered there and the flags above are only ever checked for
+        # spelling.
+        #
+        # `COLUMNS` is pinned because ps's cap follows the terminal rather
+        # than the call -- the same command came back cut at 74 characters
+        # under COLUMNS=80 here, and 96 whole with `-ww`, so leaving the
+        # width to the ambient window would let a dropped `-ww` pass on a
+        # wide one. The token sits at the end of a line that outruns that
+        # width, which is the part a cap cuts off. A fresh `ps` per attempt,
+        # not one, so an early call cannot land in the window before the
+        # child's argv is its own. Nothing is caught: `ps` being present and
+        # rejecting the arguments raises PyGUITestError, and a test that
+        # skipped on that would turn the defect it is looking for green.
+        if shutil.which("ps") is None:
+            self.skipTest("no `ps` on PATH")
+        token = f"pyguitest-psroute-{uuid.uuid4().hex[:8]}"
+        code = f"import time; time.sleep(30)  # {token}"
+        child = subprocess.Popen([sys.executable, "-c", code])
+
+        def stop():
+            child.kill()
+            child.wait()
+
+        self.addCleanup(stop)
+        found = ""
+        deadline = time.monotonic() + 5.0
+        with mock.patch.dict(os.environ, {"COLUMNS": "80"}):
+            while token not in found and time.monotonic() < deadline:
+                with mock.patch("pyguitest._have_proc", return_value=False):
+                    found = pyguitest._process_table().get(child.pid, "")
+                if token not in found:
+                    time.sleep(0.05)
+        self.assertIn(
+            token,
+            found,
+            f"the whole command line for {child.pid} should come back, got {found!r}",
+        )
 
     def test_no_proc_and_no_ps_raises_rather_than_reporting_nothing(self):
         # An empty table would read as "your process is not running", which

@@ -33,9 +33,11 @@ All notable changes to pyguitest are recorded here. The format follows
 
 - **`wait_for_process` reported nothing for a process that was running,
   wherever the lookup went through `ps` rather than `/proc`, as soon as its
-  command line ran past 76 columns.** FreeBSD's `ps` truncates `args` to the
-  width it believes its output has, so `ps axo pid= -o args=` hands back
-  command lines cut mid-word — and a long one is the ordinary case, not the
+  command line outran the width `ps` believed it had.** FreeBSD's `ps`
+  truncates `args` to that width, which follows the terminal window or
+  `COLUMNS` rather than the call — the same command came back 76 columns
+  wide in one session and 22 in another — so `ps axo pid= -o args=` hands
+  back command lines cut mid-word — and a long one is the ordinary case, not the
   exotic one, because an interpreter carries its own path and the whole
   script name ahead of whatever a caller is searching for. Measured live: a
   `python -c "..."` process with its token at the end of a command line far
@@ -44,7 +46,9 @@ All notable changes to pyguitest are recorded here. The format follows
   `ps axo pid= -o args= -ww`, the BSD spelling for "as many columns as it
   takes", which procps honours as well; Linux reads `/proc` and never
   reaches it. The test that found this keeps its token at the end of a long
-  command line on purpose, so it now covers the truncation.
+  command line on purpose, so it now covers the truncation; a second one
+  pins `COLUMNS` and runs the real `ps`, so a dropped `-ww` fails there
+  rather than depending on the width of whatever window the suite runs in.
 
 - **`docs/getting-started.md` promised "four ways" to act on a control and then
   listed five.** The count is gone rather than corrected: the table is the
