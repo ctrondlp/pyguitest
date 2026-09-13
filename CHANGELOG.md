@@ -7,6 +7,8 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-09-13
+
 ### Added
 
 - **`Element.double_click()`**, so an element can be double-clicked without
