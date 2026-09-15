@@ -1084,9 +1084,13 @@ class Session:
 
         if latency:
             time.sleep(latency)
-        if pause and len(path) > 2:
+        if pause:
             # A little past the middle of the movement, so the pointer is
-            # already under way when the hesitation lands.
+            # already under way when the hesitation lands. Safe down to a
+            # 1-point path (start == target, say): split still comes out at
+            # least 1, so the first _walk does the whole (trivial) move and
+            # the second gets an empty slice, which is a deliberate no-op --
+            # the pause still happens, just with nothing left to walk after.
             split = max(1, min(len(path) - 1, round(len(path) * 0.6)))
             self._walk(path[:split], duration * split / len(path), screen)
             time.sleep(pause)
