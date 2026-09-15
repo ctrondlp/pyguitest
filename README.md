@@ -6,6 +6,10 @@
 
 **Python GUI automation for real desktop applications.**
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/ctrondlp/pyguitest/main/docs/assets/pyguitest-demo.gif" alt="pyguitest driving a simple text editor">
+</p>
+
 Automate and test Linux and BSD desktop applications from Python — even when
 the application has no automation API.
 

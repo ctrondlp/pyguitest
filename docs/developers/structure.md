@@ -30,6 +30,7 @@ pyguitest/
 │   ├── input.md                injecting input: permissions, keymaps, libei
 │   ├── validation.md           what has been run against a real desktop
 │   ├── ai-assistants.md        rules for a coding assistant writing pyguitest code
+│   ├── assets/                 the demo GIF the README shows
 │   └── developers/             rationale and internals; nothing needed to use the library
 │       ├── README.md           index into this folder
 │       ├── design.md           why the API is not a port, and what follows
