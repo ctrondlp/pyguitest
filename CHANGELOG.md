@@ -7,6 +7,18 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **`move_mouse_naturally`'s `pause` silently did nothing on a short enough
+  move — most notably `start == target`, reachable with every shaping term
+  left at its default.** The shaped path collapses to one or two points
+  after `_dedupe`, and the split that inserts the hesitation required more
+  than two to fire at all, so the call returned having simply skipped the
+  pause it was asked for — no error, no warning. The split now runs
+  whenever `pause` is given: down to a single point it still lands correctly,
+  since the formula's second half comes out empty and `_walk` treats an
+  empty path as the no-op it is.
+
 ## [0.10.1] — 2026-09-13
 
 ### Added

@@ -1462,6 +1462,39 @@ class TestMoveMouseNaturally(unittest.TestCase):
             gui.move_mouse_naturally(400, 300, start=(0, 0), pause=0.3, latency=0.0)
         self.assertIn(0.3, [call.args[0] for call in slept.call_args_list])
 
+    def test_pause_still_happens_when_start_and_target_are_the_same(self):
+        # Every leg has zero length here, all four shaping terms included --
+        # a hover-in-place, one of the two documented reasons this method
+        # exists -- so the shaped path collapses to a single point after
+        # _dedupe. `pause` must not go missing just because there was
+        # nothing to split it out of.
+        gui, backend = self.gui()
+        with mock.patch("pyguitest.time.sleep") as slept:
+            gui.move_mouse_naturally(50, 50, start=(50, 50), pause=0.4, latency=0.0)
+        self.assertIn(0.4, [call.args[0] for call in slept.call_args_list])
+        self.assertEqual(backend.path[-1], (50, 50))
+        self.assertEqual(gui._pointer, (50, 50))
+
+    def test_pause_still_happens_on_a_very_short_move(self):
+        # A short enough move with shaping switched off collapses to two
+        # points rather than one -- a different shape of the same bug, since
+        # the split still has to produce two non-empty halves here instead
+        # of one real half and one empty no-op.
+        gui, backend = self.gui()
+        with mock.patch("pyguitest.time.sleep") as slept:
+            gui.move_mouse_naturally(
+                1,
+                0,
+                start=(0, 0),
+                arc=0.0,
+                wobble=0.0,
+                overshoot=0.0,
+                pause=0.5,
+                latency=0.0,
+            )
+        self.assertIn(0.5, [call.args[0] for call in slept.call_args_list])
+        self.assertEqual(backend.path[-1], (1, 0))
+
     def test_it_refuses_a_negative_duration(self):
         gui, _ = self.gui()
         with self.assertRaises(ValueError):
