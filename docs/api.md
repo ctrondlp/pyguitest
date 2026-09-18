@@ -163,12 +163,12 @@ Raise on failure with a message naming what was actually found, for use directly
 | `expect_window(title: str \| re.Pattern[str] \| None = None, timeout: float \| None = None, app_id: str \| Sequence[str] \| None = None)` | `WINDOW_LIST` — uses `WINDOW_EVENTS` if present |  | wait_for_window, but raises WindowNotFound instead of returning None. |
 | `extents(element: Element)` | `ELEMENT_GEOMETRY` |  | `element`'s (x, y, width, height) in screen coordinates. |
 | `focus_window(window: Window, attempts: int = 5)` | `WINDOW_ACTIVATE`, `WINDOW_GEOMETRY`, `WINDOW_STATE` |  | Give `window` focus and confirm it actually took, best-effort. |
-| `is_button_pressed(button: int)` | `INPUT_STATE_QUERY` | X11 | Whether a mouse button is currently held down. |
-| `is_key_pressed(key: str)` | `INPUT_STATE_QUERY` | X11 | Whether a key is currently held down. Replaces IsKeyPressed. |
-| `is_window_cursor(window: Window, shape: int)` | `WINDOW_CURSOR_QUERY` | X11 | Whether `window` is currently showing cursor `shape`. |
-| `lower_window(window: Window)` | `WINDOW_LOWER` | X11 | Replaces LowerWindow -- no foreign-toplevel protocol offers this. |
-| `pointer_position()` | `POINTER_QUERY` | X11 | The global pointer position. Replaces GetMousePos. |
-| `set_window_title(window: Window, title: str)` | `WINDOW_TITLE_SET` | X11 | Replaces SetWindowName. Impersonation is possible under X11. |
+| `is_button_pressed(button: int)` | `INPUT_STATE_QUERY` |  | Whether a mouse button is currently held down. |
+| `is_key_pressed(key: str)` | `INPUT_STATE_QUERY` |  | Whether a key is currently held down. Replaces IsKeyPressed. |
+| `is_window_cursor(window: Window, shape: int)` | `WINDOW_CURSOR_QUERY` |  | Whether `window` is currently showing cursor `shape`. |
+| `lower_window(window: Window)` | `WINDOW_LOWER` |  | Replaces LowerWindow -- no foreign-toplevel protocol offers this. |
+| `pointer_position()` | `POINTER_QUERY` |  | The global pointer position. Replaces GetMousePos. |
+| `set_window_title(window: Window, title: str)` | `WINDOW_TITLE_SET` |  | Replaces SetWindowName. Impersonation is possible under X11. |
 | `wait_for_pointer_activation(timeout: float \| None = None)` | `INPUT_CAPTURE` |  | Block for one real crossing of a screen edge, and return where. |
 | `wait_window_focus(window: Window, timeout: float \| None = None, interval: float = 0.1)` | `WINDOW_STATE` |  | Block until `window` holds keyboard focus, or timeout. |
 
@@ -291,21 +291,33 @@ What the current login actually offers.
 | `can_use_clipboard` | Whether a clipboard tool is reachable on this session. |
 | `desktop: str` |  |
 | `display: str` |  |
+| `dpi_awareness: str` |  |
+| `foreground_is_elevated: bool \| None` |  |
 | `has_atspi: bool` |  |
+| `has_comtypes: bool` |  |
 | `has_dogtail: bool` |  |
 | `has_evdev: bool` |  |
 | `has_input_group: bool` |  |
 | `has_libei: bool` |  |
 | `has_portal: bool` |  |
 | `has_pygobject: bool` |  |
+| `has_pywin32: bool` |  |
+| `has_sendinput: bool` |  |
+| `has_uiautomation: bool` |  |
 | `has_uinput: bool` |  |
+| `has_wgc: bool` |  |
 | `has_xlib: bool` |  |
 | `has_xtest: bool` |  |
 | `input_transport` | What will actually inject input here, whether or not it is a tool. |
+| `is_elevated: bool` |  |
+| `is_interactive_desktop: bool` |  |
+| `low_level_hooks_timeout_ms: int` |  |
 | `preferred_input` | The input *tool* to try first, or None if none is installed. |
 | `summary()` | A short, user-readable description of this environment. |
 | `uinput_writable: bool` |  |
 | `wayland_display: str` |  |
+| `windows_build: int` |  |
+| `windows_edition: str` |  |
 
 ## Capabilities
 
@@ -318,35 +330,35 @@ Wayland prevents by design, which is why those rows are X11 only.
 | `PROCESS_LAUNCH` | T1 | *session itself* | Start and run applications |
 | `TIMING` | T1 | *session itself* | Waits, and inter-event and inter-key delays |
 | `IMAGE_LOCATE` | T1 | ToolImageSearchBackend | Find a template image's position inside an already-captured screenshot by pixel comparison; a new feature, X11::GUITest never had it, and needs no live display connection, only files |
-| `SCREEN_INFO` | T2 | GnomeShellBackend, KdotoolBackend, X11Backend | Output enumeration, resolution, scale (wl_output) |
-| `POINTER_MOVE` | T4 | LibeiBackend, ToolInputBackend, UinputBackend, X11Backend | Absolute pointer positioning; relative-only injection cannot do this |
-| `POINTER_BUTTON` | T4 | LibeiBackend, PortalBackend, ToolInputBackend, UinputBackend, X11Backend | Button press and release |
-| `POINTER_SCROLL` | T4 | LibeiBackend, PortalBackend, ToolInputBackend, UinputBackend, X11Backend | Axis events; X11 buttons 4/5 were scroll, Wayland's are not |
-| `KEY_EVENT` | T4 | LibeiBackend, PortalBackend, ToolInputBackend, UinputBackend, X11Backend | Keycode press and release |
-| `TEXT_ENTRY` | T4 | LibeiBackend, PortalBackend, ToolInputBackend, UinputBackend, X11Backend | Typing characters; needs a backend-controlled keymap, which raw uinput lacks |
+| `SCREEN_INFO` | T2 | GnomeShellBackend, KdotoolBackend, Win32Backend, X11Backend | Output enumeration, resolution, scale (wl_output) |
+| `POINTER_MOVE` | T4 | LibeiBackend, ToolInputBackend, UinputBackend, Win32Backend, X11Backend | Absolute pointer positioning; relative-only injection cannot do this |
+| `POINTER_BUTTON` | T4 | LibeiBackend, PortalBackend, ToolInputBackend, UinputBackend, Win32Backend, X11Backend | Button press and release |
+| `POINTER_SCROLL` | T4 | LibeiBackend, PortalBackend, ToolInputBackend, UinputBackend, Win32Backend, X11Backend | Axis events; X11 buttons 4/5 were scroll, Wayland's are not |
+| `KEY_EVENT` | T4 | LibeiBackend, PortalBackend, ToolInputBackend, UinputBackend, Win32Backend, X11Backend | Keycode press and release |
+| `TEXT_ENTRY` | T4 | LibeiBackend, PortalBackend, ToolInputBackend, UinputBackend, Win32Backend, X11Backend | Typing characters; needs a backend-controlled keymap, which raw uinput lacks |
 | `INPUT_SYNC` | T4 | LibeiBackend | Confirm the compositor has consumed the events sent so far, instead of sleeping and hoping; proves delivery to the compositor, never that the application processed or repainted them |
 | `INPUT_CAPTURE` | T4 | InputCaptureBackend | Learn where the pointer is from a real crossing of a screen edge the caller sets up, exclusively diverting real input for the length of one activation; not a query -- see Session.wait_for_pointer_activation, which can return None rather than answer at all if nobody moves the pointer there in time |
-| `WINDOW_LIST` | T3 | AtspiBackend, GnomeShellBackend, X11Backend | Enumerate toplevels, read titles and app ids |
-| `WINDOW_EVENTS` | T3 | GnomeShellBackend, KWinEventsBackend, NiriBackend, SwayBackend | Subscribe to open/close/title-change instead of polling |
-| `WINDOW_STATE` | T3 | AtspiBackend, GnomeShellBackend, X11Backend | Read minimized and activated state |
-| `WINDOW_ACTIVATE` | T3 | AtspiBackend, GnomeShellBackend, X11Backend | Raise and focus; there is no raise-without-focus operation |
-| `WINDOW_MINIMIZE` | T3 | GnomeShellBackend, NiriBackend, X11Backend | Minimize and restore |
-| `WINDOW_GEOMETRY` | T3 | AtspiBackend, GnomeShellBackend, X11Backend | Read position and size; no foreign-toplevel protocol carries this |
-| `WINDOW_PLACEMENT` | T3 | GnomeShellBackend, NiriBackend, X11Backend | Move to a position; placement is the compositor's prerogative |
-| `WINDOW_RESIZE` | T3 | GnomeShellBackend, NiriBackend, X11Backend | Change width and height; separate from placement because a tiling compositor can size a window without letting anyone position it |
-| `WINDOW_PID` | T3 | GnomeShellBackend, KdotoolBackend, X11Backend | Map a window to a process id; prefer app_id |
-| `WINDOW_AT_POINT` | T3 | GnomeShellBackend, X11Backend | Hit-test a coordinate; needs geometry and stacking order |
-| `SCREEN_CAPTURE` | T3 | PortalCaptureBackend, ToolCaptureBackend, X11Backend | Pixels; a new feature, X11::GUITest never had it |
+| `WINDOW_LIST` | T3 | AtspiBackend, GnomeShellBackend, Win32Backend, X11Backend | Enumerate toplevels, read titles and app ids |
+| `WINDOW_EVENTS` | T3 | GnomeShellBackend, KWinEventsBackend, NiriBackend, SwayBackend, Win32Backend | Subscribe to open/close/title-change instead of polling |
+| `WINDOW_STATE` | T3 | AtspiBackend, GnomeShellBackend, Win32Backend, X11Backend | Read minimized and activated state |
+| `WINDOW_ACTIVATE` | T3 | AtspiBackend, GnomeShellBackend, Win32Backend, X11Backend | Raise and focus; there is no raise-without-focus operation |
+| `WINDOW_MINIMIZE` | T3 | GnomeShellBackend, NiriBackend, Win32Backend, X11Backend | Minimize and restore |
+| `WINDOW_GEOMETRY` | T3 | AtspiBackend, GnomeShellBackend, Win32Backend, X11Backend | Read position and size; no foreign-toplevel protocol carries this |
+| `WINDOW_PLACEMENT` | T3 | GnomeShellBackend, NiriBackend, Win32Backend, X11Backend | Move to a position; placement is the compositor's prerogative |
+| `WINDOW_RESIZE` | T3 | GnomeShellBackend, NiriBackend, Win32Backend, X11Backend | Change width and height; separate from placement because a tiling compositor can size a window without letting anyone position it |
+| `WINDOW_PID` | T3 | GnomeShellBackend, KdotoolBackend, Win32Backend, X11Backend | Map a window to a process id; prefer app_id |
+| `WINDOW_AT_POINT` | T3 | GnomeShellBackend, Win32Backend, X11Backend | Hit-test a coordinate; needs geometry and stacking order |
+| `SCREEN_CAPTURE` | T3 | PortalCaptureBackend, ToolCaptureBackend, Win32Backend, X11Backend | Pixels; a new feature, X11::GUITest never had it |
 | `WINDOW_CAPTURE` | T3 | GnomeShellBackend, X11Backend | Pixels of one window, captured natively rather than cropped out of a screen shot -- so an occluded or offscreen window still comes back whole |
-| `CLIPBOARD` | T3 | PortalBackend, ToolClipboardBackend | Read and write the clipboard's text content; a new feature, X11::GUITest never had it |
-| `ELEMENT_TREE` | T5 | AtspiBackend | Walk the accessible tree; replaces the X11 window-tree walk |
-| `ELEMENT_ACTION` | T5 | AtspiBackend | Act on an element without coordinates or injection permission |
-| `ELEMENT_GEOMETRY` | T5 | AtspiBackend | Read an element's screen rectangle, and hit-test a coordinate against the accessible tree; one capability rather than the two windows get, because both are the same Component call and no toolkit answers one without the other. A pure Wayland client is never told where it sits on screen, so this is X11 and XWayland only, exactly like WINDOW_GEOMETRY on this backend |
-| `POINTER_QUERY` | T6 | X11Backend **(X11 only)** | Read the global pointer position; injection works, readback does not |
-| `INPUT_STATE_QUERY` | T6 | X11Backend **(X11 only)** | Read global keyboard or button state; this is what a keylogger reads |
-| `WINDOW_TITLE_SET` | T6 | X11Backend **(X11 only)** | Rewrite another application's title; that is impersonation |
-| `WINDOW_LOWER` | T6 | X11Backend **(X11 only)** | Lower or restack; only activate exists, upward only |
-| `WINDOW_CURSOR_QUERY` | T6 | X11Backend **(X11 only)** | Read the cursor shape over a window; no workaround anywhere |
+| `CLIPBOARD` | T3 | PortalBackend, ToolClipboardBackend, Win32Backend | Read and write the clipboard's text content; a new feature, X11::GUITest never had it |
+| `ELEMENT_TREE` | T5 | AtspiBackend, UiaBackend | Walk the accessible tree; replaces the X11 window-tree walk |
+| `ELEMENT_ACTION` | T5 | AtspiBackend, UiaBackend | Act on an element without coordinates or injection permission |
+| `ELEMENT_GEOMETRY` | T5 | AtspiBackend, UiaBackend | Read an element's screen rectangle, and hit-test a coordinate against the accessible tree; one capability rather than the two windows get, because both are the same Component call and no toolkit answers one without the other. A pure Wayland client is never told where it sits on screen, so this is X11 and XWayland only, exactly like WINDOW_GEOMETRY on this backend |
+| `POINTER_QUERY` | T6 | Win32Backend, X11Backend | Read the global pointer position; injection works, readback does not |
+| `INPUT_STATE_QUERY` | T6 | Win32Backend, X11Backend | Read global keyboard or button state; this is what a keylogger reads |
+| `WINDOW_TITLE_SET` | T6 | Win32Backend, X11Backend | Rewrite another application's title; that is impersonation |
+| `WINDOW_LOWER` | T6 | Win32Backend, X11Backend | Lower or restack; only activate exists, upward only |
+| `WINDOW_CURSOR_QUERY` | T6 | Win32Backend, X11Backend | Read the cursor shape over a window; no workaround anywhere on Wayland, and a scoped one on Windows, where the cursor being shown is readable but compared against the system's own handles rather than asked of a window |
 
 ### Tiers
 

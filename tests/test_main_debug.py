@@ -92,9 +92,16 @@ class _FakeGui:
 
 
 def _environment(**overrides):
-    base = pyguitest.detect(
-        {"WAYLAND_DISPLAY": "wayland-0", "XDG_CURRENT_DESKTOP": "GNOME"}
-    )
+    """A GNOME Wayland Environment, whatever machine the suite runs on.
+
+    `_platform` is pinned because `_classify` asks it first and, on Windows,
+    asks nothing else -- so this fixture became a WIN32 session there and the
+    serialization tests asserted "wayland" against "win32".
+    """
+    with mock.patch("pyguitest.session._platform", return_value="linux"):
+        base = pyguitest.detect(
+            {"WAYLAND_DISPLAY": "wayland-0", "XDG_CURRENT_DESKTOP": "GNOME"}
+        )
     return dataclasses.replace(base, **overrides)
 
 

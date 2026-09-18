@@ -7,6 +7,15 @@ line-delimited JSON instead, where the risk is reassembling a reply that does
 not arrive in one recv().
 """
 
+import sys
+import unittest
+
+if sys.platform == "win32":  # pragma: no cover - platform guard
+    raise unittest.SkipTest(
+        "the compositor IPC backends speak to sway/Hyprland/niri over AF_UNIX "
+        "sockets, which this platform's socket module does not define"
+    )
+
 import json
 import socket
 import struct

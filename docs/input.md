@@ -137,6 +137,46 @@ whose compositors lack the protocol it needs.
 
 `pyguitest doctor` prints whichever of these apply to your machine.
 
+### On Windows: virtual keys, scan codes and Unicode
+
+None of the above applies there, and the reason is that Windows has three ways
+to inject a keystroke where Linux has the one this ranking is about:
+
+| Route | What it sends | Follows the active layout? |
+|---|---|---|
+| `KEYEVENTF_UNICODE` | one UTF-16 code unit, virtual-key field zero | no — the system synthesises the keystroke |
+| virtual key | a `VK_*` code | yes |
+| scan code | a physical position, `KEYEVENTF_EXTENDEDKEY` where it is one | yes |
+
+The backend for this is written — `Win32Backend`, `ctypes` and `SendInput`, no
+comtypes and no daemon ([adr-003-windows.md](developers/adr-003-windows.md) is
+the split, and `tools.py`'s ranking above is untouched by it) — and which route
+it uses is the decision that a Windows `type_text` means: **the Unicode route**.
+That is keymap-safe by construction — it never asks what layout is active — so
+Windows gets the property that this page's whole ranking exists to approximate,
+with no daemon, no group membership and no consent prompt, because `SendInput`
+is an ordinary API call. A consequence worth stating rather than discovering:
+there is nothing for `doctor` to warn about on Windows, and
+`allow_keymap_unsafe` is accepted and ignored there rather than refusing.
+
+Two names differ from their X11 spelling, and both are easy to get wrong in
+a suite written on Linux. `#` — Meta in `send_keys()` — is the **Windows key**.
+And `&` is **not a key of its own**: Windows generates AltGr from Ctrl plus the
+right Alt key, so an `&(...)` group has to expand to both of those rather than
+press one key that does not exist. One spelling that deliberately does *not*
+change: `type_text("~")` types a tilde, though Windows' own SendKeys dialect
+reads `~` as Enter.
+
+Scan codes are the route left for one case — two keys that share a virtual key,
+such as the two Enters — and that is why the virtual-key table marks which keys
+are extended rather than treating "the right-hand cluster" as one thing.
+Nothing sends a scan code today: `press_key` sends a virtual key and lets
+Windows resolve the scan code itself, extended set included, which is why that
+table exists as data for the case that needs it rather than as a call here.
+
+The Windows trap is not keymaps but privilege: see
+[troubleshooting.md](troubleshooting.md#injected-input-vanishes-on-windows).
+
 ## `eiinput`: keymap-safe input over libei
 
 `connect(backend="eiinput")` — opt-in — covers what `portal` deliberately

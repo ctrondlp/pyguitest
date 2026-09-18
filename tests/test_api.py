@@ -1,5 +1,6 @@
 """The user-facing convenience layer on Session."""
 
+import ctypes
 import json
 import math
 import os
@@ -965,7 +966,27 @@ class TestWaitForFile(unittest.TestCase):
         self.assertFalse(session().wait_for_file(path, timeout=0.05, interval=0.01))
 
 
+POSIX_PROCESS_TABLE = unittest.skipIf(
+    sys.platform == "win32",
+    "/proc and `ps` are the POSIX routes to the process table; Windows reaches "
+    "it through CreateToolhelp32Snapshot and never runs this code",
+)
+"""Skips a test that pins the /proc or `ps` implementation specifically.
+
+Not a blanket Windows skip: `_process_cpu_seconds` and `_process_table` both
+have a Windows branch that is tested beside these, and those run everywhere.
+What is skipped is the POSIX *route*, which on Windows is unreachable rather
+than broken.
+"""
+
+
 class TestWaitForProcess(unittest.TestCase):
+    @unittest.skipIf(
+        sys.platform == "win32",
+        "matches against a token in the command line, which Windows does not "
+        "expose: Toolhelp reports the executable filename only, and "
+        "wait_for_process documents that cut",
+    )
     def test_finds_a_running_process_by_cmdline(self):
         # Three things here are deliberate, and this test taught each the
         # hard way -- it failed with "31880 != 32032", having matched
@@ -1252,6 +1273,7 @@ class TestElementDoubleClick(unittest.TestCase):
 class TestProcessTableFallsBackToPs(unittest.TestCase):
     """FreeBSD has no /proc unless linprocfs is mounted; ps is the way in."""
 
+    @POSIX_PROCESS_TABLE
     def test_it_uses_ps_when_proc_is_unavailable(self):
         with (
             mock.patch("pyguitest._have_proc", return_value=False),
@@ -1313,6 +1335,7 @@ class TestProcessTableFallsBackToPs(unittest.TestCase):
             f"the whole command line for {child.pid} should come back, got {found!r}",
         )
 
+    @POSIX_PROCESS_TABLE
     def test_no_proc_and_no_ps_raises_rather_than_reporting_nothing(self):
         # An empty table would read as "your process is not running", which
         # is a different and wrong answer from "I cannot tell".
@@ -1519,6 +1542,7 @@ class TestProcHelpers(unittest.TestCase):
     def test_process_cpu_seconds_is_none_for_a_pid_that_does_not_exist(self):
         self.assertIsNone(pyguitest._process_cpu_seconds(2**30))
 
+    @POSIX_PROCESS_TABLE
     def test_cpu_seconds_is_none_when_ps_shows_no_row_and_the_pid_is_gone(self):
         # `ps -p` exits 1 with no rows for a pid that has gone -- on procps
         # and FreeBSD alike. _ps used to fold that into None, so this
@@ -1530,6 +1554,7 @@ class TestProcHelpers(unittest.TestCase):
         ):
             self.assertIsNone(pyguitest._process_cpu_seconds(2**30))
 
+    @POSIX_PROCESS_TABLE
     def test_cpu_seconds_raises_when_ps_shows_no_row_for_a_live_pid(self):
         # The same empty output, but the process is running -- so it is `ps`
         # that failed, and reporting "gone" would let wait_for_idle call a
@@ -1541,6 +1566,7 @@ class TestProcHelpers(unittest.TestCase):
             with self.assertRaises(pyguitest.PyGUITestError):
                 pyguitest._process_cpu_seconds(os.getpid())
 
+    @POSIX_PROCESS_TABLE
     def test_cpu_seconds_raises_when_ps_cannot_be_run_at_all(self):
         with (
             mock.patch("pyguitest._have_proc", return_value=False),
@@ -1549,6 +1575,7 @@ class TestProcHelpers(unittest.TestCase):
             with self.assertRaises(pyguitest.PyGUITestError):
                 pyguitest._process_cpu_seconds(os.getpid())
 
+    @POSIX_PROCESS_TABLE
     def test_cpu_seconds_parses_the_freebsd_ps_fallback(self):
         # Centiseconds, as FreeBSD 15 actually prints them.
         with (
@@ -1559,14 +1586,313 @@ class TestProcHelpers(unittest.TestCase):
         self.assertAlmostEqual(seconds, 0.44)
         self.assertAlmostEqual(resolution, 0.01)
 
+    @POSIX_PROCESS_TABLE
     def test_process_cmdline_reads_the_current_process(self):
         self.assertIn("python", pyguitest._process_cmdline(os.getpid()).lower())
 
+    @POSIX_PROCESS_TABLE
     def test_process_cmdline_is_empty_for_a_pid_that_does_not_exist(self):
         self.assertEqual(pyguitest._process_cmdline(2**30), "")
 
+    @POSIX_PROCESS_TABLE
     def test_proc_pids_includes_the_current_process(self):
         self.assertIn(os.getpid(), set(pyguitest._proc_pids()))
+
+
+class _WindowsFunction:
+    """A callable that also accepts restype/argtypes, as a ctypes function does.
+
+    `_windows_process_cpu_seconds` declares both before calling, exactly as it
+    must against a real kernel32 -- a plain bound method refuses those
+    assignments, which is why this exists rather than a method on the fake
+    directly. Mirrors `tests/test_session.py`'s own `_Function`, kept as a
+    separate copy here rather than a cross-module import: each test file's
+    fakes are self-contained, the same way `test_win32_backend.py`'s
+    `FakeLibrary` does not reach into `test_win32.py`.
+    """
+
+    def __init__(self, function):
+        self.function = function
+
+    def __call__(self, *args):
+        return self.function(*args)
+
+
+class TestWindowsProcessCpuSeconds(unittest.TestCase):
+    """`_windows_process_cpu_seconds`, driven through a fake kernel32.
+
+    Runs on Linux like every other Windows-facing test here: `_platform` and
+    `_win32_lib` are both patched, so `_process_cpu_seconds`'s own dispatch is
+    exercised too, not only the Windows half in isolation.
+    """
+
+    class _FakeKernel32:
+        """Just enough of kernel32 to answer GetProcessTimes for one pid."""
+
+        def __init__(self, pid=4242, kernel_ticks=0, user_ticks=0, exists=True):
+            self.pid = pid
+            self.kernel_ticks = kernel_ticks
+            self.user_ticks = user_ticks
+            self.exists = exists
+            self.last_error = 87  # ERROR_INVALID_PARAMETER: no such pid
+            self.opened = None
+            self.closed = []
+            self.OpenProcess = _WindowsFunction(self._open_process)
+            self.GetProcessTimes = _WindowsFunction(self._get_process_times)
+            self.CloseHandle = _WindowsFunction(self._close)
+
+        def _open_process(self, access, _inherit, pid):
+            self.opened = (access, pid)
+            if not self.exists or pid != self.pid:
+                return None
+            return 0xABCD
+
+        def _get_process_times(self, _handle, _creation, _exit, kernel, user):
+            # `kernel`/`user` arrive as the `CArgObject` `ctypes.byref()`
+            # produces, which -- unlike a real `POINTER` argument -- ctypes
+            # only converts at a genuine foreign-call boundary; `cast` is
+            # what test_session.py's own fakes use for the same reason.
+            filetime = ctypes.POINTER(pyguitest._FILETIME)
+            kernel_struct = ctypes.cast(kernel, filetime)[0]
+            user_struct = ctypes.cast(user, filetime)[0]
+            kernel_struct.dwLowDateTime = self.kernel_ticks & 0xFFFFFFFF
+            kernel_struct.dwHighDateTime = self.kernel_ticks >> 32
+            user_struct.dwLowDateTime = self.user_ticks & 0xFFFFFFFF
+            user_struct.dwHighDateTime = self.user_ticks >> 32
+            return 1
+
+        def _close(self, handle):
+            self.closed.append(handle)
+            return 1
+
+    def _reading(self, pid=4242, **kwargs):
+        kernel32 = self._FakeKernel32(**kwargs)
+        with (
+            mock.patch("pyguitest._platform", return_value="win32"),
+            mock.patch("pyguitest._win32_lib", lambda _name: kernel32),
+            # Patched rather than faked on the library: the error is read
+            # through ctypes' own saved copy, which no fake DLL can set --
+            # see session._last_error for why it is read that way.
+            mock.patch("pyguitest._last_error", lambda: kernel32.last_error),
+        ):
+            return pyguitest._process_cpu_seconds(pid), kernel32
+
+    def test_ticks_convert_to_seconds_at_the_documented_rate(self):
+        # 30_000_000 ticks of each is 3 seconds apiece, 6 total: FILETIME's
+        # own unit is 100ns, not the second _process_cpu_seconds returns.
+        (seconds, resolution), _kernel32 = self._reading(
+            kernel_ticks=30_000_000, user_ticks=30_000_000
+        )
+        self.assertAlmostEqual(seconds, 6.0)
+        self.assertAlmostEqual(resolution, 1e-7)
+
+    def test_a_pid_that_does_not_exist_is_none(self):
+        reading, kernel32 = self._reading(pid=99999, exists=True)
+        self.assertIsNone(reading)
+        self.assertEqual(
+            kernel32.opened, (pyguitest._PROCESS_QUERY_LIMITED_INFORMATION, 99999)
+        )
+
+    def test_access_denied_raises_rather_than_reading_as_gone(self):
+        # The one failure OpenProcess can report for a pid that is very much
+        # alive: reading it as "exited" would let wait_for_idle call a busy,
+        # merely-protected process idle -- the same dishonest pass this
+        # module's Linux half is written to avoid.
+        kernel32 = self._FakeKernel32(exists=False)
+        kernel32.last_error = 5  # ERROR_ACCESS_DENIED
+        with (
+            mock.patch("pyguitest._platform", return_value="win32"),
+            mock.patch("pyguitest._win32_lib", lambda _name: kernel32),
+            mock.patch("pyguitest._last_error", lambda: kernel32.last_error),
+        ):
+            with self.assertRaises(pyguitest.PyGUITestError):
+                pyguitest._process_cpu_seconds(4242)
+
+    def test_the_handle_is_always_closed(self):
+        _reading, kernel32 = self._reading()
+        self.assertEqual(kernel32.closed, [0xABCD])
+
+    @unittest.skipIf(
+        sys.platform == "win32",
+        "asserts that the Windows branch is *not* taken without _platform "
+        "saying so, which can only be checked from somewhere that is not "
+        "Windows -- here the branch is correctly taken every time",
+    )
+    def test_process_cpu_seconds_dispatches_to_windows_when_the_platform_says_so(self):
+        # Proves the seam in _process_cpu_seconds itself, not only the
+        # Windows half behind it: a Linux run must never reach this path
+        # without _platform saying so.
+        with mock.patch(
+            "pyguitest._win32_lib", side_effect=AssertionError("not Windows")
+        ):
+            seconds, resolution = pyguitest._process_cpu_seconds(os.getpid())
+        self.assertIsInstance(seconds, float)
+        self.assertGreater(resolution, 0)
+
+
+class TestTheProcessEntryLayout(unittest.TestCase):
+    """`PROCESSENTRY32W`, which the API validates through its own `dwSize`.
+
+    A wrong layout here is not a wrong answer but a refusal:
+    `Process32FirstW` fails outright when `dwSize` is not the size it expects,
+    so the whole process table comes back as a raised error on a machine
+    nobody is looking at. `ctypes` computes the size from the declared field
+    types, so it can be pinned from Linux -- which is the same argument
+    `tests/test_win32.py` makes for the `INPUT` structure.
+    """
+
+    POINTER = ctypes.sizeof(ctypes.c_void_p)
+
+    def test_it_is_the_documented_size_for_this_abi(self):
+        # 568 bytes on 64-bit Windows and 556 on 32-bit: the difference is
+        # th32DefaultHeapID's pointer width, plus the tail padding that
+        # follows from the structure's own alignment.
+        self.assertEqual(
+            ctypes.sizeof(pyguitest._PROCESSENTRY32W), 568 if self.POINTER == 8 else 556
+        )
+
+    def test_the_pointer_wide_member_is_where_alignment_puts_it(self):
+        # The one field that is not 32 bits. Declaring it as a DWORD would
+        # leave every field after it four bytes early on a 64-bit machine,
+        # and szExeFile reading from the middle of another member.
+        entry = pyguitest._PROCESSENTRY32W
+        self.assertEqual(entry.th32ProcessID.offset, 8)
+        self.assertEqual(
+            entry.th32DefaultHeapID.offset, 16 if self.POINTER == 8 else 12
+        )
+        self.assertEqual(entry.szExeFile.offset, 44 if self.POINTER == 8 else 36)
+
+    def test_the_name_field_holds_utf16_units_not_wchars(self):
+        # c_wchar is four bytes on Linux and two on Windows, so a declaration
+        # using it would lay out differently here than on the machine it
+        # describes -- and dwSize is computed from that layout.
+        self.assertEqual(pyguitest._MAX_PATH, 260)
+        entry = pyguitest._PROCESSENTRY32W()
+        self.assertEqual(ctypes.sizeof(entry.szExeFile), 2 * pyguitest._MAX_PATH)
+
+    def test_a_name_is_read_up_to_its_nul_and_no_further(self):
+        entry = pyguitest._PROCESSENTRY32W()
+        for index, unit in enumerate([ord(c) for c in "note.exe"] + [0, 88, 89]):
+            entry.szExeFile[index] = unit
+        self.assertEqual(pyguitest._wide_field(entry.szExeFile), "note.exe")
+
+
+class TestWindowsProcessTable(unittest.TestCase):
+    """`_windows_process_table`, driven through a fake kernel32 on Linux.
+
+    The snapshot walk is the whole of it: `_platform` and `_win32_lib` are
+    both patched so `_process_table`'s own dispatch is exercised too.
+    """
+
+    class _FakeKernel32:
+        """Enough of kernel32 to hand back one Toolhelp snapshot."""
+
+        SNAPSHOT = 0x5150
+
+        def __init__(self, processes=(), snapshot=SNAPSHOT):
+            self.processes = list(processes)
+            self.snapshot = snapshot
+            self.closed = []
+            self.sizes = []
+            self._remaining = []
+            self.CreateToolhelp32Snapshot = _WindowsFunction(self._create)
+            self.Process32FirstW = _WindowsFunction(self._first)
+            self.Process32NextW = _WindowsFunction(self._next)
+            self.CloseHandle = _WindowsFunction(self._close)
+
+        def _create(self, flags, _pid):
+            self.flags = flags
+            return self.snapshot
+
+        def _fill(self, entry_ref):
+            entry = ctypes.cast(entry_ref, ctypes.POINTER(pyguitest._PROCESSENTRY32W))[
+                0
+            ]
+            if not self._remaining:
+                return 0
+            pid, name = self._remaining.pop(0)
+            entry.th32ProcessID = pid
+            for index, char in enumerate(name):
+                entry.szExeFile[index] = ord(char)
+            entry.szExeFile[len(name)] = 0
+            return 1
+
+        def _first(self, _snapshot, entry_ref):
+            entry = ctypes.cast(entry_ref, ctypes.POINTER(pyguitest._PROCESSENTRY32W))[
+                0
+            ]
+            # The API validates this, so the test records what it was told.
+            self.sizes.append(entry.dwSize)
+            self._remaining = list(self.processes)
+            return self._fill(entry_ref)
+
+        def _next(self, _snapshot, entry_ref):
+            return self._fill(entry_ref)
+
+        def _close(self, handle):
+            self.closed.append(handle)
+            return 1
+
+    def _table(self, **kwargs):
+        kernel32 = self._FakeKernel32(**kwargs)
+        with (
+            mock.patch("pyguitest._platform", return_value="win32"),
+            mock.patch("pyguitest._win32_lib", lambda _name: kernel32),
+        ):
+            return pyguitest._process_table(), kernel32
+
+    def test_every_process_in_the_snapshot_is_reported(self):
+        table, kernel32 = self._table(
+            processes=[(4, "System"), (900, "explorer.exe"), (1234, "notepad.exe")]
+        )
+        self.assertEqual(table, {4: "System", 900: "explorer.exe", 1234: "notepad.exe"})
+        self.assertEqual(kernel32.flags, pyguitest._TH32CS_SNAPPROCESS)
+
+    def test_the_entry_is_sized_before_the_first_call_reads_it(self):
+        # Process32FirstW fails rather than filling anything in when dwSize is
+        # not the size it expects, so this is what stands between the walk and
+        # an empty table on a real machine.
+        _table, kernel32 = self._table(processes=[(1234, "notepad.exe")])
+        self.assertEqual(kernel32.sizes, [ctypes.sizeof(pyguitest._PROCESSENTRY32W)])
+
+    def test_the_snapshot_handle_is_always_closed(self):
+        _table, kernel32 = self._table(processes=[(1234, "notepad.exe")])
+        self.assertEqual(kernel32.closed, [self._FakeKernel32.SNAPSHOT])
+
+    def test_a_failed_snapshot_raises_rather_than_reporting_no_processes(self):
+        # An empty table reads as "your process is not running", which is the
+        # one answer that is never true -- the rule the /proc and ps routes
+        # follow too.
+        with self.assertRaises(pyguitest.PyGUITestError):
+            self._table(snapshot=pyguitest._INVALID_HANDLE_VALUE)
+        with self.assertRaises(pyguitest.PyGUITestError):
+            self._table(snapshot=0)
+
+    def _waiting(self, pattern, processes, **kwargs):
+        """`wait_for_process` over a faked snapshot, from a real Session.
+
+        The Session is built *before* the platform is faked, so `detect()`
+        classifies this machine as what it is and only the process lookup runs
+        as Windows -- the point being to exercise `wait_for_process` itself,
+        not a session that thinks it is somewhere else.
+        """
+        gui = session()
+        kernel32 = self._FakeKernel32(processes=processes)
+        with (
+            mock.patch("pyguitest._platform", return_value="win32"),
+            mock.patch("pyguitest._win32_lib", lambda _name: kernel32),
+        ):
+            return gui.wait_for_process(pattern, interval=0.01, **kwargs)
+
+    def test_wait_for_process_matches_the_executable_name(self):
+        pid = self._waiting("notepad", [(1234, "notepad.exe")], timeout=0.05)
+        self.assertEqual(pid, 1234)
+
+    def test_a_pattern_that_needs_an_argument_finds_nothing(self):
+        # The documented cut: Toolhelp carries no command line, so a script
+        # behind its interpreter cannot be told from any other Python.
+        pid = self._waiting("manage.py", [(1234, "python.exe")], timeout=0.05)
+        self.assertIsNone(pid)
 
 
 class TestLocateImage(unittest.TestCase):
@@ -1873,7 +2199,7 @@ class TestTierOneAlwaysAvailable(unittest.TestCase):
         self.assertTrue(gui.supports(Capability.TIMING))
 
     def test_and_they_actually_work(self):
-        self.assertEqual(session().run_app(["true"]).returncode, 0)
+        self.assertEqual(session().run_app([sys.executable, "-c", ""]).returncode, 0)
 
     def test_require_accepts_them(self):
         session().require(Capability.PROCESS_LAUNCH, Capability.TIMING)

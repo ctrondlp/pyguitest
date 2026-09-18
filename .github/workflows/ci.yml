@@ -75,7 +75,16 @@ jobs:
       # how scripts/diagnose-x11-capture.py drifted out of format without
       # anything noticing.
       - run: ruff check src tests examples scripts
-      - run: ruff format --check src tests examples scripts
+      # `docs` is in the format check and not the lint one, deliberately.
+      # ruff formats the python blocks inside the markdown, and those are the
+      # snippets a reader copies and runs -- a block that does not match the
+      # project's own formatting was a block nobody had run. It is *not* in
+      # `ruff check`, because documentation snippets are fragments: they name
+      # undefined variables and omit imports on purpose, and linting them
+      # would fail for everything that makes them readable. Added after a
+      # wait_for_process example drifted out of format with CI green, since
+      # the paths listed here were the only ones checked.
+      - run: ruff format --check src tests examples scripts docs
 
       # Type-checks src/pyguitest per [tool.mypy] in pyproject.toml.
       # ignore_missing_imports is set there because the optional backends
@@ -253,6 +262,65 @@ jobs:
             echo "::error::window did not come up. See the output above."
             exit 1
           fi
+
+  windows:
+    name: Windows collection and the fake-driven tests
+    runs-on: windows-latest
+    # The machine-free half of the Windows work lands before there is anything
+    # Windows-specific to break, which is the whole point of this job: an
+    # import-time failure in a Linux-only module is the likeliest first
+    # surprise -- a module-scope `import grp` was exactly that -- and it is
+    # invisible on every other runner here. Nothing needs installing, and
+    # nothing on this runner can drive a desktop, so what it proves is narrower
+    # than the other jobs' claims: that every test module imports, that the
+    # suite collects, and that the tests written to run anywhere pass there.
+    #
+    # continue-on-error until the Linux-only tests that still need guards have
+    # them: a red run here is a finding to fix rather than a broken build, and
+    # this job's first run is where those findings come from. It is
+    # deliberately not in the `publish` job's needs list for the same reason.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          # One version rather than the whole matrix: this job is about the
+          # platform, and the Python-to-Python differences are the `tests`
+          # job's business.
+          python-version: "3.12"
+
+      - name: Run the suite, and check that the Linux-only tests skipped
+        env:
+          PYTHONPATH: src
+        shell: bash
+        run: |
+          set -eo pipefail
+          python - <<'PY'
+          import sys
+          import unittest
+
+          result = unittest.TextTestRunner(verbosity=2).run(
+              unittest.TestLoader().discover("tests")
+          )
+          skipped = len(result.skipped)
+          print(
+              f"\nran {result.testsRun}, skipped {skipped}, "
+              f"failures {len(result.failures)}, errors {len(result.errors)}"
+          )
+          if result.failures or result.errors:
+              sys.exit(1)
+          # A floor rather than a target: a mass import failure would otherwise
+          # look like a suite that quietly ran almost nothing.
+          if result.testsRun < 800:
+              sys.exit(f"only {result.testsRun} tests ran -- something did not import")
+          # The X11, AT-SPI, D-Bus and portal tests have to skip *loudly* on a
+          # machine that has none of them. Zero skips does not mean "everything
+          # works here", it means their guards never fired -- which reads as
+          # support for a platform that has not been tested at all.
+          if skipped < 10:
+              sys.exit(f"only {skipped} tests skipped -- the Linux-only guards did not run")
+          PY
 
   build:
     name: build sdist and wheel

@@ -24,6 +24,7 @@ identically under X11 and Wayland -- the one layer with no backend matrix.
 
 from __future__ import annotations
 
+import ctypes
 import json
 import math
 import os
@@ -54,7 +55,16 @@ from .errors import (
 )
 from .roles import Role
 from .sendkeys import KeySender
-from .session import Compositor, Environment, SessionType, detect
+from .session import (
+    _PROCESS_QUERY_LIMITED_INFORMATION,
+    Compositor,
+    Environment,
+    SessionType,
+    _last_error,
+    _platform,
+    _win32_lib,
+    detect,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -285,6 +295,12 @@ def _process_table() -> dict[int, str]:
     PyGUITestError when neither is available, rather than reporting an
     empty process table, which would read as "your process is not running".
 
+    Windows has neither, and `_windows_process_table` answers there through
+    `CreateToolhelp32Snapshot`. The value it returns is the executable's
+    filename rather than a command line -- the one place this function's own
+    contract is narrower on one platform, documented on both that function and
+    `Session.wait_for_process`, which is what a caller reads.
+
     The two separate `-o` flags are not a style choice. FreeBSD's ps takes
     everything after `=` as the header for the *last* keyword in that
     argument, so the tidier `-o pid=,args=` asks it for a single pid column
@@ -307,6 +323,8 @@ def _process_table() -> dict[int, str]:
     that reaches it -- Linux takes the /proc route above and never gets
     here.
     """
+    if _platform() == "win32":
+        return _windows_process_table()
     if _have_proc():
         return {pid: _process_cmdline(pid) for pid in _proc_pids()}
     result = _ps("axo", "pid=", "-o", "args=", "-ww")
@@ -346,6 +364,240 @@ def _parse_cpu_time(text: str) -> tuple[float, float]:
     return days * 86400 + hours * 3600 + minutes * 60 + seconds, resolution
 
 
+_WINDOWS_TICKS_PER_SECOND = 10_000_000
+"""A `FILETIME`'s own unit: 100 nanoseconds, so this many ticks make a
+second -- four orders of magnitude finer than /proc's centisecond clock,
+which is why `wait_for_idle`'s coarseness guard (`resolution > interval`)
+never has anything to say on Windows."""
+
+_ERROR_ACCESS_DENIED = 5
+"""`OpenProcess`'s `GetLastError` for a process that exists but this one may
+not query -- ordinarily a service or another user's session -- as against 87
+(`ERROR_INVALID_PARAMETER`) for a pid that simply does not exist."""
+
+_TH32CS_SNAPPROCESS = 0x00000002
+"""`CreateToolhelp32Snapshot`'s flag for "the process list". The snapshot is a
+copy taken at one instant, which is what makes walking it safe while processes
+start and exit underneath."""
+
+_MAX_PATH = 260
+"""`PROCESSENTRY32W.szExeFile`'s fixed size, in wide characters. A constant of
+the structure rather than of the filesystem: the field is this long whatever a
+long-path-enabled machine allows elsewhere."""
+
+_INVALID_HANDLE_VALUE = (1 << (8 * ctypes.sizeof(ctypes.c_void_p))) - 1
+"""What a failing `CreateToolhelp32Snapshot` returns, as a `c_void_p` restype
+reads it.
+
+The SDK defines it as `(HANDLE)-1`, and ctypes hands a `c_void_p` back as an
+*unsigned* pointer-width integer -- so the value to compare against is every
+bit set, which is width-dependent, rather than the -1 the documentation
+writes. Computed from `sizeof(c_void_p)` for that reason and not written out
+as a literal, which would be right on one ABI and wrong on the other.
+"""
+
+
+class _FILETIME(ctypes.Structure):
+    """A Windows `FILETIME`: 100-nanosecond ticks, split across two DWORDs.
+
+    Declared here rather than reached from `backends._winapi`: that module is
+    backend infrastructure, and this probe stays independent of any backend --
+    the same rule `session.py`'s own Windows probes follow, and the reason
+    `_windows_process_cpu_seconds` loads kernel32 through `_win32_lib` rather
+    than through a `Win32Backend` instance.
+    """
+
+    _fields_ = [("dwLowDateTime", ctypes.c_uint32), ("dwHighDateTime", ctypes.c_uint32)]
+
+
+def _filetime_seconds(value: _FILETIME) -> float:
+    """A `FILETIME` as seconds, from its two 32-bit halves."""
+    ticks = (value.dwHighDateTime << 32) | value.dwLowDateTime
+    return ticks / _WINDOWS_TICKS_PER_SECOND
+
+
+class _PROCESSENTRY32W(ctypes.Structure):
+    """One row of `CreateToolhelp32Snapshot`'s process list.
+
+    Declared for the same reason and under the same rule as `_FILETIME` above:
+    this probe stays independent of any backend, so the layout is written out
+    here rather than reached from `backends._winapi`.
+
+    Every field is a fixed-width alias and `szExeFile` is an array of 16-bit
+    units rather than `ctypes.c_wchar`, which is `backends._winapi`'s rule and
+    is not stylistic: `c_wchar` is four bytes on Linux against Windows' two, so
+    a structure built from it lays out differently here than on the machine it
+    describes -- and `dwSize`, which the API *validates*, is computed from that
+    layout. Declared this way the size is the same everywhere and a test can
+    assert it without a Windows machine.
+    """
+
+    _fields_ = [
+        ("dwSize", ctypes.c_uint32),
+        ("cntUsage", ctypes.c_uint32),
+        ("th32ProcessID", ctypes.c_uint32),
+        # ULONG_PTR, so pointer-width: c_size_t rather than one of the 32-bit
+        # aliases, or every field after it sits at the wrong offset on 64-bit.
+        ("th32DefaultHeapID", ctypes.c_size_t),
+        ("th32ModuleID", ctypes.c_uint32),
+        ("cntThreads", ctypes.c_uint32),
+        ("th32ParentProcessID", ctypes.c_uint32),
+        ("pcPriClassBase", ctypes.c_int32),
+        ("dwFlags", ctypes.c_uint32),
+        ("szExeFile", ctypes.c_uint16 * _MAX_PATH),
+    ]
+
+
+def _wide_field(buffer: Any) -> str:
+    """A fixed-size wide-character field as a `str`, up to its NUL.
+
+    The same job `backends._winapi.wide_string` does, written out again for the
+    same reason the structure above is: these process probes run with no
+    backend in the picture. Each unit is one UTF-16 code unit, which is what
+    the field holds -- `ctypes.wstring_at` would read it at `wchar_t`'s width
+    and get nonsense on Linux, where the layout tests run.
+    """
+    chars = []
+    for unit in buffer:
+        if not unit:
+            break
+        chars.append(chr(unit))
+    return "".join(chars)
+
+
+def _windows_process_table() -> dict[int, str]:
+    """Every visible process on Windows, as pid -> executable filename.
+
+    `CreateToolhelp32Snapshot` takes one instant's copy of the process list and
+    `Process32FirstW`/`Process32NextW` walk it. No process handle is opened, so
+    this sees services and other users' sessions exactly as it sees this user's
+    own -- `OpenProcess` would refuse most of them, and a process table with
+    holes in it is worse than none.
+
+    **The value is `szExeFile` -- the executable's filename, and nothing else.**
+    Not the path, and above all not the arguments, which is where this differs
+    from every other platform: /proc and `ps` both hand back the whole command
+    line, so `wait_for_process` matches against that there and against
+    `"notepad.exe"` here. Windows does not carry a command line anywhere the
+    Toolhelp API reaches; the only route to one is WMI's
+    `Win32_Process.CommandLine`, and reaching it means a PowerShell or `wmic`
+    subprocess -- around a second, once per poll, in a loop that runs every
+    `interval` seconds, for a field most callers are not matching on. So the
+    narrower answer is the one given, and `Session.wait_for_process` documents
+    the cut rather than hiding it: a pattern that depends on an argument
+    (`"manage.py runserver"`, or a script name behind `python.exe`) matches
+    nothing here and times out.
+
+    Raises `PyGUITestError` where the snapshot cannot be taken, for the reason
+    `_process_table` raises rather than reporting an empty table: no processes
+    at all reads as "your process is not running", which is never true.
+    """
+    kernel32 = _win32_lib("kernel32")
+    if kernel32 is None:
+        raise PyGUITestError("cannot list processes: kernel32 did not load")
+    kernel32.CreateToolhelp32Snapshot.argtypes = (ctypes.c_ulong, ctypes.c_ulong)
+    kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+    kernel32.Process32FirstW.argtypes = (
+        ctypes.c_void_p,
+        ctypes.POINTER(_PROCESSENTRY32W),
+    )
+    kernel32.Process32FirstW.restype = ctypes.c_int
+    kernel32.Process32NextW.argtypes = (
+        ctypes.c_void_p,
+        ctypes.POINTER(_PROCESSENTRY32W),
+    )
+    kernel32.Process32NextW.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    snapshot = kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
+    # INVALID_HANDLE_VALUE is -1, which comes back through a c_void_p restype
+    # as the unsigned pointer-width value with every bit set -- so it is that,
+    # rather than 0, that has to be tested for alongside a null handle.
+    if not snapshot or snapshot == _INVALID_HANDLE_VALUE:
+        raise PyGUITestError(
+            "cannot list processes: CreateToolhelp32Snapshot failed, so this "
+            "session's process list could not be read"
+        )
+    table = {}
+    try:
+        entry = _PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(_PROCESSENTRY32W)
+        # Process32FirstW fails rather than returning an empty list when the
+        # snapshot holds nothing, and it also fails when dwSize is wrong --
+        # which is why that is set before the first call and not after it.
+        found = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+        while found:
+            table[int(entry.th32ProcessID)] = _wide_field(entry.szExeFile)
+            found = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snapshot)
+    return table
+
+
+def _windows_process_cpu_seconds(pid: int) -> tuple[float, float] | None:
+    """(CPU seconds, resolution) for `pid` on Windows, or None if it has exited.
+
+    `GetProcessTimes` reports kernel and user time as two `FILETIME`s, which
+    together are this function's whole answer -- wall-clock time this process
+    spent using a CPU, kernel and user mode summed, exactly what `ps`'s `time=`
+    column reports on the other platforms.
+
+    The exited-versus-unreadable distinction `_process_cpu_seconds`'s
+    docstring insists on is read from the error `OpenProcess` set:
+    `ERROR_ACCESS_DENIED` is a live process this one may not open, which is
+    the "cannot read" case `wait_for_idle` must not report as idle; anything
+    else failing the open -- ordinarily `ERROR_INVALID_PARAMETER` for a pid
+    that no longer names anything -- is read as "gone", the same lenient
+    reading `_process_cpu_seconds`'s `FileNotFoundError` branch gives /proc.
+
+    Through `session._last_error()` rather than `kernel32.GetLastError()`,
+    because that distinction is exactly what an unreliable read would corrupt
+    -- and it would corrupt it in the dishonest direction, reporting a busy
+    protected process as exited. See that function.
+    """
+    kernel32 = _win32_lib("kernel32")
+    if kernel32 is None:
+        raise PyGUITestError(f"cannot read CPU time for {pid}: kernel32 did not load")
+    kernel32.OpenProcess.argtypes = (ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong)
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    kernel32.GetProcessTimes.argtypes = (
+        ctypes.c_void_p,
+        ctypes.POINTER(_FILETIME),
+        ctypes.POINTER(_FILETIME),
+        ctypes.POINTER(_FILETIME),
+        ctypes.POINTER(_FILETIME),
+    )
+    kernel32.GetProcessTimes.restype = ctypes.c_int
+    handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        if _last_error() == _ERROR_ACCESS_DENIED:
+            raise PyGUITestError(
+                f"cannot read CPU time for {pid}: access denied opening its "
+                "process handle -- it belongs to another user or a protected "
+                "service"
+            )
+        return None
+    try:
+        creation, exit_time, kernel, user = (
+            _FILETIME(),
+            _FILETIME(),
+            _FILETIME(),
+            _FILETIME(),
+        )
+        if not kernel32.GetProcessTimes(
+            handle,
+            ctypes.byref(creation),
+            ctypes.byref(exit_time),
+            ctypes.byref(kernel),
+            ctypes.byref(user),
+        ):
+            raise PyGUITestError(f"GetProcessTimes failed for {pid}")
+        seconds = _filetime_seconds(kernel) + _filetime_seconds(user)
+        return seconds, 1 / _WINDOWS_TICKS_PER_SECOND
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _process_cpu_seconds(pid: int) -> tuple[float, float] | None:
     """(CPU seconds, resolution) for `pid`, or None if it has exited.
 
@@ -356,7 +608,14 @@ def _process_cpu_seconds(pid: int) -> tuple[float, float] | None:
     *idle*, which is the one way this package fails dishonestly: a test
     that should have failed passes. FileNotFoundError is the genuine "it is
     gone"; anything else is a machine that cannot answer, and raises.
+
+    Windows has neither /proc nor (ordinarily) `ps`, and needs neither:
+    `_windows_process_cpu_seconds` answers the same question through
+    `GetProcessTimes`, at a resolution /proc's own centisecond clock cannot
+    match.
     """
+    if _platform() == "win32":
+        return _windows_process_cpu_seconds(pid)
     if _have_proc():
         try:
             with open(f"/proc/{pid}/stat") as handle:
@@ -1689,7 +1948,7 @@ class Session:
         timeout: float | None = None,
         interval: float = 0.5,
     ) -> int | None:
-        """Block until a process matching `name` is running, or timeout.
+        r"""Block until a process matching `name` is running, or timeout.
 
         `name` is `.search()`ed against the full command line, the same way
         Session.find_window matches window titles. Returns the matched
@@ -1701,6 +1960,24 @@ class Session:
         PyGUITestError if neither route works, rather than reporting an
         empty process table -- which would look exactly like "your process
         is not running".
+
+        **On Windows the match is against the executable's filename alone** --
+        `"notepad.exe"`, never `"C:\...\notepad.exe /A file.txt"`. Windows
+        keeps no command line anywhere `CreateToolhelp32Snapshot` can reach,
+        and the one API that has it (WMI) costs a subprocess of around a
+        second on every poll. So a pattern naming the program works
+        (`wait_for_process("notepad")`), and a pattern that depends on an
+        argument matches nothing and times out rather than raising -- most
+        often a script behind its interpreter, where `"manage.py"` finds
+        nothing and `"python"` finds every Python on the machine.
+
+        Nothing else about pids is narrower on Windows, and two routes avoid
+        matching a name at all: `start_app(...).pid` where this session started
+        the program, and `Window.pid` -- which `win32` fills in from
+        `GetWindowThreadProcessId` -- where it did not. Both feed
+        `wait_for_idle` directly, and the second identifies the process behind
+        the window actually being driven rather than the first one sharing its
+        name.
         """
         pattern = re.compile(name) if isinstance(name, str) else name
 
@@ -1740,7 +2017,9 @@ class Session:
         resolution varies (whole seconds on procps, centiseconds on
         FreeBSD). If it is coarser than `interval` -- so coarse that a
         process using a whole core would still read as idle -- this raises
-        rather than answering badly.
+        rather than answering badly. On Windows, CPU time comes from
+        `GetProcessTimes` instead, at a resolution neither of those platforms
+        can match.
 
         Note the resolution also sets a floor under `cpu_threshold`: the
         smallest load that can be distinguished is resolution/interval of a
@@ -2626,8 +2905,16 @@ class _CaptureOnFailure:
         return os.path.join(directory, filename)
 
     def _write_json(self, path: str, data: object) -> str:
-        """Write `data` as indented JSON and return the path it went to."""
-        with open(path, "w") as handle:
+        """Write `data` as indented JSON and return the path it went to.
+
+        UTF-8 named rather than left to the locale: `json.dump` escapes
+        non-ASCII by default so today's output is pure ASCII either way, but
+        the default is the *platform's* -- cp1252 on Windows -- and that is a
+        silent corruption waiting for the day someone passes
+        `ensure_ascii=False`. Every text file this package writes names its
+        encoding for the same reason.
+        """
+        with open(path, "w", encoding="utf-8") as handle:
             json.dump(data, handle, indent=2)
         return path
 

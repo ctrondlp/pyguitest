@@ -28,7 +28,7 @@ class TestApiDocs(unittest.TestCase):
         generated = load_generator().render()
         self.assertEqual(
             generated,
-            DOC.read_text(),
+            DOC.read_text(encoding="utf-8"),
             "docs/api.md is out of date -- run python3 scripts/gen-api-docs.py",
         )
 
@@ -40,7 +40,7 @@ class TestApiDocs(unittest.TestCase):
         """
         from pyguitest.backends.composite import _DISPATCH
 
-        text = DOC.read_text()
+        text = DOC.read_text(encoding="utf-8")
         for attr in _DISPATCH:
             with self.subTest(attr=attr):
                 self.assertIn(f"`{attr}(", text)

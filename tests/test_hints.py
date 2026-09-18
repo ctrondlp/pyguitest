@@ -15,9 +15,57 @@ from pyguitest.session import (
 )
 
 
+def linux_detect(env):
+    """`detect(env)` as it would answer on Linux, from any machine.
+
+    Every fixture in this file goes through here, and the pin is the whole
+    point: `_classify` asks `_platform()` *first* and, on Windows, asks nothing
+    else -- the variables below mean nothing there, since several of them can
+    be set by something that is not the OS. Without it, every "X11 session" and
+    "wlroots session" in this file became a Windows one when the suite ran on
+    Windows, and 47 tests asserted Linux advice against a Windows report.
+    `detect()`'s own docstring names patching `_platform` as the way to test a
+    platform you are not on; it applies just as much to the one you are not on
+    by accident.
+    """
+    with mock.patch("pyguitest.session._platform", return_value="linux"):
+        return detect(env)
+
+
 def environment(**overrides):
-    base = detect({"WAYLAND_DISPLAY": "wayland-0", "XDG_CURRENT_DESKTOP": "GNOME"})
+    """The default fixture: a GNOME Wayland session."""
+    base = linux_detect(
+        {"WAYLAND_DISPLAY": "wayland-0", "XDG_CURRENT_DESKTOP": "GNOME"}
+    )
     return dataclasses.replace(base, **overrides)
+
+
+def windows_environment(**overrides):
+    """A Windows Environment, as detect() would build one on that machine.
+
+    Made by replacing fields on a Linux one, so everything this session has
+    nothing of -- no tools on PATH, no xlib, no portal -- is inherited rather
+    than restated in a second place. What differs is what a Windows detect()
+    sets, and the values here are the unremarkable ones: an interactive
+    desktop, no elevated window in front, a build past every version floor,
+    and the two things that really are installable already installed.
+
+    Merged rather than passed twice, so that an override naming one of these
+    fields wins instead of colliding with the default.
+    """
+    baseline = {
+        "session_type": SessionType.WIN32,
+        "compositor": Compositor.DWM,
+        "has_comtypes": True,
+        "has_sendinput": True,
+        "is_interactive_desktop": True,
+        "is_elevated": False,
+        "foreground_is_elevated": False,
+        "windows_build": 22631,
+        "windows_edition": "Windows 11 Pro",
+        "image_tools": ("compare",),
+    }
+    return dataclasses.replace(environment(), **{**baseline, **overrides})
 
 
 class TestDistroDetection(unittest.TestCase):
@@ -451,7 +499,9 @@ class TestToolRecommendationsAreKeyedByCompositor(unittest.TestCase):
     def _wlroots(self, **overrides):
         from pyguitest.session import Compositor, SessionType
 
-        base = detect({"WAYLAND_DISPLAY": "wayland-0", "SWAYSOCK": "/run/sway.sock"})
+        base = linux_detect(
+            {"WAYLAND_DISPLAY": "wayland-0", "SWAYSOCK": "/run/sway.sock"}
+        )
         self.assertIs(base.compositor, Compositor.WLROOTS)
         self.assertIs(base.session_type, SessionType.WAYLAND)
         return dataclasses.replace(
@@ -465,7 +515,7 @@ class TestToolRecommendationsAreKeyedByCompositor(unittest.TestCase):
     def _x11(self, **overrides):
         from pyguitest.session import SessionType
 
-        base = detect({"DISPLAY": ":0", "XDG_SESSION_TYPE": "x11"})
+        base = linux_detect({"DISPLAY": ":0", "XDG_SESSION_TYPE": "x11"})
         self.assertIs(base.session_type, SessionType.X11)
         return dataclasses.replace(
             base,
@@ -704,17 +754,19 @@ class TestTierSixHint(unittest.TestCase):
     """
 
     def _x11(self, **overrides):
-        base = detect({"DISPLAY": ":0", "XDG_SESSION_TYPE": "x11"})
+        base = linux_detect({"DISPLAY": ":0", "XDG_SESSION_TYPE": "x11"})
         self.assertIs(base.session_type, SessionType.X11)
         return dataclasses.replace(base, **{"has_xlib": False, **overrides})
 
     def _xwayland(self, **overrides):
-        base = detect({"WAYLAND_DISPLAY": "wayland-0", "DISPLAY": ":0"})
+        base = linux_detect({"WAYLAND_DISPLAY": "wayland-0", "DISPLAY": ":0"})
         self.assertIs(base.session_type, SessionType.XWAYLAND)
         return dataclasses.replace(base, **{"has_xlib": False, **overrides})
 
     def _pure_wayland(self, **overrides):
-        base = detect({"WAYLAND_DISPLAY": "wayland-0", "SWAYSOCK": "/run/sway.sock"})
+        base = linux_detect(
+            {"WAYLAND_DISPLAY": "wayland-0", "SWAYSOCK": "/run/sway.sock"}
+        )
         self.assertIs(base.session_type, SessionType.WAYLAND)
         return dataclasses.replace(base, **{"has_xlib": False, **overrides})
 
@@ -826,6 +878,332 @@ class TestEveryHintNamesSomething(unittest.TestCase):
                     hint.command or hint.packages,
                     f"{hint.component!r} names no tool and has no command",
                 )
+
+
+class TestTheWindowsReleaseLine(unittest.TestCase):
+    """detect_distro() off Linux: an OS description, never a package family.
+
+    The value is deliberately not a `_PACKAGES` key. On Windows there is no
+    distribution to install from, and under Cygwin and MSYS2 the os-release
+    that *does* exist describes the emulation layer, which is how a Cygwin
+    Python came to be offered `sudo apt install python3-gi` for a machine that
+    has never had apt.
+    """
+
+    def _windows(self, build, edition, platform="win32"):
+        from pyguitest import hints, session
+
+        with mock.patch.object(session, "_windows_version", lambda: (build, edition)):
+            return hints.detect_distro(platform=platform)
+
+    def test_the_edition_and_the_build_are_both_named(self):
+        self.assertEqual(
+            self._windows(19045, "Windows 10 Pro"), "Windows 10 Pro (build 19045)"
+        )
+
+    def test_build_22000_and_up_is_windows_11_whatever_the_registry_says(self):
+        # The documented quirk: ProductName still reads "Windows 10 Pro" on a
+        # Windows 11 machine, so the build is what settles the version line.
+        self.assertEqual(
+            self._windows(22631, "Windows 10 Pro"), "Windows 11 Pro (build 22631)"
+        )
+
+    def test_an_edition_that_already_says_11_is_left_alone(self):
+        self.assertEqual(
+            self._windows(22631, "Windows 11 Pro"), "Windows 11 Pro (build 22631)"
+        )
+
+    def test_another_windows_product_keeps_its_own_name(self):
+        # A server build is not Windows 11 and must not be renamed into it.
+        self.assertEqual(
+            self._windows(20348, "Windows Server 2022"),
+            "Windows Server 2022 (build 20348)",
+        )
+
+    def test_an_unreadable_registry_still_names_the_platform(self):
+        # None here reads as "unrecognised distribution", which sends a reader
+        # looking for a package manager that machine does not have.
+        self.assertEqual(self._windows(0, ""), "Windows")
+
+    def test_a_registry_value_without_the_prefix_is_still_recognisable(self):
+        self.assertEqual(self._windows(22631, "Pro"), "Windows Pro (build 22631)")
+
+    def test_cygwin_and_msys_are_not_linux_distributions(self):
+        for platform in ("cygwin", "msys"):
+            with self.subTest(platform=platform):
+                self.assertTrue(self._windows(22631, "Windows 10", platform))
+
+    def test_none_of_the_answers_is_a_family_with_packages_behind_it(self):
+        from pyguitest import hints
+
+        for answer in (
+            "Windows",
+            "Windows 11 Pro (build 22631)",
+            "Windows Server 2022 (build 20348)",
+        ):
+            with self.subTest(answer=answer):
+                self.assertEqual(hints._PACKAGES.get(answer, {}), {})
+
+    def test_a_supplied_os_release_still_wins_over_the_platform(self):
+        # doctor's host-image read: the machine doing the reading has nothing
+        # to do with the file being parsed.
+        self.assertEqual(detect_distro("ID=fedora", platform="win32"), "fedora")
+        self.assertEqual(detect_distro("ID=fedora", platform="cygwin"), "fedora")
+
+
+class TestWindowsHints(unittest.TestCase):
+    """The Windows rows, one per situation that can honestly be detected.
+
+    The fifth situation the design document lists -- a UAC prompt holding the
+    secure desktop -- has no test because it has no hint: nothing in this
+    package can see that desktop, and a hint that fired on anything else would
+    be a false alarm. docs/troubleshooting.md carries it instead.
+    """
+
+    def _components(self, **overrides):
+        return [h.component for h in hints_for(windows_environment(**overrides))]
+
+    def test_no_comtypes_asks_for_the_extra(self):
+        found = list(hints_for(windows_environment(has_comtypes=False)))
+        self.assertEqual(found[0].component, "UI Automation")
+        self.assertEqual(found[0].command, "pip install 'pyguitest[windows]'")
+
+    def test_a_session_that_has_comtypes_says_nothing_about_elements(self):
+        self.assertNotIn("UI Automation", self._components())
+
+    def test_a_session_with_no_desktop_is_told_nothing_can_be_installed(self):
+        hint = next(
+            h
+            for h in hints_for(windows_environment(is_interactive_desktop=False))
+            if h.component == "an interactive desktop"
+        )
+        self.assertFalse(hint.installable)
+        self.assertIsNone(hint.command)
+        self.assertIn("logged-in session", hint.why)
+
+    def test_an_elevated_target_is_named_only_where_this_process_is_not(self):
+        self.assertIn(
+            "input to an elevated window",
+            self._components(foreground_is_elevated=True, is_elevated=False),
+        )
+        # Elevated itself, so UIPI has nothing to drop: the same window is
+        # reachable and the hint would be wrong.
+        self.assertNotIn(
+            "input to an elevated window",
+            self._components(foreground_is_elevated=True, is_elevated=True),
+        )
+
+    def test_a_target_that_cannot_be_asked_is_not_an_alarm(self):
+        # None is "cannot tell" -- a protected process refusing the query --
+        # which is not the same finding as an elevated one.
+        self.assertNotIn(
+            "input to an elevated window",
+            self._components(foreground_is_elevated=None),
+        )
+
+    def test_image_magick_is_offered_because_pip_cannot_supply_it(self):
+        hint = next(iter(hints_for(windows_environment(image_tools=()))))
+        self.assertEqual(hint.component, "ImageMagick")
+        self.assertIn("winget", hint.command)
+
+    def test_a_build_below_the_capture_floor_names_the_floor(self):
+        hint = next(
+            h
+            for h in hints_for(windows_environment(windows_build=10240))
+            if h.component == "Windows.Graphics.Capture"
+        )
+        self.assertIn("17134", hint.why)
+        self.assertFalse(hint.installable)
+
+    def test_an_unreadable_build_is_not_reported_as_an_old_one(self):
+        # windows_build is 0 when it could not be read at all, and a hint
+        # saying "your build is 0" would be wrong twice over.
+        self.assertNotIn("Windows.Graphics.Capture", self._components(windows_build=0))
+
+    def test_a_session_with_nothing_missing_is_told_so(self):
+        self.assertEqual(list(hints_for(windows_environment())), [])
+        self.assertIn("Nothing missing", advice(windows_environment()))
+
+    def test_the_family_is_never_looked_up_for_a_windows_session(self):
+        # The rows are chosen before detect_distro() is called at all, so a
+        # Windows report cannot depend on a file that machine does not have.
+        from pyguitest import hints as hints_module
+
+        def explode(*_args, **_kwargs):
+            raise AssertionError("detect_distro() was called for a Windows session")
+
+        with mock.patch.object(hints_module, "detect_distro", explode):
+            found = list(hints_for(windows_environment(has_comtypes=False)))
+        self.assertEqual(found[0].component, "UI Automation")
+
+
+# The component names the Linux rows produce, which is what advice() matches
+# on to decide which Linux-only appendixes to append. Named here as well as
+# gathered from live environments, so that renaming one fails a test rather
+# than quietly making the disjointness check below vacuous.
+LINUX_COMPONENTS = frozenset(
+    {
+        "AT-SPI",
+        "the GTK accessibility bridge",
+        "tier-6 queries",
+        "window control extension",
+        "screenshots",
+        "template matching",
+        "the clipboard",
+        "input injection",
+        "membership of the 'input' group",
+    }
+)
+
+
+class TestHintsNeverBorrowALinuxComponentName(unittest.TestCase):
+    """advice() appends Linux-only advice by matching on component names.
+
+    The udev walkthrough hangs off "membership of the 'input' group" and the
+    extra line off "AT-SPI". One Windows hint reusing either name would print
+    a page about /dev/uinput underneath a hint about a build number, which is
+    a one-line mistake with an embarrassing symptom -- so the two sets are
+    held apart by tests rather than by a comment asking nicely.
+    """
+
+    _NOTHING_INSTALLED = {
+        "has_atspi": False,
+        "capture_tools": (),
+        "input_tools": (),
+        "image_tools": (),
+        "uinput_writable": False,
+        # Pinned rather than inherited: the udev hint fires only where there
+        # is an 'input' group to join, and that is read off the real machine.
+        # Left to inherit, this test passed on a distribution that has one and
+        # failed anywhere that does not -- Windows, and FreeBSD just as much,
+        # where /dev/uinput is root:wheel and no such group exists. The claim
+        # here is "every Linux component is produced by some environment", so
+        # each component's precondition belongs in the fixture.
+        "has_input_group": True,
+    }
+
+    def _linux_environments(self):
+        """One environment per shape that produces Linux components.
+
+        Several rather than one, because almost every row is conditional: the
+        tier-6 row needs a session with an X connection and no python-xlib,
+        the KWin row needs AT-SPI present with the toolkit setting off, and so
+        on. A single environment would only prove the point for itself.
+        """
+        nothing = self._NOTHING_INSTALLED
+        with_atspi = dict(nothing, has_atspi=True, has_pygobject=True, has_dogtail=True)
+        return [
+            environment(**nothing),
+            dataclasses.replace(
+                environment(**nothing), session_type=SessionType.X11, has_xlib=False
+            ),
+            dataclasses.replace(
+                environment(**nothing),
+                session_type=SessionType.XWAYLAND,
+                has_xlib=False,
+            ),
+            dataclasses.replace(environment(**with_atspi), compositor=Compositor.KWIN),
+            dataclasses.replace(environment(**nothing), compositor=Compositor.MUTTER),
+        ]
+
+    def _linux_components(self):
+        produced = set()
+        for env in self._linux_environments():
+            produced |= {
+                h.component
+                for h in hints_for(
+                    env,
+                    distro="fedora",
+                    capabilities=CapabilitySet(),
+                    toolkit_accessibility=False,
+                )
+            }
+        return produced
+
+    def _windows_components(self):
+        return {
+            h.component
+            for h in hints_for(
+                windows_environment(
+                    has_comtypes=False,
+                    is_interactive_desktop=False,
+                    foreground_is_elevated=True,
+                    image_tools=(),
+                    windows_build=10240,
+                )
+            )
+        }
+
+    def test_every_linux_component_is_still_produced_somewhere(self):
+        # A rename would leave the check below comparing against a name nothing
+        # emits, which passes for the wrong reason.
+        self.assertEqual(self._linux_components(), LINUX_COMPONENTS)
+
+    def test_the_windows_names_are_disjoint_from_the_linux_ones(self):
+        windows = self._windows_components()
+        # Every Windows row has to fire for this to mean anything.
+        self.assertEqual(len(windows), 5)
+        self.assertEqual(windows & self._linux_components(), set())
+
+    def test_the_linux_appendixes_stay_out_of_a_windows_report(self):
+        text = advice(
+            windows_environment(
+                has_comtypes=False,
+                is_interactive_desktop=False,
+                foreground_is_elevated=True,
+                image_tools=(),
+                windows_build=10240,
+            )
+        )
+        for linux_only in (
+            "/dev/uinput",
+            "udev",
+            "pyguitest[atspi]",
+            "ydotool",
+            "gnome-screenshot",
+            "dnf install",
+        ):
+            with self.subTest(linux_only=linux_only):
+                self.assertNotIn(linux_only, text)
+
+    def test_no_windows_component_reaches_a_linux_session(self):
+        windows = self._windows_components()
+        for env in self._linux_environments():
+            for hint in hints_for(env, distro="fedora"):
+                with self.subTest(session=env.session_type, component=hint.component):
+                    self.assertNotIn(hint.component, windows)
+
+
+class TestWindowsAdviceFitsATerminal(unittest.TestCase):
+    """The same width rule as the Linux rows, which is easy to lose here.
+
+    The Windows prose is longer per row than most of the Linux rows are -- a
+    build floor and a UIPI explanation both take saying -- so the wrapping has
+    to hold for it too: `doctor` output is routinely pasted into bug reports.
+    """
+
+    _GAPS = {
+        "has_comtypes": False,
+        "is_interactive_desktop": False,
+        "foreground_is_elevated": True,
+        "image_tools": (),
+        "windows_build": 10240,
+    }
+
+    def test_no_prose_line_overruns_a_terminal(self):
+        for line in advice(windows_environment(**self._GAPS)).splitlines():
+            if line.strip().startswith(("pip ", "winget ")):
+                continue
+            with self.subTest(line=line):
+                self.assertLessEqual(len(line), 80)
+
+    def test_the_winget_command_survives_on_one_line(self):
+        lines = advice(windows_environment(image_tools=())).splitlines()
+        want = "winget install ImageMagick.ImageMagick"
+        self.assertTrue(
+            any(line.strip() == want for line in lines),
+            f"the install command was reflowed apart: {lines}",
+        )
 
 
 if __name__ == "__main__":

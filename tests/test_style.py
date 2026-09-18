@@ -26,7 +26,9 @@ class TestCommentConventions(unittest.TestCase):
         run. Attribute docstrings do the same job as real objects.
         """
         for path in SOURCE:
-            for number, line in enumerate(path.read_text().splitlines(), 1):
+            for number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), 1
+            ):
                 with self.subTest(file=path.name, line=number):
                     self.assertFalse(
                         line.lstrip().startswith("#:"),
@@ -36,7 +38,9 @@ class TestCommentConventions(unittest.TestCase):
     def test_section_dividers_are_one_width(self):
         """Dividers pad to a fixed column so they line up down the file."""
         for path in SOURCE:
-            for number, line in enumerate(path.read_text().splitlines(), 1):
+            for number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), 1
+            ):
                 if DIVIDER.match(line):
                     with self.subTest(file=path.name, line=number):
                         self.assertEqual(
@@ -50,7 +54,7 @@ class TestCommentConventions(unittest.TestCase):
         found = sum(
             1
             for path in SOURCE
-            for line in path.read_text().splitlines()
+            for line in path.read_text(encoding="utf-8").splitlines()
             if DIVIDER.match(line)
         )
         self.assertGreater(found, 20)

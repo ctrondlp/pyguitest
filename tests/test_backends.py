@@ -7,6 +7,7 @@ what they raise when nothing in the session can serve them.
 
 import dataclasses
 import json
+import sys
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -391,7 +392,7 @@ class TestSessionFacade(unittest.TestCase):
 
     def test_tier_one_operations_work_without_a_display_server(self):
         with connect() as gui:
-            result = gui.run_app(["true"])
+            result = gui.run_app([sys.executable, "-c", ""])
             self.assertEqual(result.returncode, 0)
 
     def test_require_raises_for_the_whole_declared_set(self):

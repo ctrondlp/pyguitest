@@ -11,6 +11,15 @@ request/response plumbing (portalrequest.py), so a second fake would only
 be a second thing to keep in step.
 """
 
+import sys
+import unittest
+
+if sys.platform == "win32":  # pragma: no cover - platform guard
+    raise unittest.SkipTest(
+        "the ScreenCast portal is a Linux desktop service reached over D-Bus; "
+        "neither it nor the PipeWire stream behind it exists on Windows"
+    )
+
 import os
 import tempfile
 import unittest

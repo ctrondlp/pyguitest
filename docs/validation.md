@@ -1094,8 +1094,139 @@ with no shell running, applications publish it properly. Not established:
 whether a click moves focus to the clicked widget — the test was invalidated
 by the extents finding, since every button reported the same rectangle.
 
+## Run live on Windows 11 (build 26200)
+
+The first run of any of this on Windows — 2026-09-18, Python 3.13.5, over
+SSH. **The whole suite passes there: 1437 passed, 65 skipped, 25171
+subtests.** That is the machine-free half confirming itself on the platform
+it describes rather than on Linux: every module imports, nothing Linux-only
+leaks into an import path, and the Linux-only guards skip loudly (65 of them)
+instead of silently reporting support.
+
+What the session probes answered, live:
+
+| Probe | Answer | Confirms |
+| --- | --- | --- |
+| `_classify()` | `win32` | the platform branch, taken before any variable is read |
+| `_compositor()` | `dwm` | the one-member branch |
+| `_windows_version()` | build `26200`, `ProductName` = `"Windows 10 Pro"` | **the registry quirk is real** — this machine is Windows 11 and the registry says 10 |
+| `_dpi_awareness()` | `per-monitor` | the opaque-handle finding: the raw context came back as `18` and matched only through `AreDpiAwarenessContextsEqual` |
+| `_interactive_window_station()` | `False` | correctly detected; SSH is not on WinSta0 |
+| `_elevated()` | `True` | `_integrity_rid`'s SID offsets and the token calls around them |
+| `has_comtypes` | `True` | the `windows` extra resolves and imports |
+
+The window-station note fired and `windows()` returned an empty list — which
+is the design working, not a gap: an SSH session has no desktop to enumerate.
+
+**Three things turned out not to need a desktop at all**, and all three now
+have live answers:
+
+- **`wait_for_process`'s whole mechanism.** `CreateToolhelp32Snapshot` listed
+  206 processes with no handle opened, including `System`, `csrss.exe`,
+  `winlogon.exe`, `services.exe` and `lsass.exe` — confirming the claim that
+  motivated choosing Toolhelp over opening each process. `szExeFile` came back
+  as a plain filename in every one of the 206 (**zero** contained a path
+  separator), which is what the documented capability cut assumes.
+  `PROCESSENTRY32W` was accepted at `sizeof` **568**, the same number ctypes
+  computes for it on Linux — so the `dwSize` the API *validates* is right, and
+  the Linux-side layout assertion is testing the real thing.
+- **`GetProcessTimes`.** Answered `(0.125, 1e-07)` for this process: the
+  100-nanosecond resolution `wait_for_idle`'s coarseness guard never has
+  anything to say about. A pid that does not exist answered `None`, through
+  `_last_error()` correctly reading **87** (`ERROR_INVALID_PARAMETER`) rather
+  than mistaking it for access denied.
+- **UI Automation itself.** `available()`, `_connection()`,
+  `GetRootElement()` (`Element('panel', 'Desktop 1')`, rect `(0, 0, 1024,
+  768)`), `CreatePropertyCondition`, `ControlViewCondition` and
+  `ElementFromPoint` all answer. Searches execute and correctly return
+  nothing, since this station has no windows.
+
+Two findings came out of that last one:
+
+- **comtypes binds the attribute form.** `CurrentName` exists on the generated
+  class and `get_CurrentName` does not — so `_current`'s method branch is dead
+  code against this comtypes. It is kept, because nothing documents the
+  binding as stable, but the open question is now answered.
+- **A NULL COM pointer is not `None`** — the bug a fake could not have shown.
+  See the CHANGELOG entry; `_parent` at the root returned an element wrapping
+  address zero where the contract promised None.
+
+**Still not confirmed, and why:** what is left all needs the *interactive
+desktop* this run did not have — a console or RDP session. That is `windows()`
+against real windows, `SendInput` delivery, `capture()`,
+`pointer_position()`, the clipboard, `WINDOW_EVENTS`, and — for `uia` — a
+search that finds a real control, an action that drives one, and a read of
+one's text. The list under "Not run live" is scoped to exactly those, plus
+the one `wait_for_process` branch that needs an unelevated session.
+
 ## Not run live
 
+- **Everything on a Windows interactive desktop, as of 2026-09-18.** The suite
+  itself now passes on Windows 11 build 26200 and the session probes are
+  confirmed live — see "Run live on Windows 11" above for what that settled.
+  What remains is everything a desktop-less SSH session cannot reach. Every
+  prototype and structure layout below is transcribed from Microsoft's
+  documentation and driven by fakes, and a fake can only check that the code
+  sends what it means to send; whether Windows *acts* on it is the half no
+  fake reaches. In roughly the order it would break:
+
+  **`win32`, the input and window half:**
+  - `INPUT`'s layout and `cbSize` are accepted rather than dropped.
+  - `SendInput` delivers a coordinate-accurate click, and a
+    `KEYEVENTF_UNICODE` character reaches a real edit control.
+  - `MOUSEEVENTF_ABSOLUTE | VIRTUALDESK` lands where the arithmetic says on a
+    second monitor at a different DPI.
+  - The `EnumWindows` filter keeps every window a user can see and click, and
+    drops no more than that.
+  - **`windows()` really is bottom-to-top** once reversed — the ordering
+    `Session.find_window` depends on, and the one thing here that a fake
+    cannot settle because it is a claim about `EnumWindows` itself.
+  - `SetForegroundWindow`/`ShowWindow` are read back rather than trusted.
+  - The GDI capture is the right way up and not colour-swapped, with the
+    bitmap deselected from its DC before `GetDIBits` as documented.
+  - A scroll past `_MAX_WHEEL_STEPS` arrives as the total detents asked for,
+    rather than wrapping the 16-bit wheel field and scrolling backwards.
+  - `GetAsyncKeyState(VK_MENU)` answers about a held Alt. (Transcribed once
+    as `0x18`, `VK_FINAL`, so the query silently answered False.)
+  - The clipboard round-trips through `GlobalAlloc`/`GlobalLock`/`GlobalSize`.
+  - `EnumDisplayMonitors` returning false is rare enough that raising on it
+    does not turn an ordinary desktop into a failure.
+
+  **`wait_for_process`** — the mechanism is confirmed above; what is left is
+  one branch:
+  - `ERROR_ACCESS_DENIED` really does come back for a live process this one
+    may not open, and is raised rather than read as "gone". Not reachable on
+    the box used so far: that session is elevated, and every process on it
+    except pid 0 opened successfully. Needs an **unelevated** run.
+
+  **`WINDOW_EVENTS`, the one part owning a thread:**
+  - The three `SetWinEventHook` ranges fire for an ordinary application
+    window and stay quiet for the control-level flood through the same hook.
+  - `GetMessageW` delivers a `WinEventProc` call per event.
+  - `PostThreadMessageW(WM_QUIT, ...)` ends the loop rather than racing the
+    thread's first `GetMessageW`.
+  - A suspended UWP application's cloaked window does not reach
+    `_is_listable` through this path when it cannot through `EnumWindows`.
+
+  **`uia`, the element half** — less arithmetic, so a shorter list:
+  - The property and pattern ids match the SDK. A wrong one narrows a search
+    too little rather than failing outright, so nothing else would say.
+  - `FindAll(TreeScope_Descendants, condition)` returns what the filter
+    asked for, and the control-view condition excludes the layout-only
+    elements a raw walk returns.
+  - `click()` through Invoke, `set_text` through Value and `toggle` through
+    Toggle each reach a real control.
+  - `_initialize_com`'s `CoInitialize` is actually needed — the first draft
+    assumed a `Session` is built on the thread that imported `comtypes`,
+    which is untrue of a worker or a pool, and without it `_connection`
+    reported "no UI Automation" for an uninitialized apartment.
+  - A scroll bar's thumb, reported as its own `"thumb"` role, is what a real
+    `find_elements` needs — folding it into `Role.SCROLL_BAR` would make a
+    Windows scroll bar answer with two elements where Linux answers with one.
+  - `pyguitest inspect` groups windows under the desktop element's own name,
+    since UIA publishes no per-application node to group by.
+
+  A claim leaves this list only when a run puts its output beside it here.
 - **The wlroots compositor IPC backends** — sway, Hyprland, niri. Their
   tests replay recorded output and stand-ins, on a sandbox where none of
   those are available to test against. Running them against a live

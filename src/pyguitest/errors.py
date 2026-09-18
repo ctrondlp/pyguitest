@@ -120,21 +120,36 @@ class ImageNotFound(PyGUITestError):
 class ElementNotActionable(PyGUITestError):
     """Element.click() has no way left to act on this element.
 
-    Raised where dogtail's own coordinate click needs GNOME's
+    The typed answer for "this element is here and cannot be pressed", as
+    against ElementNotFound ("it is not there") and CapabilityUnsupported
+    ("this backend cannot do that at all"). The wording is the backend's,
+    which is why one is passed in: what can go wrong is a property of the
+    platform's accessibility model, not of this package.
+
+    On Linux it is dogtail's own coordinate click needing GNOME's
     gnome-ponytail-daemon -- absent on every other Wayland compositor -- and
-    the element's AT-SPI actions include neither "click" nor "press" to fall
+    the element's AT-SPI actions holding neither "click" nor "press" to fall
     back to. Seen on KDE's QML-based Kickoff menu, whose category labels
-    expose no Action interface at all. Coordinate-based clicking still
-    works here; only the coordinate-free path does not.
+    expose no Action interface at all; coordinate-based clicking still works
+    there, only the coordinate-free path does not. On Windows it is a UIA
+    element publishing none of the Invoke, Toggle or LegacyIAccessible
+    patterns, which leaves no accessible action to perform either.
     """
 
-    def __init__(self, role: str, name: str) -> None:
-        """Record which element neither click path could act on."""
+    def __init__(self, role: str, name: str, reason: str | None = None) -> None:
+        """Record which element could not be acted on, and why not.
+
+        `reason`, given, replaces the AT-SPI wording -- so the type stays the
+        same thing to a caller catching it on either platform, while the
+        sentence says what happened on the one they are running.
+        """
         self.role = role
         self.name = name
-        super().__init__(
-            f"{role} {name!r} offers no click or press action, and this "
-            "compositor's coordinate click needs GNOME's "
-            "gnome-ponytail-daemon -- click by coordinate instead, e.g. "
-            "gui.extents(element) then gui.click()"
-        )
+        if reason is None:
+            reason = (
+                f"{role} {name!r} offers no click or press action, and this "
+                "compositor's coordinate click needs GNOME's "
+                "gnome-ponytail-daemon -- click by coordinate instead, e.g. "
+                "gui.extents(element) then gui.click()"
+            )
+        super().__init__(reason)

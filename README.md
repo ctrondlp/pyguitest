@@ -17,6 +17,24 @@ Pyguitest provides one Python API for mouse, keyboard, window, screenshot, and
 accessible UI automation across Wayland, X11, and XWayland. It is the Python
 successor to [X11::GUITest](https://metacpan.org/pod/X11::GUITest).
 
+**Windows support is landing, and has not yet driven a real desktop.** A
+Windows session detects itself, reports its own environment (window station,
+integrity level, DPI awareness and build) and is advised in Windows terms
+rather than in distribution packages. Two backends drive it: `win32` —
+screens, input, windows, window events, screen capture and the clipboard,
+through `ctypes` with no dependency — and `uia`, the element tree, through UI
+Automation behind the `windows` extra.
+
+The suite passes on Windows 11 (build 26200) and the environment probes are
+confirmed against it. What has *not* run is everything touching an interactive
+desktop — injected input, capture, window enumeration and the element tree —
+because those need a console session rather than the SSH one that run used.
+Every prototype and structure layout is transcribed from Microsoft's
+documentation; [docs/validation.md](docs/validation.md) records what the live
+run settled and what is still outstanding, and
+[docs/developers/adr-003-windows.md](docs/developers/adr-003-windows.md)
+records what was decided and why.
+
 Use it to:
 
 - 🧪 Build reliable desktop GUI tests
@@ -64,8 +82,9 @@ That shape decides what it is good at and what it is not:
 - **Not a test framework.** It is a library: no pytest plugin, no fixtures,
   no runner. Use whatever you already use, and it will fit underneath it.
 - **Not for browsers or mobile.** Web pages have WebDriver and Playwright,
-  phones have their own tooling. This drives desktop windows on Linux and the
-  BSDs, and has no Windows or macOS backend.
+  phones have their own tooling. This drives desktop windows on Linux, the
+  BSDs, and Windows — which has not yet driven a real desktop, see above —
+  and macOS has no backend.
 - **Not the first choice where the application can help.** If a program ships
   a command line, a documented API or an in-app test hook, driving that is
   faster, more stable, and says what the test means instead of what it
@@ -82,6 +101,7 @@ Requires Python 3.10 or newer.
 ```sh
 pip install pyguitest              # core; no dependencies
 pip install 'pyguitest[atspi]'     # + element automation
+pip install 'pyguitest[windows]'   # + element automation on Windows (comtypes)
 ```
 
 Or from a checkout, which is the same thing with a path instead of a name:
@@ -98,9 +118,9 @@ covered in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 **None are required.** The package imports and runs with nothing else
 installed. What you add depends on which backend has to serve your desktop
-— extras (`atspi`, `x11`, `uinput`, `eiinput`, `dev`), a few distribution
-packages pip cannot supply, and sometimes a tool on `PATH`. Rather than work
-that out from a document, ask the machine:
+— extras (`atspi`, `x11`, `uinput`, `eiinput`, `windows`, `dev`), a few
+distribution packages pip cannot supply, and sometimes a tool on `PATH`.
+Rather than work that out from a document, ask the machine:
 
 ```sh
 pyguitest doctor
@@ -127,13 +147,19 @@ is what `connect()` reports, what `backend.providers()` lists, and what
 | sway, Hyprland, niri | a CLI tool, `uinput`, or libei (`eiinput`) | AT-SPI via `atspi` | their own sockets, standard library only | `grim` |
 | Any desktop with a portal | the RemoteDesktop portal (`portal`) | — | — | the Screenshot portal (`portalcapture`) |
 | Unattended CI | `x11` under Xvfb, or a headless session | AT-SPI, where a bus is running | `gnomeshell` on a headless GNOME | `x11` |
+| Windows | `win32` (`SendInput`) | `uia`, via the `windows` extra (UI Automation) | `win32` (`EnumWindows`, plus window events through `SetWinEventHook`) | `win32` (GDI `BitBlt`); one window un-occluded is not yet served |
 
 Two things the table cannot say. Whether an application publishes anything to
 AT-SPI is up to the application, and [testable-guis.md][testable-guis] is
 about that side of it. And which of these paths has actually been run against
 a real desktop is in [docs/validation.md](docs/validation.md) — that is the
 file to read before trusting any row here, and it is written to be read that
-way.
+way. That file is where the Windows row above needs reading twice: `win32` and
+`uia` are registered and composed exactly like every backend above them, but
+neither has been near a Windows machine yet, so every prototype and structure
+layout is transcribed from Microsoft's documentation rather than measured.
+[docs/developers/adr-003-windows.md](docs/developers/adr-003-windows.md)
+records the design and the alternatives rejected along the way.
 
 ## Usage
 

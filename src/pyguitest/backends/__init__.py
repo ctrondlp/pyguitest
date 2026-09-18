@@ -765,3 +765,65 @@ def _portalcapture_factory(environment, **options):
 
 
 register(_portalcapture_factory, "portalcapture", priority=58, opt_in=True)
+
+
+def _win32_factory(environment, **options):
+    """Build the in-process Windows backend, or None off Windows.
+
+    `available()` is the whole gate, and it is False on every host without
+    user32.dll -- which is every host that is not Windows -- so this factory
+    cannot claim a Linux or macOS session and needs no platform test of its
+    own. Priority 70 puts it above the capture, clipboard and image backends
+    and below the accessibility ones, which are inert here.
+
+    `input` sits at 70 as well, and the tie is decided the other way from what
+    a reader might assume: `register` appends and then sorts by descending
+    priority, and that sort is stable, so within one priority the backend
+    registered *first* stays first -- and a composite gives precedence to its
+    earlier members. `input` is registered above, so it would win an overlap.
+    Nothing here depends on that, because the two are never members of the same
+    composite: `_input_factory`'s tools are Linux and BSD binaries and its
+    fallback is uinput, so it returns None on every Windows host. Should that
+    ever stop being true, this factory needs a priority of its own rather than
+    a comment.
+
+    The elements it deliberately does not serve come from `uia` instead: this
+    is the half of Windows support that needs no COM, and on a Windows host
+    without the `windows` extra it is the whole session.
+    """
+    from . import win32 as _win32
+
+    if not _win32.available():
+        return None
+    return _win32.Win32Backend(environment)
+
+
+register(_win32_factory, "win32", priority=70)
+
+
+def _uia_factory(environment, **options):
+    """Build the UI Automation element backend, or None where it is unreachable.
+
+    `available()` is a type-library load, and it is False on every host without
+    `UIAutomationCore.dll` -- which is every host that is not Windows -- so this
+    factory cannot claim a Linux or macOS session and needs no platform test of
+    its own. Priority 90 puts it beside `atspi`, in the read-only band: elements
+    and element actions need neither the geometry nor the injection permission
+    the lower tiers are about, and only one of the two is ever applicable on a
+    given machine.
+
+    Construction can still raise `BackendUnavailable` for a reason `available()`
+    cannot see -- a type library that loads while the machine refuses to create
+    the COM object, or comtypes installed on a box whose UIA is broken -- and a
+    caller who named `uia` gets that reason rather than the registry's generic
+    "cannot drive this session". See `register`'s docstring on what happens to
+    it; automatic composition folds it into None either way.
+    """
+    from . import uia as _uia
+
+    if not _uia.available():
+        return None
+    return _uia.UiaBackend(environment)
+
+
+register(_uia_factory, "uia", priority=90)
