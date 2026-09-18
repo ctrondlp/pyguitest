@@ -141,7 +141,7 @@ def _os_release_pretty(path: pathlib.Path) -> str | None:
     bug report needs. This is for display: the literal distro string.
     """
     try:
-        text = path.read_text(errors="replace")
+        text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
     fields = {}
@@ -196,7 +196,9 @@ def _debug_data(gui) -> dict:
         "distro": {
             "family": detect_distro(),
             "pretty": _os_release_pretty(_OS_RELEASE),
-            "host_family": detect_distro(host_release.read_text(errors="replace"))
+            "host_family": detect_distro(
+                host_release.read_text(encoding="utf-8", errors="replace")
+            )
             if host_release is not None and host_release.exists()
             else None,
             "host_pretty": _os_release_pretty(host_release)

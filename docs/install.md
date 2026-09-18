@@ -6,8 +6,8 @@ with no other packages present — you get the tier-1 capabilities and an
 honest report of what is missing.
 
 Everything beyond that is opt-in, because no single set of packages spans
-GNOME, KDE, wlroots, X11 and the BSDs. Which packages you want depends
-entirely on which backend has to serve you, so start from the matrix.
+GNOME, KDE, wlroots, X11, the BSDs and Windows. Which packages you want
+depends entirely on which backend has to serve you, so start from the matrix.
 
 **You do not need to read any of this.** `pyguitest doctor` reads
 `/etc/os-release`, works out which distribution you are on, and prints the
@@ -38,8 +38,9 @@ rather than an error.
 | `imagesearch` | finding a control by a picture of it | — | — | `compare` (ImageMagick) |
 | `x11` | everything, including tier-6, on X11 and XWayland | `[x11]` (python-xlib) | — | — |
 
-`[dev]` (pytest, ruff, mypy) is the remaining extra; see
-[CONTRIBUTING.md](../CONTRIBUTING.md).
+`[windows]` (comtypes) and `[dev]` (pytest, ruff, mypy) are the remaining
+extras; the first is described under [On Windows](#on-windows), and the second
+in [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 Two rows are worth reading twice. `windows` on sway, Hyprland and niri needs
 **nothing at all** — window control speaks their unix sockets using only the
@@ -69,6 +70,50 @@ The `portal` row is the exception: `doctor` says nothing about it, because it
 is opt-in and never autodetected — see
 [Backend registry](developers/structure.md#backend-registry) for why
 `connect()` never reaches it on its own.
+
+## On Windows
+
+None of the tables below apply there: no `/etc/os-release` to read, no package
+manager to name, and no row of packages that pip cannot supply. What there is:
+
+| | |
+|---|---|
+| `pip install pyguitest` | everything but the element tree |
+| `pip install 'pyguitest[windows]'` | + UI Automation, through `comtypes` |
+| ImageMagick | `winget install ImageMagick.ImageMagick`, for locating a control by a picture of it — the one thing here pip cannot supply, and it needs its legacy command line, since the tool called is `compare` |
+| nothing on `PATH` | no CLI tool is adapted or recommended: every Windows mechanism is an API call, so there is no ydotool-shaped gap |
+
+The `windows` extra carries an environment marker, so installing it on Linux or
+macOS is a no-op rather than an error — `pip install 'pyguitest[windows]'`
+succeeds everywhere and only does something on Windows.
+
+**Both Windows backends are registered**, so `connect()` on a Windows session
+drives screens, input, windows, the clipboard and screen capture through
+`ctypes` — with no daemon and no privilege beyond the process's own — and, with
+`comtypes` installed, element search, element actions and element geometry
+through UI Automation. `pip install 'pyguitest[windows]'` is what adds the
+second half: the `uia` backend, and with it `find_element`, `element_at` and an
+element's own `click()`, which need no coordinates and no injected input.
+`pyguitest doctor` answers in Windows terms rather than with distribution
+package names, and `pyguitest debug` reports the environment the backends depend
+on (window station, integrity level, DPI awareness, build, and whether
+`comtypes` is importable).
+[docs/developers/adr-003-windows.md](developers/adr-003-windows.md) is the
+split. The suite passes on Windows 11 (build 26200) and the environment probes
+are confirmed there, but nothing has yet driven an interactive desktop — that
+needs a console session, not the SSH one that run used — so
+[validation.md](validation.md) holds what the live run settled and what is
+still outstanding, rather than a claim that it all works.
+
+Two of those are worth knowing before writing a test for a Windows machine,
+because they fail silently rather than loudly. A process that is not elevated
+cannot inject into an elevated window — UIPI drops the events with no error and
+no prompt, which is why the backend reports a short `SendInput` count as a typed
+refusal naming UIPI — and a process that is not on the interactive window
+station (a service, a scheduled task, an ssh session) can enumerate no window at
+all. `pyguitest doctor` names both when they apply, and
+[troubleshooting.md](troubleshooting.md#injected-input-vanishes-on-windows) has
+the symptoms.
 
 ## Distribution packages (pip cannot supply these)
 

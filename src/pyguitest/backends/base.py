@@ -91,7 +91,15 @@ class Screen:
         scale: float = 1.0,
         name: str = "",
     ) -> None:
-        """Describe one output."""
+        """Describe one output.
+
+        `scale` is the output's DPI divided by 96 — 1.0 unscaled, 1.5 on a
+        144 DPI monitor — and never a pixel count: `width` and `height` are
+        physical pixels, the same numbers `geometry()` and `screenshot()`
+        work in. Windows reports it as `GetDpiForMonitor` over 96, which is
+        the definition the other platforms' answers are normalised to as
+        well.
+        """
         self.index = index
         self.width = width
         self.height = height
@@ -858,7 +866,16 @@ class GUIBackend(ABC):
         raise NotImplementedError
 
     def is_window_cursor(self, window: Window, shape: int) -> bool:
-        """Whether `window` is currently showing cursor `shape`."""
+        """Whether `window` is currently showing cursor `shape`.
+
+        Under X11 this is a per-window question with a per-window answer. On
+        Windows it is scoped to the *pointer* instead: what is readable is the
+        cursor the system is showing, compared against the system's own
+        standard handles, so the answer concerns `window` only while the
+        pointer is inside it — and a themed desktop's cursor may match no
+        standard handle at all, which reads as False. WINDOW_CURSOR_QUERY's
+        description carries the same caveat.
+        """
         self.require(Capability.WINDOW_CURSOR_QUERY)
         raise NotImplementedError
 

@@ -7,7 +7,271 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **The Windows key vocabulary is public in both directions**, because the half
+  of a recorder that *captures* input needs it rather than this backend does: a
+  Windows input hook reports a **virtual-key code**, and a script replayed by
+  `press_key` has to say a **keysym name**. `win32.virtual_key_code("Return")`
+  answers the forward direction — the lookup `press_key` itself uses, now with
+  one implementation instead of two — and
+  `win32.key_name_for_virtual_key(0x0D)` the reverse, with
+  `key_names_for_virtual_key` for the five codes whose translation is not
+  one-to-one: Windows gives the main Enter and the keypad's the same virtual key
+  (`("return", "kp_enter")`), the two Meta spellings are one key on each side
+  (`("meta_l", "super_l")`, `("meta_r", "super_r")`), Ctrl+Break has two X11
+  names, and AltGr *is* the right Alt key there. A code this package
+  cannot name answers `()` and `None` rather than inventing something, since a
+  name that would not replay is worse than an honest gap. All three are pure
+  table lookups — no DLL, no COM, no backend behind them — so they answer before
+  anything is connected, and the reverse table is built from `_KEYSYM_VK` so the
+  two directions cannot drift apart. Everything else in those tables stays
+  private; these three names are the boundary.
+
+- **Windows elements: `uia`, the UI Automation backend, registered at 90 — so
+  `find_element`, element actions, element geometry and hit-testing exist on
+  Windows behind the `windows` extra.** `win32` gave Windows screens, input,
+  windows, capture and the clipboard, and its refusal for elements named what
+  was missing: those are UI Automation's, and UI Automation needs COM.
+  `UiaBackend` is that half — `GetRootElement`/`FindAll` for search, the control
+  patterns for actions (`Invoke`, `Toggle`, `SelectionItem`, `ExpandCollapse`,
+  `Value`, `Text`, `RangeValue`, `ScrollItem`, with `LegacyIAccessible` as the
+  MSAA fallback no provider is obliged to avoid), `CurrentBoundingRectangle` for
+  geometry and `ElementFromPoint` for hit-testing. The search is deliberately two
+  layers: every filter that UIA can express becomes a property condition, folded
+  two at a time onto one `CreateAndCondition` together with UIA's own
+  control-view condition, and everything that comes back is then checked against
+  the *same* predicate the AT-SPI backend applies — so a condition this module
+  got subtly wrong can only make the narrowing coarse, never turn into a
+  silently missing match, and a Windows `find_element` means what a Linux one
+  means. `push button` and `panel` map to two control types each, so a role
+  filter is sometimes an `or`, folded the same way; the three-or-more condition
+  forms want an array of interface pointers, which a Python caller has no
+  natural way to pass through comtypes and does not need. **None of it has run
+  on a Windows machine**: the type library, the property and pattern ids and
+  every call shape are transcribed from Microsoft's documentation, the tests
+  drive a fake COM client that evaluates conditions the way a provider would, and
+  two hedges exist because no document settles them — each `Current*` property is
+  read both as an attribute and as `get_Current*()`, and the point handed to
+  `ElementFromPoint` comes from the typelib's own `POINT` where it has one and
+  from `_winapi`'s identical declaration where it does not. The per-thread DPI
+  context `win32` was already setting moved into
+  `_winapi.set_thread_dpi_awareness`, which both backends now call at the same
+  point in construction: UIA's rectangles are physical pixels, so a thread that
+  had not said which it is would read a virtualised desktop on one half of a
+  session and the real one on the other. `ElementNotActionable` grew an optional
+  reason — "found it, cannot press it" is one typed answer on both platforms, and
+  the sentence explaining it is the platform's — and docs/validation.md carries
+  the list the first real run has to confirm.
+
+- **Windows is now a session this package detects, describes and advises on —
+  described before it was drivable, deliberately.** `SessionType.WIN32` and
+  `Compositor.DWM` exist; `detect()` tells a Windows session from a Linux one by
+  `sys.platform` *before* it looks at `DISPLAY` and `WAYLAND_DISPLAY`, because
+  both are settable there by an X server, by WSLg or by a Cygwin shell and
+  neither means what it means on Linux; and `Environment` carries what actually
+  describes such a session — the window station, this process's integrity level,
+  the integrity level of the process that owns the window in front (the pair
+  UIPI needs), the DPI awareness mode, the build and edition, the low-level hook
+  timeout, and whether `comtypes` is importable, which is the one thing deciding
+  whether an element tree can exist at all. Three properties had to be corrected
+  at the same time, and they are why this half went first: `can_inject_input`
+  and `input_transport` looked only at Linux mechanisms, so a Windows session
+  injected input perfectly well while reporting that it could not — and every
+  hint gated on that sent the reader off to install ydotool — and
+  `can_use_atspi` now answers False there by definition rather than by absence,
+  since AT-SPI is not missing on Windows, it does not exist. `pyguitest debug`
+  prints all of it, `pyguitest doctor` answers in Windows terms, and `connect()`
+  reports the tier-1 capabilities with a reason naming what is missing, which
+  was the honest answer until `win32` landed below it.
+- **The install advice is written for Windows too.** `detect_distro()` returns
+  the edition and build there — and for Cygwin and MSYS2, whose `/etc/os-release`
+  describes the emulation layer rather than the machine — so a Windows reader is
+  no longer offered `sudo apt install python3-gi` for a box that has never had
+  apt. `hints_for()` has Windows rows of its own: the `windows` extra for the
+  element tree, a session that is not on an interactive desktop, a target window
+  running at higher integrity than this process (UIPI drops that input silently,
+  which is the one Windows failure a test cannot see), a build below the capture
+  floor, and ImageMagick, the one dependency pip cannot supply there. None of
+  their component names matches a Linux one, because `advice()` decides what to
+  append by matching on those names — the udev walkthrough on "membership of the
+  'input' group" and the extra line on "AT-SPI" — so a shared name would print a
+  page of Linux instructions underneath a Windows hint. A test holds the two
+  sets apart rather than a comment asking nicely.
+- **`pip install 'pyguitest[windows]'`**, which installs `comtypes` for UI
+  Automation and nothing else: every other Windows mechanism this package will
+  use is a `ctypes` call against DLLs the process already has loaded, so a bare
+  install is enough for everything but elements. The requirement carries a
+  `sys_platform == 'win32'` marker, so the command succeeds and does nothing on
+  Linux or macOS, and the classifiers and keywords now name Windows. The README
+  edit and the packaging edit landed together on purpose:
+  `tests/test_docs.py` parses the extras named in one against the extras
+  declared in the other, and either half on its own fails it.
+- **A `windows-latest` CI job**, running the fake-driven suite where nothing
+  Windows-specific has been written yet — which is the point: an import-time
+  failure in a Linux-only module is the likeliest first surprise and it is
+  invisible on every other runner. It asserts that the suite collected, that a
+  floor of tests actually ran, and that the X11, AT-SPI, D-Bus and portal tests
+  *skipped* rather than quietly passing, since a run with no skips reads as
+  support for a platform nothing has been tested on. It reports rather than
+  gates for now (`continue-on-error`), because its first red run is where the
+  remaining Linux-only tests that need guards will be found.
+- **`docs/developers/adr-003-windows.md`**, recording the split — `ctypes` for
+  everything in-process, one `comtypes` extra for UI Automation, two registered
+  backends (`win32` at 70, `uia` at 90), no `pywin32`/`pywinauto`/`pyautogui`
+  wrapper — with the alternatives rejected and the reasons kept, and the two
+  places it deliberately disagrees with the macOS plan: neither backend is
+  `opt_in`, because there is no consent dialog on Windows to avoid, and "there
+  is no command-line tool to adapt" is a finding about the platform rather than
+  a gap in the plan.
+- **`Win32Backend`, registered at 70: a Windows session is now drivable, not
+  just describable.** It answers screens and their scaling (per-monitor DPI,
+  and its own thread set per-monitor-v2-aware because `SendInput` takes physical
+  pixels while an unaware thread gets a virtualised desktop), input (mouse and
+  keyboard through `SendInput`, so a chord or a double-click is one call and
+  cannot be split by anything else's input), windows (`EnumWindows` filtered
+  down to the ones a caller means, geometry, placement, activation,
+  minimize/restore, `window_at`, the title), the tier-6 reads (pointer
+  position, button and key state, cursor shape), screen and window-region
+  capture through GDI, and the clipboard through `CF_UNICODETEXT`. It refuses
+  what it cannot honestly serve: no element tree (that is `uia`, a later
+  phase), no `WINDOW_CAPTURE` — a blitted window rectangle includes whatever is
+  on top of it — and `sync()` raises naming the reason rather than sleeping
+  under the name of a guarantee, since `SendInput` reports how many events it
+  queued and nothing about what consumed them.
+- **`WINDOW_EVENTS` on Windows, through `SetWinEventHook`.** `window_events()`
+  installs three hooks — `EVENT_OBJECT_CREATE`..`_DESTROY`,
+  `EVENT_OBJECT_NAMECHANGE`, `EVENT_SYSTEM_FOREGROUND` — and a pump thread of
+  its own for the life of one call, the same per-call lifecycle
+  `GnomeShellBackend.window_events` gives its D-Bus subscription rather than a
+  hook this backend keeps running. A raw WinEvent hook is far noisier than the
+  "new"/"title"/"close"/"focus" stream this yields — it fires for every
+  window-class object on the desktop, controls included, not only the
+  toplevels `windows()` reports — so a `known`-handles set, seeded from
+  `windows()` before the first event is read, is what narrows it down and what
+  lets an `EVENT_OBJECT_DESTROY` answer "close" even for a window this call
+  never saw created, which is the ordinary case for `wait_window_close`. This
+  closes the one capability gap that made a Windows session materially less
+  capable than a Linux one with a compositor IPC backend or GNOME Shell's
+  extension: `wait_for_window`/`wait_window_close` now block on real
+  notification there too, instead of polling.
+- **`Session.wait_for_idle` on Windows, through `GetProcessTimes`.** CPU time
+  comes from the Win32 API instead of `/proc` or `ps`, at a hundred-nanosecond
+  resolution neither of those can match, and the exited-versus-unreadable
+  distinction that method's own docstring insists on is read from
+  `OpenProcess`'s `GetLastError`: access denied is a live, merely protected
+  process, which must not be reported as idle, and anything else failing the
+  open reads as gone.
+- **`Session.wait_for_process` on Windows, through
+  `CreateToolhelp32Snapshot`** — with the capability cut written down rather
+  than hidden. It raised `PyGUITestError` there, because the `/proc`-or-`ps`
+  process table it is built on exists on neither Windows nor any route to it.
+  Toolhelp's snapshot replaces that table: no process handle is opened, so
+  services and other users' sessions are listed as readily as this user's own.
+  What it reports is `szExeFile` — **the executable's filename, not the command
+  line** — so the pattern matches `"notepad.exe"` here where it matches the
+  whole argument vector everywhere else. The alternative was WMI's
+  `Win32_Process.CommandLine`, and the reason it lost is that reaching it means
+  a `wmic` or PowerShell subprocess of roughly a second, paid on *every poll* of
+  a loop whose default interval is 0.5s. So `wait_for_process("notepad")` works
+  where it previously could not run at all, and a pattern depending on an
+  argument — a script behind its interpreter, most often — matches nothing and
+  times out instead of raising. That last part is the honest cost of the trade,
+  and pids are the way around it: nothing else about them is narrower on
+  Windows, `start_app(...).pid` covers a program this session launched and
+  `Window.pid` covers one it did not, both feeding `wait_for_idle` directly.
+  See docs/troubleshooting.md and docs/developers/adr-003-windows.md.
+- **One `_winapi` module holding every prototype, structure and constant.** The
+  seam exists for two reasons: a wrong `argtypes` truncates a pointer or a
+  64-bit handle and the symptom shows up somewhere else, so every declaration
+  sits in one file where it can be checked against Microsoft's documentation in
+  a single pass; and it is what the tests drive, the same shape as
+  `tests/test_x11.py` faking the `Xlib` modules. Nothing is loaded at import —
+  `import pyguitest` still works where `ctypes` has no `WinDLL` — and every
+  non-pointer field is a fixed-width type, because `ctypes.wintypes` is only
+  right *on Windows*: on Linux its `DWORD` is eight bytes, which laid `INPUT`
+  out at 56 bytes against Windows' 40 before it was measured. One documented
+  layout, asserted on every platform in the test suite.
+- **A fake-driven suite for both, 128 tests over two files.** `user32`,
+  `gdi32`, `shcore`, `dwmapi` and `kernel32` are replaced with small fakes that
+  record their calls, so the message layout, the flag pairs, the filter and the
+  refusal messages are checked on a Linux machine with no Windows in sight. Four
+  real bugs came out of it, all of them the kind a run on hardware would have
+  blamed on the platform: the two side buttons sent `XBUTTON1`/`XBUTTON2` in
+  neither `mouseData` nor anywhere else, so Windows would have seen an
+  `XDOWN`/`XUP` pair with no idea which button it was; the side-agnostic state
+  table was keyed by `VK_*` *name* where the query holds the resolved value, so
+  asking whether Shift was held answered False while it was; the window filter
+  dropped a window that said `WS_EX_APPWINDOW` before it noticed it also said
+  `WS_EX_TOOLWINDOW`, making a taskbar-listed window no test could reach; and
+  `KEY_ALIASES` merged SendKeys' long names the wrong way round, so `{ENTER}`
+  resolved to a short alias instead of the key it names.
+
 ### Fixed
+
+- **`Element.parent` answered with a null-pointer element at the tree root
+  instead of None.** COM returns a **NULL interface pointer** where there is
+  no object, and a NULL pointer is an ordinary Python object -- not `None` --
+  so the `is None` guard in `UiaBackend._parent` never fired. A caller walking
+  upwards got `Element('unknown', '')`, wrapping address zero, whose `alive`
+  is False and whose every property answers its empty default, in place of the
+  documented None. `_null_to_none` now converts it, and the same conversion is
+  applied to the other three COM returns that were relying on `is None` --
+  `GetCurrentPattern`, `ElementFromPoint` and `DocumentRange` -- which were
+  correct only by accident, via a raise-and-catch on a null dereference.
+  (`GetCurrentPattern` took that path for every pattern an element does not
+  publish: seven raised-and-caught exceptions per element in `actions` alone.)
+
+  Found on Windows 11 build 26200, and not findable any other way: every fake
+  COM client in the suite returned Python's `None`, because that is what
+  Python returns. The fakes now answer with a falsy non-None stand-in, and
+  three tests fail without the fix.
+
+- **`find_window` picked the bottommost window on Windows, not the topmost.**
+  `Session.find_window`/`wait_for_window` take the last of `windows()` as "the
+  topmost match", which holds because every other backend reports windows
+  bottom-to-top -- X11 from `_NET_CLIENT_LIST_STACKING`, the compositor-IPC
+  backends by their own documented convention. `Win32Backend.windows()`
+  returned `EnumWindows`' order instead, which runs top *down*, so a title two
+  windows shared resolved to the one at the bottom of the stack -- the same
+  bug fixed for X11 in the window-title-collision work, arriving again on a
+  second platform and invisible until two windows share a title. `windows()`
+  now reverses, and `Win32Backend.wait_for_window` takes the last match so the
+  two agree about which window one title means.
+
+- **`doctor` and `report --json` disagreed about the Windows version.** The
+  registry still writes `ProductName` as "Windows 10 Pro" on a Windows 11
+  machine; `hints.detect_distro()` corrected for that and
+  `Environment.summary()` did not, so one run on one machine printed both
+  "Windows 11 Pro (build 26200)" and "build 26200, Windows 10 Pro". The
+  correction now lives in `session._windows_edition_name()` and is applied
+  where the field is populated, so every reader gets the same answer.
+  Measured on a real build 26200 box.
+
+- **The UIPI note fired on every ordinary Windows session.** It was gated on
+  this process not being elevated, which is the state of every normal login,
+  so it appeared in every Windows report ever printed -- which is how a reader
+  learns to skip the notes. UIPI only drops input where the *target* window is
+  the more privileged of the two, so the note now requires that as well,
+  matching the gate its corresponding hint already used.
+
+- **A window opening while `window_events()` seeded itself was reported as a
+  title change rather than a new window.** The hook is installed before
+  `known` is seeded from `windows()`, deliberately, so nothing opening during
+  the seed is missed -- but such a window lands in the snapshot *and* has a
+  create event queued behind it, and a rule keyed only on `known` read that
+  second one as "title". A caller filtering the stream for `change == "new"`
+  would never see it open. `EVENT_OBJECT_CREATE` is now "new" whenever the
+  handle is listable; the known/unknown split stays on `EVENT_OBJECT_NAMECHANGE`,
+  where it earns its keep.
+
+- **`GetLastError` was read through a second `ctypes` call**, which Python's
+  own documentation calls unreliable because ctypes may make Windows calls of
+  its own in between. That read is what tells a live-but-protected process
+  from an exited one in `wait_for_idle`, and a stale value fails in the
+  dishonest direction -- reporting a busy process as gone. The Windows
+  libraries are now loaded with `use_last_error=True` and the value read via
+  `session._last_error()`.
 
 - **`move_mouse_naturally`'s `pause` silently did nothing on a short enough
   move — most notably `start == target`, reachable with every shaping term
@@ -18,6 +282,13 @@ All notable changes to pyguitest are recorded here. The format follows
   whenever `pause` is given: down to a single point it still lands correctly,
   since the formula's second half comes out empty and `_walk` treats an
   empty path as the no-op it is.
+- **`import pyguitest` raised `ModuleNotFoundError: No module named 'grp'` on
+  Windows.** `session.py` imported `grp` at module scope to ask whether an
+  `input` group exists — a question that only has an answer on a Linux or BSD
+  machine — and the module does not exist on Windows, so nothing could import
+  the package there at all: the failure came before any probe ran, which is why
+  the new `windows-latest` job exists to catch its relatives. The import moved
+  into `_has_input_group()`, where the question is asked.
 
 ## [0.10.1] — 2026-09-13
 

@@ -1,6 +1,6 @@
 """Application lifecycle, against real processes.
 
-No display server and no GUI: these drive `sleep` and `sh`, the same way
+No display server and no GUI: these drive real child processes, the same way
 tests/test_api.py::TestWaitForProcess already drives a real process to check
 wait_for_process. Real ones matter here rather than a mock Popen -- the
 behaviour under test is what happens to an actual process that declines to
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import time
 import unittest
 
@@ -22,6 +23,44 @@ from pyguitest import Application
 # editor answering SIGTERM with a "Save changes?" dialog instead of exiting
 # -- see docs/validation.md, where exactly that hung a live run.
 STUBBORN = ["sh", "-c", 'trap "" TERM; sleep 30']
+"""A process that ignores SIGTERM. POSIX-only, and necessarily so: Windows has
+no SIGTERM to decline, and `terminate()` there is `TerminateProcess`, which a
+process cannot refuse. The one test using this skips rather than pretending."""
+
+SLEEP = [sys.executable, "-c", "import time; time.sleep(30)"]
+"""A process that stays up until it is stopped.
+
+The interpreter already running this suite, rather than `sleep`: that binary
+does not exist on Windows, where it failed every test in this file. Nothing
+here is about the program -- only about a process that is alive when the test
+wants one -- so the most portable program there is, is the right one."""
+
+EXITS = [sys.executable, "-c", ""]
+"""A process that exits immediately and successfully -- `true`, portably."""
+
+
+def echoing(text):
+    """A command that prints `text` and exits, in place of `echo`."""
+    return [sys.executable, "-c", f"print({text!r})"]
+
+
+def process_exists(pid):
+    """Whether the OS still has `pid`, on either platform.
+
+    `os.kill(pid, 0)` is the POSIX probe for this and sends no signal at all.
+    On Windows it is not a probe: every signal but `CTRL_C_EVENT` and
+    `CTRL_BREAK_EVENT` goes to `TerminateProcess`, so asking the question there
+    would *kill* a process that was still running -- a test that destroys the
+    thing it is measuring. The process table answers it without touching
+    anything, which is what `wait_for_process` is built on there anyway.
+    """
+    if sys.platform == "win32":
+        return pid in pyguitest._process_table()
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
 
 
 def session():
@@ -42,27 +81,30 @@ def session():
 class TestStopping(unittest.TestCase):
     def test_the_context_manager_stops_the_program(self):
         gui = session()
-        with gui.start_app(["sleep", "30"]) as app:
+        with gui.start_app(SLEEP) as app:
             self.assertTrue(app.is_running())
             pid = app.pid
         self.assertFalse(app.is_running())
         self.assertIsNotNone(app.returncode)
-        # Gone from the OS, not merely marked exited in this object. The pid
-        # has been reaped by wait(), so signal 0 -- the "does this process
-        # exist" probe, which sends nothing -- must find nothing.
-        with self.assertRaises(ProcessLookupError):
-            os.kill(pid, 0)
+        # Gone from the OS, not merely marked exited in this object: the pid
+        # has been reaped by wait(), so nothing should still answer to it.
+        self.assertFalse(process_exists(pid))
 
     def test_it_stops_even_when_the_block_raises(self):
         # The case the hand-rolled versions kept getting wrong: an exception
         # part way through must not leave the program running.
         gui = session()
-        app = gui.start_app(["sleep", "30"])
+        app = gui.start_app(SLEEP)
         with self.assertRaises(ZeroDivisionError):
             with app:
                 1 / 0
         self.assertFalse(app.is_running())
 
+    @unittest.skipIf(
+        sys.platform == "win32",
+        "no SIGTERM to ignore: terminate() is TerminateProcess there, which a "
+        "process cannot decline, so the behaviour under test cannot exist",
+    )
     def test_a_program_that_ignores_sigterm_is_killed(self):
         # Without the fallback this hangs forever; with a fallback that only
         # pretends, the process survives. Both are caught here.
@@ -82,14 +124,14 @@ class TestStopping(unittest.TestCase):
 
     def test_stop_is_idempotent(self):
         gui = session()
-        app = gui.start_app(["sleep", "30"])
+        app = gui.start_app(SLEEP)
         first = app.stop()
         second = app.stop()
         self.assertEqual(first, second)
 
     def test_stopping_an_already_exited_program_is_harmless(self):
         gui = session()
-        app = gui.start_app(["true"])
+        app = gui.start_app(EXITS)
         app.wait(timeout=5)
         self.assertEqual(app.stop(), 0)
 
@@ -97,7 +139,7 @@ class TestStopping(unittest.TestCase):
 class TestState(unittest.TestCase):
     def test_is_running_follows_the_process(self):
         gui = session()
-        app = gui.start_app(["sleep", "30"])
+        app = gui.start_app(SLEEP)
         try:
             self.assertTrue(app.is_running())
         finally:
@@ -106,7 +148,7 @@ class TestState(unittest.TestCase):
 
     def test_repr_says_which_program_and_whether_it_is_alive(self):
         gui = session()
-        app = gui.start_app(["sleep", "30"])
+        app = gui.start_app(SLEEP)
         try:
             self.assertIn("running", repr(app))
             self.assertIn("sleep", repr(app))
@@ -118,7 +160,7 @@ class TestState(unittest.TestCase):
 class TestRestart(unittest.TestCase):
     def test_restart_gives_a_live_process_with_a_new_pid(self):
         gui = session()
-        app = gui.start_app(["sleep", "30"])
+        app = gui.start_app(SLEEP)
         try:
             first = app.pid
             self.assertIs(app.restart(), app)
@@ -132,18 +174,18 @@ class TestRestart(unittest.TestCase):
         # the first launch mutated, so a restart is the same command run
         # again -- including the pipe this one asked for.
         gui = session()
-        app = gui.start_app(["echo", "hello"], stdout=subprocess.PIPE, text=True)
+        app = gui.start_app(echoing("hello"), stdout=subprocess.PIPE, text=True)
         try:
             self.assertEqual(app.stdout.read().strip(), "hello")
             app.restart()
             self.assertEqual(app.stdout.read().strip(), "hello")
-            self.assertEqual(app.command, ["echo", "hello"])
+            self.assertEqual(app.command, echoing("hello"))
         finally:
             app.stop()
 
     def test_restarting_an_already_exited_program_starts_it_again(self):
         gui = session()
-        app = gui.start_app(["true"])
+        app = gui.start_app(EXITS)
         app.wait(timeout=5)
         try:
             app.restart()
@@ -161,7 +203,7 @@ class TestItStillBehavesLikeAPopen(unittest.TestCase):
 
     def test_the_members_scripts_actually_used_are_forwarded(self):
         gui = session()
-        app = gui.start_app(["sleep", "30"])
+        app = gui.start_app(SLEEP)
         try:
             self.assertIsInstance(app.pid, int)
             self.assertIsNone(app.poll())
@@ -174,7 +216,7 @@ class TestItStillBehavesLikeAPopen(unittest.TestCase):
     def test_the_hand_rolled_dance_still_works_unchanged(self):
         # Verbatim shape of what examples/04 and friends were written as.
         gui = session()
-        process = gui.start_app(["sleep", "30"])
+        process = gui.start_app(SLEEP)
         process.terminate()
         try:
             process.wait(timeout=5)
@@ -185,18 +227,18 @@ class TestItStillBehavesLikeAPopen(unittest.TestCase):
 
     def test_anything_not_written_out_falls_through_to_the_popen(self):
         gui = session()
-        app = gui.start_app(["echo", "hi"], stdout=subprocess.PIPE, text=True)
+        app = gui.start_app(echoing("hi"), stdout=subprocess.PIPE, text=True)
         try:
             # communicate() is not one of the forwarded members.
             out, _err = app.communicate(timeout=5)
             self.assertEqual(out.strip(), "hi")
-            self.assertEqual(app.args, ["echo", "hi"])
+            self.assertEqual(app.args, echoing("hi"))
         finally:
             app.stop()
 
     def test_a_private_attribute_raises_rather_than_recursing(self):
         gui = session()
-        app = gui.start_app(["true"])
+        app = gui.start_app(EXITS)
         try:
             with self.assertRaises(AttributeError):
                 app._not_a_real_attribute
@@ -205,7 +247,7 @@ class TestItStillBehavesLikeAPopen(unittest.TestCase):
 
     def test_the_real_popen_is_reachable(self):
         gui = session()
-        app = gui.start_app(["sleep", "30"])
+        app = gui.start_app(SLEEP)
         try:
             self.assertIsInstance(app.process, subprocess.Popen)
         finally:
@@ -216,8 +258,8 @@ class TestConstructedDirectly(unittest.TestCase):
     def test_an_application_can_wrap_a_process_it_did_not_start(self):
         # Not the usual path, but the constructor is public and the launch
         # callable is what restart() needs -- so it should be usable.
-        process = subprocess.Popen(["sleep", "30"])
-        app = Application(process, ["sleep", "30"], lambda: process)
+        process = subprocess.Popen(SLEEP)
+        app = Application(process, SLEEP, lambda: process)
         try:
             self.assertIs(app.process, process)
             self.assertTrue(app.is_running())

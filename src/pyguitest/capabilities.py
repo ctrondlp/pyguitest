@@ -186,7 +186,10 @@ class Capability(Enum):
     WINDOW_LOWER = (Tier.NO_PATH, "Lower or restack; only activate exists, upward only")
     WINDOW_CURSOR_QUERY = (
         Tier.NO_PATH,
-        "Read the cursor shape over a window; no workaround anywhere",
+        "Read the cursor shape over a window; no workaround anywhere on "
+        "Wayland, and a scoped one on Windows, where the cursor being shown "
+        "is readable but compared against the system's own handles rather "
+        "than asked of a window",
     )
 
     def __str__(self) -> str:

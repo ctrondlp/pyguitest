@@ -8,6 +8,15 @@ package provides which, so this maps the gaps onto commands they can paste.
 Package names differ per distribution, so the family is detected from
 /etc/os-release. An unrecognised distribution still gets the generic advice --
 the component names, without a command.
+
+Windows is a different shape, and gets its own rows rather than a share of
+these: it has no distribution, so there is no package name to look up, and its
+gaps are mostly things no package can fix -- a session that is not attached to
+an interactive desktop, a window running at higher integrity than the process
+driving it. `hints_for` branches on the session type before any Linux row is
+reached, and no Windows row reuses a Linux component name, which is what keeps
+`advice()`'s Linux-only appendixes -- the udev walkthrough and the atspi extra
+line -- out of a Windows report. Both halves of that are tested.
 """
 
 from __future__ import annotations
@@ -21,7 +30,9 @@ from .capabilities import Capability, CapabilitySet
 from .session import (
     _INTERFACE_SCHEMA,
     _TOOLKIT_ACCESSIBILITY_KEY,
+    _WGC_MIN_BUILD,
     Environment,
+    _platform,
 )
 
 __all__ = ["Hint", "detect_distro", "hints_for", "advice"]
@@ -83,6 +94,16 @@ _CAPTURE_TOOL_BY_COMPOSITOR = {
     "wlroots": "grim",
     "kwin": "spectacle",
 }
+
+_WINDOWS_PLATFORMS = frozenset({"win32", "cygwin", "msys"})
+"""`sys.platform` values that mean a Windows machine underneath.
+
+Cygwin and MSYS2 are in here beside `win32` for one reason: they carry an
+/etc/os-release, so without this a Cygwin Python is bucketed as a Linux
+distribution and offered `sudo apt install python3-gi` -- a command that
+cannot work on that machine. Their report names the Windows build instead,
+and `_PACKAGES` is never consulted for them.
+"""
 
 _DEFAULT_CAPTURE_TOOL = "gnome-screenshot"
 """Named when neither the compositor nor the distribution settles it.
@@ -150,17 +171,58 @@ class Hint:
         return f"Hint({self.component!r})"
 
 
-def detect_distro(os_release: str | None = None) -> str | None:
+def _windows_release() -> str:
+    """The Windows edition and build, where a distribution family would go.
+
+    `session._windows_version()` is reused rather than re-derived, and so is
+    `session._windows_edition_name()`: the registry's `ProductName` still says
+    "Windows 10 Pro" on a Windows 11 machine, and what to make of that is a
+    decision taken once, there, for the environment probe and for this string
+    alike. Doing the comparison here as well is what let the two answers drift
+    apart -- see that function.
+    """
+    from .session import _windows_edition_name, _windows_version
+
+    build, edition = _windows_version()
+    edition = _windows_edition_name(build, edition)
+    if not edition:
+        # The registry could not be read at all. Naming the platform is
+        # still more use than None, which a reader takes for "unrecognised
+        # distribution" and goes looking for a package manager for.
+        edition = "Windows"
+    elif not edition.startswith("Windows"):
+        edition = f"Windows {edition}"
+    return f"{edition} (build {build})" if build else edition
+
+
+def detect_distro(
+    os_release: str | None = None, platform: str | None = None
+) -> str | None:
     """Return the distribution family, or None if it is not recognised.
 
     Reads /etc/os-release unless `os_release` supplies its contents, which is
     how the tests drive it.
+
+    `platform` defaults to `sys.platform`, and exists for the two cases where
+    that file is not the whole answer. On Windows there is no such file and no
+    distribution, so the answer describes the OS instead ("Windows 11 Pro
+    (build 22631)"); under Cygwin and MSYS2 the file *does* exist, and
+    describes the emulation layer rather than the machine, so those get the
+    Windows string too instead of a family whose every package name would fail
+    to install there. Neither answer is a key in `_PACKAGES`, which is the
+    point of returning them -- see `_WINDOWS_PLATFORMS`.
+
+    A caller-supplied `os_release` is never overridden by the platform: that
+    form is `doctor` reading a *host image's* os-release, and the machine
+    running the read has nothing to do with the file.
     """
     if os_release is None:
+        if (platform or _platform()) in _WINDOWS_PLATFORMS:
+            return _windows_release()
         path = pathlib.Path("/etc/os-release")
         if not path.exists():
             return None
-        os_release = path.read_text(errors="replace")
+        os_release = path.read_text(encoding="utf-8", errors="replace")
 
     # Collected separately and tried in this order regardless of which line
     # comes first in the file: ID is the specific claim, ID_LIKE the
@@ -179,6 +241,84 @@ def detect_distro(os_release: str | None = None) -> str | None:
         if identifier in _FAMILIES:
             return _FAMILIES[identifier]
     return None
+
+
+def _windows_hints(environment: Environment) -> Iterator[Hint]:
+    """The gaps a Windows session can have, and what closes each one.
+
+    Four of the five situations the Windows design document lists, plus the
+    one dependency pip is allowed to supply. The fifth -- a UAC prompt holding
+    the secure desktop -- has no branch here on purpose, because nothing in
+    this package can see that desktop. A consent prompt switches the *input*
+    desktop, so this process stays on WinSta0, every probe on `Environment`
+    keeps answering exactly as it did, `windows()` keeps listing the same
+    windows, and only input stops arriving; a hint that cannot fire is worth
+    less than the paragraph docs/troubleshooting.md carries instead, where a
+    reader whose injections are going nowhere will look.
+
+    Every component name here is deliberately unlike every Linux one, because
+    `advice()` decides what to append by matching on them: the udev
+    walkthrough on "membership of the 'input' group", the extra on "AT-SPI".
+    Reusing one would print a page of Linux instructions underneath a Windows
+    hint -- so a test holds the two sets apart rather than a comment asking
+    nicely.
+    """
+    if not environment.has_comtypes:
+        yield Hint(
+            "UI Automation",
+            "element automation: buttons, text boxes, dropdowns, and every "
+            "query that names a control rather than a window. The Windows "
+            "element tree is UI Automation, and this package reaches it "
+            "through comtypes, which pip supplies",
+            "pip install 'pyguitest[windows]'",
+            packages="comtypes",
+        )
+    if not environment.is_interactive_desktop:
+        yield Hint(
+            "an interactive desktop",
+            "this process is not attached to the interactive window station, "
+            "so it can enumerate no window at all and no session running here "
+            "can show one. A service, a scheduled task and an ssh session all "
+            "land outside it; run the suite from the logged-in session",
+            None,
+            installable=False,
+        )
+    if environment.foreground_is_elevated and not environment.is_elevated:
+        yield Hint(
+            "input to an elevated window",
+            "the window in the foreground belongs to a process running at "
+            "high integrity and this one does not, and UIPI then drops every "
+            "event aimed at it with no error: the call succeeds and the "
+            "window never sees the keystroke. Restart the terminal elevated "
+            "and run the suite from there",
+            None,
+            installable=False,
+        )
+    if not environment.image_tools:
+        yield Hint(
+            "ImageMagick",
+            "locating a control by an image of it, for widgets no "
+            "accessibility tree describes. It is one of the few parts of "
+            "this package with a Windows answer that pip cannot supply, and "
+            "it needs its legacy command line: the tool called here is "
+            "`compare`",
+            "winget install ImageMagick.ImageMagick",
+            packages="ImageMagick",
+        )
+    if 0 < environment.windows_build < _WGC_MIN_BUILD:
+        # The build is checked *and* compared, not just compared: 0 is what
+        # `windows_build` reports when the version could not be read at all,
+        # and a hint saying "your build is 0, upgrade" would be wrong twice.
+        yield Hint(
+            "Windows.Graphics.Capture",
+            f"DirectX-fidelity capture starts at build {_WGC_MIN_BUILD} and "
+            f"this machine is build {environment.windows_build}, so it is out "
+            "of reach here. GDI capture still works -- that is what "
+            "screenshot() uses -- and what is missing is a window that "
+            "renders through DirectX",
+            None,
+            installable=False,
+        )
 
 
 def hints_for(
@@ -207,6 +347,31 @@ def hints_for(
     developer's desktop and fails only when the whole suite runs in order.
     Keeping this function pure is what makes that impossible rather than
     merely unlikely. None means "not asked", and no hint fires for it.
+
+    A Windows session is answered by `_windows_hints` instead, chosen before
+    `distro` or this machine is read at all: Windows has no distribution to
+    look up, and every row below is keyed on a Linux mechanism, a Linux
+    compositor or a distribution package name. Dispatching from here keeps
+    that a caller's non-question.
+    """
+    from .session import SessionType
+
+    if environment.session_type is SessionType.WIN32:
+        return _windows_hints(environment)
+    return _linux_hints(environment, distro, capabilities, toolkit_accessibility)
+
+
+def _linux_hints(
+    environment: Environment,
+    distro: str | None = None,
+    capabilities: CapabilitySet | None = None,
+    toolkit_accessibility: bool | None = None,
+) -> Iterator[Hint]:
+    """Every hint that is about Linux, which is every one there used to be.
+
+    Split out of `hints_for` when Windows arrived, for two reasons: neither
+    platform's rows are then read through the other's, and nothing here has
+    to consider Windows at all -- a Windows session never reaches it.
     """
     from .session import Compositor, SessionType
 

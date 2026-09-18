@@ -12,10 +12,10 @@ import unittest
 from pyguitest import hints, tools
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-README = (ROOT / "README.md").read_text()
-INSTALL = (ROOT / "docs" / "install.md").read_text()
-INPUT = (ROOT / "docs" / "input.md").read_text()
-PYPROJECT = (ROOT / "pyproject.toml").read_text()
+README = (ROOT / "README.md").read_text(encoding="utf-8")
+INSTALL = (ROOT / "docs" / "install.md").read_text(encoding="utf-8")
+INPUT = (ROOT / "docs" / "input.md").read_text(encoding="utf-8")
+PYPROJECT = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
 # The README is the overview; the detail it would otherwise drown in lives in
 # docs/. A reader following one link from the front page still counts as
@@ -113,7 +113,7 @@ class TestReadmeMatchesToolRegistry(unittest.TestCase):
 class TestExamplesAreListed(unittest.TestCase):
     def test_each_example_script_appears_in_its_readme(self):
         examples = ROOT / "examples"
-        listing = (examples / "README.md").read_text()
+        listing = (examples / "README.md").read_text(encoding="utf-8")
         scripts = sorted(p.name for p in examples.glob("*.py"))
         self.assertGreater(len(scripts), 3)
         for script in scripts:
@@ -223,7 +223,7 @@ class TestLinksAndAnchorsResolve(unittest.TestCase):
 
     def test_relative_links_point_at_something_that_exists(self):
         for page in self.pages():
-            for target in _INLINE_LINK.findall(page.read_text()):
+            for target in _INLINE_LINK.findall(page.read_text(encoding="utf-8")):
                 if target.startswith(("http://", "https://", "mailto:")):
                     continue
                 path = target.split("#", 1)[0]
@@ -237,7 +237,7 @@ class TestLinksAndAnchorsResolve(unittest.TestCase):
 
     def test_each_pages_own_contents_resolves(self):
         for page in self.pages():
-            text = page.read_text()
+            text = page.read_text(encoding="utf-8")
             headings = {heading_slug(h) for h in _HEADING.findall(text)}
             for anchor in _CONTENTS_ENTRY.findall(text):
                 with self.subTest(page=page.name, anchor=anchor):

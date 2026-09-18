@@ -17,7 +17,7 @@ class TestMigrationScanner(unittest.TestCase):
     def _scan(self, source):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "script.pl"
-            path.write_text(source)
+            path.write_text(source, encoding="utf-8")
             self.output = io.StringIO()
             with contextlib.redirect_stdout(self.output):
                 return main(["migrate", str(path)])

@@ -636,7 +636,7 @@ def render() -> str:
 
 def main() -> None:
     """Write docs/api.md."""
-    OUT.write_text(render())
+    OUT.write_text(render(), encoding="utf-8")
     print(f"wrote {OUT.relative_to(ROOT)}")
 
 

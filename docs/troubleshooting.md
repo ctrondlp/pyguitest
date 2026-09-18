@@ -8,6 +8,8 @@ here, `pyguitest debug` collects everything a bug report needs — see
 - [One application has no accessible elements at all](#one-application-has-no-accessible-elements-at-all)
 - [Injected input does nothing](#injected-input-does-nothing)
 - [The wrong characters get typed](#the-wrong-characters-get-typed)
+- [Injected input vanishes on Windows](#injected-input-vanishes-on-windows)
+- [`wait_for_process` matches only the program name on Windows](#wait_for_process-matches-only-the-program-name-on-windows)
 - [CapabilityUnsupported on a window operation](#capabilityunsupported-on-a-window-operation)
 - [`geometry()` reports a position nowhere near the window](#geometry-reports-a-position-nowhere-near-the-window)
 - [Pointer and key-state reads look stale](#pointer-and-key-state-reads-look-stale)
@@ -95,7 +97,8 @@ Work down this list; it is ordered by how often each one is the answer.
    ```
 
 [input.md](input.md#when-injected-input-appears-to-do-nothing) is the full
-version of this list, with the per-backend detail behind each step.
+version of this list, with the per-backend detail behind each step. On Windows
+none of those steps is the answer — see the next entry instead.
 
 ## The wrong characters get typed
 
@@ -118,6 +121,89 @@ rather than typing the wrong (group-1) character silently. If a character
 still comes out wrong, check `gui._group_switch_keycode()` for `None` first —
 that means this X server has no `ISO_Level3_Shift` or `Mode_switch` key at
 all, which no workaround here can supply.
+
+## Injected input vanishes on Windows
+
+Three causes, none of which raises anything. `pyguitest debug` reports the first
+two; the third is visible only in the symptom.
+
+**The window you are driving is elevated and this process is not.** Windows'
+UIPI (User Interface Privilege Isolation) lets the call succeed and drops the
+events: the injection reports that it sent them, the target never sees a
+keystroke, and nothing anywhere says so — Windows deliberately does not prompt
+for this. `pyguitest debug` reports both halves (whether this process is
+elevated, and whether the window in the foreground belongs to an elevated
+process), and `pyguitest doctor` prints `input to an elevated window` when they
+disagree. Start the terminal elevated — Run as administrator — and run the
+suite from there; a runner that cannot be elevated has to drive applications
+that are not, which is usually the honest arrangement for a test anyway.
+
+**This process is not on an interactive desktop.** A service, a scheduled task
+running in session 0, or an ssh session has no window station to draw on:
+`windows()` returns nothing and every injection goes nowhere. The symptom is
+"no window matches anything" rather than an error. `debug` reports `not on an
+interactive desktop` and `doctor` names it, with the fix being to run the suite
+from the logged-in session — Windows' own Task Scheduler calls that "Run only
+when user is logged on".
+
+**A UAC prompt is up.** The secure desktop takes the screen while a consent
+prompt waits, and nothing on the ordinary desktop receives input until it is
+answered, so a suite already running looks as though it has hung. This one is
+invisible from inside the process, and deliberately so: the window station and
+every other probe keep answering exactly as they did, which is why no hint
+fires for it and this paragraph exists instead. Answer the prompt and re-run.
+
+## `wait_for_process` matches only the program name on Windows
+
+`Session.wait_for_process` `.search()`es your pattern against each process's
+**full command line** on Linux and the BSDs, where `/proc` and `ps` both carry
+one. Windows carries no command line anywhere the process-list API reaches, so
+there the pattern is matched against the **executable's filename alone**:
+
+```python
+gui.wait_for_process("notepad")  # ✓ matches "notepad.exe"
+gui.wait_for_process(r"manage\.py")  # ✗ matches nothing, then times out
+```
+
+Anything naming the program works. Anything depending on an *argument* does
+not — most often a script behind its interpreter, where `manage.py` finds
+nothing and `python` finds every Python on the machine. There is no error for
+this, because from inside the call a pattern that matches nothing looks the
+same as a program that has not started yet: it simply times out and returns
+`None`.
+
+The reason is a cost, not an oversight. `CreateToolhelp32Snapshot` is fast,
+needs no privileges and sees every process including services, but reports only
+`szExeFile`. The one API that does carry command lines is WMI's
+`Win32_Process.CommandLine`, and reaching it means a `wmic` or PowerShell
+subprocess — roughly a second, on *every poll* of a loop that runs every
+`interval` seconds. See
+[docs/developers/adr-003-windows.md](developers/adr-003-windows.md).
+
+**Nothing else about pids is limited on Windows**, and there are two ways to
+get one without matching a name at all. If you started the process, you already
+have it:
+
+```python
+with gui.start_app(["python", "manage.py", "runserver"]) as app:
+    gui.wait_for_idle(app.pid, timeout=30)
+```
+
+And if you did not start it, a *window* carries one — usually the better route
+in a GUI test, since it identifies the process you are actually driving rather
+than the first one with a matching name:
+
+```python
+window = gui.wait_for_window("Notepad", timeout=10)
+gui.wait_for_idle(window.pid, timeout=30)
+```
+
+`wait_for_idle(pid, ...)` never had the command-line limit above — it reads CPU
+time through `GetProcessTimes` and only ever wanted a pid. The one caveat on
+the window route is `WINDOW_PID`'s own: a Store (UWP) application's toplevel
+belongs to `ApplicationFrameHost.exe`, so `window.pid` is the host's rather
+than the application's. Where that matters, ask the element tree instead —
+UI Automation reports the real process, so `element.pid` is right there.
 
 ## CapabilityUnsupported on a window operation
 

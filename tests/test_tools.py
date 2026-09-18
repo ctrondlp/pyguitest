@@ -5,12 +5,25 @@ wlroots, or only under X11, has to be excluded where it does not apply, and
 one that needs a real X server has to be excluded rather than fail obscurely.
 """
 
+import shutil
 import subprocess
+import sys
 import unittest
 from unittest import mock
 
 from pyguitest import tools
 from pyguitest.capabilities import Capability
+
+REAL_BINARY = "cmd" if sys.platform == "win32" else "sh"
+"""The name of a program that is genuinely on PATH, whatever the platform.
+
+Several tests below need `ExternalTool.path()` to find something real, and
+used `sh` -- which does not exist on Windows, so every one of them reported a
+missing binary as a failure of the discovery logic. `cmd` is the equivalent
+guarantee there. Asserted at import rather than assumed, because the whole
+point of these tests is what happens when a tool is and is not present."""
+
+assert shutil.which(REAL_BINARY), f"{REAL_BINARY} should be on PATH"
 
 
 class TestToolRanking(unittest.TestCase):
@@ -63,7 +76,7 @@ class TestX11OnlyTools(unittest.TestCase):
         self.assertFalse(by_name["wdotool"].x11_only)
 
     def test_discover_can_exclude_them(self):
-        fake = tools.ExternalTool("sh", frozenset(), x11_only=True)
+        fake = tools.ExternalTool(REAL_BINARY, frozenset(), x11_only=True)
         self.assertEqual(tools.discover([fake], allow_x11_only=True), (fake,))
         self.assertEqual(tools.discover([fake], allow_x11_only=False), ())
 
@@ -84,7 +97,7 @@ class TestWlrootsOnlyTools(unittest.TestCase):
 
     def test_discover_excludes_it_when_the_compositor_lacks_the_protocol(self):
         wtype = next(t for t in tools.INPUT_TOOLS if t.name == "wtype")
-        group = [tools.ExternalTool("sh", frozenset(), wlroots_only=True)]
+        group = [tools.ExternalTool(REAL_BINARY, frozenset(), wlroots_only=True)]
         self.assertEqual(len(tools.discover(group, allow_wlroots_only=True)), 1)
         self.assertEqual(tools.discover(group, allow_wlroots_only=False), ())
         self.assertTrue(wtype.wlroots_only)
@@ -249,12 +262,14 @@ class TestDualBinaryTools(unittest.TestCase):
         self.assertEqual(by_name["xclip"].also_needs, "")
 
     def test_present_requires_both_binaries(self):
-        fake = tools.ExternalTool("sh", frozenset(), also_needs="definitely-not-real")
-        self.assertIsNotNone(fake.path())  # sh is real
+        fake = tools.ExternalTool(
+            REAL_BINARY, frozenset(), also_needs="definitely-not-real"
+        )
+        self.assertIsNotNone(fake.path())  # the binary really is there
         self.assertFalse(fake.present)  # the second half is not
 
     def test_present_is_unaffected_when_there_is_no_second_half(self):
-        fake = tools.ExternalTool("sh", frozenset())
+        fake = tools.ExternalTool(REAL_BINARY, frozenset())
         self.assertTrue(fake.present)
 
 
@@ -275,7 +290,7 @@ class TestMutterIncompatibleTools(unittest.TestCase):
         self.assertFalse(by_name["xclip"].mutter_incompatible)
 
     def test_discover_excludes_it_only_via_its_own_flag(self):
-        fake = tools.ExternalTool("sh", frozenset(), mutter_incompatible=True)
+        fake = tools.ExternalTool(REAL_BINARY, frozenset(), mutter_incompatible=True)
         self.assertEqual(
             tools.discover([fake], allow_mutter_incompatible=True), (fake,)
         )

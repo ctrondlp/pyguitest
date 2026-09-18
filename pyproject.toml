@@ -18,7 +18,7 @@ requires-python = ">=3.10"
 license = "GPL-2.0-or-later"
 authors = [{name = "Dennis K. Paulsen"}]
 readme = "README.md"
-keywords = ["gui-automation", "testing", "x11", "wayland", "accessibility", "atspi"]
+keywords = ["gui-automation", "testing", "x11", "wayland", "windows", "accessibility", "atspi"]
 
 # No `License ::` classifier: with the PEP 639 `license` SPDX string above,
 # setuptools>=77 rejects the distribution if both are present.
@@ -31,6 +31,11 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
     "Operating System :: POSIX :: BSD :: FreeBSD",
     "Operating System :: POSIX",
+    # Windows is a platform this package detects and advises on, with the
+    # backends for it arriving in phases; claiming the classifier is a
+    # statement about the wheel, which is universal (py3-none-any) and
+    # installs and imports there.
+    "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -39,6 +44,7 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
     "Programming Language :: Python :: 3 :: Only",
     "Environment :: X11 Applications",
+    "Environment :: Win32 (MS Windows)",
     "Topic :: Desktop Environment",
     "Topic :: Software Development :: Testing",
     "Topic :: Software Development :: Quality Assurance",
@@ -94,6 +100,16 @@ eiinput = ["python-libei[portal]>=0.5.1"]
                                    # pulled PyGObject in. Needs the native
                                    # libei library from the distro too; pip
                                    # cannot supply that. See README.
+windows = ["comtypes; sys_platform == 'win32'"]
+                                   # UI Automation, which is the Windows
+                                   # element tree -- what `atspi` is on
+                                   # Linux. The environment marker makes
+                                   # `pip install 'pyguitest[windows]'` on
+                                   # Linux or macOS a no-op rather than an
+                                   # install error, and no version floor is
+                                   # pinned yet: nothing has been resolved on
+                                   # a Windows machine. See
+                                   # docs/developers/adr-003-windows.md.
 dev   = ["pytest>=7", "ruff>=0.6", "mypy>=1.11",
          "python-dbusmock>=0.30"]  # tests/test_portal_dbusmock.py: PortalBackend
                                    # against a real, private D-Bus session bus.

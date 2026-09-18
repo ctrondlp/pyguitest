@@ -17,6 +17,17 @@ import pyguitest
 from pyguitest.__main__ import _report
 
 
+def _linux_detect(variables):
+    """`pyguitest.detect()` as it would answer on Linux, from any machine.
+
+    `_classify` asks `_platform()` first and, on Windows, asks nothing else, so
+    without this pin the fixtures here describe a WIN32 session and the report
+    under test is the wrong platform's.
+    """
+    with mock.patch("pyguitest.session._platform", return_value="linux"):
+        return pyguitest.detect(variables)
+
+
 class _FakeGui:
     def __init__(self, environment, capabilities=None):
         self.environment = environment
@@ -45,7 +56,7 @@ class TestReportAdviceGating(unittest.TestCase):
     def test_advice_is_suppressed_when_nothing_installable_is_missing(self):
         # capabilities.missing is non-empty (tier 6 on Wayland), but
         # hints_for() finds nothing installable missing.
-        environment = pyguitest.detect(
+        environment = _linux_detect(
             {"WAYLAND_DISPLAY": "wayland-0", "XDG_CURRENT_DESKTOP": "GNOME"}
         )
         import dataclasses
@@ -76,7 +87,7 @@ class TestReportAdviceGating(unittest.TestCase):
         self.assertNotIn("unlock more capabilities", text)
 
     def test_advice_still_appears_when_something_installable_is_missing(self):
-        environment = pyguitest.detect(
+        environment = _linux_detect(
             {"WAYLAND_DISPLAY": "wayland-0", "XDG_CURRENT_DESKTOP": "GNOME"}
         )
         import dataclasses

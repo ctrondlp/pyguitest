@@ -6,6 +6,16 @@ the Python-side request/response plumbing and call construction: the part a
 fake connection can actually stand in for.
 """
 
+import sys
+import unittest
+
+if sys.platform == "win32":  # pragma: no cover - platform guard
+    raise unittest.SkipTest(
+        "xdg-desktop-portal is a Linux desktop service reached over a D-Bus "
+        "session bus; neither exists on Windows, and PortalBackend is never "
+        "constructed there"
+    )
+
 import contextlib
 import os
 import sys

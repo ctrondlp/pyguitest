@@ -11,6 +11,7 @@ it or not.
 
 import os
 import subprocess
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -21,6 +22,18 @@ from pyguitest.capabilities import Capability
 from pyguitest.errors import CapabilityUnsupported, PyGUITestError
 
 BY_NAME = {t.name: t for t in tools.CAPTURE_TOOLS}
+
+SHOT = os.path.join(tempfile.gettempdir(), "pyguitest-shot.png")
+"""Where the stub tools below actually write.
+
+Under the platform's own temp directory rather than a literal `/tmp`: the
+fake runner really does open this path, so on Windows -- which has no `/tmp`
+-- every test in this file failed with a FileNotFoundError naming a directory
+that was never the point. The path also appears in the argv assertions, so it
+has to be one value rather than a literal repeated twenty-six times."""
+
+NEVER_WRITTEN = os.path.join(tempfile.gettempdir(), "pyguitest-never-written.png")
+"""A destination the stub deliberately does not create, for the empty-result check."""
 
 REGION = (10, 20, 100, 50)
 
@@ -56,16 +69,14 @@ class TestCapture(unittest.TestCase):
 
     def test_grim_whole_screen(self):
         gui = self._backend("grim")
-        path = gui.capture(path="/tmp/shot.png")
-        self.assertEqual(self.runner.calls[0], ["grim", "/tmp/shot.png"])
-        self.assertEqual(path, "/tmp/shot.png")
+        path = gui.capture(path=SHOT)
+        self.assertEqual(self.runner.calls[0], ["grim", SHOT])
+        self.assertEqual(path, SHOT)
 
     def test_gnome_screenshot_flag_order(self):
         gui = self._backend("gnome-screenshot")
-        gui.capture(path="/tmp/shot.png")
-        self.assertEqual(
-            self.runner.calls[0], ["gnome-screenshot", "-f", "/tmp/shot.png"]
-        )
+        gui.capture(path=SHOT)
+        self.assertEqual(self.runner.calls[0], ["gnome-screenshot", "-f", SHOT])
 
     def test_a_temporary_path_is_allocated_when_none_given(self):
         gui = self._backend("grim")
@@ -95,7 +106,7 @@ class TestCapture(unittest.TestCase):
         # window got a plausible-looking image of the wrong thing.
         gui = self._backend("grim")
         with self.assertRaises(CapabilityUnsupported):
-            gui.capture(window="some-window-handle", path="/tmp/shot.png")
+            gui.capture(window="some-window-handle", path=SHOT)
         self.assertEqual(self.runner.calls, [])
 
 
@@ -113,15 +124,15 @@ class TestRegionIsNormalized(unittest.TestCase):
 
     def test_grim_gets_its_own_geometry_syntax(self):
         gui = self._backend("grim")
-        gui.capture(path="/tmp/shot.png", region=REGION)
+        gui.capture(path=SHOT, region=REGION)
         self.assertEqual(
             self.runner.calls[0],
-            ["grim", "-g", "10,20 100x50", "/tmp/shot.png"],
+            ["grim", "-g", "10,20 100x50", SHOT],
         )
 
     def test_import_gets_imagemagick_syntax(self):
         gui = self._backend("import")
-        gui.capture(path="/tmp/shot.png", region=REGION)
+        gui.capture(path=SHOT, region=REGION)
         self.assertEqual(
             self.runner.calls[0],
             [
@@ -130,7 +141,7 @@ class TestRegionIsNormalized(unittest.TestCase):
                 "root",
                 "-crop",
                 "100x50+10+20",
-                "/tmp/shot.png",
+                SHOT,
             ],
         )
 
@@ -139,14 +150,14 @@ class TestRegionIsNormalized(unittest.TestCase):
         # a rectangle (a midpoint, a scale factor) easily produces floats,
         # and every tool's command line needs integers.
         gui = self._backend("grim")
-        gui.capture(path="/tmp/shot.png", region=(10.0, 20.9, 100.0, 50.0))
+        gui.capture(path=SHOT, region=(10.0, 20.9, 100.0, 50.0))
         self.assertEqual(self.runner.calls[0][2], "10,20 100x50")
 
     def test_a_malformed_region_is_rejected(self):
         gui = self._backend("grim")
         for bad in ("0,0 100x100", (1, 2, 3), (1, 2, 3, 4, 5), ()):
             with self.subTest(region=bad), self.assertRaises(ValueError):
-                gui.capture(path="/tmp/shot.png", region=bad)
+                gui.capture(path=SHOT, region=bad)
         self.assertEqual(self.runner.calls, [])
 
     def test_an_empty_rectangle_is_rejected(self):
@@ -155,7 +166,7 @@ class TestRegionIsNormalized(unittest.TestCase):
         gui = self._backend("import")
         for bad in ((0, 0, 0, 10), (0, 0, 10, 0), (0, 0, -5, 5)):
             with self.subTest(region=bad), self.assertRaises(ValueError):
-                gui.capture(path="/tmp/shot.png", region=bad)
+                gui.capture(path=SHOT, region=bad)
         self.assertEqual(self.runner.calls, [])
 
 
@@ -175,7 +186,7 @@ class TestCropFallback(unittest.TestCase):
 
     def test_gnome_screenshot_captures_then_crops(self):
         gui = self._backend("gnome-screenshot")
-        path = gui.capture(path="/tmp/shot.png", region=REGION)
+        path = gui.capture(path=SHOT, region=REGION)
 
         shot, crop = self.runner.calls
         self.assertEqual(shot[0], "gnome-screenshot")
@@ -183,17 +194,17 @@ class TestCropFallback(unittest.TestCase):
         # the caller asked a rectangle for -- otherwise a failing crop
         # leaves a full-screen image sitting under a name that promises a
         # rectangle.
-        self.assertNotEqual(shot[2], "/tmp/shot.png")
+        self.assertNotEqual(shot[2], SHOT)
 
         self.assertIn(crop[0], ("magick", "convert"))
         self.assertEqual(crop[1], shot[2])
         self.assertEqual(crop[2:5], ["-crop", "100x50+10+20", "+repage"])
-        self.assertEqual(crop[5], "/tmp/shot.png")
-        self.assertEqual(path, "/tmp/shot.png")
+        self.assertEqual(crop[5], SHOT)
+        self.assertEqual(path, SHOT)
 
     def test_spectacle_captures_then_crops(self):
         gui = self._backend("spectacle")
-        gui.capture(path="/tmp/shot.png", region=REGION)
+        gui.capture(path=SHOT, region=REGION)
         shot, crop = self.runner.calls
         self.assertEqual(shot[0], "spectacle")
         # -f is spectacle's fullscreen mode; -r would open its selector.
@@ -203,7 +214,7 @@ class TestCropFallback(unittest.TestCase):
 
     def test_no_region_takes_the_direct_path_with_no_crop(self):
         gui = self._backend("gnome-screenshot")
-        gui.capture(path="/tmp/shot.png")
+        gui.capture(path=SHOT)
         self.assertEqual(len(self.runner.calls), 1)
 
     def test_which_tools_crop_is_declared(self):
@@ -223,7 +234,7 @@ class TestCropFallback(unittest.TestCase):
             return argv
 
         gui = ToolCaptureBackend(BY_NAME["gnome-screenshot"], runner=runner)
-        gui.capture(path="/tmp/shot.png", region=REGION)
+        gui.capture(path=SHOT, region=REGION)
         intermediate = created[0][2]
         self.assertFalse(os.path.exists(intermediate))
 
@@ -241,7 +252,7 @@ class TestCropFallback(unittest.TestCase):
 
         gui = ToolCaptureBackend(BY_NAME["gnome-screenshot"], runner=runner)
         with self.assertRaises(PyGUITestError):
-            gui.capture(path="/tmp/shot.png", region=REGION)
+            gui.capture(path=SHOT, region=REGION)
         intermediate = seen[0][2]
         self.assertFalse(os.path.exists(intermediate))
 
@@ -272,7 +283,7 @@ class TestFailuresAreActionable(unittest.TestCase):
             ),
         ):
             with self.assertRaises(PyGUITestError) as caught:
-                gui.capture(path="/tmp/shot.png")
+                gui.capture(path=SHOT)
         message = str(caught.exception)
         self.assertIn("gnome-screenshot", message)
         self.assertIn("did not finish within 15s", message)
@@ -287,11 +298,14 @@ class TestFailuresAreActionable(unittest.TestCase):
             ),
         ):
             with self.assertRaises(PyGUITestError) as caught:
-                gui.capture(path="/tmp/shot.png")
+                gui.capture(path=SHOT)
         message = str(caught.exception)
         self.assertNotIn("backend=", message)
-        # Short enough to read inside a warning that quotes it.
-        self.assertLess(len(message), 200)
+        # Short enough to read inside a warning that quotes it -- measured
+        # without the destination path, which the caller supplies and which no
+        # wording here can bound: the same message was 226 characters on
+        # Windows purely because its temp directory is longer than /tmp.
+        self.assertLess(len(message) - len(SHOT), 200)
 
     def test_a_nonzero_exit_still_reports_the_tools_own_stderr(self):
         # Distinct from a hang: the tool answered, and what it said is
@@ -304,7 +318,7 @@ class TestFailuresAreActionable(unittest.TestCase):
             ),
         ):
             with self.assertRaises(PyGUITestError) as caught:
-                gui.capture(path="/tmp/shot.png")
+                gui.capture(path=SHOT)
         self.assertIn("compositor does not support wlr", str(caught.exception))
 
 
@@ -325,14 +339,14 @@ class TestASilentEmptyResultIsCaught(unittest.TestCase):
 
         gui = ToolCaptureBackend(BY_NAME["grim"], runner=leaves_an_empty_file)
         with self.assertRaises(PyGUITestError) as caught:
-            gui.capture(path="/tmp/shot.png")
+            gui.capture(path=SHOT)
         self.assertIn("grim", str(caught.exception))
         self.assertIn("empty", str(caught.exception))
 
     def test_a_missing_file_is_the_same_actionable_error(self):
         gui = ToolCaptureBackend(BY_NAME["grim"], runner=lambda argv: argv)
         with self.assertRaises(PyGUITestError):
-            gui.capture(path="/tmp/pyguitest-never-written.png")
+            gui.capture(path=NEVER_WRITTEN)
 
     def test_an_empty_intermediate_is_caught_before_the_crop_even_runs(self):
         seen = []
@@ -344,7 +358,7 @@ class TestASilentEmptyResultIsCaught(unittest.TestCase):
 
         gui = ToolCaptureBackend(BY_NAME["spectacle"], runner=leaves_an_empty_file)
         with self.assertRaises(PyGUITestError):
-            gui.capture(path="/tmp/shot.png", region=REGION)
+            gui.capture(path=SHOT, region=REGION)
         # Only the screenshot ran; the crop step never got a chance to.
         self.assertEqual(len(seen), 1)
 

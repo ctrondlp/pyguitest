@@ -9,8 +9,9 @@ pyguitest/
 ├── LICENSE                     GPL-2.0-or-later
 ├── pyproject.toml              packaging, ruff and pytest config
 ├── .pre-commit-config.yaml     ruff lint + format on commit
-├── .github/workflows/ci.yml    tests on 3.10-3.14, lint, types, D-Bus,
-│                               and a headless GNOME compositor nightly
+├── .github/workflows/ci.yml    tests on 3.10-3.14, lint, types, D-Bus, a
+│                               windows-latest job, and a headless GNOME
+│                               compositor nightly
 ├── README.md                   what this is, install, usage
 ├── CONTRIBUTING.md             tests, lint, types, CI
 ├── examples/                   runnable scripts, simplest first
@@ -38,6 +39,8 @@ pyguitest/
 │       ├── upstream.md         two protocol gaps, written as issue text
 │       ├── adr-001-dependencies.md why libraries were chosen as they were
 │       ├── adr-002-transports.md   why sockets replaced CLI tools
+│       ├── adr-003-windows.md  the Windows split: ctypes, one comtypes extra,
+│       │                       two backends, no wrappers
 │       └── structure.md        this file
 ├── src/pyguitest/
 │   ├── capabilities.py         the tier scale and capabilities
@@ -67,6 +70,8 @@ pyguitest/
 │       ├── portalcapture.py    screenshots via the Screenshot XDG portal
 │       ├── eiinput.py          input via libei, keymap-safe, over that portal
 │       ├── atspi.py            element automation via dogtail
+│       ├── uia.py              Windows elements via UI Automation
+│       ├── win32.py            Windows windows, events, input, capture, clipboard
 │       ├── input.py            injection via CLI tools; ydotool's evdev codes
 │       ├── uinput.py           injection in-process via python-evdev
 │       ├── capture.py          screenshots via desktop tools
@@ -180,6 +185,26 @@ extension in `gnome-shell-extension/` installed and enabled by hand (see that
 directory's README) to actually answer, so on a fresh install `atspi` leads
 on GNOME as before -- but its *factory* is safe to try automatically: probing
 whether the extension is running is a plain D-Bus call with no side effect.
+
+**Two Windows backends, split along COM versus `ctypes` rather than along
+accessibility versus input** — and the names and priorities were settled before
+either existed, which is why both are registered under the names the plan chose:
+`uia` at 90 (elements; the AT-SPI analogue, needing the `windows` extra) and
+`win32` at 70 (windows, window events through `SetWinEventHook`, screens, DPI,
+input, capture and the clipboard, in plain `ctypes`, so a bare `pip install
+pyguitest` on Windows is enough for everything but elements). Two things about
+that pair are deliberate choices rather than
+defaults. `win32` and *only* `win32` answers `windows()`: the window objects
+`uia` could return are elements rather than window handles, so every placement
+call granted to it would have nothing to use. And neither is `opt_in`, which
+**reverses** the conclusion the macOS plan reached: `register()` reserves
+`opt_in` for a factory whose construction raises a consent dialog that blocks
+until a user answers, and on Windows there is no such dialog — constructing a
+`SendInput` wrapper has no side effect at all, since the side effect is per call
+— so an opt-in Windows input backend would make a Windows session *less* capable
+by default than a Linux one for no reason a reader could observe.
+[adr-003-windows.md](adr-003-windows.md) has both arguments in full, alongside
+the alternatives rejected.
 
 `portal` is a different kind of opt-in, and `register()` enforces it rather
 than leaving it to convention: its priority (80) is never consulted by a

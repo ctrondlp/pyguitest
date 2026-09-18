@@ -6,6 +6,15 @@ part unit tests can actually verify. The extension.js side has no test
 coverage at all -- there is no way to run gnome-shell in this environment.
 """
 
+import sys
+import unittest
+
+if sys.platform == "win32":  # pragma: no cover - platform guard
+    raise unittest.SkipTest(
+        "GNOME Shell's window-control extension is reached over a D-Bus "
+        "session bus, and neither the Shell nor the bus exists on Windows"
+    )
+
 import os
 import sys
 import tempfile
