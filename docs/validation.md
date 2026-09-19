@@ -1253,17 +1253,17 @@ they cost real debugging time before being ruled out:**
 
 ## Not run live
 
-- **Everything on a Windows interactive desktop, as of 2026-09-18.** The suite
-  itself now passes on Windows 11 build 26200 and the session probes are
-  confirmed live — see "Run live on Windows 11" above for what that settled.
-  What remains is everything a desktop-less SSH session cannot reach. Every
-  prototype and structure layout below is transcribed from Microsoft's
-  documentation and driven by fakes, and a fake can only check that the code
-  sends what it means to send; whether Windows *acts* on it is the half no
-  fake reaches. In roughly the order it would break:
+- **What two live Windows runs left unverified.** The suite passes on
+  Windows 11 build 26200, and both runs recorded above — the SSH session and
+  the interactive desktop — settled what each could reach. What stays here is
+  what neither reached: the questions a desktop-less SSH session cannot ask,
+  and the ones the interactive run did not close. Every prototype and
+  structure layout below is transcribed from Microsoft's documentation and
+  driven by fakes, and a fake can only check that the code sends what it
+  means to send; whether Windows *acts* on it is the half no fake reaches. In
+  roughly the order it would break:
 
   **`win32`, the input and window half:**
-  - `INPUT`'s layout and `cbSize` are accepted rather than dropped.
   - `MOUSEEVENTF_ABSOLUTE | VIRTUALDESK` lands where the arithmetic says on a
     second monitor at a different DPI. (Coordinate accuracy on a single
     monitor is confirmed above; multi-monitor arithmetic still is not — this

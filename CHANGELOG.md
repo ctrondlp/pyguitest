@@ -209,6 +209,16 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ### Fixed
 
+- **`docs/validation.md`'s Windows scope entry contradicted the sections
+  above it.** The first item under "Not run live" still claimed that
+  everything on a Windows interactive desktop was unrun as of 2026-09-18,
+  directly below a section recording that run on 2026-09-19 -- two answers to
+  one question, and a list that read as untouched when most of it had been
+  settled. The entry now says what the list is: what neither the SSH session
+  nor the interactive desktop reached. The `INPUT`/`cbSize` item leaves with
+  it, since the live `SendInput` click and typing recorded above are that
+  structure being accepted -- `win32` raises when any event fails to queue.
+
 - **`can_capture` and `can_use_clipboard` contradicted the Windows backend.**
   Both answer the same question a capability answers, and both were still
   Linux-shaped: `can_capture` counted a screenshot tool, python-xlib or the
