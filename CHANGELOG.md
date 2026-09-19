@@ -209,6 +209,16 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ### Fixed
 
+- **`can_capture` and `can_use_clipboard` contradicted the Windows backend.**
+  Both answer the same question a capability answers, and both were still
+  Linux-shaped: `can_capture` counted a screenshot tool, python-xlib or the
+  portal, and `can_use_clipboard` counted a clipboard tool. `Win32Backend`
+  needs none of those -- it blits through GDI and encodes the PNG itself, and
+  opens the clipboard through user32/kernel32 -- so on Windows both reported
+  False beside a backend declaring SCREEN_CAPTURE and CLIPBOARD. Measured on
+  Windows 11. The Windows work gave `can_inject_input` its branch for
+  SendInput and missed these two; they now answer from the platform as well.
+
 - **`Element.parent` answered with a null-pointer element at the tree root
   instead of None.** COM returns a **NULL interface pointer** where there is
   no object, and a NULL pointer is an ordinary Python object -- not `None` --

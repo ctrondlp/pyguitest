@@ -288,7 +288,7 @@ What the current login actually offers.
 | `can_capture` | Whether any screenshot path is available, not just a CLI tool. |
 | `can_inject_input` | Whether any input mechanism is worth attempting. |
 | `can_use_atspi` | Whether the accessibility layer is actually reachable. |
-| `can_use_clipboard` | Whether a clipboard tool is reachable on this session. |
+| `can_use_clipboard` | Whether the clipboard is reachable on this session. |
 | `desktop: str` |  |
 | `display: str` |  |
 | `dpi_awareness: str` |  |
