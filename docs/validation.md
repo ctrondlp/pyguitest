@@ -1159,6 +1159,98 @@ search that finds a real control, an action that drives one, and a read of
 one's text. The list under "Not run live" is scoped to exactly those, plus
 the one `wait_for_process` branch that needs an unelevated session.
 
+## Run live on Windows 11 (build 26200), interactive desktop
+
+2026-09-19, the console session itself (`query session` shows `>console
+denni Active`, not an SSH login) — the exact gap the previous section left
+open. Driven against two targets: a hand-rolled native Win32 window
+(`EDIT`/`BUTTON`/`STATIC`/`SysTabControl32`/`COMBOBOX` children, a real menu
+bar) built for this purpose the same way the X11 validation scripts build a
+throwaway probe window, and Notepad for a real packaged application.
+
+- **`windows()` against real windows, and the `EnumWindows` filter.** Listed
+  3 real windows correctly (two Windows Terminal toplevels sharing one pid,
+  one VS Code) out of 8 raw `EnumWindows` hits on this desktop, cross-checked
+  independently with a bare `EnumWindows` call and `Get-Process`. The 5
+  dropped were exactly the ones the filter's own docstring says to drop:
+  two DWM-cloaked "Realtek Audio Console" ghost windows, two cloaked
+  "Settings" ghost windows (both confirmed cloaked via `DwmGetWindowAttribute`
+  independently of pyguitest), and `Program Manager`, the desktop shell.
+  Nothing a user could see or click was missing, and nothing cloaked leaked
+  through.
+- **`SendInput` delivers a coordinate-accurate click.** `move_mouse(x, y)`
+  followed immediately by `pointer_position()` read back the exact commanded
+  point, `(855, 543) -> (855, 543)`, 0px off.
+- **`KEYEVENTF_UNICODE` reaches a real edit control.** `type_text("Hello
+  UIA")` into a live Win32 `EDIT` child, read back afterward through
+  `uia`'s own `Element.text` (`ValuePattern`) rather than a raw
+  `GetWindowText` — see the caveat below on why that distinction mattered —
+  came back exactly `"Hello UIA"`.
+- **`click()` through Invoke reaches a real control.** `gui.button("Click
+  Me").click()` on the probe window's real `BUTTON` child updated a sibling
+  `STATIC` label from "not clicked" to "clicked 1", confirmed both through
+  the accessible tree and independently through `GetWindowText` on the
+  label's own `HWND`.
+- **`activate_window()`/`active_window()` round-trip.** Activating the probe
+  window and reading `active_window()` back returned the same window,
+  confirming `SetForegroundWindow`'s effect is read back rather than assumed.
+- **The GDI capture is the right way up and not colour-swapped.** A
+  `capture(window=...)` of the probe window, viewed directly, showed the
+  menu bar, tab control and edit box exactly as drawn — not flipped, not
+  channel-swapped. (Two other Windows 11 quirks turned up on the same
+  screenshot and are recorded below as *not* pyguitest bugs.)
+- **The clipboard round-trips through `GlobalAlloc`/`GlobalLock`/
+  `GlobalSize`.** `set_clipboard("...")` / `get_clipboard()` matched exactly,
+  twice, with different strings.
+- **`WINDOW_EVENTS` fires `new`, `close`, and `focus`.** Spawning the probe
+  window while listening produced a `new` event naming it, terminating it
+  produced `close`, and an unrelated window gaining focus during the same
+  listen produced `focus` — all three `SetWinEventHook` ranges the module
+  registers, exercised in one run.
+- **`uia` element search finds real controls beyond a plain button.** A
+  `SysTabControl32` (`page tab list` / `page tab` roles), a `COMBOBOX`
+  (`combo box`), a checkbox (`check box`), and a real menu bar (`menu bar` /
+  `menu item`, rather than only DWM's own `System` menu) all enumerated
+  correctly through `gui.elements()` against a hand-built window using
+  nothing but stock `comctl32`/`user32` controls.
+- **`is_key_pressed()` and `is_window_cursor()` answer without error** against
+  a real desktop — `is_key_pressed("Shift_L")` correctly read `False` while
+  idle; `is_window_cursor()` raised its own documented `ValueError` for a
+  shape name (`"arrow"`) this backend does not carry a Windows counterpart
+  for, which is the refusal the code is written to give, not a crash.
+
+**Two real, live-only findings that are not pyguitest bugs, recorded because
+they cost real debugging time before being ruled out:**
+
+- **A window's title can read back transiently wrong immediately after a
+  burst of injected typing, then self-correct within seconds.** Typing
+  `"Hello from pyguitest on Windows!"` into Notepad, `wait_for_window`'s
+  title read back `"...pyguitest nn Windows!..."` — `on` corrupted to `nn`.
+  Confirmed *not* a pyguitest bug: an independent, bare `GetWindowTextW`
+  call from a completely separate process read back the identical corrupted
+  string at the same moment, and the same window's title read correctly
+  moments later from a fresh query. This is Windows 11 Notepad's own
+  title-from-content computation catching a transitional state, not a read
+  bug on pyguitest's side — `_title()` (`win32.py`) is a textbook
+  `GetWindowTextLengthW` + `GetWindowTextW` pair with nothing to fix.
+- **Modern single-instance Windows apps break `Application`'s process-
+  lifecycle model.** `start_app(["notepad.exe"])` a second time, while an
+  instance was already open, spawned a *new* launcher process that hands off
+  to the existing packaged app and exits almost immediately — so
+  `Application.stop()`, which calls `TerminateProcess` on the object
+  `start_app` returned, terminates a process that was never the one holding
+  the window. The real Notepad window (a different pid) survived `stop()`
+  entirely. Confirmed by pid: `Application.pid` named the short-lived
+  launcher; `GetWindowThreadProcessId` on the actual window named a
+  different, longer-lived pid throughout. Not a bug in `Application` — it is
+  exactly the documented contract, a thin wrapper over the `subprocess.Popen`
+  it was given — but a real trap for a script that assumes one launched
+  command owns one window's lifetime on Windows 11, worth its own line in
+  troubleshooting.md for anyone hitting it. Notepad, Calculator, and several
+  other Windows 11 inbox apps share this packaged, single-instance model;
+  a hand-rolled Win32 window (as used for the checks above) does not, which
+  is part of why the live checks above prefer one.
+
 ## Not run live
 
 - **Everything on a Windows interactive desktop, as of 2026-09-18.** The suite
@@ -1172,23 +1264,23 @@ the one `wait_for_process` branch that needs an unelevated session.
 
   **`win32`, the input and window half:**
   - `INPUT`'s layout and `cbSize` are accepted rather than dropped.
-  - `SendInput` delivers a coordinate-accurate click, and a
-    `KEYEVENTF_UNICODE` character reaches a real edit control.
   - `MOUSEEVENTF_ABSOLUTE | VIRTUALDESK` lands where the arithmetic says on a
-    second monitor at a different DPI.
-  - The `EnumWindows` filter keeps every window a user can see and click, and
-    drops no more than that.
+    second monitor at a different DPI. (Coordinate accuracy on a single
+    monitor is confirmed above; multi-monitor arithmetic still is not — this
+    box has one screen.)
   - **`windows()` really is bottom-to-top** once reversed — the ordering
-    `Session.find_window` depends on, and the one thing here that a fake
-    cannot settle because it is a claim about `EnumWindows` itself.
-  - `SetForegroundWindow`/`ShowWindow` are read back rather than trusted.
-  - The GDI capture is the right way up and not colour-swapped, with the
-    bitmap deselected from its DC before `GetDIBits` as documented.
+    `Session.find_window` depends on. (The *set* `windows()` returns, and the
+    cloaked/shell filtering, are confirmed live above; the *z-order claim
+    specifically* is not, and is the one thing here a fake cannot settle
+    because it is a claim about `EnumWindows` itself.)
+  - `ShowWindow`'s other states (`minimize_window`/restore specifically, as
+    opposed to activation) are read back rather than trusted.
   - A scroll past `_MAX_WHEEL_STEPS` arrives as the total detents asked for,
     rather than wrapping the 16-bit wheel field and scrolling backwards.
   - `GetAsyncKeyState(VK_MENU)` answers about a held Alt. (Transcribed once
-    as `0x18`, `VK_FINAL`, so the query silently answered False.)
-  - The clipboard round-trips through `GlobalAlloc`/`GlobalLock`/`GlobalSize`.
+    as `0x18`, `VK_FINAL`, so the query silently answered False. `is_key_
+    pressed` is confirmed live for the *idle*, unheld case above; a held key
+    specifically is not yet.)
   - `EnumDisplayMonitors` returning false is rare enough that raising on it
     does not turn an ordinary desktop into a failure.
 
@@ -1196,26 +1288,35 @@ the one `wait_for_process` branch that needs an unelevated session.
   one branch:
   - `ERROR_ACCESS_DENIED` really does come back for a live process this one
     may not open, and is raised rather than read as "gone". Not reachable on
-    the box used so far: that session is elevated, and every process on it
-    except pid 0 opened successfully. Needs an **unelevated** run.
+    the SSH box: that session was elevated, and every process on it except
+    pid 0 opened successfully. The 2026-09-19 interactive session above *is*
+    unelevated (`doctor` reports it), so the environment for this check now
+    exists — it has not been run yet, only confirmed reachable.
 
   **`WINDOW_EVENTS`, the one part owning a thread:**
-  - The three `SetWinEventHook` ranges fire for an ordinary application
-    window and stay quiet for the control-level flood through the same hook.
-  - `GetMessageW` delivers a `WinEventProc` call per event.
-  - `PostThreadMessageW(WM_QUIT, ...)` ends the loop rather than racing the
-    thread's first `GetMessageW`.
+  - `new`/`close`/`focus` firing for an ordinary application window,
+    `GetMessageW` delivering one `WinEventProc` call per event, and
+    `PostThreadMessageW(WM_QUIT, ...)` ending the loop are all confirmed live
+    above.
+  - Whether the same hook *stays quiet* for the control-level flood beneath
+    an ordinary window (rather than merely firing correctly for the
+    toplevel-level events exercised above) is not yet isolated.
   - A suspended UWP application's cloaked window does not reach
     `_is_listable` through this path when it cannot through `EnumWindows`.
+    (Cloaked windows are confirmed excluded from `windows()` above; this is
+    the same claim for the event path specifically, not yet run against one.)
 
   **`uia`, the element half** — less arithmetic, so a shorter list:
   - The property and pattern ids match the SDK. A wrong one narrows a search
     too little rather than failing outright, so nothing else would say.
-  - `FindAll(TreeScope_Descendants, condition)` returns what the filter
-    asked for, and the control-view condition excludes the layout-only
-    elements a raw walk returns.
-  - `click()` through Invoke, `set_text` through Value and `toggle` through
-    Toggle each reach a real control.
+    (Confirmed correct enough to find and name real controls — a tab list,
+    a combo box, a checkbox, a real menu bar, an edit box, a button — above;
+    not yet confirmed *exhaustively* against every id the module declares.)
+  - `click()` through Invoke reaches a real control, confirmed above.
+    `set_text` through the Value pattern and `toggle` through Toggle
+    specifically are not — the live typing check above went through
+    `type_text`/`SendInput`, not `Element.set_text()`, and no live run has
+    called `toggle()` on a real checkbox yet.
   - `_initialize_com`'s `CoInitialize` is actually needed — the first draft
     assumed a `Session` is built on the thread that imported `comtypes`,
     which is untrue of a worker or a pool, and without it `_connection`
