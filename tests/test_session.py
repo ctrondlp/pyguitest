@@ -662,9 +662,24 @@ class TestWindowsSession(unittest.TestCase):
         # The Windows branch must not leak: on Linux a clipboard genuinely
         # needs a tool, and claiming otherwise would suppress the hint that
         # says so.
-        e = detect(env(DISPLAY=":0", XDG_SESSION_TYPE="x11"))
-        e = dataclasses.replace(e, capture_tools=(), clipboard_tools=())
+        #
+        # `linux_detect`, not `detect`: run on Windows, a bare detect()
+        # classifies as WIN32 and this asserted the branch it is checking
+        # cannot leak -- which is the one thing it must not do.
+        # `linux_detect`, not `detect`: run on Windows, a bare detect()
+        # classifies as WIN32 and this asserted the branch it is checking
+        # cannot leak -- which is the one thing it must not do. `has_xlib` is
+        # pinned too, since this host has python-xlib and X11 + xlib is its
+        # own route to capture.
+        e = dataclasses.replace(
+            linux_detect(env(DISPLAY=":0", XDG_SESSION_TYPE="x11")),
+            capture_tools=(),
+            clipboard_tools=(),
+            has_xlib=False,
+            has_portal=False,
+        )
         self.assertFalse(e.can_use_clipboard)
+        self.assertFalse(e.can_capture)
 
     def test_the_compositor_is_not_read_out_of_the_desktop_name(self):
         # A desktop name a Cygwin session leaked is not evidence of a KWin or
