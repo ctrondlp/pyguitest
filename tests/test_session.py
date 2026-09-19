@@ -637,6 +637,50 @@ class TestWindowsSession(unittest.TestCase):
         self.assertIs(e.session_type, SessionType.WIN32)
         self.assertIs(e.compositor, Compositor.DWM)
 
+    def test_the_capability_properties_agree_with_the_backend(self):
+        # These three answer the same question the backend answers with a
+        # capability, and disagreeing with it is the failure worth pinning:
+        # `Win32Backend` declares SCREEN_CAPTURE and CLIPBOARD and reaches
+        # both through user32/gdi32 with no tool on PATH, so an empty
+        # `capture_tools`/`clipboard_tools` says nothing about Windows.
+        #
+        # Measured on Windows 11 before the fix: can_capture and
+        # can_use_clipboard were both False beside a backend declaring both.
+        # The Windows work gave can_inject_input its branch and missed these.
+        e = dataclasses.replace(
+            self._detect(),
+            has_sendinput=True,
+            capture_tools=(),
+            clipboard_tools=(),
+            input_tools=(),
+        )
+        self.assertTrue(e.can_inject_input)
+        self.assertTrue(e.can_capture)
+        self.assertTrue(e.can_use_clipboard)
+
+    def test_a_linux_session_still_needs_a_tool_for_those(self):
+        # The Windows branch must not leak: on Linux a clipboard genuinely
+        # needs a tool, and claiming otherwise would suppress the hint that
+        # says so.
+        #
+        # `linux_detect`, not `detect`: run on Windows, a bare detect()
+        # classifies as WIN32 and this asserted the branch it is checking
+        # cannot leak -- which is the one thing it must not do.
+        # `linux_detect`, not `detect`: run on Windows, a bare detect()
+        # classifies as WIN32 and this asserted the branch it is checking
+        # cannot leak -- which is the one thing it must not do. `has_xlib` is
+        # pinned too, since this host has python-xlib and X11 + xlib is its
+        # own route to capture.
+        e = dataclasses.replace(
+            linux_detect(env(DISPLAY=":0", XDG_SESSION_TYPE="x11")),
+            capture_tools=(),
+            clipboard_tools=(),
+            has_xlib=False,
+            has_portal=False,
+        )
+        self.assertFalse(e.can_use_clipboard)
+        self.assertFalse(e.can_capture)
+
     def test_the_compositor_is_not_read_out_of_the_desktop_name(self):
         # A desktop name a Cygwin session leaked is not evidence of a KWin or
         # Mutter session; DWM is the compositor whatever the variable says.

@@ -1291,6 +1291,7 @@ class TestProcessTableFallsBackToPs(unittest.TestCase):
         # cut short -- see test_the_real_ps_call_finds_a_long_command_line.
         self.assertEqual(ran.call_args.args, ("axo", "pid=", "-o", "args=", "-ww"))
 
+    @POSIX_PROCESS_TABLE
     def test_the_real_ps_call_finds_a_long_command_line(self):
         # The one test here that runs the actual `ps`. Everything else in
         # this class mocks it, so nothing else would notice procps refusing
@@ -1310,6 +1311,17 @@ class TestProcessTableFallsBackToPs(unittest.TestCase):
         # child's argv is its own. Nothing is caught: `ps` being present and
         # rejecting the arguments raises PyGUITestError, and a test that
         # skipped on that would turn the defect it is looking for green.
+        #
+        # Guarded like the class's other two, and this is the test where the
+        # guard earns its keep: `_process_table` answers from Toolhelp before
+        # it ever reaches `_ps`, so on Windows this drove the Windows branch
+        # rather than the one it names -- and the `which("ps")` below did not
+        # skip it, because Git for Windows puts an MSYS `ps.exe` on the
+        # runner's PATH for `which` to find. The first `windows-latest` run
+        # got `'python.exe'` back for a child started as
+        # `python -c "...  # <token>"`: Toolhelp's `szExeFile`, which is the
+        # narrower answer that branch documents, not a defect in the flags
+        # this test exists to pin.
         if shutil.which("ps") is None:
             self.skipTest("no `ps` on PATH")
         token = f"pyguitest-psroute-{uuid.uuid4().hex[:8]}"

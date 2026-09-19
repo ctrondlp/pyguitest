@@ -209,6 +209,26 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ### Fixed
 
+- **`docs/validation.md`'s Windows scope entry contradicted the sections
+  above it.** The first item under "Not run live" still claimed that
+  everything on a Windows interactive desktop was unrun as of 2026-09-18,
+  directly below a section recording that run on 2026-09-19 -- two answers to
+  one question, and a list that read as untouched when most of it had been
+  settled. The entry now says what the list is: what neither the SSH session
+  nor the interactive desktop reached. The `INPUT`/`cbSize` item leaves with
+  it, since the live `SendInput` click and typing recorded above are that
+  structure being accepted -- `win32` raises when any event fails to queue.
+
+- **`can_capture` and `can_use_clipboard` contradicted the Windows backend.**
+  Both answer the same question a capability answers, and both were still
+  Linux-shaped: `can_capture` counted a screenshot tool, python-xlib or the
+  portal, and `can_use_clipboard` counted a clipboard tool. `Win32Backend`
+  needs none of those -- it blits through GDI and encodes the PNG itself, and
+  opens the clipboard through user32/kernel32 -- so on Windows both reported
+  False beside a backend declaring SCREEN_CAPTURE and CLIPBOARD. Measured on
+  Windows 11. The Windows work gave `can_inject_input` its branch for
+  SendInput and missed these two; they now answer from the platform as well.
+
 - **`Element.parent` answered with a null-pointer element at the tree root
   instead of None.** COM returns a **NULL interface pointer** where there is
   no object, and a NULL pointer is an ordinary Python object -- not `None` --

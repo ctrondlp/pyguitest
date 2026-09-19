@@ -933,6 +933,16 @@ class Environment:
         on the first actual capture() call instead, not surfacing an error
         outside this package's own model.
         """
+        # Windows answers first and from no tool at all: `Win32Backend` blits
+        # the screen through GDI and encodes the PNG itself, exactly as
+        # X11Backend does on X11, so a tool on PATH is not the question there.
+        # Without this the property said False on a session whose own backend
+        # declares SCREEN_CAPTURE -- confirmed on Windows 11, where
+        # `can_capture` was False beside `supports(SCREEN_CAPTURE)` True. The
+        # same shape as the `can_inject_input` branch above, which the Windows
+        # work added while these two were missed.
+        if self.session_type is SessionType.WIN32:
+            return True
         if self.capture_tools:
             return True
         # X11 only, not XWayland. X11Backend withdraws SCREEN_CAPTURE
@@ -946,13 +956,21 @@ class Environment:
 
     @property
     def can_use_clipboard(self) -> bool:
-        """Whether a clipboard tool is reachable on this session.
+        """Whether the clipboard is reachable on this session.
 
-        Unlike can_capture, there is currently only one route: a CLI tool.
-        Nothing in this package speaks a clipboard protocol directly, so
+        On Linux and the BSDs there is one route and it is a CLI tool:
+        nothing in this package speaks a clipboard protocol directly, so
         clipboard_tools is the whole answer -- see tools.CLIPBOARD_TOOLS on
         why Mutter is the one desktop where that can come back empty.
+
+        Windows is the exception, and answers before that: `Win32Backend`
+        opens the clipboard itself through user32 and kernel32, so no tool is
+        involved and an empty `clipboard_tools` says nothing. Confirmed on
+        Windows 11, where this was False beside a backend declaring
+        CLIPBOARD -- the same miss as `can_capture` above.
         """
+        if self.session_type is SessionType.WIN32:
+            return True
         return bool(self.clipboard_tools)
 
     @property
