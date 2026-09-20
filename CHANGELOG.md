@@ -9,6 +9,33 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ### Added
 
+- **Two exceptions a caller could catch but never import are now part of the
+  public surface: `ElementNotActionable` and `PortalTimeout`.** Both were raised
+  from real paths and named in the docstrings around them --
+  `Element.click()` raises the first through `atspi`, `uia` and the coordinate
+  fallback, and the portal request path raises the second -- while the package
+  root imported their ten sibling exceptions and left these two out. The cost
+  was not only an import: `docs/api.md` builds its Exceptions table from
+  `__all__`, so on a page headed "every public name in `pyguitest`" the two were
+  simply absent, and a script wanting to tell "this element exists and cannot be
+  pressed" from "this element is not there" -- the distinction
+  `ElementNotActionable` exists for, as `ElementNotFound`'s counterpart -- had
+  to reach into `pyguitest.errors` for it. Same regression as `ElementNotFound`
+  itself, which `TestPublicExports` has guarded since it was found the same way;
+  the guard now covers these two as well.
+
+- **`TIERS` is described in the reference instead of showing an empty cell.**
+  The generator renders a name's description from its own docstring, and a value
+  like `TIERS` has none to give -- it borrows `dict`'s, which `first_line`
+  refuses on purpose, since that text differs between interpreters and the file
+  is byte-compared on every version CI runs. A name in `__all__` therefore read
+  as a blank row, with the six meanings it holds unreadable anywhere in the
+  docs. `TIERS` now carries an attribute docstring — PEP 257's string literal
+  after the assignment, which `tests/test_style.py` asks for in place of a
+  Sphinx-style `#:` comment — and the generator reads it, so the sentence sits
+  next to the value it describes and the next value needing one has somewhere
+  to put it.
+
 - **The Windows key vocabulary is public in both directions**, because the half
   of a recorder that *captures* input needs it rather than this backend does: a
   Windows input hook reports a **virtual-key code**, and a script replayed by
