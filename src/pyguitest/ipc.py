@@ -30,6 +30,16 @@ __all__ = [
     "connect_niri",
 ]
 
+_AF_UNIX: int = getattr(socket, "AF_UNIX", -1)
+"""The Unix socket address family, looked up rather than named.
+
+CPython does not define `socket.AF_UNIX` on Windows, and mypy's Windows view of
+`socket` agrees, so naming it made a Windows type check fail for a code path no
+Windows machine runs: sway, i3, Hyprland and niri are Unix-socket compositors.
+Where it is missing this is -1, which makes the connection attempt fail with an
+`OSError` -- the failure `connect()` already treats as "no compositor there" --
+rather than an `AttributeError` from inside the backend."""
+
 DEFAULT_TIMEOUT = 10
 """Seconds before an unbounded socket read or subprocess call gives up.
 
@@ -68,7 +78,7 @@ class SwaySocket:
         self.path = path or os.environ.get("SWAYSOCK") or os.environ.get("I3SOCK")
         if not self.path:
             raise OSError("no SWAYSOCK or I3SOCK in the environment")
-        self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self._sock = socket.socket(_AF_UNIX, socket.SOCK_STREAM)
         self._sock.settimeout(DEFAULT_TIMEOUT)
         try:
             self._sock.connect(self.path)
@@ -288,7 +298,7 @@ class HyprlandSocket:
 
     def _request(self, command):
         """Send a command and read the reply until end of stream."""
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        with socket.socket(_AF_UNIX, socket.SOCK_STREAM) as sock:
             sock.settimeout(DEFAULT_TIMEOUT)
             sock.connect(self.path)
             sock.sendall(command.encode())
@@ -442,7 +452,7 @@ class NiriSocket:
 
     def _connect(self):
         """Open a connection to the niri socket."""
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock = socket.socket(_AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(DEFAULT_TIMEOUT)
         try:
             sock.connect(self.path)

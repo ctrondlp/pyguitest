@@ -1251,6 +1251,81 @@ they cost real debugging time before being ruled out:**
   a hand-rolled Win32 window (as used for the checks above) does not, which
   is part of why the live checks above prefer one.
 
+## Run live on Windows 11 (build 26200): push buttons, tree views and the rest of the control set
+
+2026-09-20, the same console session, unelevated, one monitor at 125% DPI, US
+layout. A hand-rolled native window with a `SysTreeView32` added to the earlier
+probe (a fourth tab: `Root` > `Fruit` > `Apple`, `Banana`, and `Veg` >
+`Carrot`, `Fruit` collapsed to begin with), driven with `uia` and read back
+through raw Win32 calls (`WM_GETTEXT`, `BM_GETCHECK`, `CB_GETCURSEL`,
+`TCM_GETCURSEL`, `IsIconic`) rather than through pyguitest's own answer.
+
+**Checked mechanically, no desktop needed.** All sixteen property and pattern
+ids `uia.py` declares, and all nine pattern interfaces it names, equal the SDK's
+own constants in the type library `comtypes` generates from
+`UIAutomationCore.dll`; and `_UIA_ROLES` covers exactly the 41 control types
+`50000`-`50040` the SDK defines, none missing and none extra, each on the right
+name. This closes the "not confirmed exhaustively" item below.
+
+**Push buttons.** Found by role and name with `invoke` offered; `click()`
+through Invoke and `do_action("click")` (the at-spi spelling) each updated the
+application's own label; a real pointer click at the centre of `extents()`
+did the same; `element_at()` on that point returned the button. A **disabled**
+button was found with `enabled=False`, and `click()` on it raised
+`CapabilityUnsupported` with the label unchanged -- the loud refusal
+`Element.click`'s docstring promises, not a click reported as successful.
+
+**Tree views.** The tree is `tree` and its nodes `tree item`. A collapsed
+node's children are not in the tree until it is expanded: `Apple` and `Banana`
+appeared after `do_action("expand")` and went again after `"collapse"`.
+`select()` on `Veg` selected it (`selected` went `False` to `True`, and the
+application's own selection-changed handler fired); a real pointer click on
+`Root` selected it and deselected `Veg`; a double click on `Fruit` expanded it;
+`element_at()` over a node returned that node, not the whole tree. Two
+things worth knowing. The tree's accessible *name* was the text of the `STATIC`
+control before it in tab order (`"clicked 3"`), because Windows names an
+unlabelled Win32 control after its preceding label -- so find a Win32 tree by
+role, not by name. And `find_elements(role="tree item")` with no `within=`
+searches the whole desktop, so it returned Explorer's and VS Code's tree items
+too; scope it with `within=gui.window_element(title)`.
+
+**The rest of the control set, now through their patterns.** `set_text()`
+through the Value pattern on an edit box, with `"héllo wörld 😀"` (a character
+outside the BMP), read back by `WM_GETTEXT` exactly. `do_action("toggle")`
+through the Toggle pattern on a real check box went `BM_GETCHECK` 0 to 1 to 0
+and `checked` followed. `choose("Gamma")` on a combo box left `CB_GETCURSEL` at
+2; a list-view row selected through `select()`; a tab item selected through
+`select()` and `TCM_GETCURSEL` agreed.
+
+**Windows and process.** `minimize_window(window)` and `(window, False)` were
+each read back through `IsIconic`, and a minimized window stayed in `windows()`.
+`is_key_pressed` answered `True` for a held Shift, Control and **Alt** and
+`False` after each release -- the held-Alt case is the one the earlier
+`VK_FINAL` transcription error would have answered `False` for.
+`wait_for_idle` on `csrss.exe`, `winlogon.exe` and `services.exe` raised the
+"access denied opening its process handle" error rather than reading them as
+gone, so the `ERROR_ACCESS_DENIED` branch is reached, unelevated, on real
+protected processes.
+
+**One real bug, found and fixed: `activate_window` failed whenever another
+process held the foreground.** `SetForegroundWindow` is refused unless this
+process has just had input of its own, so activating a background window -- the
+ordinary thing a two-window test does -- raised `did not become the foreground
+window`. Reproduced on demand (a second window brought to the front by a click,
+six seconds' wait, then the call) and four remedies tried from that state: plain
+`SetForegroundWindow` and `AttachThreadInput` to the foreground thread were
+refused; a synthetic Alt tap and a `SendInput` mouse move of zero distance both
+worked. The backend now retries once after the zero move, which shifts nothing
+and, unlike the Alt tap, opens no menu. Covered by tests against a fake
+`user32` that models the lock; **not yet re-run against the real one**, so the
+fix is as verified as its cause, which was.
+
+**Still open from this run:** the `windows()` bottom-to-top claim, which the
+above failure stopped short of; a scroll past `_MAX_WHEEL_STEPS`; the
+`WINDOW_EVENTS` flood and cloaked-window cases; multi-monitor coordinates. A
+purpose-built window is not an application, so none of this says how a
+Chromium, Electron or WPF application will look.
+
 ## Not run live
 
 - **What two live Windows runs left unverified.** The suite passes on
@@ -1273,25 +1348,23 @@ they cost real debugging time before being ruled out:**
     cloaked/shell filtering, are confirmed live above; the *z-order claim
     specifically* is not, and is the one thing here a fake cannot settle
     because it is a claim about `EnumWindows` itself.)
-  - `ShowWindow`'s other states (`minimize_window`/restore specifically, as
-    opposed to activation) are read back rather than trusted.
+  - ~~`ShowWindow`'s other states (`minimize_window`/restore) are read back
+    rather than trusted.~~ **Closed 2026-09-20:** each read back through
+    `IsIconic`.
   - A scroll past `_MAX_WHEEL_STEPS` arrives as the total detents asked for,
     rather than wrapping the 16-bit wheel field and scrolling backwards.
-  - `GetAsyncKeyState(VK_MENU)` answers about a held Alt. (Transcribed once
-    as `0x18`, `VK_FINAL`, so the query silently answered False. `is_key_
-    pressed` is confirmed live for the *idle*, unheld case above; a held key
-    specifically is not yet.)
+  - ~~`GetAsyncKeyState(VK_MENU)` answers about a held Alt.~~ **Closed
+    2026-09-20:** a held Alt, Shift and Control each answered `True`, and
+    `False` after release.
   - `EnumDisplayMonitors` returning false is rare enough that raising on it
     does not turn an ordinary desktop into a failure.
 
   **`wait_for_process`** — the mechanism is confirmed above; what is left is
   one branch:
-  - `ERROR_ACCESS_DENIED` really does come back for a live process this one
-    may not open, and is raised rather than read as "gone". Not reachable on
-    the SSH box: that session was elevated, and every process on it except
-    pid 0 opened successfully. The 2026-09-19 interactive session above *is*
-    unelevated (`doctor` reports it), so the environment for this check now
-    exists — it has not been run yet, only confirmed reachable.
+  - ~~`ERROR_ACCESS_DENIED` really does come back for a live process this one
+    may not open, and is raised rather than read as "gone".~~ **Closed
+    2026-09-20:** `csrss.exe`, `winlogon.exe` and `services.exe`, unelevated,
+    each raised.
 
   **`WINDOW_EVENTS`, the one part owning a thread:**
   - `new`/`close`/`focus` firing for an ordinary application window,
@@ -1307,16 +1380,13 @@ they cost real debugging time before being ruled out:**
     the same claim for the event path specifically, not yet run against one.)
 
   **`uia`, the element half** — less arithmetic, so a shorter list:
-  - The property and pattern ids match the SDK. A wrong one narrows a search
-    too little rather than failing outright, so nothing else would say.
-    (Confirmed correct enough to find and name real controls — a tab list,
-    a combo box, a checkbox, a real menu bar, an edit box, a button — above;
-    not yet confirmed *exhaustively* against every id the module declares.)
+  - ~~The property and pattern ids match the SDK.~~ **Closed 2026-09-20:**
+    every id and interface the module declares, and all 41 control types,
+    compared against the SDK's own constants.
   - `click()` through Invoke reaches a real control, confirmed above.
-    `set_text` through the Value pattern and `toggle` through Toggle
-    specifically are not — the live typing check above went through
-    `type_text`/`SendInput`, not `Element.set_text()`, and no live run has
-    called `toggle()` on a real checkbox yet.
+    ~~`set_text` through the Value pattern and `toggle` through Toggle.~~
+    **Closed 2026-09-20:** both, on a real edit box and check box, read back
+    by raw Win32 messages.
   - `_initialize_com`'s `CoInitialize` is actually needed — the first draft
     assumed a `Session` is built on the thread that imported `comtypes`,
     which is untrue of a worker or a pool, and without it `_connection`

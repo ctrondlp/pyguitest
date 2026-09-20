@@ -1978,6 +1978,18 @@ class TestWidgetFinders(unittest.TestCase):
         self.assertEqual(len(self.gui.elements(role=Role.PUSH_BUTTON)), 3)
         self.assertEqual(self.gui.elements(role=Role.SLIDER), [])
 
+    def test_a_window_passed_as_within_is_a_type_error_that_says_what_to_pass(self):
+        # `find_window` returns a Window and `within=` wants the Element
+        # `window_element` returns. Found live: the mix-up surfaced as
+        # `AttributeError: 'Window' object has no attribute 'node'` from inside
+        # the UIA backend, which names neither the mistake nor the fix.
+        window = self.gui.windows()[0]
+        with self.assertRaises(TypeError) as ctx:
+            self.gui.elements(role=Role.PUSH_BUTTON, within=window)
+        self.assertIn("window_element", str(ctx.exception))
+        with self.assertRaises(TypeError):
+            self.gui.element(role=Role.PUSH_BUTTON, within=window)
+
     def test_elements_filters_by_enabled(self):
         found = self.gui.elements(role=Role.PUSH_BUTTON, enabled=False)
         self.assertEqual([e.name for e in found], ["Cancel"])

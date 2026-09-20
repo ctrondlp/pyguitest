@@ -106,9 +106,10 @@ windows = ["comtypes; sys_platform == 'win32'"]
                                    # Linux. The environment marker makes
                                    # `pip install 'pyguitest[windows]'` on
                                    # Linux or macOS a no-op rather than an
-                                   # install error, and no version floor is
-                                   # pinned yet: nothing has been resolved on
-                                   # a Windows machine. See
+                                   # install error. No version floor is
+                                   # pinned: comtypes 1.4.16 is what the live
+                                   # Windows 11 runs used, and nothing has
+                                   # shown an older one to fail. See
                                    # docs/developers/adr-003-windows.md.
 dev   = ["pytest>=7", "ruff>=0.6", "mypy>=1.11",
          "python-dbusmock>=0.30"]  # tests/test_portal_dbusmock.py: PortalBackend

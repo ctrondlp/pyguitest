@@ -1600,11 +1600,29 @@ class Win32Backend(GUIBackend):
         backend quietly doing more than the interface says is worse than a
         caller writing the `minimize_window(window, False)` they meant -- so
         `IsIconic` is asked only to name the cause in the error.
+
+        **One retry, after a no-op mouse move.** Measured on Windows 11: with
+        another process in front (a window the user clicked, an application
+        that launched itself) and no input of this process's own in the last
+        few seconds, `SetForegroundWindow` is refused -- so activating a
+        background window, the ordinary thing a two-window test does, raised
+        every time. A `SendInput` mouse move of zero distance is what fixes it:
+        the system counts it as this process's input, the entitlement the call
+        is documented to need, and the retry then takes. It moves nothing and
+        types nothing, which is why it is preferred to a synthetic Alt tap --
+        that also works, and opens the foreground window's menu bar.
+        `AttachThreadInput` to the foreground thread was tried and did not
+        help. The result is read back exactly as before, so a window that
+        still does not take the foreground raises with the same message, and a
+        minimized one is not retried, since input would not change its answer.
         """
         self.require(Capability.WINDOW_ACTIVATE)
         lib = self._lib()
         handle = self._hwnd(window)
         lib.SetForegroundWindow(handle)
+        if lib.GetForegroundWindow() != handle and not lib.IsIconic(handle):
+            self._claim_last_input(lib)
+            lib.SetForegroundWindow(handle)
         if lib.GetForegroundWindow() != handle:
             if lib.IsIconic(handle):
                 raise PyGUITestError(
@@ -1618,6 +1636,20 @@ class Win32Backend(GUIBackend):
                 "the foreground only to a process that already has it or has the "
                 "last input event, so something else on the desktop is holding it"
             )
+
+    def _claim_last_input(self, lib):
+        """Send a mouse move of zero distance, so this process has just had input.
+
+        Best effort, and deliberately not through `_send`: a refusal here (a
+        UIPI block, another thread holding input) only means the retry
+        `activate_window` makes next will fail the way the first did, and that
+        call is what reads the answer back and raises. A relative move by
+        nothing does not disturb the pointer, and is not a click or a key, so
+        it cannot land in the window that has the foreground.
+        """
+        event = self._mouse_event(_winapi.MOUSEEVENTF_MOVE)
+        array = (_winapi.INPUT * 1)(event)
+        lib.SendInput(1, array, ctypes.sizeof(_winapi.INPUT))
 
     def minimize_window(self, window, minimized=True):
         """Minimize `window`, or restore it when `minimized` is False.
