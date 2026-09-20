@@ -395,10 +395,12 @@ WINDOW_ROLES
 | `BackendUnavailable` | No backend could drive the current session. |
 | `CapabilityUnsupported` | The active backend cannot perform this operation. |
 | `ClipboardMismatch` | The clipboard does not hold the text that was expected. |
+| `ElementNotActionable` | Element.click() has no way left to act on this element. |
 | `ElementNotFound` | No accessible element matched the search. |
 | `FocusMismatch` | The wrong element (or nothing) has keyboard focus. |
 | `ImageNotFound` | No match for the template image cleared the similarity threshold. |
 | `PermissionRequired` | The operation exists but was not granted. |
+| `PortalTimeout` | A portal request was accepted but never answered. |
 | `WindowNotFound` | No window matched, or a handle refers to a window that has closed. |
 
 ## Module-level names
@@ -414,7 +416,7 @@ WINDOW_ROLES
 | `Capability` | An operation a backend may or may not support. |
 | `CapabilitySet` | The capabilities a backend actually provides. |
 | `Tier` | What it costs to implement a capability on Wayland. |
-| `TIERS` |  |
+| `TIERS` | What each tier costs, in the words the capability report and the API reference print beside it. |
 | `Environment` | What the current login actually offers. |
 | `SessionType` | What kind of display server the session is running. |
 | `Compositor` | Compositor family, which decides the window backend. |
@@ -429,10 +431,12 @@ WINDOW_ROLES
 | `BackendUnavailable` | No backend could drive the current session. |
 | `CapabilityUnsupported` | The active backend cannot perform this operation. |
 | `ClipboardMismatch` | The clipboard does not hold the text that was expected. |
+| `ElementNotActionable` | Element.click() has no way left to act on this element. |
 | `ElementNotFound` | No accessible element matched the search. |
 | `FocusMismatch` | The wrong element (or nothing) has keyboard focus. |
 | `ImageNotFound` | No match for the template image cleared the similarity threshold. |
 | `PermissionRequired` | The operation exists but was not granted. |
+| `PortalTimeout` | A portal request was accepted but never answered. |
 | `WindowNotFound` | No window matched, or a handle refers to a window that has closed. |
 | `backends` | Backend registry and selection. |
 | `compat` | The X11::GUITest 0.29 migration table, as data. |

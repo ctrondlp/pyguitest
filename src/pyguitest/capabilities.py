@@ -37,6 +37,14 @@ TIERS = {
     Tier.REWORK: "Goal survives, model does not",
     Tier.NO_PATH: "Deliberately prevented",
 }
+"""What each tier costs, in the words the capability report and the API
+reference print beside it.
+
+The member names alone do not carry it: "REWORK" tells a reader nothing it can
+act on, where "goal survives, model does not" does. An attribute docstring
+rather than a comment because scripts/gen-api-docs.py reads it -- `TIERS` is
+public, and a dict has no `__doc__` of its own to hold one.
+"""
 
 
 class Capability(Enum):

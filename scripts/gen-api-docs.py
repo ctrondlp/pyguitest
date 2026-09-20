@@ -202,6 +202,79 @@ def first_line(obj) -> str:
     return re.sub(r"\s+", " ", doc.split("\n\n")[0].strip())
 
 
+def attribute_note(source: str, name: str) -> str:
+    """First paragraph of the attribute docstring on `name = ...`, or ''.
+
+    PEP 257's form: a string literal directly after the assignment. That is
+    what this project writes for a value that cannot document itself -- a dict
+    has no `__doc__` of its own to put one in -- and tests/test_style.py pins
+    the choice by rejecting the Sphinx `#:` alternative.
+
+    Collapsed the way `first_line` collapses a docstring, so the reference
+    gets one line either way.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return ""
+    for index, node in enumerate(tree.body):
+        if not (
+            isinstance(node, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == name for t in node.targets)
+        ):
+            continue
+        following = tree.body[index + 1] if index + 1 < len(tree.body) else None
+        if not (
+            isinstance(following, ast.Expr)
+            and isinstance(following.value, ast.Constant)
+            and isinstance(following.value.value, str)
+        ):
+            return ""
+        return re.sub(r"\s+", " ", following.value.value.split("\n\n")[0].strip())
+    return ""
+
+
+def note_for(name: str, obj) -> str:
+    """The attribute docstring of a name whose object cannot carry one.
+
+    `first_line` stays the first choice: a class or a function says what it is
+    in its own docstring. A plain value has none to give -- it borrows its
+    type's, which `first_line` refuses on purpose, since that text changes
+    between interpreters and this file is byte-compared on every version CI
+    runs. `TIERS` is what that left: a blank cell for a name in `__all__`, on
+    a page headed "every public name in `pyguitest`", with the six meanings it
+    holds unreadable anywhere else in the docs.
+
+    The note is read from the source rather than kept in a table here, so the
+    sentence sits next to the value it describes and no list in this script can
+    drift from the package.
+
+    Several submodules hold the same object -- `__main__` imports `TIERS` from
+    `capabilities` too -- so the search takes the first candidate that *has* a
+    note, not the first that has the name. Matching on the binding alone made
+    the result depend on which modules the interpreter had already imported,
+    which the byte-comparison in tests/test_api_docs.py reported as the
+    committed file being out of date.
+    """
+    for module_name in sorted(sys.modules):
+        if not module_name.startswith("pyguitest."):
+            continue
+        module = sys.modules[module_name]
+        if module is None or vars(module).get(name) is not obj:
+            continue
+        path = getattr(module, "__file__", None)
+        if not path:
+            continue
+        try:
+            source = Path(path).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        note = attribute_note(source, name)
+        if note:
+            return note
+    return ""
+
+
 def signature(cls, name: str) -> str:
     """`name(params)` for a method, or bare `name` for a property."""
     static = inspect.getattr_static(cls, name, None)
@@ -608,7 +681,8 @@ def render_names(out: list[str]) -> None:
     for name in pyguitest.__all__:
         obj = getattr(pyguitest, name, None)
         if obj is not None:
-            out.append(f"| `{name}` | {cell(first_line(obj))} |")
+            described = first_line(obj) or note_for(name, obj)
+            out.append(f"| `{name}` | {cell(described)} |")
     out.append("")
 
 

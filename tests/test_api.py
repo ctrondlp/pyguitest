@@ -19,10 +19,12 @@ from pyguitest import (
     AccessibilityViolation,
     Capability,
     ClipboardMismatch,
+    ElementNotActionable,
     ElementNotFound,
     FocusMismatch,
     ImageMatch,
     ImageNotFound,
+    PortalTimeout,
     PyGUITestError,
     Role,
     WindowNotFound,
@@ -2240,6 +2242,30 @@ class TestPublicExports(unittest.TestCase):
         # in examples/03_widgets.py, but omitted from __all__ while its five
         # sibling exceptions were listed.
         self.assertIn("ElementNotFound", pyguitest.__all__)
+
+    def test_the_two_raised_from_real_paths_are_in_all_too(self):
+        # The same omission, found by checking __all__ against the pages
+        # that describe it: docs/api.md builds its Exceptions table from
+        # __all__, so a public exception left out of it is not only
+        # unimportable from the package root, it is undocumentable -- absent
+        # from the page headed "every public name in pyguitest".
+        #
+        # ElementNotActionable is what Element.click() raises through atspi,
+        # uia and the coordinate fallback, and is the type a caller catches
+        # to tell "here, but it cannot be pressed" apart from
+        # ElementNotFound's "not here". PortalTimeout is raised by the portal
+        # request path when an accepted call is never answered.
+        self.assertIn("ElementNotActionable", pyguitest.__all__)
+        self.assertIn("PortalTimeout", pyguitest.__all__)
+
+    def test_both_stay_catchable_as_pyguitesterror(self):
+        # Why those two are worth exporting rather than being documented as
+        # internal detail: an existing `except PyGUITestError` has to keep
+        # catching them, and the reference's Exceptions table has to keep
+        # being the complete list a reader can trust.
+        for cls in (ElementNotActionable, PortalTimeout):
+            with self.subTest(cls=cls.__name__):
+                self.assertTrue(issubclass(cls, PyGUITestError))
 
 
 class TestScreenshot(unittest.TestCase):
