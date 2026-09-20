@@ -10,6 +10,7 @@ here, `pyguitest debug` collects everything a bug report needs — see
 - [The wrong characters get typed](#the-wrong-characters-get-typed)
 - [Injected input vanishes on Windows](#injected-input-vanishes-on-windows)
 - [`wait_for_process` matches only the program name on Windows](#wait_for_process-matches-only-the-program-name-on-windows)
+- [A window will not come to the front on Windows](#a-window-will-not-come-to-the-front-on-windows)
 - [CapabilityUnsupported on a window operation](#capabilityunsupported-on-a-window-operation)
 - [`geometry()` reports a position nowhere near the window](#geometry-reports-a-position-nowhere-near-the-window)
 - [Pointer and key-state reads look stale](#pointer-and-key-state-reads-look-stale)
@@ -152,6 +153,27 @@ answered, so a suite already running looks as though it has hung. This one is
 invisible from inside the process, and deliberately so: the window station and
 every other probe keep answering exactly as they did, which is why no hint
 fires for it and this paragraph exists instead. Answer the prompt and re-run.
+
+## A window will not come to the front on Windows
+
+`activate_window` raises `did not become the foreground window`. Windows only
+lets a process take the foreground if it has just had input of its own, or
+already holds it, so a script activating a window while something else is in
+front is refused by default. pyguitest sends a mouse move of zero distance and
+tries once more before giving up, and that is enough where the cause is only
+that the foreground lock is held. If it still raises, something is actively
+holding the foreground: a person typing, a window that cannot be activated
+(`WS_EX_NOACTIVATE`), or an elevated window while this process is not — see
+[above](#injected-input-vanishes-on-windows). A *minimized* window is named
+separately in the message, because activating never restores one; call
+`minimize_window(window, False)` first.
+
+A related trap, since it looks like this one: a modern Windows 11 application
+(Notepad, Calculator and most inbox apps) is a single-instance, packaged
+program. `start_app(["notepad.exe"])` a second time hands off to the instance
+already running and exits, so `app.stop()` terminates a launcher that never
+owned the window, and the real window stays open. Match the window
+(`find_window`) and use its `pid` rather than assuming one launch is one window.
 
 ## `wait_for_process` matches only the program name on Windows
 

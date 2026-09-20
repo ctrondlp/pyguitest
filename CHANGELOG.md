@@ -209,6 +209,37 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ### Fixed
 
+- **`mypy` could not pass on Windows, so `scripts/pre-commit-test.sh` could
+  not go green there.** Five errors, all the same shape and all present before
+  this change: mypy checks against the platform it runs on, and typeshed
+  leaves out the Unix-only names -- `socket.AF_UNIX` (three sites in `ipc.py`),
+  `grp.getgrnam` and `os.sysconf` -- when that platform is Windows. Linux CI
+  never saw them. The socket family is now looked up once
+  (`getattr(socket, "AF_UNIX", -1)`, since CPython does not define it on
+  Windows either), which makes a compositor connection fail with the `OSError`
+  it already handled instead of an `AttributeError`; the other two carry a
+  targeted `type: ignore`, because their runtime behaviour is right. Checked
+  clean under `--platform` win32, linux, freebsd and darwin.
+- **`activate_window` on Windows raised whenever another process held the
+  foreground, which is the ordinary state of a two-window test.** Found live,
+  with a second window brought to the front by a click and this process idle
+  for a few seconds: `SetForegroundWindow` is refused unless the caller has
+  just had input of its own, and the backend -- which reads the result back
+  rather than trusting the call, correctly -- raised `did not become the
+  foreground window`, every time. Four remedies were tried from that exact
+  state. Plain `SetForegroundWindow` and `AttachThreadInput` to the foreground
+  thread were refused; a synthetic Alt tap and a `SendInput` mouse move of zero
+  distance both worked. The backend now retries once after the zero move, which
+  displaces nothing and opens no menu (the Alt tap would), and reads the answer
+  back exactly as before, so a window that still will not take the foreground
+  still raises, and a minimized one is not retried. Tested against a fake
+  `user32` that models the lock, and not yet re-run on the real one.
+- **A `Window` passed as `within=` failed with `AttributeError: 'Window' object
+  has no attribute 'node'`.** `find_window` returns a `Window`, `within=` wants
+  the `Element` that `window_element` returns, and the mix-up surfaced from
+  inside whichever backend was in use, naming an attribute and not the
+  mistake. `elements()` (and so `element()` and every widget finder) now raises
+  a `TypeError` that says to use `gui.window_element(title)`.
 - **`docs/validation.md`'s Windows scope entry contradicted the sections
   above it.** The first item under "Not run live" still claimed that
   everything on a Windows interactive desktop was unrun as of 2026-09-18,

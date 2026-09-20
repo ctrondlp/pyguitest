@@ -628,7 +628,7 @@ def _process_cpu_seconds(pid: int) -> tuple[float, float] | None:
         # closing ')' rather than on whitespace from the start of the line.
         fields = stat[stat.rindex(")") + 2 :].split()
         utime, stime = int(fields[11]), int(fields[12])  # fields 14/15, 1-indexed
-        ticks = os.sysconf("SC_CLK_TCK")
+        ticks = os.sysconf("SC_CLK_TCK")  # type: ignore[attr-defined]
         return (utime + stime) / ticks, 1 / ticks
     result = _ps("-p", str(pid), "-o", "time=")
     if result is None:
@@ -2225,7 +2225,22 @@ class Session:
         cover, such as an ancestor/descendant relationship:
 
             gui.elements(predicate=lambda e: some_label.is_ancestor_of(e))
+
+        `within` scopes the search to one element's subtree, and takes an
+        `Element` -- for a window, `gui.window_element(title)`, not the
+        `Window` from `find_window`.
         """
+        if isinstance(within, Window):
+            # The one mix-up the two window types invite: `find_window` returns
+            # a Window, `within=` wants the Element `window_element` returns,
+            # and without this the first thing that notices is a backend
+            # reaching for an attribute a Window does not have -- an
+            # AttributeError naming `node` or `_handle`, on whichever backend
+            # was in use, that says nothing about what to change.
+            raise TypeError(
+                "within= takes an Element, not a Window; for a window's "
+                "contents use gui.window_element(title)"
+            )
         # Only the filters actually asked for are passed on, so a backend
         # (or a test fake) that predates these parameters keeps working for
         # a plain role/name query -- it never sees a keyword it does not

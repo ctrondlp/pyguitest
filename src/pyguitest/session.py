@@ -164,7 +164,7 @@ def _has_input_group() -> bool:
         # No Unix user database, so no group to be a member of.
         return False
     try:
-        grp.getgrnam("input")
+        grp.getgrnam("input")  # type: ignore[attr-defined]
     except KeyError:
         return False
     return True

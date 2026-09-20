@@ -261,6 +261,7 @@ class Win32TestCase(unittest.TestCase):
             "cloaked": 0,
             "rect": (10, 20, 810, 620),
             "activated": True,
+            "needs_input": False,
         }
         window.update(fields)
         self.windows[handle] = window
@@ -325,7 +326,12 @@ class Win32TestCase(unittest.TestCase):
         return 1
 
     def _set_foreground(self, hwnd):
-        if self.windows[hwnd]["activated"]:
+        # `needs_input` is Windows' foreground lock: refused until this process
+        # has sent input of its own, whatever it is.
+        granted = self.windows[hwnd]["activated"] and (
+            not self.windows[hwnd]["needs_input"] or self.sent is not None
+        )
+        if granted:
             self.foreground = hwnd
             return 1
         return 0
@@ -875,6 +881,44 @@ class TestWindowOperations(Win32TestCase):
         window = self.only_window()
         self.gui.activate_window(window)
         self.assertEqual(self.foreground, 1)
+
+    def test_a_foreground_refused_for_want_of_input_is_retried_after_a_nudge(self):
+        # Measured live: with another process in front and no input of its own
+        # lately, SetForegroundWindow is refused, and a zero-distance mouse
+        # move is what makes the retry take. Before this, activating a
+        # background window raised every time.
+        window = self.only_window(needs_input=True)
+        self.gui.activate_window(window)
+        self.assertEqual(self.foreground, 1)
+
+    def test_the_nudge_moves_nothing_and_clicks_nothing(self):
+        window = self.only_window(needs_input=True)
+        self.gui.activate_window(window)
+        count, events, _size = self.sent
+        self.assertEqual(count, 1)
+        mouse = events[0].mi
+        self.assertEqual(events[0].type, _winapi.INPUT_MOUSE)
+        self.assertEqual((mouse.dx, mouse.dy), (0, 0))
+        # Relative, and a move only: not ABSOLUTE, not a button, not a wheel.
+        self.assertEqual(mouse.dwFlags, _winapi.MOUSEEVENTF_MOVE)
+
+    def test_no_input_is_sent_when_the_first_attempt_took(self):
+        window = self.only_window()
+        self.gui.activate_window(window)
+        self.assertIsNone(self.sent)
+
+    def test_a_window_that_still_refuses_after_the_nudge_raises(self):
+        window = self.only_window(activated=False)
+        with self.assertRaises(PyGUITestError) as raised:
+            self.gui.activate_window(window)
+        self.assertIn("foreground", str(raised.exception))
+        self.assertIsNotNone(self.sent)
+
+    def test_a_minimized_window_is_not_nudged(self):
+        window = self.only_window(activated=False, iconic=True)
+        with self.assertRaises(PyGUITestError):
+            self.gui.activate_window(window)
+        self.assertIsNone(self.sent)
 
     def test_a_minimized_window_is_told_apart_from_a_held_foreground(self):
         # SetForegroundWindow does not restore a minimized window, so the

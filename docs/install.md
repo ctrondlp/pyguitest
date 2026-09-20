@@ -99,11 +99,12 @@ package names, and `pyguitest debug` reports the environment the backends depend
 on (window station, integrity level, DPI awareness, build, and whether
 `comtypes` is importable).
 [docs/developers/adr-003-windows.md](developers/adr-003-windows.md) is the
-split. The suite passes on Windows 11 (build 26200) and the environment probes
-are confirmed there, but nothing has yet driven an interactive desktop — that
-needs a console session, not the SSH one that run used — so
-[validation.md](validation.md) holds what the live run settled and what is
-still outstanding, rather than a claim that it all works.
+split. The suite passes on Windows 11 (build 26200), and both backends have
+driven a real interactive desktop there — push buttons, edit boxes, check
+boxes, combo boxes, tabs, list views, tree views and menus — but only a
+US-layout, single-monitor, unelevated one, so
+[validation.md](validation.md) holds what those runs settled and what is still
+outstanding, rather than a claim that it all works.
 
 Two of those are worth knowing before writing a test for a Windows machine,
 because they fail silently rather than loudly. A process that is not elevated
