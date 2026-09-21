@@ -66,6 +66,41 @@ class TestCapabilitySet(unittest.TestCase):
         xored = self.caps ^ CapabilitySet({Capability.WINDOW_LIST})
         self.assertIsInstance(xored, CapabilitySet)
 
+    def test_named_set_methods_stay_a_capability_set(self):
+        # Regression: the four operators above were fixed and these were
+        # not. `union()` and its three siblings are ordinary methods on
+        # frozenset and never go through `__or__`, so a merge written with
+        # one of them -- or a `copy()` taken before handing the merge on --
+        # dropped .report() and .missing all over again.
+        for method, argument in (
+            ("union", {Capability.WINDOW_LIST}),
+            ("intersection", CapabilitySet({Capability.TIMING})),
+            ("difference", CapabilitySet({Capability.TIMING})),
+            ("symmetric_difference", CapabilitySet({Capability.WINDOW_LIST})),
+        ):
+            with self.subTest(method=method):
+                result = getattr(self.caps, method)(argument)
+                self.assertIsInstance(result, CapabilitySet)
+                self.assertTrue(hasattr(result, "missing"))
+
+        copied = self.caps.copy()
+        self.assertIsInstance(copied, CapabilitySet)
+        self.assertEqual(copied, self.caps)
+
+    def test_reflected_operators_stay_a_capability_set(self):
+        # Regression, and the reason the four operators above were not
+        # enough on their own: with a frozenset on the left, Python asks the
+        # *subclass* side first, so these four reflected methods are the
+        # ones actually consulted -- and without them
+        # `frozenset({...}) | caps` came back a frozenset.
+        other = frozenset({Capability.WINDOW_LIST, Capability.TIMING})
+        self.assertIsInstance(other | self.caps, CapabilitySet)
+        self.assertIsInstance(other & self.caps, CapabilitySet)
+        self.assertIsInstance(other ^ self.caps, CapabilitySet)
+        self.assertIsInstance(other - self.caps, CapabilitySet)
+        # The values are still the right ones, not merely the right type.
+        self.assertEqual(other - self.caps, CapabilitySet({Capability.WINDOW_LIST}))
+
 
 if __name__ == "__main__":
     unittest.main()

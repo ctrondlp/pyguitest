@@ -12,3 +12,20 @@ reviews:
       # enforced by ruff's pydocstyle rules in the binding CI gate
       # (./scripts/pre-commit-test.sh), which IS path-aware.
       mode: "off"
+  # The check above is repo-wide: the schema gives it `mode` and
+  # `threshold` and nothing path-scoped, so it cannot be left on for src/
+  # and off for tests/. The reviewer itself is path-scoped, so the tests
+  # convention is stated here instead -- and it holds whether or not that
+  # check is ever switched back on.
+  path_instructions:
+    - path: "tests/**"
+      instructions: >-
+        Do not ask for docstrings on test functions, methods or classes.
+        `[tool.ruff.lint.per-file-ignores]` in pyproject.toml ignores
+        D100-D107 under tests/* on purpose: each test is named for the
+        behaviour it pins, and a docstring restating that name is noise.
+        The test modules do carry a docstring, and a comment explaining
+        what a test is proving is welcome where the name alone does not
+        carry it. Docstrings ARE required in src/ and scripts/, where
+        ruff's pydocstyle rules enforce them in the gate.
+

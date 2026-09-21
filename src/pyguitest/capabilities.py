@@ -262,3 +262,62 @@ class CapabilitySet(frozenset):
     def __xor__(self, other) -> CapabilitySet:
         """Symmetric difference, re-wrapped for the same reason as __or__."""
         return CapabilitySet(super().__xor__(other))
+
+    # The named methods are the same defect one call along, and the four
+    # operators above did not cover them: `union()` and its three siblings
+    # are ordinary methods on frozenset, so nothing routes a call through
+    # __or__ -- `caps.union({...})` came back a frozenset, and so did
+    # `caps.copy()`, which is the one a caller reaches for before handing a
+    # merge on. Re-wrapped on the same grounds.
+    def union(self, *others) -> CapabilitySet:
+        """Union with each of `others`, re-wrapped as __or__ is."""
+        return CapabilitySet(super().union(*others))
+
+    def intersection(self, *others) -> CapabilitySet:
+        """Intersection with each of `others`, re-wrapped as __or__ is."""
+        return CapabilitySet(super().intersection(*others))
+
+    def difference(self, *others) -> CapabilitySet:
+        """This set minus each of `others`, re-wrapped as __or__ is."""
+        return CapabilitySet(super().difference(*others))
+
+    def symmetric_difference(self, other) -> CapabilitySet:
+        """The members in exactly one of this set and `other`, re-wrapped."""
+        return CapabilitySet(super().symmetric_difference(other))
+
+    def copy(self) -> CapabilitySet:
+        """A shallow copy that is still a `CapabilitySet`."""
+        return CapabilitySet(self)
+
+    # And the reflected operators, which bite only with a frozenset on the
+    # left: `frozenset({...}) | caps` asked frozenset's own __or__ and came
+    # back a frozenset. Python consults a reflected method only when the
+    # right operand's type is a subclass of the left's, which CapabilitySet
+    # is of frozenset -- so these four are reached, and defining them is
+    # what keeps the merge a CapabilitySet. A plain `set` on the left is not
+    # reachable this way at all: `{...} | caps` is answered by set.__or__
+    # (set and frozenset are siblings, neither a subclass of the other) and
+    # comes back a mutable set, whose later mutation cannot affect
+    # `gui.capabilities` and is silently discarded. Documented rather than
+    # worked around: a wrapper type would have to lie about being a set.
+    #
+    # Written as `frozenset(other).union(self)` rather than the obvious
+    # `super().__ror__(other)`, which mypy rejects: typeshed's frozenset stub
+    # leaves the four reflected methods out even though the type has them at
+    # runtime. Going through a plain frozenset computes the same set by the
+    # same set algebra, and needs no `# type: ignore` to say so.
+    def __ror__(self, other) -> CapabilitySet:
+        """Union with `other` on the left, re-wrapped as __or__ is."""
+        return CapabilitySet(frozenset(other).union(self))
+
+    def __rand__(self, other) -> CapabilitySet:
+        """Intersection with `other` on the left, re-wrapped as __or__ is."""
+        return CapabilitySet(frozenset(other).intersection(self))
+
+    def __rxor__(self, other) -> CapabilitySet:
+        """Symmetric difference with `other` on the left, re-wrapped."""
+        return CapabilitySet(frozenset(other).symmetric_difference(self))
+
+    def __rsub__(self, other) -> CapabilitySet:
+        """`other` minus this set, re-wrapped as __or__ is."""
+        return CapabilitySet(frozenset(other).difference(self))
