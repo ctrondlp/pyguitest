@@ -236,6 +236,30 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ### Fixed
 
+- **`CapabilitySet` dropped its own two methods through nine more ways than
+  it was fixed for.** The class exists so a negotiated set can be reported and
+  diffed against what is missing (`.report()`, `.missing`), and since the four
+  set *operators* were re-wrapped the fix had looked complete — `frozenset`'s
+  methods return a plain `frozenset` even on a subclass instance, so `|`, `&`,
+  `-` and `^` were pinned by a test while the four *named* methods beside them
+  were not: `caps.union({...})`, `intersection()`, `difference()` and
+  `symmetric_difference()` all came back a `frozenset`, and so did
+  `caps.copy()`, which is the call a caller makes before handing a merge on.
+  The four reflected operators were missing too, and that one is not
+  symmetrical: `frozenset({...}) | caps` asks the *subclass* side first, so
+  without `__ror__` — and `__rand__`, `__rxor__`, `__rsub__` — it was answered
+  by `frozenset.__or__`, and a caller combining capabilities from the other
+  side of the documented `gui.capabilities | {...}` shape got a type with no
+  `.report()` on it. All nine are re-wrapped now, one test per family -- and
+  the four reflected ones compute through a plain frozenset
+  (`frozenset(other).union(self)`) rather than `super().__ror__(other)`, since
+  typeshed's frozenset stub leaves all four out even though the type has them
+  at runtime, so the `super()` form does not type-check. A plain `set` on the
+  left still comes back a `set`: set and frozenset are siblings, so no
+  reflected method of this class is consulted for it. That is documented in
+  the source rather than worked around, since the alternative is a wrapper
+  that has to lie about being a set.
+
 - **`mypy` could not pass on Windows, so `scripts/pre-commit-test.sh` could
   not go green there.** Five errors, all the same shape and all present before
   this change: mypy checks against the platform it runs on, and typeshed
