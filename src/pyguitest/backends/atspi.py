@@ -516,6 +516,17 @@ def _build_predicate(role, name, enabled, visible, description, predicate):
     return matches
 
 
+_UNPLACED = -1_000_000
+"""Below this, an x or y is a "no position" marker rather than a coordinate.
+
+AT-SPI's own marker is INT_MIN (-2147483648), which is what GTK reports for a
+component that is not showing. The threshold is deliberately far looser than
+that exact value, so a toolkit picking a different large negative is caught
+too, and deliberately far below any real coordinate: a window dragged off the
+left of a multi-monitor desktop lives in the thousands, not the millions.
+"""
+
+
 class AtspiBackend(GUIBackend):
     """Element automation over the accessibility bus."""
 
@@ -718,6 +729,20 @@ class AtspiBackend(GUIBackend):
         except Exception:  # noqa: BLE001 - no Component interface, or a dead node
             return None
         if rect is None or rect.width <= 0 or rect.height <= 0:
+            return None
+        # A component that is not currently shown has no position to report,
+        # and AT-SPI says so by answering INT_MIN for x and y rather than by
+        # failing -- usually with a 1x1 size, which slips past the check
+        # above. That is not a rectangle a caller can do anything with: a
+        # click point derived from it is nowhere, a containment test against
+        # it is always false, and `_area` scores it 1, the *smallest*
+        # possible, which is what element_at treats as most specific.
+        #
+        # Not rare, and not confined to odd toolkits: 177 of the 207 nodes in
+        # an ordinary gedit window report it, every one of them the contents
+        # of a popover or menu that has not been opened. Measured on GNOME
+        # Shell 51.rc; see docs/validation.md.
+        if rect.x <= _UNPLACED or rect.y <= _UNPLACED:
             return None
         return (rect.x, rect.y, rect.width, rect.height)
 

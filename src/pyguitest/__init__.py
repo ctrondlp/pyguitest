@@ -2325,16 +2325,91 @@ class Session:
         focused = self.focused()
         return focused is not None and focused.role not in Role.WINDOW_ROLES
 
+    def _focus_scope(self) -> Element | None:
+        """The accessible subtree of the active window's application, or None.
+
+        Keyboard focus is inside the active toplevel by definition, so that
+        application's subtree is the only part of the tree worth walking for
+        it -- and walking only it is the difference between 0.4s and 4.5s on
+        an ordinary GNOME desktop, measured (see docs/validation.md). The
+        window is matched to its application by pid, the one identifier both
+        halves publish.
+
+        None wherever the question cannot be answered -- no active window, no
+        pid on it, a backend that does not list windows at all -- and every
+        caller treats that as "search everything instead" rather than as a
+        failure, so a backend that cannot help here costs correctness nothing.
+        """
+        # Guarded rather than merely attempted, so that "this is a shortcut,
+        # not a requirement" is visible to a reader and to the API-doc
+        # generator alike -- which reads `supports(...)` as the marker for an
+        # optional capability and would otherwise have published WINDOW_STATE
+        # as something focused() cannot work without.
+        if not self.supports(Capability.WINDOW_STATE):
+            return None
+        try:
+            window = self.active_window()
+            if window is None or window.pid is None:
+                return None
+            applications = self.root_element().children
+        except PyGUITestError:
+            return None
+        for application in applications:
+            # Skipped rather than fatal, the same rule element_at applies to
+            # the same hazard: an application that exits between listing the
+            # tree and reading this node is ordinary, and its dead node raises
+            # on the pid read. Letting that out would make focused() fail for
+            # a reason having nothing to do with focus -- and focused() is on
+            # the hot path of anything watching a desktop over time.
+            try:
+                if application.pid == window.pid:
+                    return application
+            except Exception:  # noqa: BLE001 - a node that died mid-walk
+                continue
+        return None
+
+    @staticmethod
+    def _focused_widget(found: Sequence[Element]) -> Element | None:
+        """Pick the real focus out of everything claiming it.
+
+        A shell can hold FOCUSED on its own toplevel for the whole session
+        while the application's widget holds it too -- both are published, and
+        which one a tree walk reaches first is an accident of enumeration
+        order. Measured on GNOME Shell 51.rc: exactly two elements carry the
+        state at any moment, the shell's `Main stage` window and the focused
+        widget, and the shell's comes first. Taking `found[0]` therefore
+        answered with the shell on every GNOME desktop -- which read as "this
+        desktop does not publish per-widget focus" when it plainly does.
+
+        So a widget outranks a toplevel. Where only a toplevel claims focus
+        the toplevel is still the answer, because that *is* the unsupported
+        desktop focus_tracking_works() exists to recognise.
+        """
+        for element in found:
+            if element.role not in Role.WINDOW_ROLES:
+                return element
+        return found[0] if found else None
+
     def focused(self) -> Element | None:
         """The accessible element that currently has keyboard focus, or None.
 
-        Searches the whole desktop, not one window. On a desktop that does
-        not publish per-widget focus this returns the shell's own toplevel
-        (or None) rather than a widget -- focus_tracking_works() is the
-        check for that, and is worth asking first.
+        The active window's application is searched first and the whole
+        desktop only if that finds nothing, so the answer does not depend on
+        which application the tree happens to enumerate first. On a desktop
+        that does not publish per-widget focus this returns the shell's own
+        toplevel (or None) rather than a widget -- focus_tracking_works() is
+        the check for that, and is worth asking first.
+
+        See _focused_widget for why a widget is preferred over a toplevel
+        claiming the same state, and _focus_scope for why the search is
+        scoped before it is broadened.
         """
-        found = self.elements(predicate=lambda e: e.focused)
-        return found[0] if found else None
+        scope = self._focus_scope()
+        if scope is not None:
+            within = self.elements(predicate=lambda e: e.focused, within=scope)
+            if within:
+                return self._focused_widget(within)
+        return self._focused_widget(self.elements(predicate=lambda e: e.focused))
 
     def assert_focused(
         self,

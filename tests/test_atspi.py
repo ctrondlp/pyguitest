@@ -761,6 +761,37 @@ class TestElementGeometry(AtspiTestCase):
         with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
             self.assertIsNone(gui.extents(element))
 
+    def test_a_component_with_no_position_is_none_rather_than_int_min(self):
+        """AT-SPI answers INT_MIN for x and y when a component is not showing.
+
+        It reports that instead of failing, and usually with a 1x1 size, which
+        slips past the zero-size check above. The result is a rectangle no
+        caller can use: a click point derived from it is nowhere, a
+        containment test against it is always false, and `_area` scores it 1
+        -- the smallest possible, which `element_at` reads as *most specific*.
+
+        Not an edge case. 177 of the 207 nodes in an ordinary gedit window
+        report it, every one of them inside a popover or menu that has not
+        been opened (GNOME Shell 51.rc, docs/validation.md).
+        """
+        gui = self.gui()
+        element = gui.find_element(name="OK")
+        element.node.position = (-(2**31), -(2**31))
+        element.node.size = (1, 1)
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertIsNone(gui.extents(element))
+
+    def test_a_window_dragged_off_screen_keeps_its_negative_coordinates(self):
+        # The control for the test above: the threshold has to be far enough
+        # below any real coordinate that an ordinary off-screen position is
+        # still a position. A window pulled off the left of a multi-monitor
+        # desktop lives in the thousands, not the millions.
+        gui = self.gui()
+        element = gui.find_element(name="OK")
+        element.node.position = (-3000, -1200)
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertEqual(gui.extents(element), (-3000, -1200, 80, 30))
+
     def test_element_at_finds_the_element_under_the_point(self):
         gui = self.gui()
         with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):

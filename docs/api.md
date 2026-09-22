@@ -49,8 +49,8 @@ The recommended way to drive an application: match on what a widget is and what 
 | `elements(role: str \| None = None, name: str \| re.Pattern[str] \| None = None, within: Element \| None = None, enabled: bool \| None = None, visible: bool \| None = None, description: str \| re.Pattern[str] \| None = None, predicate: Callable[[Element], bool] \| None = None)` | `ELEMENT_TREE` |  | Return every accessible element matching every given filter. |
 | `root_element()` | `ELEMENT_TREE` |  | The accessible-tree root. The replacement for the X11 window tree. |
 | `window_element(title: str \| re.Pattern[str])` | `ELEMENT_TREE` |  | The accessible Element for the window matching `title`. |
-| `focused()` | `ELEMENT_TREE` |  | The accessible element that currently has keyboard focus, or None. |
-| `focus_tracking_works()` | `ELEMENT_TREE` |  | Whether this desktop actually publishes per-widget keyboard focus. |
+| `focused()` | `ELEMENT_TREE` — uses `WINDOW_STATE` if present |  | The accessible element that currently has keyboard focus, or None. |
+| `focus_tracking_works()` | `ELEMENT_TREE` — uses `WINDOW_STATE` if present |  | Whether this desktop actually publishes per-widget keyboard focus. |
 
 ## Pointer
 
@@ -142,9 +142,9 @@ Raise on failure with a message naming what was actually found, for use directly
 
 | Call | Needs | | What it does |
 |------|-------|---|--------------|
-| `assert_focused(name: str \| re.Pattern[str] \| None = None, role: str \| None = None, enabled: bool \| None = None, visible: bool \| None = None, description: str \| re.Pattern[str] \| None = None, predicate: Callable[[Element], bool] \| None = None)` | `ELEMENT_TREE` |  | Raise FocusMismatch unless the focus matches every given filter. |
+| `assert_focused(name: str \| re.Pattern[str] \| None = None, role: str \| None = None, enabled: bool \| None = None, visible: bool \| None = None, description: str \| re.Pattern[str] \| None = None, predicate: Callable[[Element], bool] \| None = None)` | `ELEMENT_TREE` — uses `WINDOW_STATE` if present |  | Raise FocusMismatch unless the focus matches every given filter. |
 | `assert_clipboard(expected: str, primary: bool = False)` | `CLIPBOARD` |  | Raise ClipboardMismatch unless the clipboard holds `expected`. |
-| `assert_tab_order(names: Sequence[str], timeout: float \| None = 1.0, interval: float = 0.05)` | `ELEMENT_TREE` |  | Raise FocusMismatch unless Tab visits `names` in order. |
+| `assert_tab_order(names: Sequence[str], timeout: float \| None = 1.0, interval: float = 0.05)` | `ELEMENT_TREE` — uses `WINDOW_STATE` if present |  | Raise FocusMismatch unless Tab visits `names` in order. |
 | `assert_accessible(within: Element \| None = None, roles: Sequence[str] \| None = None)` | `ELEMENT_TREE` |  | Raise AccessibilityViolation if names are missing or ambiguous. |
 | `assert_no_missing_accessible_names(within: Element \| None = None, roles: Sequence[str] \| None = None)` | `ELEMENT_TREE` |  | Raise AccessibilityViolation for any unnamed control. |
 | `assert_no_duplicate_accessible_names(within: Element \| None = None, roles: Sequence[str] \| None = None)` | `ELEMENT_TREE` |  | Raise AccessibilityViolation if one role reuses a name. |

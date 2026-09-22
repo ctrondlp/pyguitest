@@ -2051,6 +2051,54 @@ class TestFocused(unittest.TestCase):
         found = self.gui.focused()
         self.assertEqual(found.name, "Name")
 
+    def test_a_widget_outranks_a_shell_toplevel_claiming_the_same_state(self):
+        """Both are published at once on GNOME, and the shell is found first.
+
+        Measured on GNOME Shell 51.rc: exactly two elements carry FOCUSED
+        while an ordinary application is active -- the shell's own `Main
+        stage` window and the application's focused widget -- and a walk from
+        the tree root reaches the shell's first. Returning that one made every
+        GNOME desktop look like one that publishes no per-widget focus at all.
+        """
+        self.gui.backend.elements[6].focused = True  # "Preferences", a FRAME
+        self.gui.backend.elements[2].focused = True  # "Name", an ENTRY
+        self.assertEqual(self.gui.focused().name, "Name")
+
+    def test_an_application_that_exits_mid_walk_does_not_take_focused_down(self):
+        """Scoping reads a pid off each application node, and nodes go stale.
+
+        An application closing between the tree being listed and its pid being
+        read is ordinary on a live desktop, and its dead node raises on the
+        read. `element_at` already skips a whole application for this reason
+        rather than failing the query; focused() has to do the same, or it
+        fails for a reason that has nothing to do with focus. Here the only
+        application raises, so the scope comes back empty and the whole-desktop
+        walk -- the documented fallback -- still finds the focused widget.
+        """
+
+        class _DeadApplication:
+            @property
+            def pid(self):
+                raise RuntimeError("accessible node is gone")
+
+        class _Window:
+            pid = 4321
+
+        class _Root:
+            children = [_DeadApplication()]
+
+        self.gui.backend.elements[2].focused = True  # "Name"
+        self.gui.supports = lambda *capabilities: True
+        self.gui.active_window = lambda: _Window()
+        self.gui.root_element = lambda: _Root()
+        self.assertEqual(self.gui.focused().name, "Name")
+
+    def test_a_toplevel_is_still_the_answer_when_nothing_else_claims_focus(self):
+        # The genuinely-unsupported desktop, which focus_tracking_works()
+        # exists to recognise: preferring a widget must not invent one.
+        self.gui.backend.elements[6].focused = True  # "Preferences", a FRAME
+        self.assertEqual(self.gui.focused().name, "Preferences")
+
 
 class TestFocusTrackingWorks(unittest.TestCase):
     """The live probe for desktops that never publish per-widget focus.
