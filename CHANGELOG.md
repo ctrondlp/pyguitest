@@ -267,6 +267,41 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ### Fixed
 
+- **`docs/api.md` said three key-injecting calls needed no capability at all.**
+  `send_keys` is `KeySender(self).send(keys)` -- it names no `Capability` and
+  makes no `self.<name>()` call -- and the generator derives the table by
+  following exactly those two things, so it found nothing, and neither did
+  `press_tab`, which is sugar over it, nor `assert_tab_order`, which presses
+  Tab through both. Two rows showed an empty "Needs" column and the third
+  omitted `KEY_EVENT`, on a page headed "every public name in `pyguitest`".
+  The generator now also follows the helpers a method hands its work to,
+  matched on the constructor rather than on `.send(`, which is too common a
+  name to key a table on. Runtime behaviour was never affected; only the
+  documentation derived from it.
+
+- **`focused()` could still be taken down by a raw backend error while
+  scoping.** The guard caught `PyGUITestError`, but neither call it wraps is
+  confined to this package's exceptions: `AtspiBackend.active_window` reads
+  `window.handle.getState()` and `Element.children` reads `self.node.children`,
+  both straight through to AT-SPI, so a node whose process has gone raises a
+  dogtail or D-Bus error instead. That broke the contract the method is built
+  on -- failing to scope is meant to cost correctness nothing, because the
+  whole desktop is searched instead.
+
+- **`headless-session.sh --x11-display` exported a display it had never
+  connected to.** The probe's exit status was discarded, so a run with no
+  python-xlib (which cannot start Mutter's lazily-spawned Xwayland at all, let
+  alone find it) fell through to a guess from the socket name and exported it
+  anyway. The chosen display is now verified with the session's own cookie
+  before it is exported, and the script says what it could not find otherwise.
+
+- **`--a11y` reported success with no accessibility registry.** Without
+  `at-spi2-registryd` the bus comes up and answers nothing, and
+  `Atspi.get_desktop(0)` succeeds against that -- so the run did not fail, it
+  quietly tested nothing, which is the exact shape the option exists to
+  prevent. A missing daemon is now named and the run refused, since `--a11y`
+  was asked for explicitly.
+
 - **`extents()` handed back AT-SPI's "no position" marker as if it were a
   rectangle.** A component that is not currently showing reports `INT_MIN` for
   x and y rather than failing, usually with a 1x1 size -- which slipped past

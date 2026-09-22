@@ -2352,7 +2352,18 @@ class Session:
             if window is None or window.pid is None:
                 return None
             applications = self.root_element().children
-        except PyGUITestError:
+        except Exception:  # noqa: BLE001 - see below; any failure means "search everything"
+            # Broad on purpose. Neither of these calls is confined to this
+            # package's own exceptions: `AtspiBackend.active_window` reads
+            # `window.handle.getState()` and `Element.children` reads
+            # `self.node.children`, both straight through to AT-SPI, so a node
+            # whose process has gone raises a raw dogtail or D-Bus error rather
+            # than a PyGUITestError. Letting one of those out would break the
+            # contract this method is built on -- that failing to scope costs
+            # correctness nothing, because the whole desktop is searched
+            # instead -- and would make focused() fail for a reason having
+            # nothing to do with focus. Same rule, same reason, as the pid read
+            # below and as element_at's per-application guard.
             return None
         for application in applications:
             # Skipped rather than fatal, the same rule element_at applies to

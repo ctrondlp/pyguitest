@@ -134,7 +134,7 @@ read as a claim you cannot check.
 - **Per-widget keyboard focus is not published at all**, which is a
   negative result worth as much as the positive ones. **Superseded
   2026-09-21 — this conclusion was our own bug, not GNOME's**; see "Run live
-  on GNOME Shell 51.rc" above. Two elements carry `FOCUSED` on that desktop,
+  on GNOME Shell 51.rc" below. Two elements carry `FOCUSED` on that desktop,
   the shell's toplevel *and* the focused widget, and `focused()` returned
   whichever a root-first tree walk reached first, which is always the
   shell's. The reading below is what that method answered, not what the
@@ -142,14 +142,18 @@ read as a claim you cannot check.
   because the same reading is what `focus_tracking_works()` was built
   around. Everything else in this section stands. AT-SPI's FOCUSED
   state is what `focused()`, `assert_focused()` and `assert_tab_order()`
-  read. Across the whole desktop, exactly one element ever *appeared* to
-  carry it — GNOME Shell's own `Main stage` toplevel — and no widget in any
-  application did, across three separate toolkits (Ptyxis/VTE,
+  read. Asked across the whole desktop, the answer was always the same
+  single element — GNOME Shell's own `Main stage` toplevel — and never a
+  widget, across three separate toolkits (Ptyxis/VTE,
   gnome-text-editor/GTK4, zenity/GTK3), whichever window was active and
-  whether or not it had been activated first. `active_window()` was
+  whether or not it had been activated first. What was not noticed is that
+  this is what a query returning the *first* match would say either way,
+  which is why it took a second machine and an explicit count of everything
+  carrying the state to tell "only the shell publishes focus" apart from
+  "the shell is merely found first". `active_window()` was
   unaffected and stayed correct throughout: it reads STATE_ACTIVE on
   frames, a different mechanism, and it correctly named the real active
-  window while no widget anywhere reported focus. So the three focus
+  window while the focus query went on answering with the shell. So the three focus
   methods are exercised only by their unit tests; on this desktop they
   cannot match a real widget however the application behaves, and
   `Session.focus_tracking_works()` exists to say so at runtime rather

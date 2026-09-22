@@ -307,6 +307,25 @@ fi
 INNER_DISPLAY=""
 INNER_XAUTHORITY=""
 
+x_display_answers() {
+    # 0 if $1 answers with cookie $2, 1 if it does not, 2 if it cannot be asked.
+    # Connecting is also what *starts* a lazily-spawned Xwayland, so this is
+    # both the poke and the check -- one code path, so the two cannot drift.
+    XAUTHORITY="$2" DISPLAY="$1" python3 - <<'PROBE' >/dev/null 2>&1
+import sys
+
+try:
+    from Xlib import display
+except ImportError:
+    sys.exit(2)
+try:
+    display.Display().close()
+except Exception:
+    sys.exit(1)
+sys.exit(0)
+PROBE
+}
+
 find_inner_x11() {
     local now new_socket first_socket auth probe number
 
@@ -341,19 +360,16 @@ find_inner_x11() {
     # Connecting is what starts Xwayland: Mutter binds the socket at startup
     # and spawns the server on the first client. Until that happens there is
     # no process to read the real display number off, so this poke is load
-    # bearing rather than a check.
+    # bearing rather than a check -- but its status is read too, because
+    # without python-xlib nothing here can connect, and then nothing can start
+    # Xwayland either and every step below is guesswork.
     probe=":${first_socket#X}"
-    XAUTHORITY="$auth" DISPLAY="$probe" python3 - <<'PROBE' >/dev/null 2>&1
-import sys
-try:
-    from Xlib import display
-except ImportError:
-    sys.exit(0)
-try:
-    display.Display().close()
-except Exception:
-    pass
-PROBE
+    x_display_answers "$probe" "$auth"
+    case $? in
+        2)  echo "headless-session.sh: python-xlib is not installed, so the" \
+                 "inner XWayland cannot be found; running without DISPLAY" >&2
+            return 1 ;;
+    esac
 
     # Authoritative: the number Mutter actually started it on. The poke may
     # have reached it through either socket, so argv is read rather than
@@ -367,9 +383,21 @@ PROBE
         sleep 0.25
     done
     if [[ -z $number ]]; then
-        # No process, but the socket answered -- fall back to the socket name,
-        # which is right whenever Mutter took the first display it bound.
+        # No process to read: fall back to the socket name, which is right
+        # whenever Mutter took the first display it bound. A guess, so the
+        # check below is what decides whether it is exported.
         number="$probe"
+    fi
+
+    # Verified, not assumed. Everything above narrows the candidates; this is
+    # the only step that establishes the answer works, and exporting a DISPLAY
+    # that does not answer hands the command a failure with no explanation in
+    # it -- for a harness whose whole purpose is keeping a run off the wrong
+    # display, "I could not find it" has to be said out loud.
+    if ! x_display_answers "$number" "$auth"; then
+        echo "headless-session.sh: found no XWayland that answers on" \
+             "$number; running without DISPLAY" >&2
+        return 1
     fi
 
     INNER_DISPLAY="$number"
@@ -390,8 +418,17 @@ start_a11y() {
             registry="$directory/at-spi2-registryd"
     done
     if [[ -z $launcher ]]; then
-        echo "headless-session.sh: no at-spi-bus-launcher found;" \
-             "running without an accessibility bus" >&2
+        echo "headless-session.sh: no at-spi-bus-launcher found" >&2
+        return 1
+    fi
+    # Refused up front rather than started half-way. Without the registry the
+    # bus comes up and answers nothing, and `Atspi.get_desktop(0)` succeeds
+    # against that -- so the run does not fail, it quietly tests nothing, which
+    # is the exact shape --a11y exists to prevent. Naming the missing daemon
+    # beats a green run with no elements in it.
+    if [[ -z $registry ]]; then
+        echo "headless-session.sh: at-spi2-registryd not found; the bus would" \
+             "come up and publish no elements at all" >&2
         return 1
     fi
     # --launch-immediately, because nothing here will activate it on demand:
@@ -399,14 +436,11 @@ start_a11y() {
     "$launcher" --launch-immediately >/dev/null 2>&1 &
     A11Y_PIDS+=($!)
     sleep 2
-    # Started by hand for the same reason. Without the registry the bus exists
-    # and answers nothing, which reads as "no elements" rather than as a
-    # failure -- the shape this whole option exists to stop.
-    if [[ -n $registry ]]; then
-        "$registry" >/dev/null 2>&1 &
-        A11Y_PIDS+=($!)
-        sleep 2
-    fi
+    # Started by hand, because a private session bus has no systemd to
+    # activate it on demand.
+    "$registry" >/dev/null 2>&1 &
+    A11Y_PIDS+=($!)
+    sleep 2
     return 0
 }
 
@@ -427,7 +461,13 @@ if ((EXPORT_X11)) && find_inner_x11; then
     export XAUTHORITY="$INNER_XAUTHORITY"
 fi
 
-((WITH_A11Y)) && start_a11y
+# Asked for explicitly, so a failure to provide it is a setup failure rather
+# than something to run through: a command that needed elements and silently
+# got none is a green result that proves nothing.
+if ((WITH_A11Y)) && ! start_a11y; then
+    echo "headless-session.sh: --a11y was asked for and cannot be honoured" >&2
+    exit 1
+fi
 
 cd "$ROOT" || exit 1
 "$@"

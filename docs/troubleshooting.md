@@ -345,7 +345,7 @@ covers it; so does waiting for the value yourself:
 
 ```python
 window = gui.expect_window(app_id="org.gnome.TextEditor")
-gui.focus_window(window)          # waits for it to settle
+gui.focus_window(window)  # waits for it to settle
 gui.wait_until(lambda: gui.geometry(window) != (0, 0, 0, 0))
 ```
 

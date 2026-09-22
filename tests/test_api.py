@@ -2093,6 +2093,24 @@ class TestFocused(unittest.TestCase):
         self.gui.root_element = lambda: _Root()
         self.assertEqual(self.gui.focused().name, "Name")
 
+    def test_a_raw_backend_error_while_scoping_falls_back_rather_than_escaping(self):
+        """Scoping reads straight through to AT-SPI, which raises its own errors.
+
+        `active_window()` reads `window.handle.getState()` and `Element.children`
+        reads `self.node.children`, so a node whose process has gone raises a raw
+        dogtail or D-Bus error, not a PyGUITestError. Catching only the latter
+        left focused() able to fail for a reason having nothing to do with focus,
+        in the one place whose whole contract is that failing to scope is free.
+        """
+        self.gui.backend.elements[2].focused = True  # "Name"
+        self.gui.supports = lambda *capabilities: True
+
+        def explode():
+            raise RuntimeError("org.freedesktop.DBus.Error.ServiceUnknown")
+
+        self.gui.active_window = explode
+        self.assertEqual(self.gui.focused().name, "Name")
+
     def test_a_toplevel_is_still_the_answer_when_nothing_else_claims_focus(self):
         # The genuinely-unsupported desktop, which focus_tracking_works()
         # exists to recognise: preferring a widget must not invent one.

@@ -70,11 +70,11 @@ The recommended way to drive an application: match on what a widget is and what 
 | Call | Needs | | What it does |
 |------|-------|---|--------------|
 | `type_text(text: str, delay: float \| None = None, **kwargs: Any)` | `TEXT_ENTRY` |  | Type `text`, using the session's `key_delay` unless overridden. |
-| `send_keys(keys: str)` |  |  | Send literal text and key combinations in one string. |
+| `send_keys(keys: str)` | `KEY_EVENT` |  | Send literal text and key combinations in one string. |
 | `press_key(key: str)` | `KEY_EVENT` |  | Press a key by name, without releasing it. |
 | `release_key(key: str)` | `KEY_EVENT` |  | Release a key by name. |
 | `tap_key(key: str)` | `KEY_EVENT` |  | Press and release a key. Replaces PressReleaseKey. |
-| `press_tab(reverse: bool = False)` |  |  | Press Tab (or Shift+Tab if `reverse`), advancing keyboard focus. |
+| `press_tab(reverse: bool = False)` | `KEY_EVENT` |  | Press Tab (or Shift+Tab if `reverse`), advancing keyboard focus. |
 
 ## Windows
 
@@ -144,7 +144,7 @@ Raise on failure with a message naming what was actually found, for use directly
 |------|-------|---|--------------|
 | `assert_focused(name: str \| re.Pattern[str] \| None = None, role: str \| None = None, enabled: bool \| None = None, visible: bool \| None = None, description: str \| re.Pattern[str] \| None = None, predicate: Callable[[Element], bool] \| None = None)` | `ELEMENT_TREE` — uses `WINDOW_STATE` if present |  | Raise FocusMismatch unless the focus matches every given filter. |
 | `assert_clipboard(expected: str, primary: bool = False)` | `CLIPBOARD` |  | Raise ClipboardMismatch unless the clipboard holds `expected`. |
-| `assert_tab_order(names: Sequence[str], timeout: float \| None = 1.0, interval: float = 0.05)` | `ELEMENT_TREE` — uses `WINDOW_STATE` if present |  | Raise FocusMismatch unless Tab visits `names` in order. |
+| `assert_tab_order(names: Sequence[str], timeout: float \| None = 1.0, interval: float = 0.05)` | `ELEMENT_TREE`, `KEY_EVENT` — uses `WINDOW_STATE` if present |  | Raise FocusMismatch unless Tab visits `names` in order. |
 | `assert_accessible(within: Element \| None = None, roles: Sequence[str] \| None = None)` | `ELEMENT_TREE` |  | Raise AccessibilityViolation if names are missing or ambiguous. |
 | `assert_no_missing_accessible_names(within: Element \| None = None, roles: Sequence[str] \| None = None)` | `ELEMENT_TREE` |  | Raise AccessibilityViolation for any unnamed control. |
 | `assert_no_duplicate_accessible_names(within: Element \| None = None, roles: Sequence[str] \| None = None)` | `ELEMENT_TREE` |  | Raise AccessibilityViolation if one role reuses a name. |

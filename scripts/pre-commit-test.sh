@@ -72,7 +72,14 @@ RUFF="${RUFF:-ruff}"
 CHECKS=(
     "tests|$PYTHON -m pytest -q"
     "ruff|$RUFF check src tests examples scripts"
-    "format|$RUFF format --check src tests examples scripts"
+    # `docs` is here because CI checks it: ruff formats the python blocks
+    # inside the markdown, and a snippet reformatted there fails the same
+    # job as a source file would. It was missing, so this gate could pass
+    # on a branch whose only change was to a doc snippet and CI then fail
+    # on exactly that -- which is what happened. Lint deliberately does
+    # *not* cover docs, for the reason CI's own comment gives: snippets
+    # are fragments and name things they never import.
+    "format|$RUFF format --check src tests examples scripts docs"
     "mypy|$PYTHON -m mypy"
 )
 
