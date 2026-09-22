@@ -49,6 +49,35 @@ gui.wait_for_element(name="Save", timeout=10).click()
 If nothing in the application is findable, the next entry is the one you
 want.
 
+## No GTK3 or Qt application has any accessible elements
+
+If it is *every* GTK3 and Qt application rather than one, and GTK4
+applications are fine, check `NO_AT_BRIDGE`:
+
+```sh
+echo "${NO_AT_BRIDGE:-<unset>}"
+```
+
+Set to anything but empty or `0`, it stops GTK3 and Qt registering with the
+accessibility bus at startup, so those applications publish no elements at
+all. Nothing errors: the bus is healthy, `libatspi` is installed,
+`gui.windows()` lists the windows from the compositor, and only the element
+queries come back empty. GTK4 ignores the variable, which makes the gap look
+selective rather than total and so much harder to recognise.
+
+Shells, containers, CI images and tool runners all export it to silence GTK's
+"couldn't connect to accessibility bus" warning, so it is often set by
+something other than you — found exactly that way on a session where `doctor`
+reported nothing missing. `pyguitest doctor` now names it in its notes. Unset
+it for whatever launches the application under test, not only for the test
+process:
+
+```python
+environment = {**os.environ}
+environment.pop("NO_AT_BRIDGE", None)
+subprocess.Popen(["gedit"], env=environment)
+```
+
 ## One application has no accessible elements at all
 
 Chromium, Electron, VS Code, Slack and anything else on that stack publish
@@ -270,6 +299,56 @@ and do not build a test on reading a position back after setting it. Under a
 native X11 session and on other compositors this does not apply. Full write-up
 in [validation.md](validation.md#known-caveat-geometry-on-gnomes-xwayland).
 
+## An element's coordinates are nowhere near its window
+
+On a **native Wayland client**, AT-SPI reports element extents in the
+window's own coordinates rather than the screen's — and pyguitest passes them
+on as screen coordinates, because the guard that withholds them applies to a
+session with no XWayland at all, and GNOME and KDE both run XWayland. So on
+an ordinary Wayland desktop `extents()` answers confidently and wrongly for
+every native client.
+
+Measured on GNOME Shell 51.rc, one GTK3 window at `(510, 183, 900, 747)`:
+
+| client | `extents()` of its `Open` button |
+|---|---|
+| the same app through XWayland | `(516, 183, 71, 46)` — screen coordinates, inside its window |
+| the same app running natively | `(32, 23, 71, 46)` — outside its own window |
+
+What makes it dangerous is that nothing disagrees with it:
+`element_at(67, 46)` *returns that button*, because AT-SPI hit-tests in the
+same wrong space, so every containment and corroboration check passes. A
+click computed from those numbers lands near the top-left of the screen.
+
+Affected: `extents()`, `element_at()`, and `Element.double_click()`, which
+locates by rectangle. **Not** affected: `Element.click()`, `focus()`,
+`set_text()`, `select()` and the rest, which perform an accessible action and
+use no coordinates — so prefer those on Wayland, and they are the better
+style anyway. `Session.geometry()` is unaffected too; it reads the
+compositor, not AT-SPI.
+
+Detail, and why the fix is not a simple one, in
+[validation.md](validation.md#known-caveat-element-geometry-on-native-wayland-clients).
+
+## `wait_for_window` hands back a window with no position yet
+
+On native Wayland a window can be listed before Mutter has placed it, and
+`geometry()` then answers `(0, 0, 0, 0)` — a well-formed value, not an error,
+so arithmetic on it silently produces a point at the screen's origin.
+Measured on GNOME Shell 51.rc at about 0.3s wide; the same application
+through XWayland never showed it, having a frame rect from its first
+appearance. `app_id` and `pid` can likewise still be empty on the snapshot
+`wait_for_window` returns.
+
+`focus_window()` already waits for the geometry to stop changing, which
+covers it; so does waiting for the value yourself:
+
+```python
+window = gui.expect_window(app_id="org.gnome.TextEditor")
+gui.focus_window(window)  # waits for it to settle
+gui.wait_until(lambda: gui.geometry(window) != (0, 0, 0, 0))
+```
+
 ## Pointer and key-state reads look stale
 
 `pointer_position()`, `is_key_pressed()` and `is_button_pressed()` are X11
@@ -294,12 +373,22 @@ applies. Detail in
 
 `focused()`, `assert_focused()` and `assert_tab_order()` depend on the
 desktop publishing per-widget keyboard focus to the accessibility bus. Some
-do not. On GNOME Shell, measured across GTK3, GTK4 and VTE applications,
-`FOCUSED` was carried by exactly one element session-wide — the shell's own
-toplevel — and by no widget in any application.
+do not.
 
-The assertions are correct and unit-tested; there is simply nothing for them
-to match. Probe before relying on them:
+**On GNOME this used to be reported here as one of them, and that was our own
+bug** — corrected 2026-09-21 after measuring it again on GNOME Shell 51.rc.
+Two elements carry `FOCUSED` at any moment on that desktop: the shell's own
+`Main stage` window *and* the focused widget inside the active application.
+Both are published; a walk from the tree root simply reaches the shell's
+first, and `focused()` returned that one. It now searches the active
+window's application before broadening, and prefers a widget over a toplevel
+claiming the same state — so on GNOME it answers with the real widget, and
+`focus_tracking_works()` answers `True` where it used to answer `False`.
+Confirmed in both toolkits and both protocols: GTK3 through XWayland and
+GTK4 as a native Wayland client each published their focused text field.
+
+A desktop where genuinely nothing but a toplevel claims focus still reports
+`False`, which is what the probe is for. Probe before relying on them:
 
 ```python
 if gui.focus_tracking_works():

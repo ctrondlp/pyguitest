@@ -38,6 +38,18 @@ OUT = ROOT / "docs" / "api.md"
 # went in the dispatch table.
 EXTRA_DISPATCH = {"capture": Capability.SCREEN_CAPTURE}
 
+# Helpers a Session method hands the work to, which the analysis below cannot
+# see through: it follows `self.<name>(...)` calls and backend attributes, and
+# a method whose whole body constructs a helper does neither.
+#
+# `Session.send_keys` is exactly that -- `KeySender(self).send(keys)` -- so it
+# derived *no* capabilities at all, and neither did `press_tab`, which is
+# sugar over it, nor the `assert_tab_order` that presses Tab through both.
+# Three rows on a page headed "every public name in pyguitest" therefore said
+# a call that injects keystrokes needs nothing. Matched on the constructor
+# rather than on `.send(`, which is a name too common to key a table on.
+HELPER_DISPATCH = {"KeySender": Capability.KEY_EVENT}
+
 # Backends that say yes to everything or nothing carry no information.
 UNINFORMATIVE = {"CompositeBackend", "NullBackend", "GUIBackend"}
 
@@ -373,6 +385,11 @@ def method_capabilities(
     routed = {**_DISPATCH, **EXTRA_DISPATCH}
     required = {
         cap.name for attr, cap in routed.items() if re.search(rf"\.{attr}\s*\(", src)
+    }
+    required |= {
+        cap.name
+        for helper, cap in HELPER_DISPATCH.items()
+        if re.search(rf"\b{helper}\s*\(", src)
     }
     optional = set(re.findall(r"supports\(\s*Capability\.([A-Z_]+)", src))
     required |= set(re.findall(r"Capability\.([A-Z_]+)", src)) - optional

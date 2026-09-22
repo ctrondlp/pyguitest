@@ -81,10 +81,47 @@ class TestSessionClassification(unittest.TestCase):
 
     def test_xwayland_is_distinguished_from_both(self):
         # Both variables set means an X11 connection inside a Wayland session,
-        # where XTest reaches X11 clients but never native Wayland ones.
+        # which is a different thing from either on its own: both kinds of
+        # client are present at once.
         e = linux_detect(env(WAYLAND_DISPLAY="wayland-0", DISPLAY=":0"))
         self.assertIs(e.session_type, SessionType.XWAYLAND)
-        self.assertTrue(any("XWayland" in n for n in e.notes))
+
+    def test_xwayland_warns_only_where_the_transport_is_x11_only(self):
+        """The limitation belongs to XTest, not to the session type.
+
+        uinput and libei inject below the compositor and so reach native
+        Wayland clients as well -- confirmed live on GNOME Shell 51.rc by
+        typing into one and reading the text back, see docs/validation.md.
+        Firing this note on the session type alone put "reaches X11 clients
+        only" directly above an `input uinput (in-process)` line saying the
+        opposite, in the same eight-line report.
+        """
+        variables = env(WAYLAND_DISPLAY="wayland-0", DISPLAY=":0")
+        with mock.patch("pyguitest.session._input_transport", return_value="xdotool"):
+            warned = linux_detect(variables)
+        with mock.patch(
+            "pyguitest.session._input_transport", return_value="uinput (in-process)"
+        ):
+            quiet = linux_detect(variables)
+        self.assertTrue(any("XWayland" in n for n in warned.notes))
+        self.assertFalse(any("XWayland" in n for n in quiet.notes))
+
+    def test_no_at_bridge_is_reported(self):
+        """It disables element automation for GTK3 and Qt, silently.
+
+        The accessibility bus stays healthy and `has_atspi` stays true, so
+        nothing else in the report changes -- the applications simply never
+        register, and `doctor` used to say nothing was missing. GTK4 ignores
+        the variable, which is what makes the gap look selective.
+        """
+        variables = env(WAYLAND_DISPLAY="wayland-0", DISPLAY=":0", NO_AT_BRIDGE="1")
+        with mock.patch("pyguitest.session._lib", return_value=True):
+            e = linux_detect(variables)
+            quiet = linux_detect(
+                env(WAYLAND_DISPLAY="wayland-0", DISPLAY=":0", NO_AT_BRIDGE="0")
+            )
+        self.assertTrue(any("NO_AT_BRIDGE" in n for n in e.notes))
+        self.assertFalse(any("NO_AT_BRIDGE" in n for n in quiet.notes))
 
     def test_pure_x11(self):
         e = linux_detect(env(DISPLAY=":0", XDG_SESSION_TYPE="x11"))

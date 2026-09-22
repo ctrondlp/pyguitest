@@ -18,7 +18,7 @@ import os
 import shutil
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -758,6 +758,51 @@ def _windows_environment() -> dict[str, Any]:
     }
 
 
+_X11_ONLY_INPUT_TOOLS = frozenset(
+    tool.name for tool in _tools.INPUT_TOOLS if tool.x11_only
+)
+"""Input tools that talk to an X server and so cannot reach native Wayland
+clients. Named here because two callers need the same answer: `summary()`,
+which reports the transport, and `_environment()`, whose XWayland note is only
+true when the transport is one of these."""
+
+
+def _input_transport(
+    *,
+    session_type: SessionType,
+    input_tools: Sequence[str],
+    uinput_writable: bool,
+    has_evdev: bool,
+    has_sendinput: bool,
+    has_libei: bool,
+) -> str | None:
+    """Rank the input mechanisms and name the one that will carry events.
+
+    A function rather than only `Environment.input_transport` because the
+    XWayland note in `_environment()` has to ask the same question *before*
+    there is an Environment to ask it of -- and asking it a second way is how
+    the two came to disagree in the first place: the note said input reached
+    X11 clients only on a session whose transport, printed three lines above
+    it, was in-process uinput. uinput injects below the compositor, so it
+    reaches every client on the seat; only the X-only tools are limited the
+    way that note described. Confirmed live on GNOME Shell 51.rc -- see
+    docs/validation.md.
+    """
+    if session_type is SessionType.WIN32:
+        return "SendInput" if has_sendinput else None
+    keymap_safe = {t.name for t in _tools.INPUT_TOOLS if t.keymap_safe}
+    for name in input_tools:
+        if name in keymap_safe:
+            return name
+    if uinput_writable and has_evdev:
+        return "uinput (in-process)"
+    if input_tools:
+        return input_tools[0]
+    if has_libei:
+        return 'libei (opt-in: connect(backend="eiinput"))'
+    return None
+
+
 @dataclass(frozen=True)
 class Environment:
     """What the current login actually offers."""
@@ -1009,19 +1054,14 @@ class Environment:
         needs no tool and opens no device, so there is nothing on that
         platform for the ranking below to choose between.
         """
-        if self.session_type is SessionType.WIN32:
-            return "SendInput" if self.has_sendinput else None
-        keymap_safe = {t.name for t in _tools.INPUT_TOOLS if t.keymap_safe}
-        for name in self.input_tools:
-            if name in keymap_safe:
-                return name
-        if self.uinput_writable and self.has_evdev:
-            return "uinput (in-process)"
-        if self.input_tools:
-            return self.input_tools[0]
-        if self.has_libei:
-            return 'libei (opt-in: connect(backend="eiinput"))'
-        return None
+        return _input_transport(
+            session_type=self.session_type,
+            input_tools=self.input_tools,
+            uinput_writable=self.uinput_writable,
+            has_evdev=self.has_evdev,
+            has_sendinput=self.has_sendinput,
+            has_libei=self.has_libei,
+        )
 
     def summary(self) -> str:
         """A short, user-readable description of this environment."""
@@ -1375,10 +1415,22 @@ def detect(env: Mapping[str, str] | None = None) -> Environment:
                 "(pip install 'pyguitest[windows]') for UI Automation"
             )
 
-    if session_type is SessionType.XWAYLAND:
+    # Element automation asks the toolkit, and this variable stops the toolkit
+    # from answering. GTK3 and Qt read it at startup and skip registering with
+    # the accessibility bus entirely, so every window of such an application is
+    # absent from the tree -- with no error anywhere, and with `has_atspi` and
+    # the bus itself both perfectly healthy. Shells, containers and tool
+    # runners export it to silence GTK's "couldn't connect to accessibility
+    # bus" warning; found set in exactly that way on a session where `doctor`
+    # then reported nothing missing and no GTK3 application could be reached.
+    # GTK4 ignores it, which is what makes the failure look selective rather
+    # than total, and so harder to recognise.
+    if has_atspi and env.get("NO_AT_BRIDGE", "") not in ("", "0"):
         notes.append(
-            "XWayland: synthetic input reaches X11 clients only, never native "
-            "Wayland ones"
+            "NO_AT_BRIDGE is set in this environment: GTK3 and Qt applications "
+            "will not register with the accessibility bus, so they publish no "
+            "elements at all -- unset it for the process that launches them "
+            "(GTK4 ignores it, so the gap looks selective)"
         )
     if compositor is Compositor.MUTTER:
         notes.append(
@@ -1428,6 +1480,29 @@ def detect(env: Mapping[str, str] | None = None) -> Environment:
             f"only keymap-unsafe input tools found ({', '.join(input_tools)}); "
             "typed text may differ on a non-US layout"
         )
+    # Asked of the transport, not of the session type. Both kinds of client
+    # live on an XWayland session, and which of them synthetic input can reach
+    # is decided by *how* it is injected: uinput and libei go in below the
+    # compositor and reach every client on the seat, while XTest and the tools
+    # built on it speak to the X server and so reach only its clients. Firing
+    # this on the session type alone put "reaches X11 clients only" directly
+    # above an `input uinput (in-process)` line that contradicted it, on a
+    # session where typed text was then confirmed to reach a native Wayland
+    # client and be read back out of it (GNOME Shell 51.rc; docs/validation.md).
+    if session_type is SessionType.XWAYLAND:
+        transport = _input_transport(
+            session_type=session_type,
+            input_tools=input_tools,
+            uinput_writable=uinput_writable,
+            has_evdev=has_evdev,
+            has_sendinput=bool(windows.get("has_sendinput", False)),
+            has_libei=_lib("ei"),
+        )
+        if transport in _X11_ONLY_INPUT_TOOLS:
+            notes.append(
+                f"XWayland: {transport} injects through XTest, so input reaches "
+                "this session's X11 clients only, never its native Wayland ones"
+            )
     input_group = _has_input_group()
     if uinput_present and not uinput_writable:
         if input_group:

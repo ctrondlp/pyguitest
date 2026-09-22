@@ -9,6 +9,37 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ### Added
 
+- **`doctor` reports `NO_AT_BRIDGE`.** Set to anything but empty or `0`, it
+  stops GTK3 and Qt applications registering with the accessibility bus at
+  startup, so they publish no elements at all -- while `libatspi`, the bus and
+  `dogtail` stay perfectly healthy and `windows()` goes on listing the windows
+  from the compositor. GTK4 ignores it, which makes the gap look selective
+  rather than total and much harder to recognise. Shells, containers, CI images
+  and tool runners all export it to quiet GTK's "couldn't connect to
+  accessibility bus" warning, so it is usually set by something other than the
+  person debugging it: found exactly that way on a session where `doctor`
+  reported `Nothing missing` while no GTK3 application could be reached at all.
+
+- **`scripts/headless-session.sh --x11-display` finds the session's own
+  XWayland and points the command at it**, so the XWayland half of a Wayland
+  desktop can be exercised from this harness -- which it could not be at all
+  before, DISPLAY being unset on the way in and the inner display number being
+  published only to a systemd user session the script does not have. Finding it
+  is not a lookup: Mutter starts Xwayland lazily, so there is no process to
+  read the number off until something connects, and it binds two socket files
+  per display, so counting new sockets gives two answers. The script connects
+  to the lowest new socket to force the spawn, then reads the number out of the
+  Xwayland process's own argv. Opt-in, because exporting `DISPLAY` reclassifies
+  the session from `wayland` to `xwayland` and so changes which backends
+  compose -- callers wanting the pure-Wayland answer must keep getting it.
+  `--a11y` starts a private accessibility bus in the same session, which a
+  private session bus otherwise has no systemd to activate; without it nothing
+  publishes an element and the failure reads as "no elements" rather than as an
+  error. The header also now records the trap the script *cannot* close: uinput
+  injected from inside a headless session goes to the seat, which is the real
+  desktop, not the headless compositor.
+
+
 - **Two exceptions a caller could catch but never import are now part of the
   public surface: `ElementNotActionable` and `PortalTimeout`.** Both were raised
   from real paths and named in the docstrings around them --
@@ -235,6 +266,89 @@ All notable changes to pyguitest are recorded here. The format follows
   resolved to a short alias instead of the key it names.
 
 ### Fixed
+
+- **`docs/api.md` said three key-injecting calls needed no capability at all.**
+  `send_keys` is `KeySender(self).send(keys)` -- it names no `Capability` and
+  makes no `self.<name>()` call -- and the generator derives the table by
+  following exactly those two things, so it found nothing, and neither did
+  `press_tab`, which is sugar over it, nor `assert_tab_order`, which presses
+  Tab through both. Two rows showed an empty "Needs" column and the third
+  omitted `KEY_EVENT`, on a page headed "every public name in `pyguitest`".
+  The generator now also follows the helpers a method hands its work to,
+  matched on the constructor rather than on `.send(`, which is too common a
+  name to key a table on. Runtime behaviour was never affected; only the
+  documentation derived from it.
+
+- **`focused()` could still be taken down by a raw backend error while
+  scoping.** The guard caught `PyGUITestError`, but neither call it wraps is
+  confined to this package's exceptions: `AtspiBackend.active_window` reads
+  `window.handle.getState()` and `Element.children` reads `self.node.children`,
+  both straight through to AT-SPI, so a node whose process has gone raises a
+  dogtail or D-Bus error instead. That broke the contract the method is built
+  on -- failing to scope is meant to cost correctness nothing, because the
+  whole desktop is searched instead.
+
+- **`headless-session.sh --x11-display` exported a display it had never
+  connected to.** The probe's exit status was discarded, so a run with no
+  python-xlib (which cannot start Mutter's lazily-spawned Xwayland at all, let
+  alone find it) fell through to a guess from the socket name and exported it
+  anyway. The chosen display is now verified with the session's own cookie
+  before it is exported, and the script says what it could not find otherwise.
+
+- **`--a11y` reported success with no accessibility registry.** Without
+  `at-spi2-registryd` the bus comes up and answers nothing, and
+  `Atspi.get_desktop(0)` succeeds against that -- so the run did not fail, it
+  quietly tested nothing, which is the exact shape the option exists to
+  prevent. A missing daemon is now named and the run refused, since `--a11y`
+  was asked for explicitly.
+
+- **`extents()` handed back AT-SPI's "no position" marker as if it were a
+  rectangle.** A component that is not currently showing reports `INT_MIN` for
+  x and y rather than failing, usually with a 1x1 size -- which slipped past
+  the existing zero-size check. Nothing a caller can use comes of that: a click
+  point derived from it is nowhere, a containment test against it is always
+  false, and `_area` scores it 1, the smallest possible, which is exactly what
+  `element_at` reads as *most specific*. Not an edge case either: **177 of the
+  207 nodes in an ordinary gedit window report it**, every one of them inside a
+  popover or menu that has not been opened (GNOME Shell 51.rc). `None` is
+  already what this method promises "where it has no useful one", so that is
+  what it now answers. The threshold sits far below any real coordinate, so a
+  window dragged off the edge of a multi-monitor desktop keeps its negative
+  position.
+
+- **`focused()` could be taken down by an application closing while it
+  looked.** Scoping to the active window's application reads a pid off each
+  application node, and a node whose process has exited raises on that read --
+  ordinary on a live desktop, and previously fatal to a call that has nothing
+  to do with the application that vanished. It now skips such an application,
+  which is the rule `element_at` has always applied to the same hazard.
+
+- **`focused()` answered with the shell's own window on GNOME, and cost 4.5s
+  to do it.** Two elements carry AT-SPI's `FOCUSED` state on that desktop --
+  GNOME Shell's `Main stage` toplevel *and* the focused widget inside the
+  active application -- and a walk from the tree root reaches the shell's
+  first, so `found[0]` was the shell's. `focus_tracking_works()` therefore
+  answered `False` on a desktop that demonstrably publishes per-widget focus,
+  and `docs/validation.md` recorded that as a property of GNOME rather than as
+  our own bug. It now searches the active window's application before
+  broadening to the desktop, and prefers a widget over a toplevel claiming the
+  same state. Measured on GNOME Shell 51.rc: **4.49s to 0.33s**, and the right
+  element -- confirmed in both toolkits and both protocols, GTK3 through
+  XWayland and GTK4 as a native Wayland client. `WINDOW_STATE` is used where
+  present and never required; the whole-desktop walk remains the fallback, and
+  a desktop where only a toplevel claims focus still reports `False`, which is
+  what the probe is for.
+
+- **`doctor` no longer tells an XWayland session that input cannot reach its
+  native Wayland clients when it can.** The note fired on the session type,
+  while the limitation belongs to XTest and the tools built on it: uinput and
+  libei inject below the compositor and reach every client on the seat. It
+  printed `XWayland: synthetic input reaches X11 clients only` three lines
+  under `input uinput (in-process)`, in the same eight-line report. Now asked
+  of the transport that will actually carry the events, and it names the tool
+  it means. Confirmed live on GNOME Shell 51.rc by typing a unique marker into
+  a native Wayland client and reading it back out through AT-SPI.
+
 
 - **Windows `find_windows` no longer drops every owned window, so a dialog is
   reachable by title at last.** The filter behind `windows()` copied Alt-Tab's

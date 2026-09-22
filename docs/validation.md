@@ -132,16 +132,28 @@ read as a claim you cannot check.
   correct image of a real window through this package's own PNG encoder.
 - **AT-SPI, and the CLI-tool input and capture backends.**
 - **Per-widget keyboard focus is not published at all**, which is a
-  negative result worth as much as the positive ones. AT-SPI's FOCUSED
+  negative result worth as much as the positive ones. **Superseded
+  2026-09-21 — this conclusion was our own bug, not GNOME's**; see "Run live
+  on GNOME Shell 51.rc" below. Two elements carry `FOCUSED` on that desktop,
+  the shell's toplevel *and* the focused widget, and `focused()` returned
+  whichever a root-first tree walk reached first, which is always the
+  shell's. The reading below is what that method answered, not what the
+  desktop published; it is left in place because the run happened and
+  because the same reading is what `focus_tracking_works()` was built
+  around. Everything else in this section stands. AT-SPI's FOCUSED
   state is what `focused()`, `assert_focused()` and `assert_tab_order()`
-  read. Across the whole desktop, exactly one element ever carried it —
-  GNOME Shell's own `Main stage` toplevel — and no widget in any
-  application did, across three separate toolkits (Ptyxis/VTE,
+  read. Asked across the whole desktop, the answer was always the same
+  single element — GNOME Shell's own `Main stage` toplevel — and never a
+  widget, across three separate toolkits (Ptyxis/VTE,
   gnome-text-editor/GTK4, zenity/GTK3), whichever window was active and
-  whether or not it had been activated first. `active_window()` was
+  whether or not it had been activated first. What was not noticed is that
+  this is what a query returning the *first* match would say either way,
+  which is why it took a second machine and an explicit count of everything
+  carrying the state to tell "only the shell publishes focus" apart from
+  "the shell is merely found first". `active_window()` was
   unaffected and stayed correct throughout: it reads STATE_ACTIVE on
   frames, a different mechanism, and it correctly named the real active
-  window while no widget anywhere reported focus. So the three focus
+  window while the focus query went on answering with the shell. So the three focus
   methods are exercised only by their unit tests; on this desktop they
   cannot match a real widget however the application behaves, and
   `Session.focus_tracking_works()` exists to say so at runtime rather
@@ -408,6 +420,93 @@ read as a claim you cannot check.
   backend owns. `wl-paste` cannot do it on Mutter, which is why the
   witness is `xclip` through XWayland — so every result above is really
   "as seen from X11".
+
+## Run live on GNOME Shell 51.rc (Wayland), through XWayland and natively
+
+**2026-09-21, the developer's own live desktop** — the session
+`docs/developers/status.md` in pyguitest-recorder had listed as never run
+against. Fedora 45, GNOME Shell 51.rc, Mutter, XWayland on `:0`, input through
+in-process uinput. The point of the run was the one question a single-protocol
+desktop cannot ask: an XWayland session carries **both** kinds of client at
+once, and several answers here turn out to depend on which kind is in front.
+Driven with `gedit` (the one GTK3 application on this machine, so the toolkit
+that publishes widget positions at all) and `gnome-calculator` (GTK4), each
+started twice — once with `GDK_BACKEND=x11` as an XWayland client and once
+natively — so every measurement below has its own control.
+
+**Input reaches native Wayland clients, and the doctor used to deny it.** A
+unique marker typed with `Session.type_text()` into a *native Wayland* gedit
+was read back out of the document through AT-SPI: not "nothing raised", the
+characters were found. The transport was in-process uinput, which injects
+below the compositor and so reaches every client on the seat. The report had
+been printing `XWayland: synthetic input reaches X11 clients only, never
+native Wayland ones` three lines under `input uinput (in-process)` — the note
+fired on the session type, when the limitation belongs to XTest and the tools
+built on it. It is now asked of the transport, and says which tool it means.
+
+**`focused()` answered with the shell, on every GNOME desktop.** Exactly two
+elements carry AT-SPI's `FOCUSED` state here at any moment: GNOME Shell's own
+`Main stage` window, and the focused widget inside the active application.
+Both are published; a walk from the tree root reaches the shell's first, and
+`focused()` returned `found[0]`. So it answered `Element('window', 'Main
+stage')` while gedit's text field held focus, `focus_tracking_works()`
+answered `False` on a desktop that demonstrably publishes per-widget focus,
+and this file itself recorded that as a property of GNOME. It is our own bug,
+and it was costing time as well as correctness: the walk covered every
+application on the desktop — 1829 nodes in gnome-shell alone — at **4.49s a
+call**. Searching the active window's application first and preferring a
+widget over a toplevel gives **0.33s** and the right element. Confirmed in
+both toolkits and both protocols: GTK3 through XWayland and GTK4 natively
+each answered with their own focused text field, and
+`focus_tracking_works()` now answers `True`.
+
+**`NO_AT_BRIDGE` was set, and nothing said so.** Every GTK3 application on
+this session published nothing to the accessibility bus while GTK4 ones
+published normally — because `NO_AT_BRIDGE=1` was exported into the
+environment by the tool runner the session was driven from. GTK3 and Qt read
+it at startup and skip registering entirely; GTK4 ignores it, which is what
+made the gap look selective. `libatspi`, `dogtail` and the bus were all
+healthy throughout, so `doctor` reported `Nothing missing` while a whole
+toolkit was invisible. Unsetting it for the launched process, and nothing
+else, made gedit appear in the tree immediately. `doctor` now names the
+variable when it is set.
+
+**A window is listed before it has a position.** `wait_for_window` returned a
+native Wayland gedit whose `geometry()` read `(0, 0, 0, 0)` for about 0.3s
+before settling to `(510, 183, 900, 747)`; the snapshot it handed back could
+also carry an empty `app_id` and a `pid` of `None`. The same application
+through XWayland never showed it — a frame rect was there from the first
+observation. A zero rectangle is a well-formed answer, so arithmetic on it
+produces a point at the screen origin rather than an error.
+`focus_window()`'s existing wait covers it; it is in
+[troubleshooting.md](troubleshooting.md) because nothing else says so.
+
+**`app_id` is protocol-specific, and the same application has two.** gedit
+reports `Gedit` through XWayland (the class half of `WM_CLASS`) and `gedit`
+natively (the `xdg_toplevel` id); gnome-calculator reports
+`gnome-calculator` and `org.gnome.Calculator`. `_app_id_match` has always
+documented this and `find_windows` has always taken several ids for it — what
+was missing was anything *saying* so at the point it bites. A recording made
+through XWayland and replayed against the same application running natively
+raised `WindowNotFound: no window matching app_id='Gedit'` on its first line;
+changing that one line to `app_id=("Gedit", "gedit")` made the same script
+replay clean, with the document reading back `Ada Lovelace`. The recorder now
+writes that advice into any script it generates from an XWayland recording.
+
+**A full record-and-replay round trip, twice.** `pyguitest-recorder` recorded
+gedit as an XWayland client on this session — typed text, a click on the
+`Open` button, the file chooser it raised, and the Escape that dismissed it —
+and the generated script replayed into a fresh copy of the application with
+the document read back through AT-SPI to confirm it, then into a *native
+Wayland* copy with both app ids named. Four bugs in the recorder were found
+and fixed along the way; they are recorded in that repository's
+`docs/developers/status.md` rather than here.
+
+**What this run did not settle.** Element geometry for native Wayland clients
+is wrong rather than withheld, and is only documented rather than fixed —
+see the caveat below. The lag that made the recorder's window identities
+stale is much smaller but not gone. And nothing here was run on KDE, whose
+XWayland is a different implementation of the same split.
 
 ## Run unattended in a headless GNOME session
 
@@ -1090,7 +1189,11 @@ positions here, and nothing above it can recover what was never published.
 → `button 'Backspace'` → `button 'C'` → `toggle button '↑n'`. The finding
 recorded above for GNOME Shell 50.4, that only the shell's own toplevel
 carries FOCUSED, is a property of the *shell* rather than of the toolkits:
-with no shell running, applications publish it properly. Not established:
+with no shell running, applications publish it properly. **Read again after
+2026-09-21 this is the clue that was already here**: the toolkits publish
+focus on GNOME too, and what the shell actually does is publish it *as well*,
+on its own toplevel, where a root-first walk finds it first. See "Run live on
+GNOME Shell 51.rc" above. Not established:
 whether a click moves focus to the clicked widget — the test was invalidated
 by the extents finding, since every button reported the same rectangle.
 
@@ -1608,6 +1711,51 @@ is happening. Working hypothesis from one diagnostic session on one machine,
 not an independently confirmed root cause or a survey of other window
 managers. Be skeptical of `geometry()` results on GNOME's XWayland until
 someone reproduces or debunks this.
+
+## Known caveat: element geometry on native Wayland clients
+
+`AtspiBackend` withholds its geometry capabilities where AT-SPI's screen
+coordinates cannot be believed, and decides that **per session**:
+`_screen_coords_trustworthy` is false only for `SessionType.WAYLAND`, a
+session with no X connection at all. GNOME and KDE both run XWayland by
+default, so an ordinary Wayland desktop classifies as `XWAYLAND` and the
+coordinates are trusted — for every client on it, including the native
+Wayland ones they were never true for.
+
+Measured on GNOME Shell 51.rc, the same GTK3 application in the same place
+on screen, window at `(510, 183, 900, 747)`:
+
+| client | `extents()` of its `Open` button |
+|---|---|
+| XWayland | `(516, 183, 71, 46)` — screen coordinates, inside the window |
+| native Wayland | `(32, 23, 71, 46)` — window-relative, outside the window |
+
+The offset is constant across every widget in the window (26px, 23px: the
+frame rect against the client's own surface origin), which is what says this
+is a coordinate *space* difference rather than noise.
+
+What makes it worth a caveat rather than a footnote is the same thing as the
+tier-6 one below: **nothing disagrees with it.** `element_at(67, 46)` returns
+that `Open` button, because AT-SPI hit-tests in the same space it publishes
+extents in — so the answer is self-consistent, every containment check
+passes, and a click computed from it lands near the top-left of the screen
+with nothing raised anywhere.
+
+Reached by: `extents()`, `element_at()`, and `Element.double_click()`, which
+locates by rectangle. Not reached by `Element.click()`, `focus()`,
+`set_text()`, `select()` or `choose()` — each performs an accessible action
+and needs no coordinate — nor by `Session.geometry()`, which reads the
+compositor. pyguitest-recorder is unaffected in practice for a different
+reason: its resolver refuses an element whose rectangle does not fit inside
+the window it was looked up in, which is exactly what these fail, so it
+degrades to a coordinate and says so.
+
+**Why this is documented and not fixed.** The honest fix is per-window rather
+than per-session — "is *this* element's toplevel an X client on this
+session's X server?" — which needs the window half and the element half to
+agree about one window, on every compositor backend, and is a larger change
+than the run that found it. Until then, prefer the action methods over
+coordinates on any Wayland desktop; they are the better style regardless.
 
 ## Known caveat: the tier-6 queries under XWayland
 
