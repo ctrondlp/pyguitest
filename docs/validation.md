@@ -1081,6 +1081,60 @@ literal string appears in the title — needs a different string on a desktop
 whose editor is `gnome-text-editor`; `wait_for_window` itself matched
 correctly once given text the title actually contains.
 
+## Run live on sway (wlroots), headless — and on a genuinely pure Wayland session
+
+**2026-09-22, `examples/_sway_validate.py` under
+`scripts/headless-sway-session.sh`, 7/7 — three times, on three separate
+compositor instances.** This closes the oldest entry in
+"Not run live": the wlroots-family IPC backends had been carried there since
+that section was written, their tests replaying recorded output and stand-ins
+against no compositor at all. sway 1.12 on `WLR_BACKENDS=headless` needs no
+GPU and no seat, so the run is unattended and the developer's own session is
+untouched — which is why sway was the one to close first.
+
+`SwayBackend` was forced rather than composited, so every answer below is
+sway's own IPC (`ipc.py`'s `SwaySocket`) and not another member covering for
+it. It declared `SCREEN_INFO`, `WINDOW_ACTIVATE`, `WINDOW_AT_POINT`,
+`WINDOW_EVENTS`, `WINDOW_GEOMETRY`, `WINDOW_LIST`, `WINDOW_MINIMIZE`,
+`WINDOW_PID`, `WINDOW_PLACEMENT`, `WINDOW_RESIZE` and `WINDOW_STATE`, and
+delivered all of them against a real `gnome-text-editor` spawned onto that
+compositor:
+
+- **`window_events()` fired `new` for the spawned window and `close` for it
+  being killed**, both carrying the app id and the pid — the two events a
+  caller synchronises on, over a real event subscription rather than a replay.
+- **`move_window(200, 150)` and `resize_window(640, 480)` were each read back
+  at exactly the value asked for.** Worth stating plainly next to the GNOME
+  XWayland caveat below, where the same readback is the thing that cannot be
+  trusted: on sway it is exact.
+- **`activate_window()` made it the `active_window()`**, and **`window_at()`
+  over its own corner returned the same window**.
+- **`minimize_window()` round-tripped through sway's scratchpad** — not
+  viewable after, viewable again after restore. wlroots has no minimize state
+  as such, so this is the scratchpad standing in for one; the observable
+  contract (`is_window_viewable` goes false and comes back) is what was
+  checked, which is what a caller actually depends on.
+
+**And the other half of the element-geometry caveat below, which no GNOME or
+KDE session can show.** Those desktops run XWayland and so classify as
+`XWAYLAND`, where AT-SPI screen coordinates are trusted — the caveat is that
+they are trusted for native Wayland clients too, where they are wrong. sway
+with no XWayland is the only session here that classifies as
+`SessionType.WAYLAND`, and there the guard does exactly what it is written to
+do: `_screen_coords_trustworthy` is `False`, the composite
+(`sway+atspi+uinput+capture:grim+clipboard:wl-copy+imagesearch:compare`) does
+**not** offer `ELEMENT_GEOMETRY` while still offering `ELEMENT_TREE`, and
+`extents()` refuses with a typed `CapabilityUnsupported` naming the reason
+rather than answering. So the guard is correct and the caveat is precisely
+about *when it fires*, not about what it does.
+
+**What this run does not cover.** Hyprland and niri, which speak variants of
+the same IPC shape and stay in "Not run live" — neither is installed on this
+machine. Input on sway beyond the in-process uinput the composite selected.
+And recording: pyguitest-recorder needs XRecord, so a sway session with no
+XWayland is one it cannot record at all, by the same platform property
+described in that project's `architecture.md`.
+
 ## Run live on Xfce (xfwm4) — a real X11 session under a non-Mutter WM
 
 Answers roadmap item 15. The same Ubuntu 24.04 VM as the section above,
@@ -1501,14 +1555,18 @@ Chromium, Electron or WPF application will look.
     since UIA publishes no per-application node to group by.
 
   A claim leaves this list only when a run puts its output beside it here.
-- **The wlroots compositor IPC backends** — sway, Hyprland, niri. Their
+- **The wlroots compositor IPC backends** — ~~sway~~, Hyprland, niri. Their
   tests replay recorded output and stand-ins, on a sandbox where none of
-  those are available to test against. Running them against a live
-  sway/Hyprland/niri session is next. Two names have left this list:
-  `KdotoolBackend` has since run live on KWin, and `UinputBackend` on both
-  KWin and GNOME — above, and in the tier-6 caveat below, where a
-  commanded move was read back off a real X client 1px out from rounding.
-  That readback is the proof the pointer physically moved.
+  those are available to test against. **sway left this list on 2026-09-22**:
+  window listing, geometry, placement, resize, activation, minimize through
+  the scratchpad, `window_at()` and a real `window_events()` subscription all
+  ran against a live headless sway, 7/7 — see the dedicated section above.
+  Hyprland and niri remain, speaking variants of the same IPC shape, and
+  neither is installed on the machine that closed sway. Two other names have
+  left this list: `KdotoolBackend` has since run live on KWin, and
+  `UinputBackend` on both KWin and GNOME — above, and in the tier-6 caveat
+  below, where a commanded move was read back off a real X client 1px out
+  from rounding. That readback is the proof the pointer physically moved.
 - **`portal`, the input half.** Its CreateSession/SelectDevices/Start
   negotiation has been run against a real xdg-desktop-portal (1.22.1) and
   completes; the keyboard, pointer and scroll methods past that point have
@@ -1749,6 +1807,14 @@ compositor. pyguitest-recorder is unaffected in practice for a different
 reason: its resolver refuses an element whose rectangle does not fit inside
 the window it was looked up in, which is exactly what these fail, so it
 degrades to a coordinate and says so.
+
+**The guard itself is right; what is wrong is when it fires.** Confirmed on a
+headless sway with no XWayland, the only `SessionType.WAYLAND` session
+available here (2026-09-22, section above): there
+`_screen_coords_trustworthy` is `False`, `ELEMENT_GEOMETRY` is not offered at
+all, and `extents()` refuses with a typed `CapabilityUnsupported` naming the
+reason. So this caveat is not "the guard does the wrong thing" — it is that
+GNOME and KDE both run XWayland, classify as `XWAYLAND`, and never reach it.
 
 **Why this is documented and not fixed.** The honest fix is per-window rather
 than per-session — "is *this* element's toplevel an X client on this

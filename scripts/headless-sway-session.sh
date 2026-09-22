@@ -2,14 +2,14 @@
 # Run a command inside a private, headless sway session.
 #
 # SwayBackend (backends/windows.py) is the only wlroots-family window
-# backend with a live compositor to test against so far -- Hyprland and
-# niri speak variants of the same IPC shape but neither has run live
-# either, and docs/validation.md's "Not run live" section has carried all
-# three since they were written. sway is the one to close first: its IPC
-# is the most stable of the three and `WLR_BACKENDS=headless` needs no
-# real GPU or seat, so this works unattended on a bare CI runner as well
-# as a developer desktop -- nothing appears on screen and the real
-# session (Wayland, X11, or another compositor entirely) is untouched.
+# backend with a live compositor to test against -- Hyprland and niri
+# speak variants of the same IPC shape and neither has run live, so
+# docs/validation.md's "Not run live" section still carries those two.
+# sway was the one to close first, and did on 2026-09-22: its IPC is the
+# most stable of the three and `WLR_BACKENDS=headless` needs no real GPU
+# or seat, so this works unattended on a bare CI runner as well as a
+# developer desktop -- nothing appears on screen and the real session
+# (Wayland, X11, or another compositor entirely) is untouched.
 #
 #   ./scripts/headless-sway-session.sh pyguitest doctor
 #   ./scripts/headless-sway-session.sh python3 examples/_sway_validate.py
