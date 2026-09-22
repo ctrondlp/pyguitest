@@ -761,16 +761,32 @@ class TestWindows(Win32TestCase):
         self.add_window(2, style=_winapi.WS_EX_TOOLWINDOW)
         self.assertEqual(self.listed(), ["window 1"])
 
-    def test_an_owned_popup_is_dropped(self):
+    def test_an_owned_window_is_kept(self):
+        # A dialog opened with an owner, which is what nearly every
+        # Find/Replace, About and confirmation dialog is. Alt-Tab hides these
+        # because they travel with their owner, but a test cannot Alt-Tab: with
+        # this dropped, wait_for_window() returned None forever for the one
+        # window a caller was waiting on while FindWindowW answered with the
+        # handle immediately.
         self.add_window(1)
         self.add_window(2, owner=1)
+        self.assertEqual(sorted(self.listed()), ["window 1", "window 2"])
+
+    def test_an_owned_tool_window_is_dropped(self):
+        # Owning a window no longer decides, but WS_EX_TOOLWINDOW still does --
+        # an owned palette is a palette. This is the pair that shows the two
+        # rules are independent rather than one standing in for the other.
+        self.add_window(1)
+        self.add_window(2, owner=1, style=_winapi.WS_EX_TOOLWINDOW)
         self.assertEqual(self.listed(), ["window 1"])
 
-    def test_an_owned_window_that_asks_to_be_listed_is_kept(self):
-        # Sorted, because this case is about WS_EX_APPWINDOW overriding the
-        # other two flags -- which of the pair is on top is the ordering
+    def test_a_tool_window_that_asks_to_be_listed_is_kept(self):
+        # Sorted, because this case is about WS_EX_APPWINDOW overriding
+        # WS_EX_TOOLWINDOW -- which of the pair is on top is the ordering
         # tests' subject, and asserting it here as well would make this one
-        # fail for a reason it is not about.
+        # fail for a reason it is not about. Owned as well, because that is
+        # the shape the override exists for: a utility window with a real
+        # taskbar entry keeps one.
         self.add_window(1)
         self.add_window(
             2, owner=1, style=_winapi.WS_EX_TOOLWINDOW | _winapi.WS_EX_APPWINDOW
@@ -1028,9 +1044,10 @@ class TestClassifyWindowEvent(Win32TestCase):
         self.assertIn(handle, known)
 
     def test_a_create_for_an_unlistable_window_is_nothing(self):
-        # A tool window, an owned popup, a cloaked one: none of these are
-        # windows this package would list, so their own creation is not
-        # "new" any more than EnumWindows would report them.
+        # A tool window or a cloaked one: neither is a window this package
+        # would list, so their own creation is not "new" any more than
+        # EnumWindows would report them. An owned window is deliberately not
+        # in this list -- see test_an_owned_window_is_kept.
         handle = self.add_window(1, style=_winapi.WS_EX_TOOLWINDOW)
         known: set = set()
         change = self.gui._classify_window_event(
@@ -1097,7 +1114,9 @@ class TestClassifyWindowEvent(Win32TestCase):
         self.assertEqual(change, "new")
 
     def test_a_foreground_change_for_an_unlistable_window_is_nothing(self):
-        handle = self.add_window(1, owner=2)
+        # A tool window rather than an owned one: owning a window no longer
+        # makes it unlistable, but WS_EX_TOOLWINDOW still does.
+        handle = self.add_window(1, style=_winapi.WS_EX_TOOLWINDOW)
         known: set = set()
         change = self.gui._classify_window_event(
             _winapi.EVENT_SYSTEM_FOREGROUND, handle, known
