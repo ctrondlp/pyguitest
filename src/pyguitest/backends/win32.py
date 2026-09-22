@@ -1372,8 +1372,9 @@ class Win32Backend(GUIBackend):
 
         It yields considerably more than a caller means, too: `_is_listable`
         is the filter, and it drops invisible windows, `WS_EX_TOOLWINDOW`
-        palettes, owned popups that are not `WS_EX_APPWINDOW`, and DWM-cloaked
-        windows. Minimized windows are kept deliberately -- `WINDOW_STATE`
+        palettes and DWM-cloaked windows. Owned windows are kept -- see
+        `_is_listable` for why that deliberately differs from what Alt-Tab
+        shows. Minimized windows are kept deliberately, too -- `WINDOW_STATE`
         exists to report them.
 
         `app_id` is the window *class* name (`Notepad`, `Chrome_WidgetWin_1`),
@@ -1408,27 +1409,37 @@ class Win32Backend(GUIBackend):
         The same shape of filter the Wayland backends apply to
         `_NET_WM_WINDOW_TYPE`, and every part of it is from the Windows
         analysis: a tool window is a palette or a floating toolbar and never
-        belongs in a task list; an owned window belongs only when it says so;
-        and a cloaked window is a suspended Store application's -- enumerable
-        and style-visible while being nowhere on screen, which is what produces
-        a `wait_for_window` that matches a ghost.
+        belongs in a task list, and a cloaked window is a suspended Store
+        application's -- enumerable and style-visible while being nowhere on
+        screen, which is what produces a `wait_for_window` that matches a
+        ghost.
 
-        `WS_EX_APPWINDOW` is checked first because it overrides the other two.
-        It means "put this on the taskbar", which is a window asking to be
-        listed after all -- a utility window with a real taskbar entry keeps
-        one even though it is owned and even though it calls itself a tool
-        window, and dropping it here would make a window the user can see and
-        click untouchable by any test.
+        Owned windows are deliberately **kept**, even though Alt-Tab hides
+        them. Alt-Tab hides an owned window because the window travels with
+        its owner -- close the owner and it goes too -- but that is a claim
+        about what a user switching tasks wants to see, not about what is on
+        screen. A dialog created with an owner (`CreateWindowExW`'s
+        `hWndParent`, which is what nearly every Find/Replace, About and
+        confirmation dialog is) is visible, clickable, and exactly what a test
+        means by "the window I am waiting for". Filtering it here made those
+        dialogs structurally unreachable: `find_windows` never reported them,
+        so `wait_for_window("Slow Dialog")` returned None forever and not even
+        a `.*` search contained them, while `FindWindowW` answered with the
+        handle immediately. Found live, driving a deliberately slow Windows
+        probe window whose dialog opens a beat after the click that asked for
+        it.
+
+        `WS_EX_APPWINDOW` still overrides `WS_EX_TOOLWINDOW`: it means "put
+        this on the taskbar", which is a window asking to be listed after all,
+        and dropping it here would make a window the user can see and click
+        untouchable by any test.
         """
         lib = self._lib()
         if not lib.IsWindowVisible(hwnd):
             return False
         style = _winapi.get_window_ex_style(hwnd)
-        if not style & _winapi.WS_EX_APPWINDOW:
-            if style & _winapi.WS_EX_TOOLWINDOW:
-                return False
-            if lib.GetWindow(hwnd, _winapi.GW_OWNER):
-                return False
+        if not style & _winapi.WS_EX_APPWINDOW and style & _winapi.WS_EX_TOOLWINDOW:
+            return False
         return not self._is_cloaked(hwnd)
 
     def _is_cloaked(self, hwnd):

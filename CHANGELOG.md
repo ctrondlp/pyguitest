@@ -236,6 +236,29 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ### Fixed
 
+- **Windows `find_windows` no longer drops every owned window, so a dialog is
+  reachable by title at last.** The filter behind `windows()` copied Alt-Tab's
+  rule, which hides a window that has an owner because such a window travels
+  with its owner -- close the owner and it goes too. That is a claim about what
+  a user switching tasks wants to see, and it is the wrong question for a test.
+  A dialog created with an owner (`CreateWindowExW`'s `hWndParent`, which is
+  what nearly every Find/Replace, About and confirmation dialog is) is visible,
+  clickable, and exactly what a caller means by "the window I am waiting for".
+  Dropping it made those dialogs structurally unreachable: not merely missed by
+  `find_windows`, but `wait_for_window("Slow Dialog")` returning None forever,
+  with not even a `.*` search containing it, while `FindWindowW` answered with
+  the handle immediately. Found live on a real Windows 11 desktop, driving a
+  deliberately slow probe window that opens a confirmation dialog a beat after
+  the click that asked for it -- the dialog appeared, the driver's own
+  `wait_for_window` timed out, and the probe had to fall back to `FindWindowW`
+  by handle. `_is_listable` now keeps an owned window and drops only what it has
+  a real reason to: invisible, `WS_EX_TOOLWINDOW` without `WS_EX_APPWINDOW`,
+  DWM-cloaked. `WS_EX_APPWINDOW` still overrides the tool-window rule, so a
+  utility window with a taskbar entry stays reachable. Three tests that pinned
+  the old rule were rewritten rather than deleted, and two others that had used
+  an owned window merely as a convenient unlistable example now use a tool
+  window, so the owned/tool-window distinction is asserted directly.
+
 - **`CapabilitySet` dropped its own two methods through nine more ways than
   it was fixed for.** The class exists so a negotiated set can be reported and
   diffed against what is missing (`.report()`, `.missing`), and since the four
