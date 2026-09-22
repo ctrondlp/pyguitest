@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """One-off live validation of SwayBackend, forced rather than composited.
 
-docs/validation.md's "Not run live" section has carried sway (and
-Hyprland, niri, the same IPC shape) since it was written -- their tests
-replay recorded output and stand-ins, never a real compositor. This is
-that missing run: connect, list, move, resize, activate, minimize and
-subscribe to window_events() against an actual sway, over the real IPC
-socket (ipc.py's SwaySocket), the way scripts/headless-sway-session.sh
-sets one up.
+docs/validation.md's "Not run live" section carried sway (and Hyprland,
+niri, the same IPC shape) from when it was written until 2026-09-22 --
+their tests replay recorded output and stand-ins, never a real
+compositor. This is the run that closed sway, 7/7: connect, list, move,
+resize, activate, minimize and subscribe to window_events() against an
+actual sway, over the real IPC socket (ipc.py's SwaySocket), the way
+scripts/headless-sway-session.sh sets one up. Hyprland and niri are
+still on that list.
+
+It stays a one-off rather than becoming a test: it needs a compositor,
+and what it asserts is that a real one answered, which is the one thing
+a fake cannot stand in for.
 
     ./scripts/headless-sway-session.sh python3 examples/_sway_validate.py
 """

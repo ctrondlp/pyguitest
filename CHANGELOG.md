@@ -7,6 +7,35 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **sway has run live, so the wlroots IPC backends are no longer all
+  unvalidated.** `docs/validation.md`'s "Not run live" had carried sway,
+  Hyprland and niri since that section was written -- their tests replay
+  recorded output and stand-ins against no compositor at all. sway left the
+  list on 2026-09-22, 7/7 through `examples/_sway_validate.py` on a headless
+  sway 1.12 -- three runs on three separate compositor instances, since one
+  green run is a coincidence and three is a result: `window_events()` delivering `new` and `close` over a real
+  subscription, `move_window`/`resize_window` read back at exactly the values
+  asked for, `activate_window`, `window_at()`, and `minimize_window`
+  round-tripping through the scratchpad that stands in for a minimize state
+  wlroots does not have. The backend was forced rather than composited, so
+  every answer is sway's own IPC. Hyprland and niri remain, and neither is
+  installed on the machine that closed sway. Documentation only -- no
+  behaviour changed, which is the point: the code was already written, and
+  what was missing was evidence that a real compositor answers it.
+
+- **The element-geometry caveat now has both halves measured.** That guard
+  withholds AT-SPI coordinates only for `SessionType.WAYLAND`, and GNOME and
+  KDE both run XWayland, so nothing had ever exercised the branch where it
+  fires. The headless sway session has no XWayland and is the first genuinely
+  pure Wayland session this has run on: `_screen_coords_trustworthy` is
+  `False` there, `ELEMENT_GEOMETRY` is not offered while `ELEMENT_TREE` still
+  is, and `extents()` refuses with a typed `CapabilityUnsupported` naming the
+  reason. The caveat is therefore about *when* the guard fires, not about what
+  it does -- which is a smaller and more precise claim than it could make
+  before.
+
 ### Added
 
 - **`doctor` reports `NO_AT_BRIDGE`.** Set to anything but empty or `0`, it
