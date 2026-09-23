@@ -7,12 +7,15 @@ already know what you want and just need the signature, go to
 ## 1. Install
 
 ```sh
-pip install 'pyguitest[atspi]'
+pip install 'pyguitest[atspi]'     # Linux and the BSDs
+pip install 'pyguitest[windows]'   # Microsoft Windows
 ```
 
-The `atspi` extra is the one worth having from the start: it is what lets a
-test say `gui.button("Save").click()` instead of clicking a coordinate.
-Everything else is optional and depends on your desktop.
+One extra is worth having from the start, and which one depends on your
+platform: both give you the element tree, which is what lets a test say
+`gui.button("Save").click()` instead of clicking a coordinate — `atspi`
+through AT-SPI on Linux and the BSDs, `windows` through UI Automation on
+Microsoft Windows. Everything else is optional and depends on your desktop.
 
 Then ask the machine rather than reading a table:
 
@@ -20,11 +23,11 @@ Then ask the machine rather than reading a table:
 pyguitest doctor
 ```
 
-`doctor` detects your distribution and prints the exact commands for whatever
-is missing — including the pieces `pip` cannot supply, like the AT-SPI
-libraries that come from your distribution. Run it before assuming anything
-below does not work. [install.md](install.md) is the same information as a
-reference table.
+`doctor` prints the exact commands for whatever is missing — naming your
+distribution's packages on Linux and the BSDs, including the pieces `pip`
+cannot supply like the AT-SPI libraries, and answering in Windows terms on
+Windows. Run it before assuming anything below does not work.
+[install.md](install.md) is the same information as a reference table.
 
 ## 2. See what this desktop can do
 

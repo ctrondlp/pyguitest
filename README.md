@@ -10,30 +10,24 @@
   <img src="https://raw.githubusercontent.com/ctrondlp/pyguitest/main/docs/assets/pyguitest-demo.gif" alt="pyguitest driving a simple text editor">
 </p>
 
-Automate and test Linux and BSD desktop applications from Python — even when
-the application has no automation API.
+Automate and test Linux, BSD and Microsoft Windows desktop applications from
+Python — even when the application has no automation API.
 
 Pyguitest provides one Python API for mouse, keyboard, window, screenshot, and
-accessible UI automation across Wayland, X11, and XWayland. It is the Python
-successor to [X11::GUITest](https://metacpan.org/pod/X11::GUITest).
+accessible UI automation across Wayland, X11, XWayland and Windows. It is the
+Python successor to [X11::GUITest](https://metacpan.org/pod/X11::GUITest).
 
-**Windows support is landing, and has not yet driven a real desktop.** A
-Windows session detects itself, reports its own environment (window station,
-integrity level, DPI awareness and build) and is advised in Windows terms
-rather than in distribution packages. Two backends drive it: `win32` —
-screens, input, windows, window events, screen capture and the clipboard,
-through `ctypes` with no dependency — and `uia`, the element tree, through UI
-Automation behind the `windows` extra.
-
-The suite passes on Windows 11 (build 26200) and the environment probes are
-confirmed against it. What has *not* run is everything touching an interactive
-desktop — injected input, capture, window enumeration and the element tree —
-because those need a console session rather than the SSH one that run used.
-Every prototype and structure layout is transcribed from Microsoft's
-documentation; [docs/validation.md](docs/validation.md) records what the live
-run settled and what is still outstanding, and
-[docs/developers/adr-003-windows.md](docs/developers/adr-003-windows.md)
-records what was decided and why.
+**Microsoft Windows support arrives in 0.11.0**, the first release that
+imports there at all. Two backends drive it: `win32` — screens, input,
+windows, window events, screen capture and the clipboard, through `ctypes`
+with no dependency — and `uia`, the element tree, through UI Automation behind
+the `windows` extra. The suite passes on Windows 11 (build 26200) and four
+live runs have driven a real interactive desktop — but on one US-layout,
+single-monitor, unelevated machine, so multi-monitor arithmetic, `windows()`'s
+z-order claim, AltGr and dead keys are still open.
+[docs/validation.md](docs/validation.md) records which is which, and
+[docs/developers/adr-003-windows.md](docs/developers/adr-003-windows.md) what
+was decided and why.
 
 Use it to:
 
@@ -49,8 +43,8 @@ Use it to:
   and clicking, landing on cue
 
 **Status:** every capability implemented across all backends, covering
-**every X11::GUITest export**. Much of it has been run against real GNOME
-Wayland and X11 sessions; some of it has not, and
+**every X11::GUITest export**. Much of it has been run against real GNOME,
+KDE, sway, Xfce, X11, GhostBSD and Windows 11 sessions; some of it has not, and
 [docs/validation.md](docs/validation.md) says exactly which is which, so
 nothing here has to be taken on trust.
 
@@ -83,8 +77,7 @@ That shape decides what it is good at and what it is not:
   no runner. Use whatever you already use, and it will fit underneath it.
 - **Not for browsers or mobile.** Web pages have WebDriver and Playwright,
   phones have their own tooling. This drives desktop windows on Linux, the
-  BSDs, and Windows — which has not yet driven a real desktop, see above —
-  and macOS has no backend.
+  BSDs and Microsoft Windows; macOS has no backend.
 - **Not the first choice where the application can help.** If a program ships
   a command line, a documented API or an in-app test hook, driving that is
   faster, more stable, and says what the test means instead of what it
@@ -93,6 +86,42 @@ That shape decides what it is good at and what it is not:
 - **Not a recorder.** [pyguitest-recorder][recorder] is a separate package
   that writes pyguitest scripts from a recorded session, and pyguitest does
   not depend on it.
+
+## Compared to other tools
+
+These overlap less than a search result makes it look, and for several jobs
+one of the others is the better answer.
+
+| | pyguitest | [PyAutoGUI][pyautogui] | [dogtail][dogtail] | [pywinauto][pywinauto] |
+|---|---|---|---|---|
+| Linux, X11 | yes | yes | yes | — |
+| Wayland | input through libei, the portal or `uinput`; windows through the compositor's own IPC | — | AT-SPI actions, but no synthetic input | — |
+| Windows | yes — `win32` and `uia`, from 0.11.0 | yes | — | yes |
+| macOS | — | yes | — | — |
+| Finds a widget by role and name | AT-SPI and UI Automation | — coordinates and image matching | AT-SPI | UI Automation and Win32 |
+| Required dependencies | none | several | pyatspi, PyGObject | comtypes, pywin32 |
+
+**Use PyAutoGUI** if you need macOS, or you want image matching behind a
+small API and your desktop is X11 or Windows. It is the most widely used of
+these by a wide margin, and that is worth real money in answered questions.
+
+**Use pywinauto** if the target is Windows and only Windows. It is mature and
+Windows-shaped throughout, with far more Windows-specific knowledge behind it
+than a package spanning four desktops can carry.
+
+**dogtail is not really a competitor.** The `atspi` extra installs it, and
+the element tree on Linux is dogtail underneath. Use it directly if AT-SPI on
+Linux is all you need and you would rather have one less layer.
+
+What is left is the awkward middle, and it is the only thing pyguitest claims
+to be better at: one API that keeps working when the session underneath
+changes — X11 to Wayland, GNOME to KDE to sway, Linux to Windows — and
+`gui.supports()` to ask what the session in front of you can actually do
+instead of discovering it by failing. If you do not have that problem, one of
+the above is a shorter road.
+
+These projects move, and the table is our reading of them rather than theirs
+— check their own documentation before deciding on it.
 
 ## Install
 
@@ -104,7 +133,7 @@ pip install 'pyguitest[atspi]'     # + element automation
 pip install 'pyguitest[windows]'   # + element automation on Windows (comtypes)
 ```
 
-Or from a checkout, which is the same thing with a path instead of a name:
+Or from a checkout, if you are working from the source tree:
 
 ```sh
 git clone https://github.com/ctrondlp/pyguitest.git
@@ -126,7 +155,8 @@ Rather than work that out from a document, ask the machine:
 pyguitest doctor
 ```
 
-It detects your distribution and prints the exact commands. For the whole
+It prints the exact commands — naming your distribution's packages on Linux
+and the BSDs, and answering in Windows terms on Windows. For the whole
 picture — a per-backend requirements matrix, the distribution package table,
 and how capture chooses a path — see [docs/install.md](docs/install.md).
 Injecting input has its own setup (`/dev/uinput` permissions, the `ydotool`
@@ -155,9 +185,10 @@ about that side of it. And which of these paths has actually been run against
 a real desktop is in [docs/validation.md](docs/validation.md) — that is the
 file to read before trusting any row here, and it is written to be read that
 way. That file is where the Windows row above needs reading twice: `win32` and
-`uia` are registered and composed exactly like every backend above them, but
-neither has been near a Windows machine yet, so every prototype and structure
-layout is transcribed from Microsoft's documentation rather than measured.
+`uia` are registered and composed exactly like every backend above them, and
+both have driven a real Windows 11 desktop — but on one machine, with one
+layout and one monitor, so the row says what is implemented and validation.md
+says what has been measured.
 [docs/developers/adr-003-windows.md](docs/developers/adr-003-windows.md)
 records the design and the alternatives rejected along the way.
 
@@ -307,6 +338,9 @@ flags works unchanged.
 
 [recorder]: https://github.com/ctrondlp/pyguitest-recorder
 [testable-guis]: https://github.com/ctrondlp/pyguitest-recorder/blob/main/docs/testable-guis.md
+[pyautogui]: https://github.com/asweigart/pyautogui
+[dogtail]: https://gitlab.com/dogtail/dogtail
+[pywinauto]: https://github.com/pywinauto/pywinauto
 
 ## Documentation
 

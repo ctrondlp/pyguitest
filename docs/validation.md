@@ -556,9 +556,11 @@ Three findings came out of getting there, all now handled:
   bus. Not an exception — libatspi answers an unreachable bus with
   `g_error()`, which is `abort()`, and `import dogtail.tree` reaches it at
   import time. No `try`/`except` can catch that, so `backends/atspi.py`
-  now asks `gdbus` whether `org.a11y.Bus` answers before importing
-  anything. This was reachable in any container or CI runner, not only
-  here.
+  now asks, before importing anything, the three questions libatspi asks in
+  libatspi's own order — `$AT_SPI_BUS_ADDRESS`, then the `AT_SPI_BUS`
+  property on the X11 root window, then `org.a11y.Bus.GetAddress` on the
+  session bus — and connects to the address the first of them yields. This
+  was reachable in any container or CI runner, not only here.
 - **The shell takes its bus name about 4.4 seconds before its extensions
   are loaded.** A connect in that window fails with "Object does not exist
   at path" — the same error an extension that is not installed gives. The
@@ -1092,6 +1094,13 @@ against no compositor at all. sway 1.12 on `WLR_BACKENDS=headless` needs no
 GPU and no seat, so the run is unattended and the developer's own session is
 untouched — which is why sway was the one to close first.
 
+The seven are the seven the script asserts and exits non-zero without: the
+window **moved** where it was told, **resized** to what it was told, **became
+active**, went **hidden** on minimize and **visible** again on restore,
+answered **`window_at()`** with itself, and produced the **`close` event**
+when it was killed. Connecting, listing and the `new` event are how the run
+finds the window it then drives, not among the seven.
+
 `SwayBackend` was forced rather than composited, so every answer below is
 sway's own IPC (`ipc.py`'s `SwaySocket`) and not another member covering for
 it. It declared `SCREEN_INFO`, `WINDOW_ACTIVATE`, `WINDOW_AT_POINT`,
@@ -1103,6 +1112,8 @@ compositor:
 - **`window_events()` fired `new` for the spawned window and `close` for it
   being killed**, both carrying the app id and the pid — the two events a
   caller synchronises on, over a real event subscription rather than a replay.
+  The `new` is how the run picks its own window out of the others; the `close`
+  is the one of the two that is asserted.
 - **`move_window(200, 150)` and `resize_window(640, 480)` were each read back
   at exactly the value asked for.** Worth stating plainly next to the GNOME
   XWayland caveat below, where the same readback is the thing that cannot be
@@ -1474,8 +1485,10 @@ six seconds' wait, then the call) and four remedies tried from that state: plain
 refused; a synthetic Alt tap and a `SendInput` mouse move of zero distance both
 worked. The backend now retries once after the zero move, which shifts nothing
 and, unlike the Alt tap, opens no menu. Covered by tests against a fake
-`user32` that models the lock; **not yet re-run against the real one**, so the
-fix is as verified as its cause, which was.
+`user32` that models the lock, and **since re-run against the real one** — see
+the dedicated section below, 3/3 on 2026-09-22, where a plain
+`SetForegroundWindow` is refused one second before the same call through
+`activate_window` takes the foreground.
 
 **Still open from this run:** the `windows()` bottom-to-top claim, which the
 above failure stopped short of; a scroll past `_MAX_WHEEL_STEPS`; the
@@ -1483,13 +1496,119 @@ above failure stopped short of; a scroll past `_MAX_WHEEL_STEPS`; the
 purpose-built window is not an application, so none of this says how a
 Chromium, Electron or WPF application will look.
 
+## Run live on Windows 11 (build 26200): a slow desktop, and the dialog nothing could find
+
+2026-09-22, the same console session, against a probe window built to be
+*slow* — a confirmation dialog that opens a beat after the click asking for
+it, rather than within the same message it was asked in. That delay is the
+ordinary shape of a real application and the shape the earlier probe windows
+did not have, since theirs came up inside the click that created them.
+
+**It found a bug that made owned dialogs structurally unreachable, and then
+confirmed the repair against the same dialog:**
+
+- `wait_for_window("Slow Dialog")` returned `None` until it timed out, on a
+  dialog that was on screen and clickable the whole time. Not a race with the
+  delay: a `.*` search did not contain it either, so no amount of waiting
+  would have produced it.
+- `FindWindowW` answered with the dialog's handle immediately, from the same
+  process at the same moment — which is what separated "pyguitest cannot see
+  it" from "it is not there yet". The probe had to fall back to driving it by
+  that handle to finish at all.
+- The cause was in `_is_listable`, not in the waiting: the filter had copied
+  Alt-Tab's rule and dropped every window with an owner. Alt-Tab hides an
+  owned window because it travels with its owner; a test waiting for a
+  Find/Replace, About or confirmation dialog means exactly that window, and
+  `CreateWindowExW`'s `hWndParent` is how nearly every one of them is made.
+  The filter now keeps owned windows and drops only what it can name a reason
+  for: invisible, `WS_EX_TOOLWINDOW` without `WS_EX_APPWINDOW`, DWM-cloaked.
+- **The fixed filter was then run against that same dialog on that same
+  desktop**, which is what makes this a closed claim rather than a bug report
+  with a patch attached: `wait_for_window("Slow Dialog")` matched the window
+  it had timed out on, with no fallback to `FindWindowW` needed to finish.
+  A live machine confirmed the cause *and* the repair, which is the pair this
+  file exists to distinguish.
+
+The repair is pinned by tests as well as by that run — three that asserted the
+old rule were rewritten, and two that had used an owned window as a convenient
+unlistable example now use a tool window, so the owned/tool-window distinction
+is asserted directly rather than implied.
+
+**What this run did not settle.** `activate_window`'s retry, which was the
+same shape one step back — its cause reproduced live, its fix only ever run
+against the fake. The section below closes that one too.
+
+## Run live on Windows 11 (build 26200): activate_window's retry, against the real foreground lock
+
+**2026-09-22, 3/3, and the first Windows run driven end to end from the Linux
+workstation.** This closes the last claim the Windows list carried. The fix —
+one retry after a `SendInput` mouse move of zero distance — had its *cause*
+reproduced live on 2026-09-20, but the repair itself had only ever run against
+the fake `user32` that models the lock.
+
+**How it was driven, since it cannot be driven the obvious way.** An SSH login
+is not on the interactive window station, which the 2026-09-18 run measured
+here: `is_interactive_desktop` is `False` and `windows()` lists nothing, so the
+one thing this test needs — a real foreground to be refused — does not exist
+over SSH. The probe is therefore pushed into the logged-in console session by
+Task Scheduler with `/it` ("run only when user is logged on"), the mechanism
+docs/troubleshooting.md already names for this, and its output read back over
+SSH afterwards. Nothing about the test is remote; only the trigger is.
+
+**Three attempts were inconclusive before one was valid, and each failure is
+the useful part**, because each is a way of *appearing* to test a foreground
+lock while testing nothing:
+
+- **Two visible windows are not a foreground contest.** Creating a window does
+  not arm the lock, and whichever window came up last simply held the
+  foreground — so the activation target already had what it was supposed to be
+  taking, and the probe said so rather than passing. Reversing the spawn order
+  changed nothing: the target won either way.
+- **The probe clicking the blocker into front invalidates the control.** With
+  the click injected from the probe's own process, a plain `SetForegroundWindow`
+  was *accepted* — `SendInput` confers exactly the entitlement the retry
+  manufactures, so the fix was arriving by the back door and the control could
+  no longer fail. The click has to come from a third process (`click_at.py`)
+  for the probe to be in the state a real test script is in: one that has
+  injected nothing yet.
+- **The machine's own numbers say the lock is real.** `SPI_GETFOREGROUNDLOCKTIMEOUT`
+  reads **2147483647 ms** here, so the entitlement never expires on its own and
+  waiting cannot substitute for the retry.
+
+With the setup honest, the result is unambiguous, three runs out of three:
+
+| | |
+| --- | --- |
+| setup | a third process clicks the blocker; foreground is `ProbeBlocker` |
+| control | `SetForegroundWindow(target)` from the probe returns **0**, foreground unchanged |
+| test | `gui.activate_window(target)` raises nothing, foreground becomes `ProbeTarget` |
+| readback | `GetWindowTextW(GetForegroundWindow())` independently answers `'ProbeTarget'` |
+
+The control is what makes the test mean anything: the same handle, from the
+same process, one second earlier, was refused. What changed between the two
+calls is the zero-distance move.
+
+**`pyguitest debug` was run on the same box in the same session**, which is the
+first time its Windows rendering has run anywhere but against a constructed
+`Environment`: the report listed the `image` tools alone and named the other
+four groups Linux and BSD only, collapsed the eight unset X11/Wayland variables
+to one line, and printed `elements     UI Automation, through comtypes` in
+place of the three accessibility lines — one of which used to say "AT-SPI is
+attempted anyway" on a platform that attempts nothing of the sort. It also
+reported `is_interactive_desktop False` with the note that no prompt or error
+will say so, which is correct for the SSH session it ran in.
+
 ## Not run live
 
-- **What two live Windows runs left unverified.** The suite passes on
-  Windows 11 build 26200, and both runs recorded above — the SSH session and
-  the interactive desktop — settled what each could reach. What stays here is
-  what neither reached: the questions a desktop-less SSH session cannot ask,
-  and the ones the interactive run did not close. Every prototype and
+- **What five live Windows runs left unverified.** The suite passes on
+  Windows 11 build 26200, and the five runs recorded above — the SSH session,
+  the first interactive desktop, the control-set pass, the slow-desktop probe
+  and the foreground-lock probe — settled what each could reach. Both repairs
+  that were once here in the awkward state, cause confirmed live and fix only
+  against a fake, have since been run against the real thing and are struck
+  through below. What stays is what none of the five reached: the questions a
+  desktop-less SSH session cannot ask, and the ones no single-monitor,
+  US-layout machine can answer at all. Every prototype and
   structure layout below is transcribed from Microsoft's documentation and
   driven by fakes, and a fake can only check that the code sends what it
   means to send; whether Windows *acts* on it is the half no fake reaches. In
@@ -1515,6 +1634,17 @@ Chromium, Electron or WPF application will look.
     `False` after release.
   - `EnumDisplayMonitors` returning false is rare enough that raising on it
     does not turn an ordinary desktop into a failure.
+  - ~~`activate_window`'s retry after a zero-distance `SendInput` move takes
+    the foreground from another process.~~ **Closed 2026-09-22:** 3/3 against
+    the real lock (`SPI_GETFOREGROUNDLOCKTIMEOUT` reads 2147483647 ms on that
+    box), with a plain `SetForegroundWindow` refused from the same process one
+    second earlier as the control. See the dedicated section above.
+  - ~~An owned dialog is listed by `windows()` and reachable by
+    `wait_for_window`.~~ **Closed 2026-09-22:** found and fixed in the same
+    session — `wait_for_window("Slow Dialog")` timed out on a dialog
+    `FindWindowW` answered for immediately, and matched it after the
+    `_is_listable` rewrite, on that desktop. See the slow-desktop section
+    above.
 
   **`wait_for_process`** — the mechanism is confirmed above; what is left is
   one branch:

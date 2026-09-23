@@ -4,10 +4,15 @@
 docs/validation.md's "Not run live" section carried sway (and Hyprland,
 niri, the same IPC shape) from when it was written until 2026-09-22 --
 their tests replay recorded output and stand-ins, never a real
-compositor. This is the run that closed sway, 7/7: connect, list, move,
-resize, activate, minimize and subscribe to window_events() against an
-actual sway, over the real IPC socket (ipc.py's SwaySocket), the way
-scripts/headless-sway-session.sh sets one up. Hyprland and niri are
+compositor. This is the run that closed sway, 7/7 against an actual sway
+over the real IPC socket (ipc.py's SwaySocket), the way
+scripts/headless-sway-session.sh sets one up. The seven are the seven
+asserted below, and are what this exits non-zero without: the window
+moved where it was told, resized to what it was told, became active,
+went hidden on minimize and visible again on restore, answered
+window_at() with itself, and produced the close event when it was
+killed. Connecting, listing and the `new` event are how the run finds
+the window it then drives, not among the seven. Hyprland and niri are
 still on that list.
 
 It stays a one-off rather than becoming a test: it needs a compositor,

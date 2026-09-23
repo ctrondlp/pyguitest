@@ -177,12 +177,33 @@ if ((${#missing[@]})); then
     exit 1
 fi
 
-# A CI runner often has no XDG_RUNTIME_DIR at all, and the Wayland socket has
-# to live in a directory only this user can read. Made here rather than
-# assumed, and torn down with everything else. The env var carries ownership
-# across the re-exec below, so the inner run knows to remove what the outer
-# one created -- the outer process is gone by then.
-if [[ -z ${XDG_RUNTIME_DIR:-} || ! -d ${XDG_RUNTIME_DIR:-} ]]; then
+# A private XDG_RUNTIME_DIR, always -- not only where there is none to
+# inherit. A CI runner often has none at all and the Wayland socket has to
+# live in a directory only this user can read, which is why this block was
+# written; reusing the developer's where one existed is what made it a
+# hazard. at-spi-bus-launcher derives its socket path from the runtime dir
+# rather than from the bus it was started on, so `start_a11y` below, running
+# with the real runtime dir inherited, **rebinds $XDG_RUNTIME_DIR/at-spi/bus
+# and evicts the developer's own accessibility bus** -- silently, for the
+# whole desktop, until the next login. Found on 2026-09-22 with four dead
+# sockets in that directory (`bus`, `bus_2`, `bus_3`, `bus_99`, one per
+# session this harness had run), every GTK3 and Qt application on the live
+# session publishing no elements, and `import dogtail.tree` aborting any
+# pyguitest process with SIGABRT because at-spi-bus-launcher outlives the bus
+# it launched and goes on handing out its address. A session advertised as
+# private has no business writing into the one directory the real session
+# keeps its sockets in.
+#
+# Torn down with everything else. The env var carries ownership across the
+# re-exec below, so the inner run knows to remove what the outer one created
+# -- the outer process is gone by then.
+# Guarded on our own marker rather than on XDG_RUNTIME_DIR being unset: this
+# harness always takes a private one (reusing the developer's is the whole of
+# the bug above), but it must take exactly one. This runs before the re-exec
+# guard below, so without the test the inner run made a second directory and
+# overwrote the variable naming the first -- and the trap, which removes only
+# what $XDG_RUNTIME_DIR then pointed at, orphaned a 0700 directory per run.
+if [[ ${PYGUITEST_HEADLESS_OWN_RUNTIME:-0} != 1 ]]; then
     XDG_RUNTIME_DIR="$(mktemp -d "${TMPDIR:-/tmp}/pyguitest-runtime.XXXXXX")"
     chmod 700 "$XDG_RUNTIME_DIR"
     export XDG_RUNTIME_DIR PYGUITEST_HEADLESS_OWN_RUNTIME=1

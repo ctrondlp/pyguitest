@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import tempfile
 import unittest
 
 from pyguitest.backends.portal import PortalBackend
@@ -61,6 +62,14 @@ _SESSION_REQUEST = "/org/freedesktop/portal/desktop/request/mock/create_session"
 _DEVICES_REQUEST = "/org/freedesktop/portal/desktop/request/mock/select_devices"
 _START_REQUEST = "/org/freedesktop/portal/desktop/request/mock/start"
 _SESSION_HANDLE = "/org/freedesktop/portal/desktop/session/mock"
+
+
+def _restore_env(name: str, saved: str | None) -> None:
+    """Put one environment variable back the way it was, absence included."""
+    if saved is None:
+        os.environ.pop(name, None)
+    else:
+        os.environ[name] = saved
 
 
 def _respond_code(request_path: str, result_code: int, results: dict) -> str:
@@ -144,6 +153,30 @@ class PortalDBusMockTestCase(_TestCaseBase):
             ) from exc
 
         cls._saved_bus_address = os.environ.get("DBUS_SESSION_BUS_ADDRESS")
+        # XDG_RUNTIME_DIR is swapped with the bus, and that is not tidiness.
+        # at-spi-bus-launcher derives its socket path from the runtime dir
+        # rather than from the bus it was activated on, so the path
+        # $XDG_RUNTIME_DIR/at-spi/bus is shared by every bus on the machine.
+        # Anything reaching AT-SPI while the private bus below is in effect
+        # activates a *second* launcher on it, which rebinds that shared path
+        # and evicts the real session's accessibility bus -- silently, for the
+        # whole desktop, until the next login. Measured here on 2026-09-22: a
+        # stray at-spi2-registryd left holding a /tmp bus address, every GTK3
+        # and Qt application on the developer's session with no accessibility
+        # bus, and `import dogtail.tree` aborting any pyguitest process with
+        # SIGABRT. A private bus that can still reach into the shared runtime
+        # directory is not private.
+        cls._saved_runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
+        cls._runtime_dir = tempfile.mkdtemp(prefix="pyguitest-dbusmock-runtime.")
+        # Registered before the swap that needs undoing, not in tearDownClass:
+        # unittest does not run tearDownClass when setUpClass raises, so a
+        # start_session_bus() that failed would have left this process pointing
+        # at a directory nothing removes -- leaking it, and handing every later
+        # test in the run a runtime directory that is not the session's. Class
+        # cleanups run after tearDownClass, so the bus is still stopped first.
+        cls.addClassCleanup(shutil.rmtree, cls._runtime_dir, ignore_errors=True)
+        cls.addClassCleanup(_restore_env, "XDG_RUNTIME_DIR", cls._saved_runtime_dir)
+        os.environ["XDG_RUNTIME_DIR"] = cls._runtime_dir
         cls.start_session_bus()
 
     @classmethod
@@ -153,6 +186,8 @@ class PortalDBusMockTestCase(_TestCaseBase):
             os.environ.pop("DBUS_SESSION_BUS_ADDRESS", None)
         else:
             os.environ["DBUS_SESSION_BUS_ADDRESS"] = cls._saved_bus_address
+        # XDG_RUNTIME_DIR and the directory itself are undone by the class
+        # cleanups registered in setUpClass, which survive a failure there.
 
     def setUp(self):
         import dbus  # guaranteed importable: dbusmock declares it as a dependency

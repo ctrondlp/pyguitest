@@ -15,9 +15,10 @@ Two things make the decision awkward enough to write down. First, the house rule
 from ADR 001 and ADR 002 — **adapt a maintained command-line tool rather than
 bind a library** — does not carry over, because on Linux the API sits behind a
 socket or a compositor daemon while on Windows it is in DLLs every process has
-already loaded. Second, a sibling analysis of the macOS port reached two
-conclusions this plan deliberately reverses, and a reviewer who has read that
-one will ask about both; they have their own section below.
+already loaded. Second, a sibling analysis of the macOS port — now
+[ADR 004](adr-004-macos.md) — reached two conclusions this plan deliberately
+reverses, and a reviewer who has read that one will ask about both; they have
+their own section below.
 
 One constraint shaped the order of the work rather than its content: nothing in
 this phase has been run on a Windows machine. What is written from the

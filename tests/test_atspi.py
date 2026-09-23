@@ -5,9 +5,13 @@ adapter's own logic: capability gating, the Wayland coordinate refusal, and
 frame filtering.
 """
 
+import os
 import re
+import shutil
+import socket
 import subprocess
 import sys
+import tempfile
 import types
 import unittest
 from unittest import mock
@@ -299,6 +303,84 @@ class TestAvailability(AtspiTestCase):
         self.assertNotIn("pip install", message)
 
 
+_ACCESSIBILITY_ENV = (
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "AT_SPI_DISPLAY",
+    "AT_SPI_BUS_ADDRESS",
+)
+"""Everything the accessibility-bus probe reads out of the environment."""
+
+
+def _environment(**values):
+    """`os.environ` with the probe's own names replaced wholesale.
+
+    A test that says which session it is testing cannot drift when the
+    machine running it is a different one -- and the two sessions ask
+    different questions of different tools: `WAYLAND_DISPLAY` being set is
+    the whole of the difference between asking the session bus and reading
+    the X11 root window.
+    """
+    scoped = {
+        name: value
+        for name, value in os.environ.items()
+        if name not in _ACCESSIBILITY_ENV
+    }
+    scoped.update(values)
+    return mock.patch.dict(os.environ, scoped, clear=True)
+
+
+def _live_bus(test):
+    """A unix socket that accepts connections, as an address to connect to.
+
+    Skips on a platform with no `AF_UNIX` -- Windows, where CPython does not
+    define it (see `ipc._AF_UNIX`). Only the tests that need a *listening*
+    socket are skipped this way: the probe's own refusal path is exercised
+    with `_DEAD_BUS`, which needs no listener and runs everywhere.
+    """
+    if not hasattr(socket, "AF_UNIX"):
+        test.skipTest("no AF_UNIX on this platform; nothing can listen")
+    directory = tempfile.mkdtemp()
+    test.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+    path = os.path.join(directory, "bus")
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    test.addCleanup(listener.close)
+    listener.bind(path)
+    listener.listen(1)
+    return f"unix:path={path}"
+
+
+_DEAD_BUS = "unix:path=/nonexistent/at-spi/bus"
+"""An address nothing is listening on, which is what a bus that has gone
+leaves behind: the socket file outlives its listener and a connect to it is
+refused. That refusal is the state the probe exists to catch."""
+
+
+def _gdbus_answering(address):
+    """A `gdbus call` result, in the tuple syntax gdbus prints."""
+    return subprocess.CompletedProcess([], 0, f"('{address}',)\n".encode(), b"")
+
+
+def _xprop_answering(address):
+    """An `xprop -root AT_SPI_BUS` result, as xprop prints one."""
+    return subprocess.CompletedProcess(
+        [], 0, f'AT_SPI_BUS(STRING) = "{address}"\n'.encode(), b""
+    )
+
+
+_XPROP_NOTHING_SET = subprocess.CompletedProcess(
+    [], 0, b"AT_SPI_BUS:  no such atom on any window.\n", b""
+)
+"""What `xprop` prints when nobody ever set the property, exiting 0 to say
+it -- a session whose root window has no `AT_SPI_BUS` on it."""
+
+_XPROP_NO_DISPLAY = subprocess.CompletedProcess(
+    [], 1, b"", b"xprop:  unable to open display ':99'"
+)
+"""What it does for a display it cannot open, which is `XOpenDisplay`
+returning NULL in libatspi -- also no address from X11."""
+
+
 class TestTheAccessibilityBusProbe(unittest.TestCase):
     """The probe itself: a subprocess, and what each way it can fail means.
 
@@ -315,6 +397,13 @@ class TestTheAccessibilityBusProbe(unittest.TestCase):
         previous = atspi._A11Y_BUS_ANSWERED
         atspi._A11Y_BUS_ANSWERED = False
         self.addCleanup(setattr, atspi, "_A11Y_BUS_ANSWERED", previous)
+        # These are about the session-bus half, so the session they run on
+        # has to be one that asks it: `WAYLAND_DISPLAY` set is what makes
+        # libatspi skip the X11 root-window property. Pinned rather than
+        # inherited, so the answers below do not depend on the machine.
+        patcher = _environment(DISPLAY=":0", WAYLAND_DISPLAY="wayland-0")
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _run(self, **kwargs):
         with (
@@ -393,6 +482,288 @@ class TestTheAccessibilityBusProbe(unittest.TestCase):
         # A composite asks available() once per member build; a probe that
         # spawned a process each time would be paid for repeatedly.
         self.assertIs(self.atspi.a11y_bus_probe(), True)
+
+    def test_an_address_nothing_is_listening_on_answers_no(self):
+        # The bug this probe had. at-spi-bus-launcher outlives the bus it
+        # launched and goes on answering GetAddress with that bus's address,
+        # so "the launcher replied" and "libatspi can connect" are different
+        # questions -- and libatspi dies on the second. Measured on a real
+        # machine in that state: GetAddress answered, connecting was refused,
+        # and `import dogtail.tree` aborted the process with SIGABRT.
+        answer, _ = self._run(
+            return_value=subprocess.CompletedProcess(
+                [], 0, b"('unix:path=/nonexistent/at-spi/bus',)\n", b""
+            )
+        )
+        self.assertIs(answer, False)
+
+    def test_a_dead_address_is_not_memoized_as_reachable(self):
+        with (
+            mock.patch.object(
+                self.atspi.shutil, "which", return_value="/usr/bin/gdbus"
+            ),
+            mock.patch.object(self.atspi.subprocess, "run") as run,
+        ):
+            run.return_value = subprocess.CompletedProcess(
+                [], 0, b"('unix:path=/nonexistent/at-spi/bus',)\n", b""
+            )
+            self.assertIs(self.atspi.a11y_bus_probe(), False)
+            self.assertIs(self.atspi.a11y_bus_probe(), False)
+
+    def test_an_address_that_accepts_a_connection_answers_yes(self):
+        # A real listening socket rather than a patched helper: the thing
+        # being asserted is that a connect actually happens.
+        address = _live_bus(self)
+        answer, _ = self._run(
+            return_value=subprocess.CompletedProcess(
+                [], 0, f"('{address}',)\n".encode(), b""
+            )
+        )
+        self.assertIs(answer, True)
+
+    def test_an_address_this_cannot_check_is_not_a_no(self):
+        # "Could not ask" must not become "no" here any more than anywhere
+        # else in this probe: a tcp address is one this has no cheap way to
+        # test, and refusing AT-SPI over it would be the worse error.
+        answer, _ = self._run(
+            return_value=subprocess.CompletedProcess(
+                [], 0, b"('tcp:host=localhost,port=12345',)\n", b""
+            )
+        )
+        self.assertIs(answer, True)
+
+    def test_the_address_is_parsed_out_of_gdbus_tuple_syntax(self):
+        self.assertEqual(
+            self.atspi._address_from("('unix:path=/run/user/1000/at-spi/bus',)\n"),
+            "unix:path=/run/user/1000/at-spi/bus",
+        )
+        self.assertEqual(
+            self.atspi._address_from(b"('unix:path=/tmp/bus',)\n"),
+            "unix:path=/tmp/bus",
+        )
+        for unparseable in (None, "", b"", "no quotes here"):
+            with self.subTest(reply=unparseable):
+                self.assertIsNone(self.atspi._address_from(unparseable))
+
+    def test_a_guid_suffix_does_not_hide_the_socket_path(self):
+        # The form a real daemon hands out.
+        self.assertIs(
+            self.atspi._address_connectable("unix:path=/nonexistent/bus,guid=abc123"),
+            False,
+        )
+
+    def test_a_dead_first_alternative_does_not_condemn_the_list(self):
+        # A D-Bus address is semicolon-separated alternatives and libdbus
+        # walks them until one connects. Judging the list by its first entry
+        # reported a reachable bus as unavailable and refused AT-SPI over a
+        # bus that works.
+        live = _live_bus(self)
+        self.assertIs(
+            self.atspi._address_connectable(f"unix:path=/nonexistent/bus;{live}"),
+            True,
+        )
+
+    def test_a_list_with_nothing_alive_is_still_a_no(self):
+        self.assertIs(
+            self.atspi._address_connectable(
+                "unix:path=/nonexistent/bus;unix:path=/also/nonexistent"
+            ),
+            False,
+        )
+
+
+class TestTheAddressLibatspiWouldConnectTo(unittest.TestCase):
+    """Which of libatspi's three sources the probe asks, and in what order.
+
+    `atspi_get_a11y_bus` reads `$AT_SPI_BUS_ADDRESS`, then the `AT_SPI_BUS`
+    property on the root window of the display when `WAYLAND_DISPLAY` is
+    unset, then `org.a11y.Bus.GetAddress` on the session bus, stopping at
+    the first that yields an address. A probe that asks a source libatspi
+    stops before is answering about a bus it never touches -- measured on
+    this machine on 2026-09-22, and how the abort got through.
+    """
+
+    def setUp(self):
+        from pyguitest.backends import atspi
+
+        self.atspi = atspi
+        previous = atspi._A11Y_BUS_ANSWERED
+        atspi._A11Y_BUS_ANSWERED = False
+        self.addCleanup(setattr, atspi, "_A11Y_BUS_ANSWERED", previous)
+
+    def _probe(self, env, **replies):
+        """Run the probe against canned replies, one per tool it may spawn.
+
+        `which` reports exactly the tools given a reply, so leaving one out
+        is how a test says a tool is not installed; `run` refuses anything
+        nothing was arranged for, so a tool this should not have asked fails
+        the test rather than getting a Mock. Returns the answer and the
+        commands actually run.
+        """
+        commands = []
+
+        def fake_run(command, **_kwargs):
+            commands.append(command)
+            for tool, reply in replies.items():
+                if os.path.basename(command[0]) == tool:
+                    return reply
+            raise AssertionError(f"nothing arranged for {command}")
+
+        def fake_which(tool):
+            return f"/usr/bin/{tool}" if tool in replies else None
+
+        with (
+            _environment(**env),
+            mock.patch.object(self.atspi.shutil, "which", side_effect=fake_which),
+            mock.patch.object(self.atspi.subprocess, "run", side_effect=fake_run),
+        ):
+            return self.atspi.a11y_bus_probe(), commands
+
+    def _asked(self, commands):
+        """The tools a probe run consulted, by name."""
+        return [os.path.basename(command[0]) for command in commands]
+
+    def _display(self, command):
+        """The display an `xprop` command was pointed at."""
+        return command[command.index("-display") + 1]
+
+    def test_a_wayland_session_never_reads_the_property(self):
+        # XWayland on this desktop: both names set, so libatspi goes
+        # straight to the session bus and whatever is on the root window is
+        # not consulted -- the case that answered correctly before the fix.
+        answer, commands = self._probe(
+            {"DISPLAY": ":0", "WAYLAND_DISPLAY": "wayland-0"},
+            gdbus=_gdbus_answering(_live_bus(self)),
+            xprop=_xprop_answering(_DEAD_BUS),  # arranged for, never asked
+        )
+        self.assertIs(answer, True)
+        self.assertEqual(self._asked(commands), ["gdbus"])
+
+    def test_a_dead_property_is_the_answer_libatspi_dies_on(self):
+        # The recording's environment, `scoped_environment` having stripped
+        # WAYLAND_DISPLAY: libatspi never asks the session bus here, so an
+        # answer from one -- this test's live bus included -- is not the
+        # bus it would connect to.
+        answer, commands = self._probe(
+            {"DISPLAY": ":0"},
+            xprop=_xprop_answering(_DEAD_BUS),
+            gdbus=_gdbus_answering(_live_bus(self)),
+        )
+        self.assertIs(answer, False)
+        self.assertEqual(self._asked(commands), ["xprop"])
+
+    def test_a_live_property_is_reachable_without_the_session_bus(self):
+        answer, commands = self._probe(
+            {"DISPLAY": ":0"}, xprop=_xprop_answering(_live_bus(self))
+        )
+        self.assertIs(answer, True)
+        self.assertEqual(self._asked(commands), ["xprop"])
+
+    def test_the_display_is_read_the_way_libatspi_reads_it(self):
+        # `spi_display_name` strips the screen suffix: the property lives
+        # on the root window of the display, not of the screen.
+        _, commands = self._probe(
+            {"DISPLAY": ":0.1"}, xprop=_xprop_answering(_DEAD_BUS)
+        )
+        self.assertEqual(self._display(commands[0]), ":0")
+
+    def test_at_spi_display_wins_over_display(self):
+        _, commands = self._probe(
+            {"DISPLAY": ":0", "AT_SPI_DISPLAY": ":7"},
+            xprop=_xprop_answering(_DEAD_BUS),
+        )
+        self.assertEqual(self._display(commands[0]), ":7")
+
+    def test_at_spi_display_alone_still_reads_the_property(self):
+        # AT_SPI_DISPLAY set and DISPLAY unset. libatspi gates the X11
+        # source on WAYLAND_DISPLAY alone and takes its display from
+        # `spi_display_name`, which prefers AT_SPI_DISPLAY -- so it reads
+        # the property here. Gating this probe on DISPLAY instead made it
+        # skip the property, answer from the session bus, and call a bus
+        # reachable while libatspi connected to the stale one and aborted:
+        # the precise failure the probe exists to prevent, so it is asserted
+        # by which tool gets asked rather than only by the verdict.
+        answer, commands = self._probe(
+            {"AT_SPI_DISPLAY": ":7"},
+            xprop=_xprop_answering(_DEAD_BUS),
+            gdbus=_gdbus_answering(_live_bus(self)),
+        )
+        self.assertEqual(self._asked(commands), ["xprop"])
+        self.assertEqual(self._display(commands[0]), ":7")
+        self.assertIs(answer, False)
+
+    def test_no_display_at_all_falls_through_to_the_session_bus(self):
+        # The other half of that gate: with neither name set there is no
+        # root window to read, so the property is skipped the way libatspi
+        # skips it when XOpenDisplay fails, and the session bus answers.
+        answer, commands = self._probe({}, gdbus=_gdbus_answering(_live_bus(self)))
+        self.assertEqual(self._asked(commands), ["gdbus"])
+        self.assertIs(answer, True)
+
+    def test_an_environment_address_ends_the_search(self):
+        # libatspi's first source, taken as given: DISPLAY set and
+        # WAYLAND_DISPLAY unset both ways, because neither is reached. The
+        # address is still *checked*, by connecting -- that is the step
+        # libatspi aborts on, whichever source named the address.
+        answer, commands = self._probe(
+            {"DISPLAY": ":0", "AT_SPI_BUS_ADDRESS": _DEAD_BUS},
+            xprop=_xprop_answering(_live_bus(self)),
+            gdbus=_gdbus_answering(_live_bus(self)),
+        )
+        self.assertIs(answer, False)
+        self.assertEqual(commands, [])
+
+    def test_an_empty_environment_address_is_not_an_address(self):
+        # `address_env != NULL && *address_env != 0` in libatspi, which is
+        # this: an empty name falls through to X11 rather than being
+        # connected to.
+        answer, commands = self._probe(
+            {"DISPLAY": ":0", "AT_SPI_BUS_ADDRESS": ""},
+            xprop=_xprop_answering(_live_bus(self)),
+        )
+        self.assertIs(answer, True)
+        self.assertEqual(self._asked(commands), ["xprop"])
+
+    def test_a_property_nobody_set_sends_libatspi_on_to_the_session_bus(self):
+        answer, commands = self._probe(
+            {"DISPLAY": ":0"},
+            xprop=_XPROP_NOTHING_SET,
+            gdbus=_gdbus_answering(_DEAD_BUS),
+        )
+        self.assertIs(answer, False)
+        self.assertEqual(self._asked(commands), ["xprop", "gdbus"])
+
+    def test_a_display_that_cannot_be_opened_does_the_same(self):
+        answer, commands = self._probe(
+            {"DISPLAY": ":99"},
+            xprop=_XPROP_NO_DISPLAY,
+            gdbus=_gdbus_answering(_DEAD_BUS),
+        )
+        self.assertIs(answer, False)
+        self.assertEqual(self._asked(commands), ["xprop", "gdbus"])
+
+    def test_no_xprop_leaves_the_session_bus_to_answer(self):
+        # An X11 session without x11-utils still has a bus, so that half is
+        # asked -- and either answer has to be the bus's own, rather than a
+        # no because a tool is missing.
+        dead, commands = self._probe(
+            {"DISPLAY": ":0"}, gdbus=_gdbus_answering(_DEAD_BUS)
+        )
+        self.assertIs(dead, False)
+        self.assertEqual(self._asked(commands), ["gdbus"])
+        live, commands = self._probe(
+            {"DISPLAY": ":0"}, gdbus=_gdbus_answering(_live_bus(self))
+        )
+        self.assertIs(live, True)
+        self.assertEqual(self._asked(commands), ["gdbus"])
+
+    def test_no_tools_at_all_was_never_asked(self):
+        # Neither installed, on a session that invokes both: still the
+        # third answer, which `a11y_bus_reachable` reads as "try AT-SPI
+        # anyway" rather than as a no.
+        answer, commands = self._probe({"DISPLAY": ":0"})
+        self.assertIsNone(answer)
+        self.assertEqual(commands, [])
 
 
 class TestWaylandCoordinateHonesty(AtspiTestCase):

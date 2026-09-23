@@ -315,6 +315,78 @@ class TestFormatDebug(unittest.TestCase):
         self.assertNotIn("host distro", text)
 
 
+class TestFormatDebugOnWindows(unittest.TestCase):
+    """The report is Linux-shaped, and on Windows it said so about a healthy box.
+
+    `doctor` has answered in Windows terms since the platform landed; this is
+    the same correction for `debug`, which was still reporting fifteen absent
+    CLI tools, eight unset X11/Wayland variables and three accessibility
+    questions Windows does not have -- one of them claiming AT-SPI is
+    attempted there, which nothing does.
+    """
+
+    def _windows_data(self, **overrides):
+        fields = {
+            "session_type": pyguitest.SessionType.WIN32,
+            "compositor": pyguitest.Compositor.DWM,
+            "has_sendinput": True,
+            "has_comtypes": True,
+            "windows_build": 26200,
+            "windows_edition": "Windows 11 Pro",
+            **overrides,
+        }
+        return _debug_data(_FakeGui(_environment(**fields)))
+
+    def test_the_linux_accessibility_lines_are_replaced_by_the_element_tree(self):
+        text = _format_debug(self._windows_data())
+        self.assertIn("elements     UI Automation, through comtypes", text)
+        for absent in ("a11y bus", "chromium a11y", "toolkit      "):
+            with self.subTest(line=absent):
+                self.assertNotIn(absent, text)
+
+    def test_a_missing_comtypes_names_the_extra_that_supplies_it(self):
+        text = _format_debug(self._windows_data(has_comtypes=False))
+        self.assertIn("no element tree", text)
+        self.assertIn("pyguitest[windows]", text)
+
+    def test_only_the_image_tools_are_listed(self):
+        # ImageMagick's `compare` is the one tool that serves Windows.
+        # Reporting the other four groups absent described a gap that does
+        # not exist: win32 injects, captures, lists windows and reads the
+        # clipboard in-process.
+        text = _format_debug(self._windows_data())
+        self.assertIn("image tools", text)
+        for group in ("input tools", "capture tools", "window tools"):
+            with self.subTest(group=group):
+                self.assertNotIn(group, text)
+        self.assertIn("Linux and BSD", text)
+
+    def test_unset_x11_variables_collapse_to_one_line(self):
+        data = self._windows_data()
+        data["env_vars"] = dict.fromkeys(data["env_vars"])
+        text = _format_debug(data)
+        self.assertIn("none of the X11/Wayland variables is set", text)
+        self.assertNotIn("WAYLAND_DISPLAY", text)
+
+    def test_a_variable_that_is_set_is_still_reported(self):
+        # A Windows host can run an X server (Xming, VcXsrv, WSLg) while
+        # `_classify` still answers win32, so a set DISPLAY there belongs in
+        # a bug report.
+        data = self._windows_data()
+        data["env_vars"] = dict.fromkeys(data["env_vars"])
+        data["env_vars"]["DISPLAY"] = ":0"
+        text = _format_debug(data)
+        self.assertIn("DISPLAY", text)
+        self.assertIn(":0", text)
+
+    def test_a_linux_session_keeps_every_line(self):
+        text = _format_debug(_debug_data(_FakeGui(_environment())))
+        for line in ("a11y bus", "chromium a11y", "input tools", "clipboard tools"):
+            with self.subTest(line=line):
+                self.assertIn(line, text)
+        self.assertNotIn("elements     ", text)
+
+
 class TestDebugCommand(unittest.TestCase):
     def _run(self, argv):
         with mock.patch(

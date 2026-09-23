@@ -194,7 +194,7 @@ your distribution (`libei libeis` on Fedora and openSUSE, `libei1 libeis1`
 on Debian/Ubuntu, `libei` on Arch), then the bindings:
 
 ```sh
-pip install '.[eiinput]'     # or: pip install 'python-libei[portal]'
+pip install 'pyguitest[eiinput]'   # or: pip install 'python-libei[portal]'
 ```
 
 The two halves are separate on purpose — `python-libei` is pure ctypes and
@@ -209,9 +209,12 @@ negotiation lived in this package until it was upstreamed in python-libei
 0.3.0; 0.4.0 is where a negotiation that fails part-way stopped leaving its
 portal session open behind it, and where the timeout below came to bound
 every leg of a round trip rather than only the wait for the portal's
-reply. The `eiinput` extra requires **0.5.0**, one further bump, for
+reply. The `eiinput` extra requires **0.5.2**, two further bumps, for
 `InputCaptureSession` -- the read direction the opt-in `inputcapture`
-backend uses, described further down. The extra also pulls in PyGObject,
+backend uses, described further down. 0.5.0 is where that class arrived;
+0.5.2 is where it started receiving its own signals, having subscribed to
+`Activated` on the wrong D-Bus object until then, so every wait ran to its
+timeout and the capability could not work at all. The extra also pulls in PyGObject,
 which that module needs. `libeis` is only needed to run
 `tests/test_eiinput_libei.py`, not at runtime.
 
@@ -454,7 +457,7 @@ to remove.
 Every other capability in this section injects. `Capability.INPUT_CAPTURE`
 is the one that reads: the opt-in `inputcapture` backend
 (`connect(backend="inputcapture")`) negotiates
-`org.freedesktop.portal.InputCapture`, needs `python-libei[portal]>=0.5.0`
+`org.freedesktop.portal.InputCapture`, needs `python-libei[portal]>=0.5.2`
 (the `eiinput` extra also covers it), and offers exactly one operation:
 
 ```python

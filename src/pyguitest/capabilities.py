@@ -172,10 +172,12 @@ class Capability(Enum):
         Tier.REWORK,
         "Read an element's screen rectangle, and hit-test a coordinate "
         "against the accessible tree; one capability rather than the two "
-        "windows get, because both are the same Component call and no "
-        "toolkit answers one without the other. A pure Wayland client is "
-        "never told where it sits on screen, so this is X11 and XWayland "
-        "only, exactly like WINDOW_GEOMETRY on this backend",
+        "windows get, because on AT-SPI both are the same Component call "
+        "and no toolkit answers one without the other. Where it is withheld "
+        "is a per-backend answer, not a property of the capability: AT-SPI "
+        "offers it on X11 and XWayland only, since a pure Wayland client is "
+        "never told where it sits on screen, while UI Automation answers it "
+        "on any Windows session",
     )
 
     # -- T6: no path -------------------------------------------------------
