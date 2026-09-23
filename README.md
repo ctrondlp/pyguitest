@@ -95,7 +95,7 @@ one of the others is the better answer.
 | | pyguitest | [PyAutoGUI][pyautogui] | [dogtail][dogtail] | [pywinauto][pywinauto] |
 |---|---|---|---|---|
 | Linux, X11 | yes | yes | yes | — |
-| Wayland | input through libei, the portal or `uinput`; windows through the compositor's own IPC | — | AT-SPI actions, but no synthetic input | — |
+| Wayland | input through libei, the portal or `uinput`; windows through the compositor's own IPC | — | AT-SPI actions; synthetic input on GNOME only, through `gnome-ponytail-daemon` | — |
 | Windows | yes — `win32` and `uia`, from 0.11.0 | yes | — | yes |
 | macOS | — | yes | — | — |
 | Finds a widget by role and name | AT-SPI and UI Automation | — coordinates and image matching | AT-SPI | UI Automation and Win32 |
@@ -130,7 +130,7 @@ Requires Python 3.10 or newer.
 ```sh
 pip install pyguitest              # core; no dependencies
 pip install 'pyguitest[atspi]'     # + element automation
-pip install 'pyguitest[windows]'   # + element automation on Windows (comtypes)
+pip install "pyguitest[windows]"   # + element automation on Windows (comtypes)
 ```
 
 Or from a checkout, if you are working from the source tree:

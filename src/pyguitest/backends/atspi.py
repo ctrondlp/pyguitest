@@ -51,7 +51,8 @@ class _ProbeTimedOut(Exception):
     two mean opposite things to the caller: a missing address sends libatspi
     on to the next source, while a question that timed out leaves this probe
     unable to say the address libatspi *will* use is safe. See the timeout
-    rule in `a11y_bus_probe`."""
+    rule in `a11y_bus_probe`.
+    """
 
 
 _HAS_AF_UNIX: bool = hasattr(socket, "AF_UNIX")

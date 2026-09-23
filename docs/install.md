@@ -79,12 +79,12 @@ manager to name, and no row of packages that pip cannot supply. What there is:
 | | |
 |---|---|
 | `pip install pyguitest` | everything but the element tree |
-| `pip install 'pyguitest[windows]'` | + UI Automation, through `comtypes` |
+| `pip install "pyguitest[windows]"` | + UI Automation, through `comtypes` — double quotes because Command Prompt does not strip single ones |
 | ImageMagick | `winget install ImageMagick.ImageMagick`, for locating a control by a picture of it — the one thing here pip cannot supply, and it needs its legacy command line, since the tool called is `compare` |
 | nothing on `PATH` | no CLI tool is adapted or recommended: every Windows mechanism is an API call, so there is no ydotool-shaped gap |
 
 The `windows` extra carries an environment marker, so installing it on Linux or
-macOS is a no-op rather than an error — `pip install 'pyguitest[windows]'`
+macOS is a no-op rather than an error — `pip install "pyguitest[windows]"`
 succeeds everywhere and only does something on Windows.
 
 The backends are registered by the same registry every other backend uses, and
@@ -134,7 +134,7 @@ property when the bus it names goes away. `GetAddress` above answering
 happily is then the misleading result, because it is about a different bus:
 
 ```sh
-xprop -display :0 -root AT_SPI_BUS
+xprop -root AT_SPI_BUS
 ```
 
 Measured (2026-09-22) on a desktop with `DISPLAY=:0` and no

@@ -178,11 +178,13 @@ All notable changes to pyguitest are recorded here. The format follows
   dialog on that same desktop, where `wait_for_window("Slow Dialog")` matched
   the window it had timed out on, with no fallback to `FindWindowW` needed --
   so a live machine confirmed the cause *and* the fix, which is the pair this
-  file exists to distinguish. `activate_window`'s retry is the one left in the
+  file exists to distinguish. `activate_window`'s retry was the one left in the
   other state -- its cause reproduced live on 2026-09-20, its fix only ever run
-  against the fake `user32` -- and it is now a bullet under "Not run live"
-  rather than a remark inside the section that produced it, so a future run
-  finds it where every other outstanding claim is listed.
+  against the fake `user32` -- which is why it was moved to a bullet under "Not
+  run live" rather than left as a remark inside the section that produced it.
+  It has since been driven against the real foreground lock, 3/3, and that
+  bullet above is the current status; this paragraph records only where it
+  stood when the fourth run was written up.
 
 - **sway has run live, so the wlroots IPC backends are no longer all
   unvalidated.** `docs/validation.md`'s "Not run live" had carried sway,

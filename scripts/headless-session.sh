@@ -197,13 +197,13 @@ fi
 # Torn down with everything else. The env var carries ownership across the
 # re-exec below, so the inner run knows to remove what the outer one created
 # -- the outer process is gone by then.
-# Guarded on our own marker rather than on XDG_RUNTIME_DIR being unset: this
-# harness always takes a private one (reusing the developer's is the whole of
-# the bug above), but it must take exactly one. This runs before the re-exec
+# Guarded on the re-exec marker rather than on XDG_RUNTIME_DIR being unset:
+# this harness always takes a private one (reusing the developer's is the whole
+# of the bug above), but it must take exactly one. This runs before the re-exec
 # guard below, so without the test the inner run made a second directory and
 # overwrote the variable naming the first -- and the trap, which removes only
 # what $XDG_RUNTIME_DIR then pointed at, orphaned a 0700 directory per run.
-if [[ ${PYGUITEST_HEADLESS_OWN_RUNTIME:-0} != 1 ]]; then
+if [[ ${PYGUITEST_HEADLESS_INNER:-0} != 1 ]]; then
     XDG_RUNTIME_DIR="$(mktemp -d "${TMPDIR:-/tmp}/pyguitest-runtime.XXXXXX")"
     chmod 700 "$XDG_RUNTIME_DIR"
     export XDG_RUNTIME_DIR PYGUITEST_HEADLESS_OWN_RUNTIME=1
@@ -223,6 +223,18 @@ if [[ ${PYGUITEST_HEADLESS_INNER:-} != 1 ]]; then
     exec dbus-run-session -- "${BASH_SOURCE[0]}" "${ORIGINAL_ARGS[@]}"
     # Not reached.
 fi
+
+# Past the re-exec both markers have done their work, so they are taken out of
+# the environment here and kept in shell-local state instead. They are
+# *exported*, which means they would otherwise reach the command in "$@" -- and
+# anything that runs this script again from in there would inherit "a runtime
+# directory already exists" and "the re-exec already happened", allocate
+# nothing, and then have its own EXIT trap delete the outer session's runtime
+# directory. The same inheritance from a caller that happened to export
+# PYGUITEST_HEADLESS_OWN_RUNTIME would delete the caller's real
+# XDG_RUNTIME_DIR. Ownership is this invocation's business and nobody else's.
+OWN_RUNTIME=${PYGUITEST_HEADLESS_OWN_RUNTIME:-0}
+unset PYGUITEST_HEADLESS_OWN_RUNTIME PYGUITEST_HEADLESS_INNER
 
 # ------------------------------------------------------------------ the shell
 
@@ -259,7 +271,7 @@ cleanup() {
     # A signalled shell leaves both of these behind; see the header.
     rm -f "$SOCKET" "$SOCKET.lock"
     ((LOG_IS_TEMP)) && rm -f "$LOG"
-    [[ ${PYGUITEST_HEADLESS_OWN_RUNTIME:-0} == 1 ]] && rm -rf "$XDG_RUNTIME_DIR"
+    [[ ${OWN_RUNTIME:-0} == 1 ]] && rm -rf "$XDG_RUNTIME_DIR"
     return $status
 }
 trap cleanup EXIT
