@@ -19,7 +19,13 @@ worth adapting for the part that matters, so ADR 001's house rule has to be
 re-argued rather than applied — but it fails here for a *different* reason than
 it failed on Windows, and the difference is the whole of the capture decision.
 Second, macOS has a permission system with no analogue anywhere else in this
-package: TCC grants are per-binary, permanent, and answerable "no" exactly once.
+package: TCC grants are per-binary, they persist until something resets them,
+and a denial sticks without any further prompting. Not *permanent* and not
+answerable "no" exactly once — `tccutil reset <service> <bundle-id>` puts a
+decision back, which this file's own rejected-alternatives table already says
+— but the practical effect on a developer who clicked "Don't Allow" is the
+same until they go and undo it, and nothing the package can call will ask
+again.
 Third, [ADR 003](adr-003-windows.md) already argues with this design in public —
 it was written against the research notes of 2026-09-13 and names them "the
 macOS plan" in four places, with the README index, `structure.md` and
@@ -46,7 +52,7 @@ there.
 | Screens, scale, coordinate space | `CGGetActiveDisplayList`, `CGDisplayBounds`, `CGDisplayModeGetPixelWidth` | `pyobjc-framework-Quartz` |
 | Input injection | `CGEventCreateMouseEvent`, `CGEventCreateScrollWheelEvent`, `CGEventCreateKeyboardEvent`, `CGEventPost` | `pyobjc-framework-Quartz` |
 | Pointer query | `CGEventCreate(NULL)` + `CGEventGetLocation` — **no grant at all** | `pyobjc-framework-Quartz` |
-| Screen and window capture | `screencapture -x` / `-R` / `-l`, with ScreenCaptureKit as a second implementation behind the same capability | none — the tool ships with macOS |
+| Screen and window capture | `screencapture -x` / `-R` / `-l`, with ScreenCaptureKit as a second implementation behind the same capability | none for the tool — it ships with macOS. The ScreenCaptureKit route needs `pyobjc-framework-ScreenCaptureKit`, its own distribution, which neither Quartz nor Cocoa pulls in |
 | Clipboard | `NSPasteboard.general`, `NSPasteboardTypeString` | `pyobjc-framework-Cocoa`, pulled in by Quartz |
 | Image search | `imagesearch` and ImageMagick, unchanged from Linux and Windows | none (pip cannot supply the tool) |
 
@@ -81,16 +87,55 @@ Xfce already taught this package once.
 **3. Both PyObjC backends register `opt_in=True`.** This is the decision ADR 003
 reverses for Windows, and the reason is the one `register()`'s docstring names:
 `opt_in` is for a factory whose *construction* raises an interactive consent
-dialog and blocks until someone answers it. On macOS that is literally true —
-`AXIsProcessTrustedWithOptions` with `kAXTrustedCheckOptionPrompt` is a
-system-modal prompt, and §4.3's point is that it can be answered "Don't Allow"
-once, permanently, by a developer who was not expecting it. `eiinput` is the
-existing precedent and the shape is identical.
+dialog. On macOS the dialog is real but the blocking is not:
+`AXIsProcessTrustedWithOptions` with `kAXTrustedCheckOptionPrompt` presents the
+prompt and returns the process's trust status *as it stands*, without waiting
+for an answer — so an untrusted process gets `false` immediately, with the
+dialog still on screen, and only sees `true` on some later call after the user
+has actually granted it in System Settings. Any design that reads the return
+value as "the user's answer" is wrong, and a backend cannot treat the call as
+the moment permission is settled.
+
+The decision is unchanged, because blocking was never the criterion.
+`register()`'s docstring reserves `opt_in` for "a factory whose construction
+has a side effect no caller should hit by surprise, **such as** raising an
+interactive consent dialog that blocks until a user answers it" — the blocking
+dialog is the example, the surprise is the rule. A prompt that appears
+unbidden and returns `false` underneath it is *more* surprising than one that
+waits, not less: a plain `connect()` would leave a dialog on a developer's
+screen and hand back a backend that reports no elements, with nothing tying
+the two together. §4.3's point survives in
+corrected form — the prompt can be answered "Don't Allow" by a developer who
+was not expecting it, and nothing this package can call will raise it again.
+`eiinput` is the existing precedent and the shape is the same.
 
 **4. The preflight/prompt split is the design, not an implementation detail.**
 Every TCC service has a non-prompting counterpart — `AXIsProcessTrusted()`,
-`CGPreflightScreenCaptureAccess()`, `CGPreflightListenEventAccess()` — and
-`detect()` calls only those. The prompting forms are reachable only from a named
+`CGPreflightScreenCaptureAccess()`, `CGPreflightPostEventAccess()`,
+`CGPreflightListenEventAccess()` — and `detect()` calls only those. The
+prompting forms are `AXIsProcessTrustedWithOptions`,
+`CGRequestScreenCaptureAccess()`, `CGRequestPostEventAccess()` and
+`CGRequestListenEventAccess()`.
+
+**Post-event is its own grant, and it is the one input injection needs.**
+`kTCCServiceAccessibility`, `kTCCServicePostEvent` and `kTCCServiceListenEvent`
+are separate TCC services, tracked independently, even though System Settings
+files the first two under the same Accessibility pane. Apple's own guidance is
+explicit that the Accessibility privilege is not what event posting requires:
+
+> If you're using just `CGEventTap`, there's `CGPreflightListenEventAccess`,
+> `CGRequestListenEventAccess`, `CGPreflightPostEventAccess`, and
+> `CGRequestPostEventAccess`. You only need the Accessibility privilege if
+> you're doing other stuff with Accessibility APIs.
+>
+> — Quinn "The Eskimo!", Apple DTS,
+> [Developer Forums thread 744440](https://developer.apple.com/forums/thread/744440)
+
+So `macquartz`, which posts events with `CGEventPost` and never touches an AX
+API, preflights **PostEvent** and not Accessibility; `macax`, which reads and
+writes AX attributes, preflights Accessibility. Conflating the two would make
+the input backend refuse itself on a machine that had granted exactly what it
+needs, and would make §6's reduced capability set withdraw the wrong half. The prompting forms are reachable only from a named
 backend's constructor, never from an import, never from `detect()`, and never
 from a test that did not ask for the backend by name. A denial is reported in
 `Environment.notes` and in `summary()`, because "empty element tree" and "not
@@ -112,9 +157,24 @@ below.
 `capabilities` is a property `Session` and `--debug` both trust, so a `macos`
 backend built without Accessibility declares the CGWindowList-shaped subset —
 `WINDOW_LIST`/`WINDOW_STATE`/`WINDOW_GEOMETRY`/`WINDOW_ACTIVATE`/`WINDOW_PID`/
-`WINDOW_AT_POINT` and nothing more — rather than a set it cannot honour. This is
-the same rule `tools.py` already applies when it refuses to select `wtype` on
-Mutter: installed is not the same as able.
+`WINDOW_AT_POINT` — rather than a set it cannot honour. This is the same rule
+`tools.py` already applies when it refuses to select `wtype` on Mutter:
+installed is not the same as able.
+
+**What it withdraws is what Accessibility actually gates, and no more.** A
+denied Accessibility grant says nothing about the capabilities that never asked
+for it, and withdrawing those would report a machine as less able than it is —
+the same dishonesty in the other direction. Kept in the reduced set:
+`SCREEN_INFO`, which is `CGGetActiveDisplayList`/`CGDisplayBounds` and needs no
+grant; `POINTER_QUERY`, which the table above already marks **no grant at
+all**; `SCREEN_CAPTURE`/`WINDOW_CAPTURE`, which are gated on
+ScreenCapture — a different service, preflighted separately; and
+`IMAGE_LOCATE`, which is ImageMagick on a file. The input capabilities are
+gated on **PostEvent**, per §4, so they are withdrawn when *that* preflight
+says no and not when Accessibility does. Only `ELEMENT_TREE`, `ELEMENT_ACTION`,
+`ELEMENT_GEOMETRY` and the AX-backed window writes
+(`WINDOW_PLACEMENT`/`WINDOW_RESIZE`/`WINDOW_MINIMIZE`) are Accessibility's to
+take away.
 
 **7. Four refusals are permanent, and are refusals for the same reason Wayland's
 are.** `WINDOW_TITLE_SET` (`kAXTitleAttribute` is read-only for a foreign
@@ -159,7 +219,7 @@ environment variable and skipped by default, never skipped silently, the way
 | Neither backend `opt_in`, for parity with ADR 003 | See below: constructing these *can* raise a system-modal prompt, which is the exact case `opt_in` is reserved for. Windows has no TCC, so it has nothing to avoid |
 | `SessionType.UNKNOWN` with `Compositor.OTHER` | Both are printed by `Environment.summary()` and read by `hints_for()`, so this routes a Mac to the Linux advice path while telling a developer nothing |
 | ScreenCaptureKit first | An async completion-handler API from Python, ahead of a CLI that ships with the OS and already fits `tools.py`. It belongs behind the capability, not in front of the tool |
-| A `Hint` variant for permissions | The research notes left "`command=None` plus new prose, or a change to the `Hint` type" open. It closed itself: `Hint.command` is already `str | None`, so the TCC advice needs no type change |
+| A `Hint` variant for permissions | The research notes left "`command=None` plus new prose, or a change to the `Hint` type" open. It closed itself: `Hint.command` is already `str \| None`, so the TCC advice needs no type change |
 | Automating the grant | `tccutil reset` can withdraw a permission; nothing supported can grant one. A "just click the toggle" helper is not buildable, however often it is asked for |
 | A signed helper bundle for unattended CI | An MDM-delivered PPPC profile pre-approving a signed, stable binary is the only route, and a virtualenv interpreter is neither signed nor stable. That is a distribution project, not a backend one |
 
@@ -207,11 +267,24 @@ documents will otherwise find an argument that ADR 003 already dismantled.
 
 ## Consequences
 
-- A bare `pip install pyguitest` on macOS gets detection, honest hints, the
-  clipboard, process launch, timing and image search — and no elements, no
-  windows, no input. The `macos` extra adds the first two families and the
-  third; `doctor` names it. That is a real contrast with Windows, where only
-  elements sit behind an extra.
+- A bare `pip install pyguitest` on macOS gets detection, honest hints, screen
+  capture through `screencapture`, process launch, timing and image search —
+  and no elements, no windows, no input. The `macos` extra adds the first two
+  families and the third; `doctor` names it. That is a real contrast with
+  Windows, where only elements sit behind an extra.
+
+  **Two things this promise needs, which the earlier draft skipped over.** The
+  preflight calls in §4 are plain C functions in ApplicationServices and
+  CoreGraphics — no arguments, a `Boolean` return — so `detect()` reaches them
+  through `ctypes.CDLL` and needs no PyObjC, exactly as ADR 003's Windows probe
+  reaches `user32`. Without that the promise collapses, because every API §4
+  names would otherwise sit behind the optional extra it is supposed to report
+  on. The clipboard, though, does **not** survive a bare install: the table
+  above puts it on `NSPasteboard`, which is Objective-C and unreachable that
+  way, so it moves behind the extra with the rest. If a no-dependency clipboard
+  is wanted, `pbcopy`/`pbpaste` ship with macOS and fit `tools.py` the way
+  `screencapture` does — that is ADR 001's house rule and an obvious route, but
+  it is a decision this file has not taken.
 - Nothing is automatic. Both PyObjC backends are `opt_in`, so a plain
   `connect()` on a Mac composes the capture tool and whatever needs no grant;
   a caller wanting AX or injection names the backend and accepts the prompt.
