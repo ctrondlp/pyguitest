@@ -330,13 +330,53 @@ def _environment(**values):
     return mock.patch.dict(os.environ, scoped, clear=True)
 
 
+needs_af_unix = unittest.skipUnless(
+    hasattr(socket, "AF_UNIX"), "no AF_UNIX on this platform"
+)
+"""For the few tests whose subject really is the unix socket layer.
+
+Everything else states reachability with `_connectability` instead of staging
+it, so the probe's *logic* is testable on a platform that has no unix sockets
+at all -- which is the whole of why those tests are not simply skipped here.
+"""
+
+
+def _connectability(test, live=()):
+    """Answer "can this address be connected to" from a set, not from a socket.
+
+    The seam these tests were missing. Most of them are about the probe's
+    decision logic -- which of libatspi's three sources gets consulted, what a
+    refusal means, what is memoized -- and reachability is only the scaffolding
+    that provokes the decision. Expressing "dead" as a real
+    `unix:path=/nonexistent/...` handed that question to the host's socket
+    stack, so on a machine with no `AF_UNIX` the logic could not be tested at
+    all: `_address_connectable` rightly answers None ("cannot check") there,
+    the verdict came back True, and seven tests failed on Windows CI for a
+    reason that had nothing to do with what any of them assert.
+
+    Stated as a fact instead, the same tests run everywhere and assert the
+    same thing. `_live_bus` and `needs_af_unix` stay for the handful whose
+    point *is* that a real connect happens.
+    """
+    live = set(live)
+
+    def answer(address):
+        if not address:
+            return None
+        return address in live
+
+    patcher = mock.patch.object(test.atspi, "_address_connectable", side_effect=answer)
+    patcher.start()
+    test.addCleanup(patcher.stop)
+
+
 def _live_bus(test):
     """A unix socket that accepts connections, as an address to connect to.
 
     Skips on a platform with no `AF_UNIX` -- Windows, where CPython does not
-    define it (see `ipc._AF_UNIX`). Only the tests that need a *listening*
-    socket are skipped this way: the probe's own refusal path is exercised
-    with `_DEAD_BUS`, which needs no listener and runs everywhere.
+    define it (see `ipc._AF_UNIX`). Only for tests that need a *listening*
+    socket; a test that merely needs an address to be reachable should say so
+    with `_connectability` and stay portable.
     """
     if not hasattr(socket, "AF_UNIX"):
         test.skipTest("no AF_UNIX on this platform; nothing can listen")
@@ -354,6 +394,13 @@ _DEAD_BUS = "unix:path=/nonexistent/at-spi/bus"
 """An address nothing is listening on, which is what a bus that has gone
 leaves behind: the socket file outlives its listener and a connect to it is
 refused. That refusal is the state the probe exists to catch."""
+
+_LIVE_BUS = "unix:path=/run/user/1000/at-spi/bus"
+"""A plausible address that `_connectability` is told is reachable.
+
+Deliberately never connected to: naming a path that happens to exist on the
+machine running the suite is exactly the coupling this pair of constants
+exists to remove."""
 
 
 def _gdbus_answering(address):
@@ -490,23 +537,19 @@ class TestTheAccessibilityBusProbe(unittest.TestCase):
         # questions -- and libatspi dies on the second. Measured on a real
         # machine in that state: GetAddress answered, connecting was refused,
         # and `import dogtail.tree` aborted the process with SIGABRT.
-        answer, _ = self._run(
-            return_value=subprocess.CompletedProcess(
-                [], 0, b"('unix:path=/nonexistent/at-spi/bus',)\n", b""
-            )
-        )
+        _connectability(self)  # nothing is reachable
+        answer, _ = self._run(return_value=_gdbus_answering(_DEAD_BUS))
         self.assertIs(answer, False)
 
     def test_a_dead_address_is_not_memoized_as_reachable(self):
+        _connectability(self)  # nothing is reachable
         with (
             mock.patch.object(
                 self.atspi.shutil, "which", return_value="/usr/bin/gdbus"
             ),
             mock.patch.object(self.atspi.subprocess, "run") as run,
         ):
-            run.return_value = subprocess.CompletedProcess(
-                [], 0, b"('unix:path=/nonexistent/at-spi/bus',)\n", b""
-            )
+            run.return_value = _gdbus_answering(_DEAD_BUS)
             self.assertIs(self.atspi.a11y_bus_probe(), False)
             self.assertIs(self.atspi.a11y_bus_probe(), False)
 
@@ -545,13 +588,19 @@ class TestTheAccessibilityBusProbe(unittest.TestCase):
             with self.subTest(reply=unparseable):
                 self.assertIsNone(self.atspi._address_from(unparseable))
 
+    @needs_af_unix
     def test_a_guid_suffix_does_not_hide_the_socket_path(self):
-        # The form a real daemon hands out.
+        # The form a real daemon hands out. Unpatched on purpose: this one is
+        # about `_address_connectable` itself picking the path out of the
+        # address, so it needs the real socket layer to answer -- and where
+        # there is none, the honest answer is None ("cannot check"), not
+        # False, which is why this skips rather than asserting.
         self.assertIs(
             self.atspi._address_connectable("unix:path=/nonexistent/bus,guid=abc123"),
             False,
         )
 
+    @needs_af_unix
     def test_a_dead_first_alternative_does_not_condemn_the_list(self):
         # A D-Bus address is semicolon-separated alternatives and libdbus
         # walks them until one connects. Judging the list by its first entry
@@ -563,6 +612,7 @@ class TestTheAccessibilityBusProbe(unittest.TestCase):
             True,
         )
 
+    @needs_af_unix
     def test_a_list_with_nothing_alive_is_still_a_no(self):
         self.assertIs(
             self.atspi._address_connectable(
@@ -581,6 +631,13 @@ class TestTheAddressLibatspiWouldConnectTo(unittest.TestCase):
     the first that yields an address. A probe that asks a source libatspi
     stops before is answering about a bus it never touches -- measured on
     this machine on 2026-09-22, and how the abort got through.
+
+    Every test here asserts *which source was consulted*; whether an address
+    answers is only what provokes the probe to move on. So reachability is
+    stated once in setUp rather than staged with real sockets -- which keeps
+    these runnable on a platform that has no unix sockets, and stops them
+    depending on whether `_LIVE_BUS`'s path happens to exist on the machine
+    running the suite.
     """
 
     def setUp(self):
@@ -590,6 +647,7 @@ class TestTheAddressLibatspiWouldConnectTo(unittest.TestCase):
         previous = atspi._A11Y_BUS_ANSWERED
         atspi._A11Y_BUS_ANSWERED = False
         self.addCleanup(setattr, atspi, "_A11Y_BUS_ANSWERED", previous)
+        _connectability(self, live={_LIVE_BUS})
 
     def _probe(self, env, **replies):
         """Run the probe against canned replies, one per tool it may spawn.
@@ -606,6 +664,11 @@ class TestTheAddressLibatspiWouldConnectTo(unittest.TestCase):
             commands.append(command)
             for tool, reply in replies.items():
                 if os.path.basename(command[0]) == tool:
+                    # An exception is a reply too: subprocess.run raises for a
+                    # timeout rather than returning one, and how each half of
+                    # the probe treats that is its own rule worth testing.
+                    if isinstance(reply, BaseException):
+                        raise reply
                     return reply
             raise AssertionError(f"nothing arranged for {command}")
 
@@ -633,7 +696,7 @@ class TestTheAddressLibatspiWouldConnectTo(unittest.TestCase):
         # not consulted -- the case that answered correctly before the fix.
         answer, commands = self._probe(
             {"DISPLAY": ":0", "WAYLAND_DISPLAY": "wayland-0"},
-            gdbus=_gdbus_answering(_live_bus(self)),
+            gdbus=_gdbus_answering(_LIVE_BUS),
             xprop=_xprop_answering(_DEAD_BUS),  # arranged for, never asked
         )
         self.assertIs(answer, True)
@@ -647,14 +710,14 @@ class TestTheAddressLibatspiWouldConnectTo(unittest.TestCase):
         answer, commands = self._probe(
             {"DISPLAY": ":0"},
             xprop=_xprop_answering(_DEAD_BUS),
-            gdbus=_gdbus_answering(_live_bus(self)),
+            gdbus=_gdbus_answering(_LIVE_BUS),
         )
         self.assertIs(answer, False)
         self.assertEqual(self._asked(commands), ["xprop"])
 
     def test_a_live_property_is_reachable_without_the_session_bus(self):
         answer, commands = self._probe(
-            {"DISPLAY": ":0"}, xprop=_xprop_answering(_live_bus(self))
+            {"DISPLAY": ":0"}, xprop=_xprop_answering(_LIVE_BUS)
         )
         self.assertIs(answer, True)
         self.assertEqual(self._asked(commands), ["xprop"])
@@ -686,17 +749,32 @@ class TestTheAddressLibatspiWouldConnectTo(unittest.TestCase):
         answer, commands = self._probe(
             {"AT_SPI_DISPLAY": ":7"},
             xprop=_xprop_answering(_DEAD_BUS),
-            gdbus=_gdbus_answering(_live_bus(self)),
+            gdbus=_gdbus_answering(_LIVE_BUS),
         )
         self.assertEqual(self._asked(commands), ["xprop"])
         self.assertEqual(self._display(commands[0]), ":7")
         self.assertIs(answer, False)
 
+    def test_an_xprop_that_times_out_answers_no_rather_than_asking_elsewhere(self):
+        # A slow X server is not an absent property: libatspi will still read
+        # the address off that root window. Falling through to the session bus
+        # would answer True about a bus it is never going to touch -- and
+        # memoize it -- which is the failure this probe exists to prevent. The
+        # session-bus half already answers a timeout with no; this is the
+        # matching rule for the X11 half.
+        answer, commands = self._probe(
+            {"DISPLAY": ":0"},
+            xprop=subprocess.TimeoutExpired("xprop", 5),
+            gdbus=_gdbus_answering(_LIVE_BUS),  # arranged for, must not be asked
+        )
+        self.assertIs(answer, False)
+        self.assertEqual(self._asked(commands), ["xprop"])
+
     def test_no_display_at_all_falls_through_to_the_session_bus(self):
         # The other half of that gate: with neither name set there is no
         # root window to read, so the property is skipped the way libatspi
         # skips it when XOpenDisplay fails, and the session bus answers.
-        answer, commands = self._probe({}, gdbus=_gdbus_answering(_live_bus(self)))
+        answer, commands = self._probe({}, gdbus=_gdbus_answering(_LIVE_BUS))
         self.assertEqual(self._asked(commands), ["gdbus"])
         self.assertIs(answer, True)
 
@@ -707,8 +785,8 @@ class TestTheAddressLibatspiWouldConnectTo(unittest.TestCase):
         # libatspi aborts on, whichever source named the address.
         answer, commands = self._probe(
             {"DISPLAY": ":0", "AT_SPI_BUS_ADDRESS": _DEAD_BUS},
-            xprop=_xprop_answering(_live_bus(self)),
-            gdbus=_gdbus_answering(_live_bus(self)),
+            xprop=_xprop_answering(_LIVE_BUS),
+            gdbus=_gdbus_answering(_LIVE_BUS),
         )
         self.assertIs(answer, False)
         self.assertEqual(commands, [])
@@ -719,7 +797,7 @@ class TestTheAddressLibatspiWouldConnectTo(unittest.TestCase):
         # connected to.
         answer, commands = self._probe(
             {"DISPLAY": ":0", "AT_SPI_BUS_ADDRESS": ""},
-            xprop=_xprop_answering(_live_bus(self)),
+            xprop=_xprop_answering(_LIVE_BUS),
         )
         self.assertIs(answer, True)
         self.assertEqual(self._asked(commands), ["xprop"])
@@ -752,7 +830,7 @@ class TestTheAddressLibatspiWouldConnectTo(unittest.TestCase):
         self.assertIs(dead, False)
         self.assertEqual(self._asked(commands), ["gdbus"])
         live, commands = self._probe(
-            {"DISPLAY": ":0"}, gdbus=_gdbus_answering(_live_bus(self))
+            {"DISPLAY": ":0"}, gdbus=_gdbus_answering(_LIVE_BUS)
         )
         self.assertIs(live, True)
         self.assertEqual(self._asked(commands), ["gdbus"])

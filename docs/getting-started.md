@@ -8,8 +8,13 @@ already know what you want and just need the signature, go to
 
 ```sh
 pip install 'pyguitest[atspi]'     # Linux and the BSDs
-pip install 'pyguitest[windows]'   # Microsoft Windows
+pip install "pyguitest[windows]"   # Microsoft Windows
 ```
+
+Double quotes on the Windows line on purpose: Command Prompt does not strip
+single ones, so `'pyguitest[windows]'` reaches pip with the quotes still
+attached and fails to parse. Double quotes work in Command Prompt, PowerShell
+and a POSIX shell alike.
 
 One extra is worth having from the start, and which one depends on your
 platform: both give you the element tree, which is what lets a test say

@@ -44,6 +44,16 @@ __all__ = [
 ]
 
 
+class _ProbeTimedOut(Exception):
+    """One of the probe's subprocesses ran out of time.
+
+    Carried as an exception rather than folded into "no address" because the
+    two mean opposite things to the caller: a missing address sends libatspi
+    on to the next source, while a question that timed out leaves this probe
+    unable to say the address libatspi *will* use is safe. See the timeout
+    rule in `a11y_bus_probe`."""
+
+
 _HAS_AF_UNIX: bool = hasattr(socket, "AF_UNIX")
 """Whether this platform has Unix sockets at all.
 
@@ -174,7 +184,10 @@ def _bus_verdict() -> bool | None:
     """
     address = os.environ.get("AT_SPI_BUS_ADDRESS") or None
     if address is None and _x11_bus_applies():
-        address = _x11_address()
+        try:
+            address = _x11_address()
+        except _ProbeTimedOut:
+            return False
     if address is None:
         return _session_bus_verdict()
     return _address_connectable(address) is not False
@@ -227,8 +240,19 @@ def _x11_address() -> str | None:
             timeout=_A11Y_BUS_TIMEOUT,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
+    except subprocess.TimeoutExpired:
+        # Not the same as "no property", and the difference decides whether
+        # this probe can abort the process. A slow X server still has a root
+        # window, and libatspi will still read the address off it -- so
+        # falling through to the session bus here would answer confidently
+        # about a bus libatspi is never going to touch, which is the exact
+        # shape of the bug this rewrite exists to fix. The timeout rule in
+        # `a11y_bus_probe` applies: answer no, and pay a skipped backend
+        # rather than risk the core dump. `_session_bus_verdict` already
+        # separates its two failures the same way.
+        raise _ProbeTimedOut from None
+    except OSError:
+        return None  # no runnable xprop: still an unasked question
     return _address_from_x11(probe.stdout)
 
 
