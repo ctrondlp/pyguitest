@@ -263,7 +263,23 @@ def _focus_tracking(gui) -> bool | None:
 
 
 def _format_debug(data: dict) -> str:
-    """Render `_debug_data`'s output as the pasteable text report."""
+    """Render `_debug_data`'s output as the pasteable text report.
+
+    Three blocks below are Linux questions, and on a Windows session they
+    were answered in Linux terms rather than not asked: fifteen CLI tools
+    reported `not found`, eight X11/Wayland variables reported `unset`, and
+    the three accessibility lines rendered their "could not ask" case --
+    including "AT-SPI is attempted anyway", which is untrue there, since
+    nothing on Windows attempts AT-SPI at all. A healthy machine read as one
+    missing two dozen things. `doctor` has answered in Windows terms since
+    the platform landed (see hints._windows_hints); this is the same
+    correction for the wider report.
+
+    Only the rendering branches. `_debug_data` still asks every question on
+    every platform, so `--json` carries the same fields everywhere and a
+    consumer of it needs no platform branch of its own.
+    """
+    windows = data["environment"].get("session_type") == "win32"
     lines = [
         f"pyguitest    {data['pyguitest_version']}",
         f"python       {data['python']['version']} "
@@ -286,7 +302,17 @@ def _format_debug(data: dict) -> str:
     for name, value in data["environment"].items():
         lines.append(f"  {name:<16} {value!r}")
 
-    for group in ("input", "capture", "window", "image", "clipboard"):
+    # `image` is in the Windows list because it is the one group that serves
+    # that platform: ImageMagick's `compare` is what IMAGE_LOCATE shells out
+    # to everywhere, and docs/install.md names it as the single thing pip
+    # cannot supply there. The other four are Linux and BSD tools that no
+    # Windows path consults -- win32 injects, captures, lists windows and
+    # reads the clipboard in-process -- so reporting them absent described a
+    # gap that does not exist.
+    groups = (
+        ("image",) if windows else ("input", "capture", "window", "image", "clipboard")
+    )
+    for group in groups:
         lines.append("")
         lines.append(f"{group} tools")
         for tool in data["tools"][group]:
@@ -295,11 +321,26 @@ def _format_debug(data: dict) -> str:
                 continue
             version = tool["version"] or "version unknown"
             lines.append(f"  {tool['name']:<18} {tool['path']}  ({version})")
+    if windows:
+        lines.append("")
+        lines.append(
+            "input, capture, window and clipboard tools are Linux and BSD "
+            "only;\nwin32 does all four in-process"
+        )
 
+    # Printed on Windows only when something actually set one. A Windows host
+    # can run an X server (Xming, VcXsrv, WSLg) and `_classify` still answers
+    # win32 before it reads any variable, so a set DISPLAY there is worth
+    # seeing in a bug report -- while the ordinary case, all eight unset, is
+    # a list of absences about a protocol this session does not speak.
+    env_vars = data["env_vars"]
     lines.append("")
-    lines.append("environment variables")
-    for name, value in data["env_vars"].items():
-        lines.append(f"  {name:<26} {value if value is not None else 'unset'}")
+    if windows and not any(value is not None for value in env_vars.values()):
+        lines.append("environment variables  none of the X11/Wayland variables is set")
+    else:
+        lines.append("environment variables")
+        for name, value in env_vars.items():
+            lines.append(f"  {name:<26} {value if value is not None else 'unset'}")
 
     lines.append("")
     lines.append(f"backend      {data['backend']}")
@@ -313,35 +354,57 @@ def _format_debug(data: dict) -> str:
             None: "not probed (no element tree on this desktop)",
         }[focus]
     )
-    lines.append(
-        "a11y bus     "
-        + {
-            True: "org.a11y.Bus answers",
-            False: "org.a11y.Bus did NOT answer -- AT-SPI is unavailable "
-            "here; install at-spi2-core or start at-spi-bus-launcher",
-            None: "not asked (no gdbus) -- AT-SPI is attempted anyway",
-        }[data["a11y_bus"]]
-    )
-    lines.append(
-        "chromium a11y "
-        + {
-            True: "an AT is announced, so Chromium/Electron apps publish elements",
-            False: "org.a11y.Status.IsEnabled is false -- Chromium and "
-            "Electron apps (VS Code, Chrome, Slack) publish NO elements "
-            "at all, though windows() still lists their windows",
-            None: "not readable (no gdbus, or no accessibility bus)",
-        }[data["assistive_technology"]]
-    )
-    lines.append(
-        "toolkit      "
-        + {
-            True: "toolkit-accessibility on",
-            False: "toolkit-accessibility OFF -- harmless on GNOME, but on "
-            "KDE no GTK application publishes elements",
-            None: "toolkit-accessibility not readable (no PyGObject, or no "
-            "GNOME schemas installed)",
-        }[data["toolkit_accessibility"]]
-    )
+    if windows:
+        # One line where Linux gets three, and about the tree this platform
+        # actually has. The three below ask after the accessibility *bus*,
+        # the announced AT that makes Chromium publish anything, and GTK's
+        # bridge setting -- none of which exists on Windows, where the
+        # element tree is UI Automation and the only question is whether
+        # comtypes can open it. That is `can_use_atspi`'s reasoning (see
+        # session.py) carried into the report.
+        lines.append(
+            "elements     "
+            + (
+                "UI Automation, through comtypes"
+                if data["environment"].get("has_comtypes")
+                else "no element tree -- comtypes is not importable; "
+                "pip install 'pyguitest[windows]'"
+            )
+        )
+    else:
+        lines.append(
+            "a11y bus     "
+            + {
+                True: "the address libatspi would use accepts a connection",
+                False: "the address libatspi would use was REFUSED -- AT-SPI "
+                "is unavailable here; install at-spi2-core or start "
+                "at-spi-bus-launcher, and if the X root window still names a "
+                "bus that is gone, clear it with "
+                "`xprop -root -remove AT_SPI_BUS`",
+                None: "not asked (no gdbus, and no display to read the "
+                "AT_SPI_BUS property from) -- AT-SPI is attempted anyway",
+            }[data["a11y_bus"]]
+        )
+        lines.append(
+            "chromium a11y "
+            + {
+                True: "an AT is announced, so Chromium/Electron apps publish elements",
+                False: "org.a11y.Status.IsEnabled is false -- Chromium and "
+                "Electron apps (VS Code, Chrome, Slack) publish NO elements "
+                "at all, though windows() still lists their windows",
+                None: "not readable (no gdbus, or no accessibility bus)",
+            }[data["assistive_technology"]]
+        )
+        lines.append(
+            "toolkit      "
+            + {
+                True: "toolkit-accessibility on",
+                False: "toolkit-accessibility OFF -- harmless on GNOME, but on "
+                "KDE no GTK application publishes elements",
+                None: "toolkit-accessibility not readable (no PyGObject, or no "
+                "GNOME schemas installed)",
+            }[data["toolkit_accessibility"]]
+        )
     if data["backend_report"]:
         lines.append("")
         lines.append(data["backend_report"])

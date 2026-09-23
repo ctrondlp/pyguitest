@@ -39,8 +39,9 @@ the thing you are actually waiting for:
 Two of these are worth knowing precisely.
 
 **`wait_for_idle(pid)` means CPU-idle, not "the UI stopped changing."** It
-samples `/proc/<pid>/stat` (or `ps`, off Linux) and returns once the process
-has stopped burning CPU. That is the right signal after clicking *Export* and
+samples `/proc/<pid>/stat` (or `ps` where there is no readable `/proc`, or
+`GetProcessTimes` on Windows) and returns once the process has stopped burning
+CPU. That is the right signal after clicking *Export* and
 before checking the output file; it is the wrong signal for an application
 idling in an animation loop.
 
@@ -338,9 +339,10 @@ path, so a port can be gated in CI; the full 50-export table lives in
 | `ClickWindow` | `Element.click` | Prefer `gui.button(...).click()` |
 | `GetRootWindow` / `GetChildWindows` / `GetParentWindow` | `root_element` / `Element.children` / `Element.parent` | The accessible tree, not the window tree |
 | `GetScreenRes` / `ScreenCount` | `Screen.size` / `len(gui.screens())` | |
-| `GetMousePos`, `IsKeyPressed`, `IsMouseButtonPressed`, `SetWindowName`, `LowerWindow`, `IsWindowCursor` | X11 sessions only | Deliberately prevented on Wayland; `gui.pointer_position()` and friends exist but raise there |
+| `GetMousePos`, `IsKeyPressed`, `IsMouseButtonPressed`, `SetWindowName`, `LowerWindow`, `IsWindowCursor` | X11 and Microsoft Windows | Deliberately prevented on Wayland; `gui.pointer_position()` and friends exist but raise there |
 
 The last row is the one that decides whether a port is possible at all. If a
-script depends on reading global input state, it can be ported to X11 and
-XWayland and nowhere else — no backend will ever change that, because
-preventing it is the point.
+script depends on reading global input state, it can be ported to X11,
+XWayland and Windows — where these are ordinary API calls — but not to
+Wayland, and no backend will ever change that, because preventing it is the
+point.

@@ -197,12 +197,13 @@ that pair are deliberate choices rather than
 defaults. `win32` and *only* `win32` answers `windows()`: the window objects
 `uia` could return are elements rather than window handles, so every placement
 call granted to it would have nothing to use. And neither is `opt_in`, which
-**reverses** the conclusion the macOS plan reached: `register()` reserves
-`opt_in` for a factory whose construction raises a consent dialog that blocks
-until a user answers, and on Windows there is no such dialog — constructing a
-`SendInput` wrapper has no side effect at all, since the side effect is per call
-— so an opt-in Windows input backend would make a Windows session *less* capable
-by default than a Linux one for no reason a reader could observe.
+**reverses** the conclusion the macOS plan ([ADR 004](adr-004-macos.md))
+reached: `register()` reserves `opt_in` for a factory whose construction raises
+a consent dialog that blocks until a user answers, and on Windows there is no
+such dialog — constructing a `SendInput` wrapper has no side effect at all,
+since the side effect is per call — so an opt-in Windows input backend would
+make a Windows session *less* capable by default than a Linux one for no reason
+a reader could observe.
 [adr-003-windows.md](adr-003-windows.md) has both arguments in full, alongside
 the alternatives rejected.
 

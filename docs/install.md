@@ -30,7 +30,7 @@ rather than an error.
 | `kwinevents` | window open/close/title events on KDE | — | PyGObject | — (loads an ad hoc KWin script at runtime; nothing to install) |
 | `gnomeshell` | window control, prompt-free per-window capture, and outputs with their scale on GNOME | — | PyGObject | — (plus the [Shell extension](../gnome-shell-extension/README.md), installed by hand) |
 | `input` | pointer and keyboard through a CLI tool | — | — | `wdotool`, `wtype`, `ydotool` or `xdotool` |
-| `uinput` | in-process pointer and keyboard | `[uinput]` (evdev) | — | — (needs `/dev/uinput` access) |
+| `uinput` | in-process pointer and keyboard | `[uinput]` (evdev) | — | — (needs [`/dev/uinput` access](input.md#uinput-devuinput-permissions)) |
 | `eiinput` *(opt-in)* | keymap-safe input over libei | `[eiinput]` (`python-libei[portal]`, which brings PyGObject with it) | `libei`, gobject-introspection | — |
 | `portal` *(opt-in)* | keyboard and pointer buttons/scroll via the RemoteDesktop portal, and the clipboard with `clipboard=True` — the only clipboard path on GNOME | — | PyGObject | — |
 | `capture` | screenshots | — | — | `grim`, `gnome-screenshot`, `spectacle` or `import` |
@@ -51,14 +51,14 @@ PNGs itself, so it needs no screenshot tool either.
 
 | Desktop | What you install |
 |---|---|
-| sway / Hyprland / niri | `pip install .` — nothing else |
-| GNOME | `pip install '.[atspi]'` + three distribution packages |
+| sway / Hyprland / niri | `pip install pyguitest` — nothing else |
+| GNOME | `pip install 'pyguitest[atspi]'` + three distribution packages |
 | GNOME, pure Wayland (no XWayland) | as GNOME, plus the [pyguitest-window-control extension](../gnome-shell-extension/README.md) for window placement/minimize |
 | KDE | as GNOME, plus `kdotool` for windows, and `gsettings set org.gnome.desktop.interface toolkit-accessibility true` or no application publishes any elements — [see below](#on-kde-one-more-step-that-is-not-a-package) |
-| X11 | `pip install '.[x11]'` |
-| Any portal-supporting desktop, deliberately | `pip install '.[atspi]'` for PyGObject, then `connect(backend="portal")` and click Allow (once, if you opt into `persist_mode`) |
-| Keymap-safe input over libei, deliberately | `pip install '.[eiinput]'` + your distribution's `libei`, then `connect(backend="eiinput")` |
-| Screenshots with no tool installed at all, deliberately | `pip install '.[atspi]'` for PyGObject, then `connect(backend="portalcapture")` — the only capture path that works inside a Flatpak sandbox |
+| X11 | `pip install 'pyguitest[x11]'` for windows, input, capture and tier-6 — add `'pyguitest[atspi]'` too for elements, since AT-SPI works on X11 exactly as it does on GNOME |
+| Any portal-supporting desktop, deliberately | `pip install 'pyguitest[atspi]'` for PyGObject, then `connect(backend="portal")` and click Allow (once, if you opt into `persist_mode`) |
+| Keymap-safe input over libei, deliberately | `pip install 'pyguitest[eiinput]'` + your distribution's `libei`, then `connect(backend="eiinput")` |
+| Screenshots with no tool installed at all, deliberately | `pip install 'pyguitest[atspi]'` for PyGObject, then `connect(backend="portalcapture")` — the only capture path that works inside a Flatpak sandbox |
 
 `pyguitest doctor` reports which of these you have and names what is missing
 — including the GNOME Shell extension, which it infers from the capabilities
@@ -73,48 +73,34 @@ is opt-in and never autodetected — see
 
 ## On Windows
 
-None of the tables below apply there: no `/etc/os-release` to read, no package
+None of the Linux tables apply there: no `/etc/os-release` to read, no package
 manager to name, and no row of packages that pip cannot supply. What there is:
 
 | | |
 |---|---|
 | `pip install pyguitest` | everything but the element tree |
-| `pip install 'pyguitest[windows]'` | + UI Automation, through `comtypes` |
+| `pip install "pyguitest[windows]"` | + UI Automation, through `comtypes` — double quotes because Command Prompt does not strip single ones |
 | ImageMagick | `winget install ImageMagick.ImageMagick`, for locating a control by a picture of it — the one thing here pip cannot supply, and it needs its legacy command line, since the tool called is `compare` |
 | nothing on `PATH` | no CLI tool is adapted or recommended: every Windows mechanism is an API call, so there is no ydotool-shaped gap |
 
 The `windows` extra carries an environment marker, so installing it on Linux or
-macOS is a no-op rather than an error — `pip install 'pyguitest[windows]'`
+macOS is a no-op rather than an error — `pip install "pyguitest[windows]"`
 succeeds everywhere and only does something on Windows.
 
-**Both Windows backends are registered**, so `connect()` on a Windows session
-drives screens, input, windows, the clipboard and screen capture through
-`ctypes` — with no daemon and no privilege beyond the process's own — and, with
-`comtypes` installed, element search, element actions and element geometry
-through UI Automation. `pip install 'pyguitest[windows]'` is what adds the
-second half: the `uia` backend, and with it `find_element`, `element_at` and an
-element's own `click()`, which need no coordinates and no injected input.
-`pyguitest doctor` answers in Windows terms rather than with distribution
-package names, and `pyguitest debug` reports the environment the backends depend
-on (window station, integrity level, DPI awareness, build, and whether
-`comtypes` is importable).
-[docs/developers/adr-003-windows.md](developers/adr-003-windows.md) is the
-split. The suite passes on Windows 11 (build 26200), and both backends have
-driven a real interactive desktop there — push buttons, edit boxes, check
-boxes, combo boxes, tabs, list views, tree views and menus — but only a
-US-layout, single-monitor, unelevated one, so
-[validation.md](validation.md) holds what those runs settled and what is still
-outstanding, rather than a claim that it all works.
+The backends are registered by the same registry every other backend uses, and
+the marker is a runtime import guard inside
+`src/pyguitest/backends/win32.py`, so on Linux the module imports and reports
+itself unsupported rather than failing at install time.
 
-Two of those are worth knowing before writing a test for a Windows machine,
-because they fail silently rather than loudly. A process that is not elevated
-cannot inject into an elevated window — UIPI drops the events with no error and
-no prompt, which is why the backend reports a short `SendInput` count as a typed
-refusal naming UIPI — and a process that is not on the interactive window
-station (a service, a scheduled task, an ssh session) can enumerate no window at
-all. `pyguitest doctor` names both when they apply, and
-[troubleshooting.md](troubleshooting.md#injected-input-vanishes-on-windows) has
-the symptoms.
+`pyguitest doctor` answers in Windows terms rather than with distribution
+package names, and `pyguitest debug` reports the environment the backends
+depend on: window station, integrity level, DPI awareness, build, and whether
+`comtypes` is importable. Two of those decide whether a test can run at all,
+so the backend names them as it hits them — a process that is not elevated
+cannot inject into an elevated window (UIPI drops the events with no error and
+no prompt), and a process that is not on the interactive window station (a
+service, a scheduled task, an ssh session) can enumerate no window at all.
+[validation.md](validation.md) has what was checked on hardware and how.
 
 ## Distribution packages (pip cannot supply these)
 
@@ -136,10 +122,35 @@ gdbus call --session --dest org.a11y.Bus --object-path /org/a11y/bus \
 A desktop session starts `at-spi-bus-launcher` for you and this answers
 with an address. A container, a CI runner or a headless session often has
 neither the service nor a session bus to activate it on, and there the
-`atspi` backend declines with a message naming `org.a11y.Bus` rather than
-naming dogtail. `pyguitest debug` reports the same answer on its `a11y bus`
-line, with a third state for "could not ask" -- no `gdbus` -- since that is
-not the same as an answer.
+`atspi` backend declines with a message naming the address it went looking
+for rather than naming dogtail. `pyguitest debug` reports the same answer on
+its `a11y bus` line, with a third state for "could not ask" -- no `gdbus` --
+since that is not the same as an answer.
+
+On an **X11 session the address does not come from the session bus at all.**
+When `DISPLAY` is set and `WAYLAND_DISPLAY` is not, libatspi reads the
+`AT_SPI_BUS` property on the root window instead, and nothing clears that
+property when the bus it names goes away. `GetAddress` above answering
+happily is then the misleading result, because it is about a different bus:
+
+```sh
+xprop -root AT_SPI_BUS
+```
+
+Measured (2026-09-22) on a desktop with `DISPLAY=:0` and no
+`WAYLAND_DISPLAY`, where a harness had left a dead socket behind: this prints
+`AT_SPI_BUS(STRING) = "unix:path=/run/user/1000/at-spi/bus"` -- nothing
+listening on it -- while `GetAddress` answers `.../at-spi/bus_0`, which is
+alive. libatspi reads the property, dies on the connect, and the process with
+it. `$XDG_RUNTIME_DIR/at-spi/` collects one such socket per accessibility bus
+the machine has run; `bus` refused, `bus_0` connected and `bus_2`, `bus_3`
+and `bus_99` refused, on this desktop. pyguitest checks the property's
+address when libatspi would use it, so this is a declined backend rather than
+a core dump, and `pyguitest debug`'s `a11y bus` line is where the no shows
+up. Deleting the stale property -- `xprop -root -remove AT_SPI_BUS`, a change
+to the running X server rather than a read -- leaves libatspi to fall through
+to the session bus; that fall-through is libatspi's source, and the property
+was left in place here rather than cleared on somebody's live session.
 
 It is worth checking rather than assuming, because getting it wrong used to
 be spectacular: libatspi answers an unreachable bus by aborting the calling

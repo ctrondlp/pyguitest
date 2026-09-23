@@ -20,6 +20,7 @@ import io
 import os
 import re
 import shutil
+import socket
 import subprocess
 from typing import TYPE_CHECKING, Any
 
@@ -43,16 +44,43 @@ __all__ = [
 ]
 
 
+class _ProbeTimedOut(Exception):
+    """One of the probe's subprocesses ran out of time.
+
+    Carried as an exception rather than folded into "no address" because the
+    two mean opposite things to the caller: a missing address sends libatspi
+    on to the next source, while a question that timed out leaves this probe
+    unable to say the address libatspi *will* use is safe. See the timeout
+    rule in `a11y_bus_probe`.
+    """
+
+
+_HAS_AF_UNIX: bool = hasattr(socket, "AF_UNIX")
+"""Whether this platform has Unix sockets at all.
+
+CPython does not define `socket.AF_UNIX` on Windows, and naming it raises
+`AttributeError` from inside `_address_connectable` -- which `except OSError`
+does not catch, and which `pyguitest debug` would hit on any Windows box with
+`AT_SPI_BUS_ADDRESS` set or an X server's `DISPLAY` in the environment, since
+`_debug_data` asks this question on every platform.
+
+Asked as a flag rather than borrowing `ipc._AF_UNIX`'s `getattr(..., -1)`
+default, because -1 does not degrade the way that reads: it is CPython's
+"use the default" sentinel, so `socket.socket(-1, SOCK_STREAM)` succeeds and
+hands back an AF_INET socket, and connecting *that* to a path string raises
+TypeError rather than the OSError the caller treats as "nothing there"."""
+
 _A11Y_BUS_TIMEOUT = 5
 """Seconds to wait for the accessibility-bus probe. Short because it runs
 inside connect(): a probe that hangs would hang every session, and what it
-waits for is a local D-Bus round trip."""
+waits for is a local round trip -- a D-Bus call, or `xprop` reading one
+property off a display."""
 
 _A11Y_BUS_ANSWERED = False
 """Memoized *positive* answer from a11y_bus_probe; a no is never cached.
 Caching one would leave a process that started before its desktop did with
 AT-SPI permanently unavailable, for a reason nothing reports -- and the
-probe is one cheap subprocess whose failing case fails immediately."""
+probe is a subprocess or two whose failing case fails immediately."""
 
 _WAYLAND_COORDS = (
     "AT-SPI screen coordinates are unreliable in a pure Wayland session; "
@@ -87,9 +115,10 @@ def a11y_bus_reachable():
 def a11y_bus_probe():
     """Whether the accessibility bus answers: True, False, or None.
 
-    None means the question could not be asked -- no `gdbus` -- which is
-    a different line in a bug report from "it answered", and the reason
-    this is separate from `a11y_bus_reachable`.
+    None means the question could not be asked -- no `gdbus`, and no `xprop`
+    or no display when the session is one that would read the X11 property --
+    which is a different line in a bug report from "it answered", and the
+    reason this is separate from `a11y_bus_reachable`.
 
     libatspi does not fail politely when it cannot reach the bus. It calls
     `g_error()`, which **aborts the process**, and `import dogtail.tree`
@@ -102,9 +131,28 @@ def a11y_bus_probe():
     be activated.
 
     The question therefore has to be answered *before* the import, by
-    something whose death is not ours: `gdbus`, making the same
-    `org.a11y.Bus.GetAddress` call libatspi makes. A subprocess rather than
-    Gio in-process for a second reason as well -- see
+    something whose death is not ours -- and what it has to ask about is
+    **the address libatspi would itself connect to**, which is not one
+    question. `atspi_get_a11y_bus` consults three sources in a fixed order
+    and stops at the first that yields an address: `$AT_SPI_BUS_ADDRESS`,
+    then the `AT_SPI_BUS` property on the root window of the display (read
+    only when `WAYLAND_DISPLAY` is unset), then
+    `org.a11y.Bus.GetAddress` on the session bus. It then connects, and
+    the connect is what calls `g_error()`. Asking the session bus alone was
+    this probe's own bug, twice over: at-spi-bus-launcher outlives the bus
+    it launched and goes on answering with that bus's address, so a
+    GetAddress that succeeds says the launcher is alive and nothing about
+    the bus; and on a session that has a `DISPLAY` and no
+    `WAYLAND_DISPLAY` -- exactly what a recording looks like, since
+    `scoped_environment` strips `WAYLAND_DISPLAY` -- libatspi never asks
+    the session bus at all. Measured on this developer's desktop,
+    2026-09-22: the root-window property named
+    `$XDG_RUNTIME_DIR/at-spi/bus`, connecting to it was refused, the
+    session bus answered a different and live `bus_0`, and this probe said
+    True while `Atspi.get_desktop(0)` aborted the process with SIGABRT.
+
+    `gdbus` and `xprop` are subprocesses rather than Gio and Xlib in this
+    process for a second reason as well -- see
     `session.toolkit_accessibility`, which shells out for precisely this:
     importing Gio caches the session bus for the life of the process, which
     breaks tests/test_portal_dbusmock.py.
@@ -116,6 +164,124 @@ def a11y_bus_probe():
     global _A11Y_BUS_ANSWERED
     if _A11Y_BUS_ANSWERED:
         return True
+    verdict = _bus_verdict()
+    if verdict is True:
+        _A11Y_BUS_ANSWERED = True
+    return verdict
+
+
+def _bus_verdict() -> bool | None:
+    """Whether the address libatspi would use accepts a connection.
+
+    `atspi_get_a11y_bus`'s three sources in its own order, stopping where
+    it stops: an address from the environment ends the search for libatspi,
+    and so does one off the X11 root window. Nothing else is asked, because
+    libatspi would not ask it -- and a probe that answers about a bus
+    libatspi never touches is worse than no probe, which is how the abort
+    above got through.
+
+    None only when no source could be consulted at all; see
+    `_session_bus_verdict`.
+    """
+    address = os.environ.get("AT_SPI_BUS_ADDRESS") or None
+    if address is None and _x11_bus_applies():
+        try:
+            address = _x11_address()
+        except _ProbeTimedOut:
+            return False
+    if address is None:
+        return _session_bus_verdict()
+    return _address_connectable(address) is not False
+
+
+def _x11_bus_applies() -> bool:
+    """Whether libatspi would read the X11 root-window property at all.
+
+    The gate is `WAYLAND_DISPLAY` unset and a display to read from, which is
+    why one machine answers on one kind of session and aborts on the other:
+    an XWayland desktop sets both and never reads the property, and anything
+    that unsets `WAYLAND_DISPLAY` -- the recorder's `scoped_environment`,
+    a hand-run `env -u` -- swings libatspi onto a property nothing clears.
+    Taken from libatspi's source rather than inferred from behaviour.
+
+    Which display that is comes from `_x11_display()`, not from `DISPLAY`
+    alone: libatspi asks `spi_display_name()`, which prefers
+    `AT_SPI_DISPLAY`. Gating on `DISPLAY` being set made the
+    `AT_SPI_DISPLAY`-only case -- that variable set, `DISPLAY` unset -- skip
+    the property and answer from the session bus, reporting a reachable bus
+    while libatspi read the stale property and aborted. That is the exact
+    failure this probe exists to prevent, so the gate has to ask the same
+    question `_x11_display()` does.
+    """
+    return "WAYLAND_DISPLAY" not in os.environ and _x11_display() is not None
+
+
+def _x11_address() -> str | None:
+    """The `AT_SPI_BUS` root-window property, or None if it cannot be read.
+
+    libatspi's second source, and the one this probe went blind to. Nothing
+    clears the property when the bus it names goes away, so it holds a
+    leftover's address as often as a live bus's. `xprop` runs for the same
+    reason `gdbus` does: a subprocess whose death is not ours.
+
+    None for every way this can fail, because they mean one thing to
+    libatspi -- no address from X11, and so on to the session bus. A display
+    it cannot open (`xprop` exits 1) and a property nobody ever set
+    (`no such atom on any window.`) are both that, which is why neither is
+    answered as a no.
+    """
+    xprop = shutil.which("xprop")
+    display = _x11_display()
+    if xprop is None or display is None:
+        return None
+    try:
+        probe = subprocess.run(
+            [xprop, "-display", display, "-root", "AT_SPI_BUS"],
+            capture_output=True,
+            timeout=_A11Y_BUS_TIMEOUT,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        # Not the same as "no property", and the difference decides whether
+        # this probe can abort the process. A slow X server still has a root
+        # window, and libatspi will still read the address off it -- so
+        # falling through to the session bus here would answer confidently
+        # about a bus libatspi is never going to touch, which is the exact
+        # shape of the bug this rewrite exists to fix. The timeout rule in
+        # `a11y_bus_probe` applies: answer no, and pay a skipped backend
+        # rather than risk the core dump. `_session_bus_verdict` already
+        # separates its two failures the same way.
+        raise _ProbeTimedOut from None
+    except OSError:
+        return None  # no runnable xprop: still an unasked question
+    return _address_from_x11(probe.stdout)
+
+
+def _x11_display() -> str | None:
+    """The display whose root window libatspi would read, or None.
+
+    `spi_display_name`'s rule, mirrored because the two halves have to name
+    the same display: `AT_SPI_DISPLAY` when it is set, taken as it stands,
+    else `DISPLAY` with any screen suffix stripped. An empty one is no
+    display at all -- `XOpenDisplay("")` fails -- and libatspi goes on to
+    the session bus having read nothing.
+    """
+    display = os.environ.get("AT_SPI_DISPLAY")
+    if display is None:
+        display = os.environ.get("DISPLAY") or ""
+        colon, dot = display.rfind(":"), display.rfind(".")
+        if colon != -1 and dot > colon:
+            display = display[:dot]
+    return display or None
+
+
+def _session_bus_verdict() -> bool | None:
+    """`org.a11y.Bus.GetAddress` over `gdbus`: True, False, or None.
+
+    libatspi's last source, and the only one that needs no display. None
+    means no `gdbus` to ask with, or one on PATH that would not run: a
+    question this never got to ask, which is not the same as a no.
+    """
     gdbus = shutil.which("gdbus")
     if gdbus is None:
         return None
@@ -142,8 +308,90 @@ def a11y_bus_probe():
         return None  # on PATH but would not run: still an unasked question
     if probe.returncode != 0:
         return False
-    _A11Y_BUS_ANSWERED = True
-    return True
+    # An address is not a bus. `org.a11y.Bus` is answered by
+    # at-spi-bus-launcher, which survives the bus it launched and goes on
+    # handing out that bus's address afterwards -- so GetAddress succeeding
+    # says the launcher is alive, and libatspi needs the thing one step
+    # further on. Measured on a machine in exactly that state: GetAddress
+    # answered `unix:path=/run/user/1000/at-spi/bus`, connecting to it was
+    # refused, and `import dogtail.tree` took the process down with SIGABRT
+    # -- the abort this probe exists to prevent, waved through by the probe.
+    return _address_connectable(_address_from(probe.stdout)) is not False
+
+
+def _address_from(reply: bytes | str | None) -> str | None:
+    """The bus address out of `gdbus call`'s tuple syntax, or None.
+
+    `gdbus` prints a one-element tuple -- `('unix:path=/run/user/1000/at-spi/bus',)`
+    -- and the address is the quoted half. None for anything that does not
+    parse, which reads as "cannot ask" rather than as a failure.
+    """
+    if isinstance(reply, bytes):
+        reply = reply.decode("utf-8", errors="replace")
+    match = re.search(r"'([^']*)'", reply or "")
+    return match.group(1) if match else None
+
+
+def _address_from_x11(reply: bytes | str | None) -> str | None:
+    """The bus address out of `xprop -root`'s output, or None.
+
+    One property line -- `AT_SPI_BUS(STRING) =
+    "unix:path=/run/user/1000/at-spi/bus"` -- and the address is the quoted
+    half. None for everything else, which is the `gdbus` half's rule and
+    for the same reason, plus two forms `xprop` has of its own: `AT_SPI_BUS:
+    no such atom on any window.` for a property nobody set, and nothing at
+    all for a display it could not open. Both leave libatspi without an X11
+    address, so both go on to the session bus rather than answering no.
+    """
+    if isinstance(reply, bytes):
+        reply = reply.decode("utf-8", errors="replace")
+    match = re.search(r'=\s*"([^"]*)"', reply or "")
+    return match.group(1) if match else None
+
+
+def _address_connectable(address: str | None) -> bool | None:
+    """Whether a D-Bus address accepts a connection: True, False, or None.
+
+    None keeps this probe's third answer intact -- an address naming no
+    unix socket (tcp, or a form not handled here) is one this cannot check
+    cheaply, and "cannot ask" must not become "no". A plain socket connect
+    rather than a second `gdbus` run: it answers the identical question at
+    no process cost, and unlike importing anything it cannot itself abort.
+
+    **Every** address in the list is tried, not just the first. A D-Bus
+    address is semicolon-separated alternatives, and libdbus walks them until
+    one connects -- so judging the list by its first entry alone reported a
+    dead leading entry as an unreachable bus and refused AT-SPI that libdbus
+    would have gone on to reach. False therefore means at least one unix
+    address was tried and none accepted; None means none was there to try.
+    """
+    if not address or not _HAS_AF_UNIX:
+        # No AF_UNIX (Windows) means a unix address is one this cannot test,
+        # which is the None case rather than a no. Not left to the connect
+        # below to discover: `socket.socket(-1, ...)` does not fail, it builds
+        # an *AF_INET* socket -- -1 is CPython's "use the default" sentinel --
+        # and connecting that to a path string raises TypeError, which
+        # `except OSError` does not catch.
+        return None
+    tried = False
+    for entry in address.split(";"):
+        for part in entry.split(","):
+            key, _, value = part.partition("=")
+            if key == "unix:path":
+                target = value
+            elif key == "unix:abstract":
+                target = "\0" + value
+            else:
+                continue
+            tried = True
+            try:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+                    probe.settimeout(_A11Y_BUS_TIMEOUT)
+                    probe.connect(target)
+                return True
+            except OSError:
+                break  # this alternative is dead; libdbus would try the next
+    return False if tried else None
 
 
 def _dogtail():
@@ -538,8 +786,11 @@ class AtspiBackend(GUIBackend):
         if modules is None:
             if not a11y_bus_reachable():
                 raise BackendUnavailable(
-                    "the accessibility bus did not answer (org.a11y.Bus on "
-                    "the session bus). Install at-spi2-core, or start "
+                    "the accessibility bus did not answer (the address "
+                    "libatspi would connect to -- from "
+                    "$AT_SPI_BUS_ADDRESS, the AT_SPI_BUS property on the X "
+                    "root window, or org.a11y.Bus on the session bus -- was "
+                    "not reachable). Install at-spi2-core, or start "
                     "at-spi-bus-launcher; a headless or container session "
                     "often has neither. Importing dogtail without it aborts "
                     "the process, so this refuses rather than trying"

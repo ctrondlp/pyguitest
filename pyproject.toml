@@ -11,14 +11,44 @@ name = "pyguitest"
 # `pyguitest.__version__`, the wheel and the `--version` flag cannot disagree.
 # setuptools parses that assignment statically; it does not import the package.
 dynamic = ["version"]
-description = "Cross-platform GUI automation; successor to X11::GUITest"
+# PyPI searches this at the same x5 boost as `keywords` below, so the words
+# chosen here are search surface as much as description. "Cross-platform" was
+# both the vaguest thing it could say and a mild over-claim (there is no macOS
+# backend); naming the three platforms costs nothing and is checkable.
+# "X11::GUITest" stays, and tokenizes to x11+guitest, so the lineage keeps
+# earning its own search terms.
+description = "Desktop GUI automation and UI testing for Linux, BSD and Windows; successor to X11::GUITest"
 # 3.9 reached end-of-life in October 2025; 3.10 is the oldest
 # version still receiving security fixes.
 requires-python = ">=3.10"
 license = "GPL-2.0-or-later"
 authors = [{name = "Dennis K. Paulsen"}]
 readme = "README.md"
-keywords = ["gui-automation", "testing", "x11", "wayland", "windows", "accessibility", "atspi"]
+# PyPI searches this field: warehouse/packaging/search.py types it as Text
+# with the snowball analyzer, and warehouse/search/queries.py boosts it x5 --
+# the same weight as `summary` and as `description`, which is the rendered
+# README. `classifiers` is NOT searched; it is a Keyword field absent from
+# SEARCH_FIELDS, so it only drives the sidebar filters.
+#
+# Two consequences shape the list below. Snowball stems and splits on
+# hyphens, so "gui-automation" indexes as gui+autom and a separate bare
+# "automation" would add nothing -- but "atspi" is one token that a search
+# for "at-spi" cannot reach, which is why both spellings are here. And BM25
+# normalises by field length, so every keyword added makes the others score
+# slightly less: this list is meant to stay curated, not exhaustive.
+#
+# Every entry is something this package is or drives. Tools we adapt
+# (xdotool, dogtail, libei) belong here because a caller searching for one is
+# looking for exactly this; tools we merely compete with do not, and are
+# answered in the README where a comparison can be honest and has room.
+keywords = [
+    "gui-automation", "gui-testing", "desktop-automation", "ui-testing",
+    "ui-automation", "uia",
+    "linux", "freebsd", "windows", "win32",
+    "x11", "wayland", "xwayland", "gnome", "kde", "sway",
+    "accessibility", "at-spi", "atspi", "dogtail",
+    "xdotool", "libei",
+]
 
 # No `License ::` classifier: with the PEP 639 `license` SPDX string above,
 # setuptools>=77 rejects the distribution if both are present.
@@ -47,6 +77,11 @@ classifiers = [
     "Environment :: Win32 (MS Windows)",
     "Topic :: Desktop Environment",
     "Topic :: Software Development :: Testing",
+    # What this drives is a user interface, and what it is used for is
+    # acceptance testing -- both are real filter facets on PyPI's search
+    # sidebar, which is the only thing classifiers feed.
+    "Topic :: Software Development :: Testing :: Acceptance",
+    "Topic :: Software Development :: User Interfaces",
     "Topic :: Software Development :: Quality Assurance",
     # PEP 561: py.typed is shipped, so annotations are usable downstream.
     "Typing :: Typed",
@@ -72,9 +107,32 @@ atspi = ["dogtail>=2.0"]        # element automation. NB: dogtail declares no
                                 # the distro. See README INSTALL.
 x11   = ["python-xlib>=0.33"]   # X11 backend, incl. FreeBSD/Solaris
 uinput = ["evdev>=1.9"]         # last-resort input where no tool is installed
-eiinput = ["python-libei[portal]>=0.5.1"]
-                                   # libei input backend (opt-in). 0.5.1 is
-                                   # the floor because InputCapture reports
+eiinput = ["python-libei[portal]>=0.5.2"]
+                                   # libei input backend (opt-in). 0.5.2 is
+                                   # the floor because
+                                   # InputCaptureSession.wait_for_activation()
+                                   # subscribed to `Activated` with the
+                                   # session handle as the D-Bus object path
+                                   # until then, while the portal emits on
+                                   # its own object -- so the subscription
+                                   # matched nothing and every wait ran to
+                                   # its timeout. inputcapture.py is the only
+                                   # caller and its timeout path returns
+                                   # None, so on 0.5.1 INPUT_CAPTURE cannot
+                                   # work and fails as "nobody crossed an
+                                   # edge in time" rather than as an error.
+                                   # docs/validation.md's own live proof of
+                                   # that capability is dated 2026-09-12,
+                                   # which is 0.5.2's release date. It also
+                                   # carries the _request double-remove fix,
+                                   # and _request backs CreateSession,
+                                   # SelectDevices, Start, GetZones and
+                                   # SetPointerBarriers. Not 0.6.0: that is
+                                   # documentation plus LibraryNotFoundError
+                                   # reaching three __all__s, which nothing
+                                   # here imports.
+                                   # 0.5.1 had been the floor because
+                                   # InputCapture reports
                                    # version 0 on some compositors (e.g.
                                    # GNOME 50) despite implementing the
                                    # complete interface, and only 0.5.1

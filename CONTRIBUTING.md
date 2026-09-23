@@ -26,6 +26,18 @@ pre-commit install
 `-e` links to the source tree instead of installing a copy, which is what you
 want here and *not* what a user of the package wants.
 
+`dev` is the tools; which *backend* extras you add depends on the session you
+can drive a test against:
+
+```sh
+pip install -e '.[dev,atspi,x11,uinput]'   # a Linux desktop
+pip install -e '.[dev,windows]'            # a Windows desktop
+```
+
+The Linux set still needs the distribution packages pip cannot supply, which
+install.md [tabulates](docs/install.md#distribution-packages-pip-cannot-supply-these)
+per distribution; `pyguitest doctor` fills in the names for yours.
+
 ## Running the tests
 
 ```sh
@@ -103,6 +115,44 @@ same `~/.local/share/gnome-shell/extensions`.
 
 What it does not cover: input actually reaching a client, and anything
 needing the portal's consent dialog, which has nobody to click it.
+
+## Developing on Windows
+
+The suite runs there. CI's `windows` job collects and runs it on
+`windows-latest` on every push, with a floor on both the number of tests run
+and the number skipped — the X11, AT-SPI, D-Bus and portal tests have to skip
+*loudly*, since zero skips means their guards never fired rather than that
+everything works there. What the job cannot do is drive a real desktop, so the
+two Windows backends are covered by the fake-driven unit tests plus the live
+runs recorded in [docs/validation.md](docs/validation.md); what was decided
+about them, and why, is
+[ADR 003](docs/developers/adr-003-windows.md). `python -c "import
+pyguitest.backends.win32"` is what says a given install carries the platform.
+
+```sh
+pip install -e '.[dev,windows]'
+```
+
+`scripts/headless-session.sh` and the `compositor` CI job have no Windows
+equivalent — they are a private `gnome-shell --headless` on its own session
+bus, and the extension validation that runs inside it — and
+`scripts/pre-commit-test.sh` is bash. Git Bash runs it as written; from
+PowerShell or `cmd`, it is the same four checks by hand:
+
+```sh
+python -m pytest -q
+ruff check src tests examples scripts
+ruff format --check src tests examples scripts docs
+python -m mypy
+```
+
+Two things are worth knowing before driving a real desktop here, because both
+fail silently rather than loudly: injected input into an elevated window from
+an unelevated process, which UIPI drops with no error, and a process off the
+interactive window station — a service, a scheduled task, an ssh session —
+which can enumerate no window at all. install.md names both, and
+[docs/troubleshooting.md](docs/troubleshooting.md#injected-input-vanishes-on-windows)
+has the symptoms.
 
 ## Lint, format, types
 

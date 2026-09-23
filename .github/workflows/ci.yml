@@ -275,11 +275,15 @@ jobs:
     # than the other jobs' claims: that every test module imports, that the
     # suite collects, and that the tests written to run anywhere pass there.
     #
-    # continue-on-error until the Linux-only tests that still need guards have
-    # them: a red run here is a finding to fix rather than a broken build, and
-    # this job's first run is where those findings come from. It is
-    # deliberately not in the `publish` job's needs list for the same reason.
-    continue-on-error: true
+    # This job was `continue-on-error: true` while the Linux-only tests still
+    # needed their guards -- a red run being a finding to collect rather than
+    # a broken build -- and it was left out of `publish`'s needs for the same
+    # reason. Both have been paid off: the guards landed (the real-`ps` route,
+    # and the Linux capture and clipboard routes, each pinned so the Windows
+    # branch cannot mask them), the full suite has since run green on a real
+    # Windows 11 box, and this job is green on main. An advisory job that
+    # nothing can fail is indistinguishable from no job at all once the thing
+    # it watches for works, so it is a gate now, and in `publish`'s needs.
     steps:
       - uses: actions/checkout@v5
 
@@ -387,7 +391,11 @@ jobs:
   publish:
     name: publish to PyPI
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [tests, lint, imagemagick, portal, compositor, build]
+    # `windows` is in here because a release that cannot be imported on
+    # Windows is exactly what shipped once already: 0.10.1 carries a
+    # module-scope `import grp`, so `import pyguitest` raises there, and no
+    # gate said so at publish time.
+    needs: [tests, lint, imagemagick, portal, compositor, windows, build]
     runs-on: ubuntu-latest
     # Must match the environment named in the PyPI publisher config. A
     # required reviewer on it makes each publish a deliberate approval

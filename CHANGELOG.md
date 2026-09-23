@@ -5,9 +5,186 @@ All notable changes to pyguitest are recorded here. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html) — with the usual
 0.x caveat that the API may still change between minor versions.
 
-## [Unreleased]
+## [0.11.0] — 2026-09-23
+
+### Fixed
+
+- **The accessibility-bus probe waved through the abort it exists to prevent,
+  and the test suite created the condition.** `a11y_bus_probe` asked
+  `org.a11y.Bus.GetAddress` and treated a reply as "the bus answers", but
+  libatspi asks *and then connects*, and the connect is what calls `g_error()`
+  and takes the process down. `at-spi-bus-launcher` outlives the bus it
+  launched and keeps handing out that bus's address, so a machine whose
+  accessibility bus has gone passes the first question and aborts on the
+  second -- `import dogtail.tree` killing any pyguitest process with SIGABRT,
+  which is precisely the catastrophe the probe was written for. It now
+  connects to the address it is given, in-process over a plain socket, and
+  keeps "could not ask" separate: an address naming no unix socket still reads
+  as unknown rather than as no.
+
+- **And the condition was self-inflicted, by this suite and this repository's
+  own harness.** `at-spi-bus-launcher` derives its socket path from
+  `XDG_RUNTIME_DIR`, not from the bus it was activated on, so
+  `$XDG_RUNTIME_DIR/at-spi/bus` is shared by every bus on the machine.
+  `tests/test_portal_dbusmock.py` swapped `DBUS_SESSION_BUS_ADDRESS` for a
+  private dbus-daemon while leaving the runtime directory alone, and
+  `scripts/headless-session.sh` started a private accessibility bus with the
+  developer's runtime directory inherited -- each of them rebinding that
+  shared path and **evicting the real session's accessibility bus, silently,
+  for every GTK3 and Qt application on the desktop, until the next login**.
+  Found with four dead sockets in that directory, one per session those
+  harnesses had run, and a stray `at-spi2-registryd` still holding a `/tmp`
+  bus address. Both now take a private `XDG_RUNTIME_DIR` and remove it
+  afterwards; the headless harness takes one always rather than only where it
+  inherited none, since reusing the developer's is the whole of the bug. A
+  session advertised as private has no business writing into the directory the
+  real session keeps its sockets in.
+
+- **And the probe was asking the wrong source on the session a recording runs
+  in.** It knew to *connect* to what it was told, but it only ever asked
+  `org.a11y.Bus` -- and libatspi does not. `atspi_get_a11y_bus` reads
+  `$AT_SPI_BUS_ADDRESS`, then the `AT_SPI_BUS` property on the X11 root window
+  whenever `DISPLAY` is set and `WAYLAND_DISPLAY` is not, and only then the
+  session bus. A recording is exactly that session, because
+  `scoped_environment` strips `WAYLAND_DISPLAY`; nothing clears the root-window
+  property when the bus it names goes away, so on this developer's desktop it
+  held `$XDG_RUNTIME_DIR/at-spi/bus` while the session bus answered a live
+  `bus_0` — connecting to the property's address was refused, the probe said
+  yes, and the recorder died of SIGABRT in its own pre-commit doctor test.
+  Measured socket by socket: `bus` refused, `bus_0` connected, `bus_2`,
+  `bus_3`, `bus_99` refused. The probe now walks libatspi's three sources in
+  libatspi's order — with `xprop` beside `gdbus` — checks the address that same
+  source would have connected to, and stops where libatspi stops. A caller who
+  names `atspi` gets a refusal that names all three sources, rather than one
+  that blamed the session bus while it was answering happily.
 
 ### Changed
+
+- **`pyguitest debug` answers in Windows terms, like `doctor` already did.**
+  The report is Linux-shaped, and on a healthy Windows 11 box it said so about
+  the machine rather than about itself: fifteen CLI tools reported `not found`,
+  eight X11/Wayland variables reported `unset`, and the three accessibility
+  lines rendered their "could not ask" case -- one of them reading "not asked
+  (no gdbus) -- AT-SPI is attempted anyway", which is untrue there, since
+  nothing on Windows attempts AT-SPI at all. A machine with nothing wrong with
+  it read as one missing two dozen things, in the output a bug report is made
+  of. On a Windows session the report now lists the `image` tools alone (the
+  ImageMagick `compare` that `IMAGE_LOCATE` shells out to everywhere, and the
+  one thing on that platform pip cannot supply) and names the other four
+  groups as Linux and BSD only; prints the X11/Wayland variables only when
+  something actually set one, since a Windows host can run an X server while
+  `_classify` still answers `win32`; and replaces the three accessibility
+  lines with one about the element tree it does have -- UI Automation, and
+  whether `comtypes` can open it. Only the rendering branches: `_debug_data`
+  still asks every question on every platform, so `--json` carries the same
+  fields everywhere and a consumer needs no platform branch of its own.
+
+- **The Windows CI job is a gate rather than advice.** It was
+  `continue-on-error: true`, and left out of `publish`'s `needs`, while the
+  Linux-only tests still needed their guards -- a red run being a finding to
+  collect rather than a broken build. Both reasons have been paid off: the
+  guards landed, the suite has since run green on real Windows 11 hardware,
+  and the job is green on `main`. An advisory job that nothing can fail is
+  indistinguishable from no job at all once the thing it watches for works, so
+  Windows breakage can now fail a build and block a release. That a release
+  needs this gate is not hypothetical: 0.10.1 shipped with a module-scope
+  `import grp`, so it could not be imported on Windows at all, and nothing said
+  so at publish time.
+
+- **`Capability.ELEMENT_GEOMETRY`'s own description said it was X11 and
+  XWayland only.** That sentence was written when AT-SPI was the only backend
+  offering it, and it ended "exactly like WINDOW_GEOMETRY on this backend" --
+  a per-backend caveat sitting in the text that describes the capability
+  itself. `UiaBackend` offers it too, on every Windows session, where
+  `extents()` has driven real pointer clicks and `element_at()` has returned
+  real tree nodes. The description now says where it is withheld is a
+  per-backend answer: AT-SPI withholds it on a pure Wayland session because a
+  Wayland client is never told where it sits, and UI Automation answers it
+  anywhere. `docs/api.md` is generated from this text, so it carried the same
+  claim.
+
+- **The install documentation treated Windows as a platform still to arrive,
+  and no longer has to.** `docs/install.md` opened that section with a
+  blockquote naming 0.10.1, its module-scope `import grp` and the git URL to
+  install instead, and `docs/troubleshooting.md` carried the same failure as a
+  symptom to search for. This is that release, so both are gone rather than
+  restated. The install page is pip-first on both platforms now — it keeps the
+  Linux distribution table it always had, and puts the Windows part beside it:
+  the `windows` extra, ImageMagick through `winget`, and the two silent input
+  failures worth knowing before writing a test. What was specific to
+  developing *on* Windows rather than installing for it moved to
+  [CONTRIBUTING.md](CONTRIBUTING.md#developing-on-windows), and the recorder's
+  floor moves with it, so a Windows install of either package is a plain
+  `pip install`.
+
+- **The README said Windows had never driven a real desktop.** Written when
+  that was true, and left behind by the three interactive runs that followed:
+  it still claimed, in four places, that everything touching a desktop was
+  unrun and that every structure layout was transcribed rather than measured,
+  while `docs/install.md` and `docs/validation.md` had been updated for those
+  runs. It now says what has run and on how narrow a machine, and points at
+  validation.md for which is which.
+
+- **`activate_window`'s retry has run against the real foreground lock, 3/3,
+  and the Windows list has no repair left in the awkward state.** The fix --
+  one retry after a zero-distance `SendInput` move -- had its cause reproduced
+  live on 2026-09-20 and its repair verified only against the fake `user32`
+  that models the lock. It has now been driven on the box: a third process
+  clicks a blocker window to the front, a plain `SetForegroundWindow` on the
+  target from the probe's own process returns 0 with the foreground unmoved,
+  and one second later `gui.activate_window(target)` takes it, read back
+  through `GetWindowTextW(GetForegroundWindow())` rather than through
+  pyguitest's own answer. Three attempts were inconclusive first, and
+  `docs/validation.md` records why each was: creating two visible windows does
+  not arm the lock, and clicking the blocker from the *probe's* process makes
+  the plain call succeed, because `SendInput` confers exactly the entitlement
+  the retry manufactures. Driven from Linux over SSH through Task Scheduler's
+  `/it`, since an SSH login is not on the interactive window station and has no
+  foreground to be refused.
+
+- **`pyguitest debug`'s Windows rendering has run on Windows.** The branch
+  above was written and tested against a constructed `Environment`; it has now
+  printed on the real box, listing the `image` tools alone, collapsing the
+  eight unset X11/Wayland variables to one line, and naming UI Automation in
+  place of the three accessibility lines.
+
+- **The `eiinput` extra's floor moves to `python-libei>=0.5.2`.** 0.5.1 is the
+  version `InputCaptureSession.wait_for_activation()` subscribed to
+  `Activated` with the session handle as the D-Bus object path, while the
+  portal emits on its own object -- so the subscription matched nothing and
+  every wait ran to its timeout. `inputcapture.py` is the only caller, and its
+  timeout path returns `None`: on 0.5.1 `Capability.INPUT_CAPTURE` cannot work
+  at all, and it fails as "nobody crossed an edge in time" rather than as an
+  error, which is the silently-wrong answer a floor exists to prevent. The
+  evidence is in this repository: `docs/validation.md` records
+  `wait_for_pointer_activation()` returning on a real edge crossing on
+  2026-09-12, which is 0.5.2's release date -- the capability's only live
+  validation was obtained on a version the floor did not require. 0.5.2 also
+  carries the `_request` double-remove fix, and `_request` backs
+  `CreateSession`, `SelectDevices`, `Start`, `GetZones` and
+  `SetPointerBarriers`. Not 0.6.0: that release is documentation, badges and
+  the addition of `LibraryNotFoundError` to three modules' `__all__`, which
+  affects `import *` and tooling rather than anything this package imports.
+
+- **The fourth live Windows run is in `docs/validation.md`, where the other
+  three already were.** The slow-desktop probe of 2026-09-22 -- a confirmation
+  dialog that opens a beat after the click asking for it -- found
+  `wait_for_window` unable to match a dialog `FindWindowW` answered for
+  immediately, which is what produced the owned-window fix below it. That run
+  reached the CHANGELOG and the backend's own docstring but never the file
+  whose rule is that a claim moves only when a run is recorded there, so the
+  record said three runs where four had happened. The section now records it,
+  repair included: the rewritten `_is_listable` was run against that same
+  dialog on that same desktop, where `wait_for_window("Slow Dialog")` matched
+  the window it had timed out on, with no fallback to `FindWindowW` needed --
+  so a live machine confirmed the cause *and* the fix, which is the pair this
+  file exists to distinguish. `activate_window`'s retry was the one left in the
+  other state -- its cause reproduced live on 2026-09-20, its fix only ever run
+  against the fake `user32` -- which is why it was moved to a bullet under "Not
+  run live" rather than left as a remark inside the section that produced it.
+  It has since been driven against the real foreground lock, 3/3, and that
+  bullet above is the current status; this paragraph records only where it
+  stood when the fourth run was written up.
 
 - **sway has run live, so the wlroots IPC backends are no longer all
   unvalidated.** `docs/validation.md`'s "Not run live" had carried sway,
@@ -15,11 +192,15 @@ All notable changes to pyguitest are recorded here. The format follows
   recorded output and stand-ins against no compositor at all. sway left the
   list on 2026-09-22, 7/7 through `examples/_sway_validate.py` on a headless
   sway 1.12 -- three runs on three separate compositor instances, since one
-  green run is a coincidence and three is a result: `window_events()` delivering `new` and `close` over a real
-  subscription, `move_window`/`resize_window` read back at exactly the values
-  asked for, `activate_window`, `window_at()`, and `minimize_window`
-  round-tripping through the scratchpad that stands in for a minimize state
-  wlroots does not have. The backend was forced rather than composited, so
+  green run is a coincidence and three is a result. The seven are the seven
+  the script asserts: `move_window`/`resize_window` each read back at exactly
+  the value asked for, `activate_window` making it the active window,
+  `minimize_window` hiding it and restoring it again through the scratchpad
+  that stands in for the minimize state wlroots does not have, `window_at()`
+  answering with the same window, and the `close` event arriving over a real
+  `window_events()` subscription. Connecting, listing and the `new` event are
+  how the run finds its window rather than part of the seven. The backend was
+  forced rather than composited, so
   every answer is sway's own IPC. Hyprland and niri remain, and neither is
   installed on the machine that closed sway. Documentation only -- no
   behaviour changed, which is the point: the code was already written, and
@@ -2500,7 +2681,8 @@ First public release.
 - A `pyguitest` command-line entry point.
 - PEP 561 type information (`py.typed`); no hard runtime dependencies.
 
-[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/ctrondlp/pyguitest/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/ctrondlp/pyguitest/compare/v0.10.0...v0.10.1
 [0.5.0]: https://github.com/ctrondlp/pyguitest/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/ctrondlp/pyguitest/compare/v0.3.0...v0.4.0
