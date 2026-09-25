@@ -1,0 +1,32 @@
+# Line endings and binary-ness, decided by git rather than by whichever editor
+# or platform last touched a file. The companion to `.editorconfig`: that one
+# tells an editor what to write, and this one makes git normalize what it
+# stores, which is the half an editor's settings cannot reach.
+#
+# Why it earns its place: this package is developed on Linux and GhostBSD and
+# its live checks are run from a Windows box, where a global `core.autocrlf`
+# (neither repository pins one) would otherwise check these files out with
+# CRLF and hand back a whole-file diff on the next commit from anywhere else.
+#
+# `text=auto` lets git decide what is text; `eol=lf` is what it puts in the
+# working tree even on Windows. Every tracked file here already has LF in the
+# index -- measured, not assumed -- so there is nothing to renormalize for this
+# to take effect; it takes effect on the way in from here on.
+* text=auto eol=lf
+
+# Not text at all: git must never translate these, and showing a diff of one is
+# meaningless. The images are the demo GIF and the captured screenshots under
+# examples/artifacts/.
+*.gif binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.pdf binary
+
+# Build and cache artifacts, named so that a stray one is classified by this
+# file rather than by whatever bytes it happens to contain.
+*.pyc binary
+*.whl binary
+*.zip binary
+*.tar.gz binary

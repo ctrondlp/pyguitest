@@ -79,7 +79,7 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T")
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"
 
 __all__ = [
     "connect",
@@ -1623,6 +1623,14 @@ class Session:
         Returns the matched Window, or None if `timeout` elapses first --
         not WindowNotFound, since polling for something that may simply not
         exist *yet* is the expected outcome here, unlike find_window.
+
+        A match is a window the window list carries, which under a reparenting
+        window manager is not yet a window that is *there*: measured on Marco,
+        this returns while `is_window_viewable` is still False and `geometry`
+        still reads the pre-placement position, and a move issued in that gap
+        is lost to the manager's own placement. Wait for
+        `is_window_viewable(window)` before acting on a window whose position
+        matters.
         """
         if title is None and app_id is None:
             raise ValueError("wait_for_window needs title, app_id, or both")
@@ -2297,6 +2305,149 @@ class Session:
             )
             raise ElementNotFound(f"no element with {wanted}")
         return found[0]
+
+    def tree_items(
+        self,
+        root: Element,
+        *,
+        role: str | None = None,
+        max_depth: int = 24,
+    ) -> list[Element]:
+        """Every descendant of `root`, opening collapsed branches to reach them.
+
+        `elements(within=root)` only ever sees what the accessibility tree
+        already has *visible* -- a collapsed tree row's children are not
+        there to find until something opens it, the same way they are not
+        there on screen. This walks `root`, expanding every branch it finds
+        still collapsed (`expandable` and not `expanded`) before descending
+        into it, so a caller gets every row the user could reach by clicking
+        every disclosure triangle in order, not only the ones already open
+        when this was called.
+
+        `root` is the *container* the rows live in -- the tree, list or table
+        element itself, not a row inside it. Where the next section says a
+        toolkit publishes revealed rows beside their branch, that is the
+        whole reason: a row passed here is not a container of anything, so a
+        collapsed one answers nothing.
+
+        Where a revealed row goes
+        -------------------------
+        Opening a branch does not put its rows in the same place on every
+        toolkit, and `child.children` alone cannot tell the two apart:
+
+        - **UI Automation nests them.** The branch's own `children` grows, so
+          reading it after `expand()` finds them. Measured on WinDirStat's
+          real tree, where a `tree item` holds the rows it revealed.
+        - **AT-SPI on GTK flattens them.** The opened row keeps *no*
+          children at all, and the rows it revealed are published as new
+          siblings of it, in the container's own child list. Measured live on
+          a GTK3 `GtkTreeView` (the probe window's `Folders` tree): with
+          `Documents` collapsed, `Documents.children` was `[]`, and after
+          `Documents.expand()` it was still `[]` -- while the tree's own
+          children went from `[column header 'Folder', 'Documents', 'Trash']`
+          to `['Folder', 'Documents', 'Reports', 'Notes', 'Trash']`. The
+          revealed rows appear in pre-order beside the row that revealed
+          them, exactly as the flattened list on screen reads. A walk that
+          only recursed into `child.children` therefore found every row that
+          was already open and never one it had just opened itself.
+
+        So a container's children are re-read after each expansion, and the
+        walk resumes from where it stopped rather than from the snapshot it
+        started with. That picks up rows revealed beside their branch (GTK)
+        and leaves the nested case (UIA) exactly as it was, since there the
+        list does not change and the recursion into the branch finds them
+        instead. The one thing this assumes about order is that a toolkit
+        publishes revealed rows at or after the position of the row that
+        revealed them, which is what pre-order flattening means and what both
+        measured toolkits do; one that inserted them *before* their branch
+        would leave them unseen. The result is not deduped either, because
+        there is nothing to dedupe on: a live backend hands out a fresh
+        wrapper per read, so two reads of one row are two objects that merely
+        look alike, and a container publishing the same row twice yields it
+        twice rather than once.
+
+        Only the reads matter here, and one is added where it counts: a
+        container is re-read once per expansion, never once per child, so a
+        tree with nothing left collapsed costs exactly the walk it did before.
+
+        `role` filters what is *returned* -- `Role.TABLE_CELL` for a GTK tree
+        view's rows, `Role.TREE_ITEM` for UI Automation's, say -- without
+        changing what gets walked or expanded; `None` (the default) returns
+        every descendant, matching `elements()`'s own convention. Rows this
+        expands stay expanded afterward: collapsing them back would cost a
+        second full walk for a state nothing asked to have preserved, the
+        same tradeoff `os.walk` makes about a directory's mtimes.
+
+        `max_depth` bounds how deep the *containers* nest, the same bound
+        `element_at` polices descent with on both backends and for the same
+        reason: a cyclic or malformed tree must not spin forever. A real tree
+        exhausts its actual depth long before 24 matters; a caller automating
+        something deeper can raise it. On a flattening toolkit it bounds less
+        than it looks like it does, since every row sits one level below the
+        tree itself however deep the branch it came from -- it is not a limit
+        on rows. A cycle is still caught: an element listing itself among its
+        own children is only walked again where an expansion actually added
+        something to walk, and `expand()` no-ops on a row already open.
+
+        Needs Capability.ELEMENT_TREE to walk children at all, and
+        Capability.ELEMENT_ACTION only where a branch actually has to be
+        opened -- a tree with nothing left collapsed runs on the first alone,
+        and the second is asked for before the first expansion rather than on
+        the way in.
+        """
+        self.require(Capability.ELEMENT_TREE)
+        found: list[Element] = []
+
+        def walk(container: Element, depth: int) -> None:
+            if depth > max_depth:
+                return
+            index = 0
+            children = container.children
+            while index < len(children):
+                child = children[index]
+                index += 1
+                if role is None or child.role == role:
+                    found.append(child)
+                if child.expandable and not child.expanded:
+                    self.require(Capability.ELEMENT_ACTION)
+                    child.expand()
+                    # Only re-read where the list can have changed, and read
+                    # the *container* rather than the branch: see the shapes
+                    # above -- GTK adds the revealed rows here, UIA adds them
+                    # under the branch, where the recursion below finds them.
+                    children = container.children
+                walk(child, depth + 1)
+
+        walk(root, 0)
+        return found
+
+    def row_values(self, row: Element) -> tuple[str, ...]:
+        """`row`'s own column values, as plain text, one per child cell.
+
+        For a control that nests each row's cells beneath it as children --
+        confirmed live against a UIA `ListView` (WinDirStat's real
+        extension-summary list, each `list item` holding one `text` child
+        per column). Reads each child's `name`, which is where both backends
+        put a cell's displayed value.
+
+        A GTK `GtkTreeView` never nests this way, whatever its column count:
+        it publishes no row element at all. Measured live on
+        pyguitest-recorder's probe window -- a one-column `Gtk.TreeView`
+        (`First row`/`Second row`/`Third row`, and the `Folders` tree, whose
+        rows are `Documents`/`Reports`/`Q1`/`Q2`/`Notes`/`Trash`) -- every
+        one of those names is a `table cell` directly inside the table,
+        `table row` matches nothing at all, and this method on one of those
+        cells answers `()`. Measured again on a three-column
+        `Gtk.ListStore`: three `table column header` children (`Name`,
+        `Count`, `Color`) followed by the six `table cell`s flat, in
+        row-major order. Nothing groups those into rows but the caller
+        already knowing the column count, so this method does not cover that
+        shape -- reading it means chunking
+        `elements(role=Role.TABLE_CELL, within=table)` by the count
+        `elements(role=Role.TABLE_COLUMN_HEADER, within=table)` gives, by
+        hand, since nothing here has that structure to read automatically.
+        """
+        return tuple(child.name or "" for child in row.children)
 
     def focus_tracking_works(self) -> bool:
         """Whether this desktop actually publishes per-widget keyboard focus.

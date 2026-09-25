@@ -161,7 +161,7 @@ _UIA_ROLES = {
     # A container for column headers, not a text heading: `Role.HEADING` is
     # a different thing and is not what a UIA Header maps to.
     50034: "header",
-    50035: "table column header",
+    50035: Role.TABLE_COLUMN_HEADER,
     50036: Role.TABLE,
     50037: "title bar",
     50038: Role.SEPARATOR,
@@ -186,12 +186,19 @@ not answer" rather than a mismatch to be papered over.
 """
 
 _ATSPI_NAMES_WITHOUT_CONSTANTS = frozenset(
-    {"calendar", "header", "menu bar", "table column header", "tool tip"}
+    {"calendar", "header", "menu bar", "tool tip"}
 )
 """Values that are real at-spi role names with no `Role` constant beside them.
 
-Five of the fifty-odd names at-spi can report have no constant in `roles.py`,
-because until now nothing in this package could produce them.
+Four of the fifty-odd names at-spi can report have no constant in `roles.py`,
+because until now nothing in this package could produce them. `"table column
+header"` was a fifth until a live WinDirStat session needed one:
+`gui.element(role="table column header", name="Bytes")` was the only way to
+reach a sortable list's own column headers, a string with no named spelling
+next to `Role.TABLE_CELL`/`TABLE_ROW` it already sits beside. `Role.
+TABLE_COLUMN_HEADER` now names it, on both backends -- UIA's `HeaderItem`
+(id 50035) already reported exactly this string, just not through the
+constant.
 """
 
 _NO_ATSPI_COUNTERPART = frozenset({"custom", "semantic zoom", "thumb", "title bar"})
@@ -276,6 +283,15 @@ ToggleState_Off = 0
 ToggleState_On = 1
 ToggleState_Indeterminate = 2
 """`TogglePattern`'s three answers, in the order the documentation lists them."""
+
+ExpandCollapseState_Collapsed = 0
+ExpandCollapseState_Expanded = 1
+ExpandCollapseState_PartiallyExpanded = 2
+ExpandCollapseState_LeafNode = 3
+"""`ExpandCollapsePattern`'s four answers. PartiallyExpanded is a Windows
+Explorer-style tree node showing some but not all of its children -- read as
+expanded here, the same way a real user would describe it; LeafNode is a
+node with nothing to expand, which is what `expandable` refuses on."""
 
 _PATTERN_INTERFACES = {
     "invoke": (UIA_InvokePatternId, "IUIAutomationInvokePattern"),
@@ -614,7 +630,7 @@ class Element:
     dogtail's Node carries its own API.
     """
 
-    __slots__ = ("node", "_backend", "_session")
+    __slots__ = ("node", "_backend", "_session", "_pattern_cache")
 
     def __init__(self, node, backend, session=None):
         """Wrap one element, the backend that found it, and the session above it.
@@ -628,6 +644,39 @@ class Element:
         self.node = node
         self._backend = backend
         self._session = session
+        self._pattern_cache = {}
+
+    def _pattern(self, key):
+        """`self._backend._pattern(self.node, key)`, memoized on this element.
+
+        Every property below that asks "does this element publish X" made
+        its own fresh `GetCurrentPattern` COM round trip even where another
+        property on the very same element had just asked the identical
+        question -- `actions` alone asks about all seven patterns to build
+        its list, and `expanded`/`expandable` (or `checked`/`checkable`,
+        `selected`/`selectable`) then ask about one of those same seven
+        again. Measured live: pyguitest-recorder's win32 resolver builds one
+        ElementRef per click from a fresh Element exactly like this one,
+        reading `actions`, `expanded` and `selectable` off it in a row --
+        each a cross-process COM call, not a local one -- and that total is
+        what races a native double-click's own synchronous, same-process
+        toggle of a tree row and reliably loses; see that repository's
+        status.md. A pattern's presence cannot change between two reads a
+        millisecond apart on the same element, so caching the *lookup* is
+        exact, not an approximation -- a state read like
+        `CurrentToggleState` still goes back to UIA every time it is asked,
+        through the same cached pattern object.
+
+        Only a settled answer is kept -- see `UiaBackend._pattern_lookup`. A
+        lookup that raised is asked again next time rather than remembered
+        as "absent".
+        """
+        if key in self._pattern_cache:
+            return self._pattern_cache[key]
+        pattern, settled = self._backend._pattern_lookup(self.node, key)
+        if settled:
+            self._pattern_cache[key] = pattern
+        return pattern
 
     @property
     def name(self):
@@ -695,12 +744,12 @@ class Element:
         hands back its value as a string. `value` is the third thing and is a
         number -- a slider's position, not its label.
         """
-        pattern = self._backend._pattern(self.node, "text")
+        pattern = self._pattern("text")
         if pattern is not None:
             document = self._backend._document_text(pattern)
             if document is not None:
                 return document
-        pattern = self._backend._pattern(self.node, "value")
+        pattern = self._pattern("value")
         if pattern is None:
             return None
         return _current(pattern, "CurrentValue", None)
@@ -713,7 +762,7 @@ class Element:
         holds text, and reading a float out of that would be inventing a
         number.
         """
-        pattern = self._backend._pattern(self.node, "range value")
+        pattern = self._pattern("range value")
         if pattern is None:
             return None
         raw = _current(pattern, "CurrentValue", None)
@@ -733,7 +782,7 @@ class Element:
         the widget rather than report what it said. Read `checkable` first, as
         the interface asks.
         """
-        pattern = self._backend._pattern(self.node, "toggle")
+        pattern = self._pattern("toggle")
         if pattern is None:
             return None
         state = _current(pattern, "CurrentToggleState", ToggleState_Indeterminate)
@@ -744,7 +793,7 @@ class Element:
     @property
     def checkable(self):
         """Whether the element has a check box, radio button, or toggle."""
-        return self._backend._pattern(self.node, "toggle") is not None
+        return self._pattern("toggle") is not None
 
     @property
     def selected(self):
@@ -754,7 +803,7 @@ class Element:
         caveat as `checked`, and `selectable` is the same kind of first
         question.
         """
-        pattern = self._backend._pattern(self.node, "selection item")
+        pattern = self._pattern("selection item")
         if pattern is None:
             return None
         return bool(_current(pattern, "CurrentIsSelected", False))
@@ -762,7 +811,37 @@ class Element:
     @property
     def selectable(self):
         """Whether the element can be a list item, tab, or menu selection."""
-        return self._backend._pattern(self.node, "selection item") is not None
+        return self._pattern("selection item") is not None
+
+    @property
+    def expanded(self):
+        """Whether a tree item or similar disclosure control is open.
+
+        None where the element publishes no ExpandCollapse pattern -- the
+        same caveat as `checked`, and `expandable` is the same kind of first
+        question. A LeafNode reads as None rather than False for the same
+        reason: it is not a closed disclosure control, it is not one at all.
+        """
+        pattern = self._pattern("expand collapse")
+        if pattern is None:
+            return None
+        state = _current(
+            pattern, "CurrentExpandCollapseState", ExpandCollapseState_LeafNode
+        )
+        if state == ExpandCollapseState_LeafNode:
+            return None
+        return state != ExpandCollapseState_Collapsed
+
+    @property
+    def expandable(self):
+        """Whether the element can be expanded or collapsed, like a tree item."""
+        pattern = self._pattern("expand collapse")
+        if pattern is None:
+            return False
+        state = _current(
+            pattern, "CurrentExpandCollapseState", ExpandCollapseState_LeafNode
+        )
+        return state != ExpandCollapseState_LeafNode
 
     @property
     def focused(self):
@@ -782,7 +861,7 @@ class Element:
         return sorted(
             action
             for action, (pattern, _method) in _ACTIONS.items()
-            if self._backend._pattern(self.node, pattern) is not None
+            if self._pattern(pattern) is not None
         )
 
     @property
@@ -911,7 +990,7 @@ class Element:
         that answer, where a raw COM failure would report an HRESULT and leave
         the reader to work out which of the two it meant.
         """
-        pattern = self._backend._pattern(self.node, "value")
+        pattern = self._pattern("value")
         if pattern is None:
             raise CapabilityUnsupported(
                 Capability.ELEMENT_ACTION,
@@ -968,6 +1047,38 @@ class Element:
             Capability.ELEMENT_ACTION,
             self._backend.name,
             f"{self!r} publishes no SelectionItem pattern, so it cannot be selected",
+        )
+
+    def expand(self):
+        """Open this tree item or similar disclosure control.
+
+        A no-op where `expanded` already reads True. UIA's Expand() and
+        Collapse() are separate methods, unlike at-spi's single toggling
+        action, but the check is kept anyway: some providers raise
+        `E_UNAVAILABLE` calling Expand() on an already-expanded node rather
+        than treating it as a no-op, and the two backends agreeing on this
+        idempotence is worth more than trusting one provider's leniency.
+        """
+        if self.expanded is True:
+            return
+        if self._backend._call_pattern(self.node, "expand"):
+            return
+        raise CapabilityUnsupported(
+            Capability.ELEMENT_ACTION,
+            self._backend.name,
+            f"{self!r} publishes no ExpandCollapse pattern, so it cannot be expanded",
+        )
+
+    def collapse(self):
+        """Close this tree item or similar disclosure control. See `expand`."""
+        if self.expanded is False:
+            return
+        if self._backend._call_pattern(self.node, "collapse"):
+            return
+        raise CapabilityUnsupported(
+            Capability.ELEMENT_ACTION,
+            self._backend.name,
+            f"{self!r} publishes no ExpandCollapse pattern, so it cannot be collapsed",
         )
 
     def choose(self, option):
@@ -1158,23 +1269,36 @@ class UiaBackend(GUIBackend):
 
         `GetCurrentPattern` returns the pattern as an `IUnknown`, which is then
         asked for the interface its methods live on -- the documented two-step.
-        An element that does not implement the pattern answers a COM failure,
-        and that is the ordinary answer here rather than an error: it is how
-        "this widget cannot be toggled" is spelled in UIA.
+        An element that does not implement the pattern answers a NULL pointer
+        (or, from some providers, a COM failure), and that is the ordinary
+        answer here rather than an error: it is how "this widget cannot be
+        toggled" is spelled in UIA.
 
         Every refusal folds into None, including a provider raising something
         other than a COM error, because every caller has a sensible answer for
         "not offered": `actions` leaves it out, `click` tries its next route,
         `checkable` is False.
         """
+        return self._pattern_lookup(node, key)[0]
+
+    def _pattern_lookup(self, node, key):
+        """`_pattern`'s answer, and whether it is settled enough to remember.
+
+        A pattern returned, or a NULL pointer, is UIA's own answer about the
+        element and cannot change while the element lives. A raise is not: it
+        is as likely to be a provider busy mid-update, or a cross-process call
+        that timed out, as a genuine "not implemented" -- so `Element._pattern`
+        must not cache it, or one hiccup would stand in for the answer for the
+        rest of that Element's life.
+        """
         pattern_id, interface_name = _PATTERN_INTERFACES[key]
         interface = getattr(self._client, interface_name, None)
         if interface is None:
-            return None
+            return None, True
         try:
             unknown = _null_to_none(node.GetCurrentPattern(pattern_id))
-        except Exception:  # noqa: BLE001 - not implemented is the usual answer
-            return None
+        except Exception:  # noqa: BLE001 - folded into "not offered", unsettled
+            return None, False
         if unknown is None:
             # The ordinary answer for a pattern this element does not publish,
             # and it arrives as a NULL pointer rather than as None -- see
@@ -1182,11 +1306,11 @@ class UiaBackend(GUIBackend):
             # QueryInterface on a null pointer and relied on the raise, which
             # is an exception raised and caught for every pattern an element
             # lacks: seven per element on `actions` alone.
-            return None
+            return None, True
         try:
-            return unknown.QueryInterface(interface)
+            return unknown.QueryInterface(interface), True
         except Exception:  # noqa: BLE001 - the same question, one call later
-            return None
+            return None, False
 
     def _call_pattern(self, node, action):
         """Perform `action` through its pattern; False where it is not offered.

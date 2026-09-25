@@ -89,6 +89,7 @@ class FakeNode:
         dead=False,
         actions=None,
         click_raises=None,
+        state_set=(),
     ):
         self.name = name
         self.roleName = role
@@ -103,6 +104,10 @@ class FakeNode:
         self.sensitive = sensitive
         self.description = description
         self._pid = pid
+        self.state_set = list(state_set)
+        """Fake AT-SPI states, as plain names -- `Element._state_names` reads
+        each real state's `.name`, so a bare string here stands in for one
+        just as well as a real `Atspi.StateType` member does."""
         self._component = component
         self.dead = dead
         self.actions = actions or {}
@@ -153,6 +158,93 @@ class FakeNode:
 
     def applications(self):
         return self.children
+
+    def __len__(self):
+        """Child count, as dogtail's `Node` answers it.
+
+        dogtail makes a node a *sequence of its own children* -- `__len__`
+        and `__getitem__`, no `__iter__` -- which is how `_past_a_container`
+        reads them: `list(node)` walks `node[0]`, `node[1]`, ... until
+        `IndexError`. A fake without the pair made that step see a node with
+        no children, which is exactly the shape the code around it is written
+        to treat as a dead node, so the one toolkit case that step exists for
+        answered the tab list and looked like a passing negative control.
+        """
+        return len(self.children)
+
+    def __getitem__(self, index):
+        return self.children[index]
+
+    def __bool__(self):
+        # dogtail answers `self is not None`, deliberately not "has
+        # children" -- so `if node:` is not a question about the tree, and
+        # defining `__len__` above must not quietly turn it into one here.
+        return True
+
+
+class _PageTab(FakeNode):
+    """A GtkNotebook page tab: a rectangle only as wide as its label.
+
+    The one shape that breaks the geometric nesting `_descend` rests on. A
+    notebook publishes a page's *contents* as children of the `page tab`,
+    whose own rectangle is the little label at the top -- so the tab does not
+    contain its own children, which every other node here does. The real
+    `getAccessibleAtPoint` answers for a point in the page body anyway (Gtk's
+    accessible hands that question on to the page), where the plain
+    `FakeComponent` above refuses any point its own node does not cover --
+    the check that makes it a stand-in for the ordinary case and not for this
+    one, so the tab gets a component without it.
+    """
+
+    def queryComponent(self):
+        if not self._component:
+            raise NotImplementedError("no Component interface")
+        return _PageTabComponent(self)
+
+
+class _PageTabComponent(FakeComponent):
+    def getAccessibleAtPoint(self, x, y, coord_type):
+        for child in self.node.children:
+            if child.covers(x, y):
+                return child
+        return None
+
+
+class _WindowCoordsNode(FakeNode):
+    """A node that answers a point it is nowhere near.
+
+    What a toolkit reporting widgets in *window* coordinates does: a native
+    Wayland client is never told where it sits, so its elements answer for a
+    point hundreds of pixels away -- seen live as a terminal's "New Terminal"
+    button, extents (0, 0, 34, 34), returned for a point at (49, 83).
+
+    `_descend` refuses that by requiring every answer to contain the point,
+    and the page-tab step beside it asks children directly, where the
+    ordinary descent asks the parent for the child at the point -- so that is
+    the one place the guard could be lost.
+    """
+
+    def queryComponent(self):
+        if not self._component:
+            raise NotImplementedError("no Component interface")
+        return _WindowCoordsComponent(self)
+
+
+class _WindowCoordsComponent(FakeComponent):
+    def getAccessibleAtPoint(self, x, y, coord_type):
+        return self.node.children[0] if self.node.children else None
+
+
+class _ReapedStates(FakeNode):
+    """A node gone from the bus: reading its state set raises."""
+
+    @property
+    def state_set(self):
+        raise RuntimeError("the node is gone")
+
+    @state_set.setter
+    def state_set(self, value):
+        pass
 
 
 class _DeadApplication:
@@ -621,6 +713,22 @@ class TestTheAccessibilityBusProbe(unittest.TestCase):
             False,
         )
 
+    def test_a_platform_without_unix_sockets_cannot_answer(self):
+        """Windows defines no `socket.AF_UNIX`, so a unix address is unaskable.
+
+        "Could not ask" has to stay the None the caller reads as "let libatspi
+        decide" rather than a False that would refuse AT-SPI on a machine
+        whose bus may well be there. Staged on the backend's own family
+        rather than by deleting `socket.AF_UNIX`, so this covers the platform
+        Windows compiles to and runs on every platform.
+        """
+        self.addCleanup(setattr, self.atspi, "_AF_UNIX", self.atspi._AF_UNIX)
+        self.atspi._AF_UNIX = None
+        self.assertIs(
+            self.atspi._address_connectable("unix:path=/run/user/1000/at-spi/bus"),
+            None,
+        )
+
 
 class TestTheAddressLibatspiWouldConnectTo(unittest.TestCase):
     """Which of libatspi's three sources the probe asks, and in what order.
@@ -1021,51 +1129,47 @@ class TestElements(AtspiTestCase):
         )
 
     def test_click_needs_no_coordinates_or_injection(self):
+        # The OK button fixture publishes no actions, so this exercises the
+        # coordinate fallback -- see the action-preferring tests below for
+        # the path that exists precisely because this one is not reliable.
         gui = self.backend()
         gui.find_element(name="OK").click()
         self.assertTrue(self.button.clicked)
 
-    def test_click_falls_back_to_the_action_interface_without_ponytail(self):
-        # dogtail's own click() is coordinate-based and needs GNOME's
-        # ponytail daemon to synthesize it under Wayland -- absent on every
-        # other Wayland compositor (confirmed live against KDE Plasma 6 /
-        # KWin). Element.click() should recover via AT-SPI's own action
-        # interface instead of surfacing dogtail's daemon-not-found error.
+    def test_click_prefers_a_published_action_over_coordinates(self):
+        # GTK measured live (a checkbox and a radio button, both on the
+        # probe window in pyguitest-recorder): each reports its whole row as
+        # its rectangle rather than the small toggle the row reacts to, so a
+        # coordinate click lands past it and changes nothing -- no
+        # exception, just a click that silently did not work.
+        # `click_raises` a plain Exception here, outside the tuple `click()`
+        # catches, so if dogtail's coordinate path were touched at all this
+        # test would fail with that error rather than pass.
         node = FakeNode(
-            name="5",
-            role="push button",
+            name="Enabled",
+            role="check box",
             actions={"Press": {}, "SetFocus": {}},
-            click_raises=RuntimeError(
-                "Error in ponytail initiation might be cause by several reasons"
-            ),
+            click_raises=Exception("coordinates were used"),
         )
         self.atspi.Element(node).click()
         self.assertEqual(node.actions_performed, ["Press"])
         self.assertFalse(node.clicked)
 
-    def test_click_reraises_an_unrelated_runtime_error(self):
-        # Only the ponytail failure is worked around -- anything else out of
-        # dogtail's click() is a real error and must not be swallowed.
-        node = FakeNode(
-            name="5",
-            role="push button",
-            actions={"Press": {}},
-            click_raises=RuntimeError("some other failure"),
-        )
-        with self.assertRaises(RuntimeError):
-            self.atspi.Element(node).click()
-        self.assertEqual(node.actions_performed, [])
+    def test_click_matches_an_action_name_case_insensitively(self):
+        node = FakeNode(name="Gamma", role="menu item", actions={"CLICK": {}})
+        self.atspi.Element(node).click()
+        self.assertEqual(node.actions_performed, ["CLICK"])
 
-    def test_click_reraises_ponytail_failure_with_no_usable_action(self):
-        # KDE's QML-based Kickoff menu publishes its category labels with no
-        # Action interface at all -- ShowMenu here stands in for "something
-        # unrelated to clicking", same as having none. Raised as pyguitest's
-        # own typed error, not dogtail's raw, GNOME-specific ponytail
-        # RuntimeError, which names a daemon this compositor never had.
+    def test_click_falls_back_to_the_action_interface_without_ponytail(self):
+        # dogtail's own click() is coordinate-based and needs GNOME's
+        # ponytail daemon to synthesize it under Wayland -- absent on every
+        # other Wayland compositor (confirmed live against KDE Plasma 6 /
+        # KWin). Reached only where no action was published, since one
+        # being there is now tried first and never raises this.
         node = FakeNode(
             name="5",
             role="push button",
-            actions={"ShowMenu": {}},
+            actions={"SetFocus": {}},
             click_raises=RuntimeError(
                 "Error in ponytail initiation might be cause by several reasons"
             ),
@@ -1075,6 +1179,66 @@ class TestElements(AtspiTestCase):
         self.assertEqual(ctx.exception.role, "push button")
         self.assertEqual(ctx.exception.name, "5")
         self.assertIsInstance(ctx.exception.__cause__, RuntimeError)
+
+    def test_click_reraises_an_unrelated_runtime_error(self):
+        # Only the ponytail failure is worked around -- anything else out of
+        # dogtail's click() is a real error and must not be swallowed.
+        node = FakeNode(
+            name="5",
+            role="push button",
+            actions={"SetFocus": {}},
+            click_raises=RuntimeError("some other failure"),
+        )
+        with self.assertRaises(RuntimeError):
+            self.atspi.Element(node).click()
+        self.assertEqual(node.actions_performed, [])
+
+    def test_click_falls_back_when_the_element_has_no_coordinates(self):
+        # AT-SPI answers INT_MIN for x and y when a component is not showing,
+        # and dogtail's own click() injects at that rectangle, so it raises
+        # `ValueError: ... negative coordinates: (-2147483647, -2147483647)`
+        # out of rawinput.py before AT-SPI is asked anything. Reached only
+        # where no action was published -- a menu item that offers one, the
+        # live case this was found from, never reaches dogtail's click() at
+        # all any more; see test_click_prefers_a_published_action.
+        node = FakeNode(
+            name="Gamma",
+            role="menu item",
+            actions={"ShowMenu": {}},
+            click_raises=ValueError(
+                "Attempting to generate a mouse event at negative coordinates: "
+                "(-2147483647,-2147483647)"
+            ),
+        )
+        with self.assertRaises(ElementNotActionable) as ctx:
+            self.atspi.Element(node).click()
+        self.assertIsInstance(ctx.exception.__cause__, ValueError)
+
+    def test_click_reraises_a_value_error_that_is_not_about_coordinates(self):
+        # Only the missing-route failures are worked around. A ValueError out
+        # of dogtail's click() for any other reason is a real error.
+        node = FakeNode(
+            name="Gamma",
+            role="menu item",
+            actions={"ShowMenu": {}},
+            click_raises=ValueError("something else entirely"),
+        )
+        with self.assertRaises(ValueError):
+            self.atspi.Element(node).click()
+        self.assertEqual(node.actions_performed, [])
+
+    def test_click_reraises_a_value_error_that_merely_mentions_coordinates(self):
+        # Only dogtail's own "negative coordinates" refusal means "no usable
+        # position". Any other ValueError is a real error, even one whose
+        # message happens to use the word.
+        node = FakeNode(
+            name="Gamma",
+            role="menu item",
+            actions={"ShowMenu": {}},
+            click_raises=ValueError("coordinates must be integers"),
+        )
+        with self.assertRaises(ValueError):
+            self.atspi.Element(node).click()
 
     def test_focused_reads_the_node_s_focus_state(self):
         gui = self.backend()
@@ -1159,6 +1323,85 @@ class TestElements(AtspiTestCase):
         # Not merely marked dead -- gone from the bus entirely, so even
         # asking raises. That still has to answer False, not propagate.
         self.assertFalse(self.atspi.Element(_RaisesOnDead()).alive)
+
+
+class TestElementExpandCollapse(AtspiTestCase):
+    """Opening and closing a tree item, through GTK's one toggling action.
+
+    Measured live against a GTK3 GtkTreeView (see
+    pyguitest-recorder/docs/developers/status.md): a collapsed row's state
+    set holds EXPANDABLE alone and gains EXPANDED once opened, and the only
+    published action is "expand or contract" -- one verb, not the separate
+    expand/collapse this interface offers, which is exactly why `expand`
+    and `collapse` have to check `expanded` before acting rather than just
+    invoking the action.
+    """
+
+    def row(self, expanded=False, expandable=True, actions=None):
+        states = []
+        if expandable:
+            states.append("EXPANDABLE")
+        if expanded:
+            states.append("EXPANDED")
+        if actions is None:
+            actions = {"expand or contract": ""}
+        return self.atspi.Element(
+            FakeNode(name="Documents", state_set=states, actions=actions)
+        )
+
+    def test_expandable_is_true_with_the_state(self):
+        self.assertTrue(self.row(expandable=True).expandable)
+
+    def test_expandable_is_false_without_the_state(self):
+        self.assertFalse(self.row(expandable=False).expandable)
+
+    def test_expanded_is_none_when_not_expandable(self):
+        # Not merely "not True": a leaf row is not a closed disclosure
+        # control, it is not one at all -- the same distinction `checked`
+        # draws for an element with no Toggle pattern.
+        self.assertIsNone(self.row(expandable=False).expanded)
+
+    def test_expanded_is_false_for_a_collapsed_row(self):
+        self.assertFalse(self.row(expanded=False).expanded)
+
+    def test_expanded_is_true_for_an_open_row(self):
+        self.assertTrue(self.row(expanded=True).expanded)
+
+    def test_a_row_that_died_reads_as_a_leaf_rather_than_raising(self):
+        # tree_items() reads expandable/expanded off every row it walks; a
+        # row closing mid-walk must not end the whole walk with a bus error.
+        element = self.atspi.Element(_ReapedStates(name="Gone"))
+        self.assertFalse(element.expandable)
+        self.assertIsNone(element.expanded)
+
+    def test_expand_invokes_the_toggling_action(self):
+        element = self.row(expanded=False)
+        element.expand()
+        self.assertEqual(element.node.actions_performed, ["expand or contract"])
+
+    def test_expand_is_a_no_op_once_already_expanded(self):
+        # The action toggles -- calling it on an open row would close it.
+        element = self.row(expanded=True)
+        element.expand()
+        self.assertEqual(element.node.actions_performed, [])
+
+    def test_collapse_invokes_the_toggling_action(self):
+        element = self.row(expanded=True)
+        element.collapse()
+        self.assertEqual(element.node.actions_performed, ["expand or contract"])
+
+    def test_collapse_is_a_no_op_once_already_collapsed(self):
+        element = self.row(expanded=False)
+        element.collapse()
+        self.assertEqual(element.node.actions_performed, [])
+
+    def test_expand_raises_where_no_expand_action_is_published(self):
+        # A row with no matching action at all -- not this GTK's shape, but
+        # the typed refusal has to hold for whatever toolkit lacks it.
+        element = self.row(expanded=False, actions={"click": ""})
+        with self.assertRaises(ElementNotActionable) as caught:
+            element.expand()
+        self.assertIn("Documents", str(caught.exception))
 
 
 class TestElementGeometry(AtspiTestCase):
@@ -1256,6 +1499,71 @@ class TestElementGeometry(AtspiTestCase):
         gui = self.gui()
         with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
             self.assertEqual(gui.element_at(25, 30).name, "Save")
+
+    def test_element_at_walks_past_a_page_tab_that_does_not_nest(self):
+        """A notebook's page tab is not where its children are.
+
+        Measured on a GTK3 notebook: the page tab reports (133, 141, 54, 30),
+        its content filler (113, 175, 494, 312) and the `Save` button inside
+        that (113, 217, 494, 34). Asked about the button's own centre, the
+        `page tab list` above the tab -- which does contain the point --
+        answers `getAccessibleAtPoint` with nothing at all, since the point is
+        inside no tab's label. The descent dead-ended there, so `element_at`
+        answered the tab list for every widget on the page instead of the
+        widget. Found recording such a window through pyguitest-recorder,
+        where every control on a tab page came out as a bare coordinate
+        rather than `gui.button("Save")`.
+        """
+        save = FakeNode("Save", "push button", position=(113, 217), size=(494, 34))
+        filler = FakeNode("", "filler", [save], (113, 175), (494, 312))
+        tab = _PageTab("Page 1", "page tab", [filler], (133, 141), (54, 30))
+        tab_list = FakeNode("", "page tab list", [tab], (113, 175), (494, 312))
+        notebook = FakeNode("Notes", "frame", [tab_list], (100, 140), (520, 360))
+        app = FakeNode("gedit", "application", [notebook])
+        gui = self.gui()
+        gui._tree.root = FakeNode("desktop", "desktop frame", [app])
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertEqual(gui.element_at(360, 234).name, "Save")
+
+    def test_the_page_tab_step_survives_a_child_it_cannot_ask(self):
+        # VITAL -- keep this test. The page-tab step asks each child of a
+        # dead-ended node directly; one child with no Component interface
+        # (or gone mid-walk) used to raise out to `_hits_in`, which drops the
+        # whole application -- so element_at answered None where it used to
+        # answer the coarse tab list, a regression the notebook fix caused.
+        save = FakeNode("Save", "push button", position=(113, 217), size=(494, 34))
+        filler = FakeNode("", "filler", [save], (113, 175), (494, 312))
+        tab = _PageTab("Page 1", "page tab", [filler], (133, 141), (54, 30))
+        mute = FakeNode("", "page tab", component=False)
+        tab_list = FakeNode("", "page tab list", [mute, tab], (113, 175), (494, 312))
+        notebook = FakeNode("Notes", "frame", [tab_list], (100, 140), (520, 360))
+        app = FakeNode("gedit", "application", [notebook])
+        gui = self.gui()
+        gui._tree.root = FakeNode("desktop", "desktop frame", [app])
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertEqual(gui.element_at(360, 234).name, "Save")
+
+    def test_the_page_tab_step_refuses_a_child_that_misses_the_point(self):
+        """The step under `_descend` must not reopen the window-coordinates hole.
+
+        It asks each of a dead-ended node's children directly, where the
+        ordinary descent asks the parent for the child at the point, so an
+        answer that does not contain the point is refused here or nowhere.
+        Staged as the live shape: a node that covers the point, a child that
+        does not, and that child answering with a node 9000 pixels away --
+        which is precisely what `_at_point` is asked about on a toolkit
+        reporting window coordinates.
+        """
+        away = FakeNode("Away", "label", position=(9000, 9000), size=(10, 10))
+        middle = _WindowCoordsNode("Middle", "filler", [away], (5, 5), (10, 10))
+        holder = FakeNode("Holder", "frame", [middle], (0, 0), (800, 600))
+        app = FakeNode("gedit", "application", [holder])
+        gui = self.gui()
+        gui._tree.root = FakeNode("desktop", "desktop frame", [app])
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            # The point is inside `holder` and nowhere near either child; the
+            # answer has to be the node that really covers it.
+            self.assertEqual(gui.element_at(150, 150).name, "Holder")
 
     def test_element_at_is_none_where_nothing_covers_the_point(self):
         gui = self.gui()

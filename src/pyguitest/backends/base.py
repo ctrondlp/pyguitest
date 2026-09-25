@@ -325,6 +325,19 @@ class Element(Protocol):
         ...
 
     @property
+    def expanded(self) -> bool | None:
+        """Whether a tree item or similar disclosure control is open.
+
+        Same caveat as `checked`: read `expandable` first.
+        """
+        ...
+
+    @property
+    def expandable(self) -> bool:
+        """Whether the element can be expanded or collapsed, like a tree item."""
+        ...
+
+    @property
     def focused(self) -> bool:
         """Whether the element currently has keyboard focus."""
         ...
@@ -405,6 +418,19 @@ class Element(Protocol):
 
     def select(self) -> None:
         """Select this element, for a list item, tab, or menu entry."""
+        ...
+
+    def expand(self) -> None:
+        """Open a tree item or similar disclosure control.
+
+        A no-op where `expanded` already reads True, since the underlying
+        action toggles on at least one platform -- calling this twice must
+        not collapse what the first call opened.
+        """
+        ...
+
+    def collapse(self) -> None:
+        """Close a tree item or similar disclosure control. See `expand`."""
         ...
 
     def choose(self, option: str) -> None:

@@ -1,0 +1,35 @@
+# What an editor should do with the files in this repository, whatever editor
+# that is -- VS Code, PyCharm, Vim, Emacs, Sublime and the rest read this file.
+# Every setting below is the one the tree is already written in, not a
+# preference being imposed on it.
+#
+# Line endings are the half of this that matters. The package is developed on
+# Linux and GhostBSD and its live checks are run from a Windows box, and a file
+# saved there with CRLF comes back as a whole-file diff to everyone else. Git
+# cannot see an editor's settings, so this file is paired with `.gitattributes`,
+# which makes git normalize what it stores; this is what an editor is told
+# before it writes.
+#
+# Measured rather than assumed, when this was written: all 155 tracked files
+# end their lines with LF, no tracked source file contains a tab, and every
+# indent size below is the one that file type already uses -- Python, shell,
+# TOML and the GNOME Shell extension's JavaScript at 4, YAML and JSON at 2.
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+indent_style = space
+indent_size = 4
+trim_trailing_whitespace = true
+
+[*.{yml,yaml,json}]
+indent_size = 2
+
+[*.md]
+# Two trailing spaces are a hard line break in Markdown, and this repository's
+# prose uses them -- the tier headings in docs/developers/wayland-audit.md each
+# end with a pair. Trimming them would join lines that are meant to be apart.
+trim_trailing_whitespace = false

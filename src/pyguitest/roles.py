@@ -58,6 +58,7 @@ class Role:
     TABLE = "table"
     TABLE_CELL = "table cell"
     TABLE_ROW = "table row"
+    TABLE_COLUMN_HEADER = "table column header"
     TREE = "tree"
     TREE_ITEM = "tree item"
     DOCUMENT_FRAME = "document frame"

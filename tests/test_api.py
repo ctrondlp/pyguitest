@@ -18,6 +18,7 @@ import pyguitest
 from pyguitest import (
     AccessibilityViolation,
     Capability,
+    CapabilityUnsupported,
     ClipboardMismatch,
     ElementNotActionable,
     ElementNotFound,
@@ -48,6 +49,9 @@ class FakeElement:
         actions=(),
         parent=None,
         children=(),
+        expandable=False,
+        expanded=None,
+        reveals=(),
     ):
         self.role = role
         self.name = name
@@ -64,10 +68,63 @@ class FakeElement:
         self.focused = focused
         self.actions = list(actions)
         self.parent = parent
-        self.children = list(children)
+        self.children_reads = 0
+        self.children = children
+        self.expandable = expandable
+        self.expanded = expanded
+        self.reveals = list(reveals)
+        self.expand_calls = 0
 
     def click(self):
         self.clicked = True
+
+    @property
+    def children(self):
+        """This element's children, as a fresh list on every read.
+
+        Fresh on purpose, and the reason the flat shape needed the fake
+        changed at all: `atspi.Element.children` and `uia.Element.children`
+        each enumerate the live tree and build a new list per access, so a
+        list already handed out never grows. A fake returning one shared
+        list would let a walk holding its pre-expansion snapshot see the
+        rows GTK appends to its container -- passing here and finding
+        nothing at all on a real desktop.
+        """
+        self.children_reads += 1
+        return list(self._children)
+
+    @children.setter
+    def children(self, value):
+        self._children = list(value)
+
+    def add(self, *children):
+        """Append children, pointing their `parent` back at this element."""
+        for child in children:
+            child.parent = self
+            self._children.append(child)
+
+    def reveal_beside(self, row, rows):
+        """Publish `rows` as siblings of `row`, immediately after it.
+
+        The container's half of GTK's shape: a real GtkTreeView puts a
+        branch's revealed rows in its own child list rather than under the
+        branch, which is the opposite of what UI Automation does. Called
+        from `expand()` below, on whichever element `row.parent` is.
+        """
+        at = self._children.index(row) + 1
+        for revealed in rows:
+            revealed.parent = self
+        self._children[at:at] = rows
+
+    def expand(self):
+        self.expand_calls += 1
+        self.expanded = True
+        # GTK's shape, not UIA's: what this reveals goes in the *container's*
+        # child list rather than here, which is the whole of the bug
+        # TestTreeItems exists to pin.
+        if self.parent is not None and self.reveals:
+            self.parent.reveal_beside(self, self.reveals)
+            self.reveals = []
 
     def focus(self):
         self.focused = True
@@ -109,7 +166,9 @@ class FakeBackend(GUIBackend):
 
     @property
     def capabilities(self):
-        return CapabilitySet({Capability.ELEMENT_TREE, Capability.WINDOW_LIST})
+        return CapabilitySet(
+            {Capability.ELEMENT_TREE, Capability.ELEMENT_ACTION, Capability.WINDOW_LIST}
+        )
 
     def find_elements(
         self,
@@ -1209,6 +1268,271 @@ class _RecordingPointerAndExtents(_RecordingButtons):
 
     def move_mouse(self, x, y, screen=0):
         self.moved_to.append((x, y))
+
+
+class _NoActionBackend(FakeBackend):
+    """FakeBackend without Capability.ELEMENT_ACTION.
+
+    Walking a tree needs ELEMENT_TREE always and ELEMENT_ACTION only where
+    a branch has to be opened, so this is the backend a fully-open tree is
+    walked on and a collapsed one is refused on.
+    """
+
+    name = "fake-no-actions"
+
+    @property
+    def capabilities(self):
+        return CapabilitySet({Capability.ELEMENT_TREE, Capability.WINDOW_LIST})
+
+
+def _flat_tree(*rows):
+    """A GTK-shaped tree: one container, every row a direct child of it.
+
+    Expanding a row puts what it reveals *beside* it rather than under it,
+    so a row here is not a container of anything -- see
+    `FakeElement.expand()`. Returns the container.
+    """
+    tree = FakeElement(Role.TREE, "Folders")
+    tree.add(*rows)
+    return tree
+
+
+def _no_action_session():
+    return pyguitest.Session(_NoActionBackend(), pyguitest.detect())
+
+
+class TestTreeItems(unittest.TestCase):
+    """`Session.tree_items()`: every row, including the ones it opens itself.
+
+    Both shapes a toolkit publishes have to work, and only one of them was
+    modelled here at first: UI Automation nests a branch's revealed rows
+    under the branch (the `children=` fixtures), while GTK publishes them
+    as new siblings of the branch (`reveals=`, `_flat_tree`). A walk that
+    recursed into `child.children` alone passed every nested test here and
+    found nothing it had opened on a live GTK tree, which is exactly how
+    the bug was shipped; the live measurement is in the method's docstring.
+    """
+
+    def test_walks_already_visible_descendants(self):
+        root = FakeElement(
+            Role.TREE,
+            "Root",
+            children=[
+                FakeElement(Role.TREE_ITEM, "A"),
+                FakeElement(Role.TREE_ITEM, "B"),
+            ],
+        )
+        gui = session()
+        found = gui.tree_items(root, role=Role.TREE_ITEM)
+        self.assertEqual([e.name for e in found], ["A", "B"])
+
+    def test_expands_a_collapsed_branch_to_reach_its_children(self):
+        branch = FakeElement(
+            Role.TREE_ITEM,
+            "Documents",
+            expandable=True,
+            expanded=False,
+            children=[FakeElement(Role.TREE_ITEM, "Reports")],
+        )
+        root = FakeElement(Role.TREE, "Root", children=[branch])
+        gui = session()
+        found = gui.tree_items(root, role=Role.TREE_ITEM)
+        self.assertEqual([e.name for e in found], ["Documents", "Reports"])
+        self.assertEqual(branch.expand_calls, 1)
+
+    def test_an_already_expanded_branch_is_not_expanded_again(self):
+        branch = FakeElement(
+            Role.TREE_ITEM,
+            "Documents",
+            expandable=True,
+            expanded=True,
+            children=[FakeElement(Role.TREE_ITEM, "Reports")],
+        )
+        gui = session()
+        gui.tree_items(FakeElement(Role.TREE, "Root", children=[branch]))
+        self.assertEqual(branch.expand_calls, 0)
+
+    def test_role_filters_the_result_not_the_walk(self):
+        # A container that does not itself match role= is still descended
+        # into and expanded -- the filter is only on what gets returned.
+        wrapper = FakeElement(
+            Role.PANEL,
+            "Wrapper",
+            expandable=True,
+            expanded=False,
+            children=[FakeElement(Role.TREE_ITEM, "Reports")],
+        )
+        root = FakeElement(Role.TREE, "Root", children=[wrapper])
+        gui = session()
+        found = gui.tree_items(root, role=Role.TREE_ITEM)
+        self.assertEqual([e.name for e in found], ["Reports"])
+        self.assertEqual(wrapper.expand_calls, 1)
+
+    def test_role_none_returns_every_descendant(self):
+        branch = FakeElement(
+            Role.TREE_ITEM,
+            "Documents",
+            children=[FakeElement(Role.TREE_ITEM, "Reports")],
+        )
+        root = FakeElement(Role.TREE, "Root", children=[branch])
+        gui = session()
+        found = gui.tree_items(root)
+        self.assertEqual([e.name for e in found], ["Documents", "Reports"])
+
+    def test_max_depth_bounds_a_malformed_cyclic_tree(self):
+        cyclic = FakeElement(Role.TREE_ITEM, "Loop")
+        cyclic.children = [cyclic]  # points at itself -- a real tree never does
+        gui = session()
+        found = gui.tree_items(cyclic, role=Role.TREE_ITEM, max_depth=0)
+        self.assertEqual(len(found), 1)
+
+    # -- the flat shape: rows revealed beside their branch -----------------
+
+    def test_a_branch_whose_rows_appear_beside_it_is_still_walked(self):
+        # The live GTK shape, and the regression this method shipped with:
+        # Documents never gains children at all, so a walk trusting
+        # `child.children` after expanding reported nothing it had opened.
+        documents = FakeElement(
+            Role.TREE_ITEM,
+            "Documents",
+            expandable=True,
+            expanded=False,
+            reveals=[
+                FakeElement(Role.TREE_ITEM, "Reports"),
+                FakeElement(Role.TREE_ITEM, "Notes"),
+            ],
+        )
+        tree = _flat_tree(documents, FakeElement(Role.TREE_ITEM, "Trash"))
+        gui = session()
+        found = gui.tree_items(tree, role=Role.TREE_ITEM)
+        self.assertEqual(
+            [e.name for e in found], ["Documents", "Reports", "Notes", "Trash"]
+        )
+        self.assertEqual(documents.expand_calls, 1)
+
+    def test_a_row_revealed_by_an_expansion_is_itself_walked(self):
+        # Reports is not in the container's child list when the walk starts:
+        # it arrives when Documents opens, and is collapsed itself -- so the
+        # walk has to keep reading the container as it grows rather than
+        # walking the one snapshot it began with.
+        reports = FakeElement(
+            Role.TREE_ITEM,
+            "Reports",
+            expandable=True,
+            expanded=False,
+            reveals=[
+                FakeElement(Role.TREE_ITEM, "Q1"),
+                FakeElement(Role.TREE_ITEM, "Q2"),
+            ],
+        )
+        documents = FakeElement(
+            Role.TREE_ITEM,
+            "Documents",
+            expandable=True,
+            expanded=False,
+            reveals=[reports, FakeElement(Role.TREE_ITEM, "Notes")],
+        )
+        tree = _flat_tree(documents, FakeElement(Role.TREE_ITEM, "Trash"))
+        gui = session()
+        found = gui.tree_items(tree, role=Role.TREE_ITEM)
+        self.assertEqual(
+            [e.name for e in found],
+            ["Documents", "Reports", "Q1", "Q2", "Notes", "Trash"],
+        )
+        self.assertEqual(reports.expand_calls, 1)
+
+    def test_a_collapsed_row_passed_as_the_root_reveals_nothing(self):
+        # The documented limit rather than an accident: on a flattening
+        # toolkit a row's rows are beside it, so a row has nothing under it
+        # to walk and is not opened on the caller's behalf either -- the
+        # tree is what goes in. Pinned because passing the row is the
+        # mistake the live measurement this test comes from was making.
+        documents = FakeElement(
+            Role.TREE_ITEM,
+            "Documents",
+            expandable=True,
+            expanded=False,
+            reveals=[FakeElement(Role.TREE_ITEM, "Reports")],
+        )
+        _flat_tree(documents)
+        gui = session()
+        self.assertEqual(gui.tree_items(documents, role=Role.TREE_ITEM), [])
+        self.assertEqual(documents.expand_calls, 0)
+
+    def test_a_tree_with_nothing_collapsed_is_read_once(self):
+        tree = _flat_tree(
+            FakeElement(Role.TREE_ITEM, "A"), FakeElement(Role.TREE_ITEM, "B")
+        )
+        gui = session()
+        gui.tree_items(tree)
+        self.assertEqual(tree.children_reads, 1)
+
+    def test_each_expansion_costs_one_extra_read_of_the_container(self):
+        # One re-read per expansion, never one per child: a live `children`
+        # read is a round trip on both backends, and paying it per child is
+        # how a walk over a large tree stops being usable.
+        documents = FakeElement(
+            Role.TREE_ITEM,
+            "Documents",
+            expandable=True,
+            expanded=False,
+            reveals=[FakeElement(Role.TREE_ITEM, "Reports")],
+        )
+        tree = _flat_tree(documents)
+        gui = session()
+        gui.tree_items(tree)
+        self.assertEqual(tree.children_reads, 2)
+
+    # -- what it asks of the backend ---------------------------------------
+
+    def test_a_fully_open_tree_needs_no_element_action(self):
+        # ELEMENT_ACTION is asked for at the first expansion rather than on
+        # the way in, so a tree with nothing left collapsed walks on a
+        # backend that cannot act at all.
+        root = FakeElement(
+            Role.TREE, "Root", children=[FakeElement(Role.TREE_ITEM, "A")]
+        )
+        gui = _no_action_session()
+        found = gui.tree_items(root, role=Role.TREE_ITEM)
+        self.assertEqual([e.name for e in found], ["A"])
+
+    def test_opening_a_branch_is_refused_without_element_action(self):
+        branch = FakeElement(
+            Role.TREE_ITEM,
+            "Documents",
+            expandable=True,
+            expanded=False,
+            children=[FakeElement(Role.TREE_ITEM, "Reports")],
+        )
+        gui = _no_action_session()
+        with self.assertRaises(CapabilityUnsupported) as caught:
+            gui.tree_items(FakeElement(Role.TREE, "Root", children=[branch]))
+        self.assertIn("ELEMENT_ACTION", str(caught.exception))
+        self.assertEqual(branch.expand_calls, 0)
+
+
+class TestRowValues(unittest.TestCase):
+    def test_reads_each_childs_name_as_the_cell_value(self):
+        row = FakeElement(
+            Role.LIST_ITEM,
+            ".exe",
+            children=[
+                FakeElement(Role.TEXT, ".exe"),
+                FakeElement(Role.TEXT, "Application"),
+                FakeElement(Role.TEXT, "17.00 GiB"),
+            ],
+        )
+        gui = session()
+        self.assertEqual(gui.row_values(row), (".exe", "Application", "17.00 GiB"))
+
+    def test_a_row_with_no_children_is_an_empty_tuple(self):
+        gui = session()
+        self.assertEqual(gui.row_values(FakeElement(Role.LIST_ITEM, "Empty")), ())
+
+    def test_an_unnamed_cell_reads_as_empty_string_not_none(self):
+        row = FakeElement(Role.LIST_ITEM, "Row", children=[FakeElement(Role.TEXT, "")])
+        gui = session()
+        self.assertEqual(gui.row_values(row), ("",))
 
 
 class TestDoubleClickElement(unittest.TestCase):

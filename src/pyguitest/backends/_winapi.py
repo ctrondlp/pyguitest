@@ -210,11 +210,14 @@ EVENT_SYSTEM_FOREGROUND = 0x0003
 
 EVENT_OBJECT_CREATE = 0x8000
 EVENT_OBJECT_DESTROY = 0x8001
+EVENT_OBJECT_SHOW = 0x8002
 """One contiguous range, covering the `WindowEvent(change="new")` and
-`change="close"` sources. Windows fires both for every window-class object on
-the desktop, not only the toplevels this package lists -- `OBJID_WINDOW` and
-`CHILDID_SELF` below narrow that to whole windows rather than their controls,
-and `Win32Backend._is_listable` narrows it the rest of the way."""
+`change="close"` sources -- SHOW as a second "new" source, for a window that
+was not yet visible when it was created. Windows fires all three for every
+window-class object on the desktop, not only the toplevels this package
+lists -- `OBJID_WINDOW` and `CHILDID_SELF` below narrow that to whole
+windows rather than their controls, and `Win32Backend._is_listable` narrows
+it the rest of the way."""
 
 EVENT_OBJECT_NAMECHANGE = 0x800C
 """The `WindowEvent(change="title")` source. Fires for a caption change on
