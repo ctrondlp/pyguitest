@@ -46,9 +46,47 @@ summary, then the story: what broke, how it was found, what changed).
 `docs/api.md` is generated — run `python3 scripts/gen-api-docs.py` after
 touching a public docstring; `test_api_docs.py` enforces it stays in sync.
 
+**Cutting a version.** Bumping `__version__` in `src/pyguitest/__init__.py`
+and retitling `## [Unreleased]` to `## [x.y.z] — <date>` is itself ordinary
+fix/feature work here, not a separate release ceremony gated behind
+something more formal — match the semver precedent in `CHANGELOG.md`'s
+history (new public API is a minor bump). Do this whenever a change adds
+enough shape to `[Unreleased]` to warrant it, particularly when
+`pyguitest-recorder`'s version floor needs a real released version to point
+at (see "This repo's place in the family").
+
 ## Testing against a real desktop
 
 If a task involves actually running pyguitest against a live GUI (not just
 unit tests with mocks/fakes), don't launch or raise real windows on the
 user's own desktop without asking first — this includes recording/replaying
 `pyguitest-recorder` scripts, which move the real mouse and click.
+
+**Windows.** If testing against a live Windows box, note that a plain SSH
+shell typically lands in Session 0 (services), which cannot see, let alone
+drive, the interactive desktop — see `docs/validation.md`'s own account of
+this. Reaching the real console session generally requires a one-shot
+scheduled task run with the `/it` flag (`schtasks /create ... /it /tr "..."`,
+then `schtasks /run`), polling the script's own log file rather than waiting
+on the SSH command itself, which returns long before the task does.
+
+**`SetWinEventHook`'s `WINEVENT_SKIPOWNPROCESS` flag matters for live
+checks.** A window created in the same Python process that installs the hook
+(e.g. via `pyguitest.connect()` in a probe script) never fires hook events
+for itself — that flag in `win32.py` is deliberate. A live check of
+`window_events()`/`wait_for_window()` needs the windows under test owned by a
+*separate* process (spawn one with `subprocess.Popen`, coordinate with a file
+or a small IPC mechanism); testing hook-driven behavior same-process silently
+tests nothing, and looks like a hang or a false failure rather than a clear
+error about why.
+
+## This repo's place in the family
+
+`pyguitest-recorder` (a sibling checkout) generates scripts against this
+package's public API and pins a version floor to it in its own
+`pyproject.toml`. Adding or changing public API here — a new `Element`
+property or method, a new `Session` call, anything `docs/api.md` lists —
+means checking whether the recorder's generator, resolver, or model reads it,
+and if so bumping its floor and adding its own changelog entry once this
+package's version reflects the change. Don't consider that side's work done
+without checking; see this file's own git-workflow note on scope.

@@ -5,6 +5,231 @@ All notable changes to pyguitest are recorded here. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html) — with the usual
 0.x caveat that the API may still change between minor versions.
 
+## [0.12.0] — 2026-09-24
+
+### Fixed
+
+- **`window_events()` reported a window's own *controls* as windows.** The
+  `SetWinEventHook` stream is narrowed by `_is_listable`, which answers style
+  questions -- visible, not a tool window, not cloaked -- and a visible child
+  control passes every one of them. So a button could arrive as `new` and be
+  added to the `known` set `wait_for_window` and `wait_window_close` are built
+  on, and a control taking focus could arrive as `focus` on the toplevel's
+  behalf. Only the event path was ever affected: `EnumWindows`, which
+  `windows()` is built on, never returns a child. Found while closing this
+  exact hole in docs/validation.md's list, by driving a real probe window's
+  controls under a live subscription -- seventeen events during the churn, of
+  which `new: 'Click Me'` (the button), `new: 'clicked 1'` (the static label
+  whose text the click changed) and seven `focus` events on handles carrying
+  no title belonged to controls. A caller waiting for a window was being
+  handed a button. The pump now requires the handle to be its own root
+  (`GetAncestor(hwnd, GA_ROOT)`, the reduction `window_at` already made for
+  screen points), so control events are dropped where `EnumWindows` never
+  produced them in the first place. `EVENT_OBJECT_DESTROY` is answered
+  *before* that check rather than after it, and the order is the other half of
+  the fix: a destroy is delivered once the window is gone, so asking whether it
+  is still a window dropped every `close` -- caught by re-running the same live
+  check after the first version of this change, where the toplevel's close
+  stopped being reported while the suite stayed green (a fake keeps the handle
+  in its table until a test removes it). Confirmed after: the churn produced
+  seven `focus` events for the window itself and nothing else, and a second
+  window's `new` and `close` both arrived, matched by handle. A window already
+  reported and then reparented into another (`SetParent`, a docked panel) now
+  reports `close` at its next event and is forgotten, rather than staying in
+  `known` with every later event dropped by the same toplevel check.
+
+- **A large `scroll()` on Windows scrolled the other way.** Anything past
+  273 detents -- one wheel event's ceiling, since every consumer reads the
+  delta back through 16 signed bits -- is split into pieces, and the pieces
+  went in one `SendInput` call. Measured live on Windows 11, with a real
+  window procedure counting the deltas it received: `scroll(dy=300)` arrived
+  as a *single* message of -29536, which is 36000 summed in 16 bits and
+  wrapped, so the desktop scrolled backwards by 246 detents rather than
+  forwards by 300. Splitting the calls is not the fix: two `SendInput` calls
+  back to back merged identically, because the merge is about what is pending
+  when the window reads its queue, not about the batch. Waiting between the
+  pieces is, and 10ms is where it starts -- measured at 0, 1, 5, 10, 20 and
+  50ms against a window draining its own queue, the first three merging and
+  the last three delivering both pieces -- so the pieces of an oversized
+  scroll are now sent separately, spaced by `_WHEEL_PIECE_GAP`. That gap is
+  50ms, not the 10ms threshold: the threshold was measured on an idle window,
+  and one that drains its queue later (busy, loaded, remote) would scroll
+  backwards again rather than merely short. A scroll
+  within the limit still goes in one call, where nothing can be added to
+  anything: the two axes are different messages and cannot be summed with
+  each other. The docstring had the mechanism wrong too, and now says what was
+  measured: one oversized event is *clamped* to 32767 (273 detents, short of
+  the ask) rather than wrapped, and it is the queue's summing of pending
+  pieces that wraps. Found closing the one Windows item left in
+  docs/validation.md's "Not run live" list, which is where the measurement is
+  recorded.
+
+- **`Element.click()` silently did nothing on a GTK checkbox or radio
+  button.** It tried dogtail's own coordinate-based click first and fell
+  back to AT-SPI's action interface only if that raised -- and on X11 it
+  does not raise, it just fails quietly for these two widgets. GTK reports
+  a checkbox or radio button's AT-SPI extents as its *whole row*, not the
+  small toggle the row reacts to; dogtail clicks the row's centre, which
+  sits past the label in dead space, and returns having changed nothing.
+  Measured live on the probe window in pyguitest-recorder, found by
+  recording a session and then recording a replay of the script it
+  generated to compare the two: `element.click()` on `Enabled` and on the
+  `Large` radio returned normally and left both unchecked, while
+  `element.do_action("click")` on the identical elements toggled them every
+  time -- confirmed the same way for a GTK3 combo box's popup item too,
+  which was already routed around this exact failure for a different
+  reason: a closed popup's item reports AT-SPI's INT_MIN "not showing"
+  position, which dogtail refuses with `ValueError: Attempting to generate a
+  mouse event at negative coordinates`. That refusal still becomes
+  `ElementNotActionable`, now matched on dogtail's own "negative coordinates"
+  wording rather than on any error that happens to mention coordinates.
+  `click()` now tries the
+  action interface first wherever the element publishes one, and only
+  falls back to dogtail's coordinate click where none exists -- KDE's
+  QML-based Kickoff menu category labels, still, which publish no Action
+  interface at all.
+
+- **`element_at` answered with the tab strip for every widget on a notebook
+  page.** The hit test walks down from each frame, asking
+  `getAccessibleAtPoint` and requiring every node it accepts to contain the
+  point -- a guard that earns its place, since a toolkit reporting widgets in
+  window coordinates otherwise claims points hundreds of pixels away. But it
+  assumed the tree nests geometrically, and GtkNotebook does not: a notebook
+  publishes its page *contents* as children of the `page tab`, whose own
+  rectangle is just the little tab label at the top. So the page tab does not
+  contain its own children, and the `page tab list` above it answers
+  `getAccessibleAtPoint` with nothing at all for a point in the page body --
+  the point is inside no tab's label. The walk stopped there and answered with
+  the tab list, which is not a widget anyone clicked. Measured on a GTK3
+  notebook: the tab reports (133, 141, 54, 30), its content filler
+  (113, 175, 494, 312), and a `Save` button inside that (113, 217, 494, 34);
+  asked about the button's own centre, the tab list answered `None` and the
+  page tab answered the filler correctly, so one step through the tab was all
+  that was missing. `_descend` now takes that step where the ordinary descent
+  dead-ends, asking each child rather than searching the subtree, and the node
+  it finally returns still has to contain the point -- so the window-coordinate
+  case is refused exactly as before. A child that cannot be asked -- no
+  Component interface, or gone mid-walk -- is skipped rather than raising out
+  of the walk, which would otherwise have dropped the whole application and
+  answered worse than before the step existed. Found recording a GTK notebook through
+  pyguitest-recorder, where every control on a tab page came out as a bare
+  coordinate instead of `gui.button("Save")`; see that repository's
+  `docs/developers/status.md`.
+
+### Changed
+
+- **A UIA `Element` no longer asks the same question of the same pattern
+  twice.** `expandable`/`expanded`, `checkable`/`checked` and
+  `selectable`/`selected` each independently asked `GetCurrentPattern` for
+  the same interface, and `actions` asks it seven times over on its own,
+  once per pattern this backend knows -- so reading, say, `actions` and then
+  `expanded` off one element was two identical cross-process COM round trips
+  for "does this publish ExpandCollapse," not one. `Element` now memoizes
+  the *lookup* (not any value read through the pattern, which still goes
+  back to UIA on every read) for its own lifetime -- a pattern's presence
+  cannot change between two reads a millisecond apart on the same element,
+  so this is exact, not an approximation. Only a settled answer is kept --
+  the pattern itself, or UIA's NULL for one the element does not publish; a
+  lookup that *raised* is asked again next time, so one transient COM failure
+  cannot stand in for "no such pattern" for the rest of the element's life.
+  Found chasing a pyguitest-recorder
+  bug: `windows/resolver.py` builds one `ElementRef` per click by reading
+  `actions`, `expanded` and `selectable` (among others) off a single fresh
+  `Element` in a row, and that total round-trip time is what a native
+  double-click's own synchronous, same-process toggle of a tree row was
+  racing and reliably winning, leaving the wrong `expand()`/`collapse()`
+  recorded; see that repository's status.md for the fuller story and why a
+  bigger fix (UI Automation's own `IUIAutomationCacheRequest`, batching
+  every property of interest into the *original* round trip rather than
+  saving the second one) was judged out of scope for a live-testing pass.
+
+### Added
+
+- **`Session.tree_items()`**, for every row of a tree including the ones
+  only there once a branch has been opened. `elements(within=tree)` sees
+  what is visible, and a collapsed row's children are not in the
+  accessibility tree at all -- the same way they are not on screen -- so
+  collecting the whole tree meant opening each branch by hand first. What
+  an expansion reveals is not in the same place on both toolkits, and the
+  first version of this method assumed one shape for both. Measured live on
+  a GTK3 `GtkTreeView`: opening `Documents` left `Documents.children` empty
+  (before *and* after the expansion) and put `Reports` and `Notes` into the
+  *tree's* own child list, beside the row that revealed them; UI Automation
+  nests the same rows under the branch instead, which is what a walk that
+  recursed into `child.children` was built for. Found by reading the live
+  tree directly after that walk reported nothing it had just opened -- the
+  unit fixtures that came with it modelled the nesting only, so they agreed
+  with the wrong assumption and stayed green. `tree_items()` now expands
+  every branch it finds collapsed and re-reads a container after each
+  expansion rather than walking the snapshot it started with: that picks up
+  the GTK rows beside their branch and leaves the nested case to the
+  recursion that already handled it. Confirmed live after the change, same
+  window, `Documents` and `Reports` both collapsed: the walk heard from the
+  tree container came back
+  `['Documents', 'Reports', 'Q1', 'Q2', 'Notes', 'Trash']`, expanding two
+  levels of branch it had never seen -- `Reports` and its `Q1`/`Q2` were
+  only in the container's child list *after* `Documents` opened. A
+  container is re-read once per *expansion*, never once per child, since a
+  live read is a round trip on both backends, and `ELEMENT_ACTION` is asked
+  for at the first expansion rather than on the way in, so a tree with
+  nothing left collapsed walks on `ELEMENT_TREE` alone. The test double now
+  models both shapes -- children that are a fresh list per read, as both
+  backends' are, and an expansion that reveals rows beside its branch --
+  and the old walk was re-run against those fixtures afterwards to check
+  they catch it: it answers `['Documents', 'Trash']` for the flat one, the
+  bug in one line.
+
+- **`Session.row_values()`**, a list or tree row's column values as a
+  tuple, read from the row's own children. Both backends put a cell's
+  displayed text in its `name`, and a UIA `ListView` nests those one per
+  column -- measured live on WinDirStat's extension-summary list, each
+  `list item` holding one `text` child per column. The GTK half of the
+  docstring was written from a claim rather than a measurement, and
+  measuring it is what changed the text: a GTK `GtkTreeView` publishes no
+  row element at all, at *any* column count, so there is nothing for this
+  method to read there. Measured live on the recorder's probe window, its
+  one-column `Gtk.TreeView`s (`First row`/`Second row`/`Third row`, and the
+  `Folders` tree's `Documents`/`Reports`/`Q1`/`Q2`/`Notes`/`Trash`) publish
+  those names as `table cell`s directly inside the table, `table row`
+  matching nothing, and `row_values` on one of them answers `()`; on a
+  three-column `Gtk.ListStore`, the three `table column header`s are
+  followed by six flat cells in row-major order. Chunking
+  `elements(role=Role.TABLE_CELL, within=table)` by the
+  `TABLE_COLUMN_HEADER` count stays the caller's job there, which is what
+  the docstring now says.
+
+- **`Role.TABLE_COLUMN_HEADER`.** UIA's `HeaderItem` (control type 50035)
+  already reported the string `"table column header"` -- it just had no
+  constant beside `Role.TABLE_CELL`/`TABLE_ROW` to spell it with, so a
+  caller had to hardcode the raw string. Found live: automating WinDirStat's
+  real extension-summary list, `gui.element(role="table column header",
+  name="Bytes")` was the only way to reach a column header at all. Four
+  at-spi role names now have no `Role` constant, not five.
+
+- **`Element.expand()`, `.collapse()`, `.expanded` and `.expandable`,** so a
+  tree row, notebook or other disclosure control can be opened and closed by
+  name rather than by a gesture that only works on one platform. Found
+  through pyguitest-recorder: with nothing to name, the only way it could
+  emit "open this tree row" was `gui.element(role=Role.TREE_ITEM,
+  name=...).double_click()`, measured live to work on Win32 and do nothing
+  at all on GTK, where a double-click on a tree row activates it rather than
+  expanding it. Both platforms publish a way to ask, just not the same
+  shape: UIA's ExpandCollapse pattern offers separate `Expand()`/`Collapse()`
+  methods and a four-state `CurrentExpandCollapseState`, while GTK (measured
+  on a GtkTreeView) publishes one action, `"expand or contract"`, that
+  toggles, and reports open/closed through the AT-SPI EXPANDABLE/EXPANDED
+  states rather than a pattern of its own -- dogtail wires `checked` and
+  `selected` to real states through its own `AccessibleState`, but never got
+  as far as this pair, so `expanded`/`expandable` read the node's state set
+  directly, by each state's name rather than by importing
+  `gi.repository.Atspi.StateType`, so that reading them costs nothing on a
+  system with no PyGObject installed. `expand()` and `collapse()` both check
+  `expanded` first and no-op where the control is already in the requested
+  state, which matters more on GTK, where the published action is a toggle,
+  than on Windows, where it is only a defensive match to the same
+  idempotence -- some UIA providers raise calling `Expand()` on an
+  already-expanded node instead of tolerating it.
+
 ## [0.11.0] — 2026-09-23
 
 ### Fixed

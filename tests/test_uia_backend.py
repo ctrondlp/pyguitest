@@ -130,6 +130,11 @@ class FakePattern:
         return self.state.get("selected", False)
 
     @property
+    def CurrentExpandCollapseState(self):
+        """`ExpandCollapseState_LeafNode` unless a test said otherwise."""
+        return self.state.get("expand_collapse_state", uia.ExpandCollapseState_LeafNode)
+
+    @property
     def CurrentValue(self):
         """Whatever a test put there, or None."""
         return self.state.get("value")
@@ -264,6 +269,7 @@ class FakeElement:
         self.getters = {}
         self.finds = []
         self.focus_calls = 0
+        self.pattern_calls = []
         self.failure = None
         self.find_failure = None
         self.focus_failure = None
@@ -299,6 +305,7 @@ class FakeElement:
 
     def GetCurrentPattern(self, pattern_id):
         """The pattern for `pattern_id`, or the failure a provider returns."""
+        self.pattern_calls.append(pattern_id)
         if self.failure is not None:
             raise self.failure
         if pattern_id not in self.patterns:
@@ -1024,6 +1031,41 @@ class TestElementState(UiaTestCase):
         self.assertIsNone(element.selected)
         self.assertFalse(element.selectable)
 
+    def test_expanded_follows_the_expand_collapse_state(self):
+        for state, expected in (
+            (uia.ExpandCollapseState_Expanded, True),
+            (uia.ExpandCollapseState_Collapsed, False),
+            # A tree view showing some but not all of a node's children --
+            # read as expanded, the way a real user would describe it.
+            (uia.ExpandCollapseState_PartiallyExpanded, True),
+        ):
+            with self.subTest(state=state):
+                node = self.node()
+                node.add_pattern(
+                    "expand collapse", FakePattern(expand_collapse_state=state)
+                )
+                element = self.element(node)
+                self.assertEqual(element.expanded, expected)
+                self.assertTrue(element.expandable)
+
+    def test_a_leaf_node_is_not_expandable(self):
+        # LeafNode is what a provider answers for "nothing to expand", not a
+        # closed disclosure control -- the same None `checked` gives an
+        # element with no Toggle pattern at all.
+        node = self.node()
+        node.add_pattern(
+            "expand collapse",
+            FakePattern(expand_collapse_state=uia.ExpandCollapseState_LeafNode),
+        )
+        element = self.element(node)
+        self.assertIsNone(element.expanded)
+        self.assertFalse(element.expandable)
+
+    def test_an_element_without_an_expand_collapse_pattern_is_not_expandable(self):
+        element = self.element(self.node())
+        self.assertIsNone(element.expanded)
+        self.assertFalse(element.expandable)
+
     def test_focus_is_read_from_the_element(self):
         self.assertTrue(self.element(self.node(CurrentHasKeyboardFocus=True)).focused)
         self.assertFalse(self.element(self.node()).focused)
@@ -1034,6 +1076,76 @@ class TestElementState(UiaTestCase):
         node.add_pattern("toggle", FakePattern())
         self.assertEqual(self.element(node).actions, ["invoke", "toggle"])
         self.assertEqual(self.element(self.node()).actions, [])
+
+    def test_a_pattern_lookup_is_not_repeated_on_the_same_element(self):
+        # `expandable` and `expanded` both ask "does this element publish
+        # expand collapse" -- that used to be two separate GetCurrentPattern
+        # calls for the identical question, and pyguitest-recorder's
+        # ElementRef reads several such pairs off one Element per click
+        # (actions checks all seven patterns; expanded/selectable each
+        # check one of those seven again). Measured live as part of a real
+        # click's total round-trip time, which a native double-click's own
+        # synchronous toggle of a tree row was racing and winning. See
+        # pyguitest-recorder's status.md.
+        node = self.node()
+        node.add_pattern(
+            "expand collapse",
+            FakePattern(expand_collapse_state=uia.ExpandCollapseState_Expanded),
+        )
+        element = self.element(node)
+        self.assertTrue(element.expandable)
+        self.assertTrue(element.expanded)
+        expand_collapse_id = uia._PATTERN_INTERFACES["expand collapse"][0]
+        self.assertEqual(node.pattern_calls.count(expand_collapse_id), 1)
+
+    def test_a_second_element_for_the_same_node_asks_again(self):
+        # The cache lives on the Element, not the node -- two separate
+        # Elements (as a fresh hit-test on the same point would hand back)
+        # must not see each other's answers.
+        node = self.node()
+        node.add_pattern("toggle", FakePattern(toggle_state=uia.ToggleState_On))
+        first = self.element(node)
+        self.assertTrue(first.checked)
+        second = self.element(node)
+        self.assertTrue(second.checked)
+        toggle_id = uia._PATTERN_INTERFACES["toggle"][0]
+        self.assertEqual(node.pattern_calls.count(toggle_id), 2)
+
+    def test_a_lookup_that_raised_is_asked_again_not_remembered(self):
+        # VITAL -- keep this test. Without it the per-Element pattern cache
+        # can silently remember a transient COM failure as "no such pattern",
+        # and expanded/expand()/checked on that Element then lie for its
+        # whole life -- in exactly the double-click race the cache was added
+        # for.
+        node = self.node()
+        node.add_pattern(
+            "expand collapse",
+            FakePattern(expand_collapse_state=uia.ExpandCollapseState_Collapsed),
+        )
+        element = self.element(node)
+        node.failure = ComFailure("0x80131505: the provider timed out")
+        self.assertFalse(element.expandable)
+        node.failure = None
+        self.assertTrue(element.expandable)
+        self.assertFalse(element.expanded)
+
+    def test_a_null_pattern_is_remembered_as_absent(self):
+        # VITAL -- keep this test. A NULL pointer is the real Windows answer
+        # for a pattern an element does not publish, and it *is* settled: if
+        # it stopped being cached, every `actions` read would go back to
+        # re-ask all seven patterns, undoing the round-trip saving above.
+        node = self.node()
+        asked = []
+
+        def null_pattern(pattern_id):
+            asked.append(pattern_id)
+            return NullPointer()
+
+        node.GetCurrentPattern = null_pattern
+        element = self.element(node)
+        self.assertFalse(element.expandable)
+        self.assertIsNone(element.expanded)
+        self.assertEqual(len(asked), 1)
 
     def test_the_pid_is_read_and_zero_reads_as_unknown(self):
         self.assertEqual(self.element(self.node(CurrentProcessId=4242)).pid, 4242)
@@ -1138,6 +1250,55 @@ class TestElementActions(UiaTestCase):
         with self.assertRaises(CapabilityUnsupported) as caught:
             self.element(self.node()).select()
         self.assertIn("SelectionItem", str(caught.exception))
+
+    def test_expand_calls_expand_on_a_collapsed_node(self):
+        node = self.node()
+        pattern = node.add_pattern(
+            "expand collapse",
+            FakePattern(expand_collapse_state=uia.ExpandCollapseState_Collapsed),
+        )
+        self.element(node).expand()
+        self.assertEqual(pattern.calls, ["Expand"])
+
+    def test_expand_is_a_no_op_once_already_expanded(self):
+        # Some providers raise calling Expand() on an already-expanded node
+        # rather than treating it as a no-op; checked first for that reason,
+        # not only to match the at-spi backend's own idempotence.
+        node = self.node()
+        pattern = node.add_pattern(
+            "expand collapse",
+            FakePattern(expand_collapse_state=uia.ExpandCollapseState_Expanded),
+        )
+        self.element(node).expand()
+        self.assertEqual(pattern.calls, [])
+
+    def test_expand_without_an_expand_collapse_pattern_refuses(self):
+        with self.assertRaises(CapabilityUnsupported) as caught:
+            self.element(self.node()).expand()
+        self.assertIn("ExpandCollapse", str(caught.exception))
+
+    def test_collapse_calls_collapse_on_an_expanded_node(self):
+        node = self.node()
+        pattern = node.add_pattern(
+            "expand collapse",
+            FakePattern(expand_collapse_state=uia.ExpandCollapseState_Expanded),
+        )
+        self.element(node).collapse()
+        self.assertEqual(pattern.calls, ["Collapse"])
+
+    def test_collapse_is_a_no_op_once_already_collapsed(self):
+        node = self.node()
+        pattern = node.add_pattern(
+            "expand collapse",
+            FakePattern(expand_collapse_state=uia.ExpandCollapseState_Collapsed),
+        )
+        self.element(node).collapse()
+        self.assertEqual(pattern.calls, [])
+
+    def test_collapse_without_an_expand_collapse_pattern_refuses(self):
+        with self.assertRaises(CapabilityUnsupported) as caught:
+            self.element(self.node()).collapse()
+        self.assertIn("ExpandCollapse", str(caught.exception))
 
     def test_do_action_performs_a_ui_automation_action(self):
         node = self.node()

@@ -1600,15 +1600,16 @@ will say so, which is correct for the SSH session it ran in.
 
 ## Not run live
 
-- **What five live Windows runs left unverified.** The suite passes on
+- **What the live Windows runs left unverified.** The suite passes on
   Windows 11 build 26200, and the five runs recorded above — the SSH session,
   the first interactive desktop, the control-set pass, the slow-desktop probe
-  and the foreground-lock probe — settled what each could reach. Both repairs
-  that were once here in the awkward state, cause confirmed live and fix only
-  against a fake, have since been run against the real thing and are struck
-  through below. What stays is what none of the five reached: the questions a
-  desktop-less SSH session cannot ask, and the ones no single-monitor,
-  US-layout machine can answer at all. Every prototype and
+  and the foreground-lock probe — settled what each could reach, and the
+  dated runs at the end of this file closed more. Everything struck through
+  below has since been run against the real thing, including both repairs
+  that were once here in the awkward state (cause confirmed live, fix only
+  against a fake). What stays is what none of those runs reached: the
+  questions a desktop-less SSH session cannot ask, and the ones no
+  single-monitor, US-layout machine can answer at all. Every prototype and
   structure layout below is transcribed from Microsoft's documentation and
   driven by fakes, and a fake can only check that the code sends what it
   means to send; whether Windows *acts* on it is the half no fake reaches. In
@@ -1627,8 +1628,13 @@ will say so, which is correct for the SSH session it ran in.
   - ~~`ShowWindow`'s other states (`minimize_window`/restore) are read back
     rather than trusted.~~ **Closed 2026-09-20:** each read back through
     `IsIconic`.
-  - A scroll past `_MAX_WHEEL_STEPS` arrives as the total detents asked for,
-    rather than wrapping the 16-bit wheel field and scrolling backwards.
+  - ~~A scroll past `_MAX_WHEEL_STEPS` arrives as the total detents asked for,
+    rather than wrapping the 16-bit wheel field and scrolling backwards.~~
+    **Closed 2026-09-24, by falsifying it:** it *did* wrap and scroll
+    backwards -- in a message a real window procedure received on a real
+    desktop -- and the split the backend already did was being undone by the
+    message queue. Fixed; see the CHANGELOG, and "A long wheel scroll, and a
+    claim that was wrong" below for the measurements.
   - ~~`GetAsyncKeyState(VK_MENU)` answers about a held Alt.~~ **Closed
     2026-09-20:** a held Alt, Shift and Control each answered `True`, and
     `False` after release.
@@ -1658,9 +1664,13 @@ will say so, which is correct for the SSH session it ran in.
     `GetMessageW` delivering one `WinEventProc` call per event, and
     `PostThreadMessageW(WM_QUIT, ...)` ending the loop are all confirmed live
     above.
-  - Whether the same hook *stays quiet* for the control-level flood beneath
+  - ~~Whether the same hook *stays quiet* for the control-level flood beneath
     an ordinary window (rather than merely firing correctly for the
-    toplevel-level events exercised above) is not yet isolated.
+    toplevel-level events exercised above) is not yet isolated.~~
+    **Closed 2026-09-24, by falsifying it:** it did *not* stay quiet -- a
+    window's own visible child controls passed `_is_listable` and arrived as
+    `new` and `focus` events, which is a bug `wait_for_window` could have been
+    satisfied by. Fixed; see the CHANGELOG and the Windows section below.
   - A suspended UWP application's cloaked window does not reach
     `_is_listable` through this path when it cannot through `EnumWindows`.
     (Cloaked windows are confirmed excluded from `windows()` above; this is
@@ -2050,3 +2060,283 @@ The third check the previous version of this section proposed — a capture at
 two points along a long move — is still not done, for a reason worth stating:
 a screenshot does not reliably contain the pointer at all, so it was the
 weakest of the three to begin with.
+
+## Run live on a private Xvfb against a GTK3 notebook (2026-09-23)
+
+Driven from pyguitest-recorder's side, recording a purpose-built GTK3 window
+(`scripts/gtk_probe_window.py` there) on a private Xvfb with a private
+accessibility bus. The window exists to publish one of each control worth
+telling apart, which is how this turned up something no single-widget probe
+would.
+
+**`element_at` answered with the tab strip for every widget on a notebook
+page** — the finding, and the fix is in the CHANGELOG. GtkNotebook publishes
+a page's contents as children of the `page tab`, whose own rectangle is the
+tab label at the top, so the tree stops nesting geometrically exactly where
+the descent assumed it would. Measured on the page's `Save` button: the tab
+reports (133, 141, 54, 30), the content filler (113, 175, 494, 312), and the
+button (113, 217, 494, 34). Asked about the button's own centre (360, 234),
+`page tab list.getAccessibleAtPoint` answered **`None`** — the point is in no
+tab's label — while `page tab.getAccessibleAtPoint` answered the filler
+correctly. So the walk needed one step *through* a node that does not contain
+its own children, and nothing more.
+
+That measurement is the whole reason the fix is one step rather than a
+subtree search: it was taken before the change, not reasoned about after.
+Both node types the descent meets — a dogtail `Node` from `_hits_in` and a
+raw `Atspi.Accessible` from `getAccessibleAtPoint` — were checked to answer
+`list(node)`, `childCount`, `children` and `getChildAtIndex` alike, so the
+children iteration added to it is safe on either.
+
+**Confirmed after the fix:** `element_at` at that same point answers
+`Element('button', 'Save')`, and a recording of the window names its entry,
+button, check box, radio button, combo box, tab, tree-view row and menu items
+where it previously named none of them. 1739 tests and 26112 subtests still
+pass.
+
+## A private Xvfb with and without a window manager, and Windows 11 (2026-09-23)
+
+Three things measured while checking this package against a private X server
+(`Xvfb :96` with MATE's `marco`, and a bare `Xvfb :95` with no window manager)
+and against the Windows box.
+
+- **`move_window`/`resize_window` do nothing at all with no window manager.**
+  Both are `_NET_MOVERESIZE_WINDOW` client messages, so on a bare X server
+  nobody is listening: the client stayed at parent-relative (0, 0) and
+  484x316, no error, no change in `geometry()` -- while `WINDOW_PLACEMENT` and
+  `WINDOW_RESIZE` stay declared. With `marco` the same calls work:
+  `move_window(w, 50, 60)` put the frame at (38, 17) with the client at
+  (12, 43) inside it, and `geometry()` read back exactly (50, 60).
+  pyguitest-recorder emits neither call, so no generated script is affected;
+  hand-written scripts in a bare-Xvfb rig are.
+- **A move sent before the window manager has placed a window is lost.**
+  `wait_for_window` returned a window whose `is_window_viewable` was still
+  False with `geometry()` reading the pre-placement (1, 1, 484, 316); the
+  `move_window(50, 60)` sent immediately after lost to marco's own placement,
+  leaving the window at (398, 257) (frame at (386, 214)), while the same call
+  after a 1.5s settle landed at exactly (50, 60). That is the cause of the
+  "geometry may still disagree" note that used to sit on `move_window`'s
+  docstring as an unconfirmed read-side issue: the read side is right and the
+  timing was wrong, and both docstrings now say so.
+- **An element lookup intermittently misses an element that is there.**
+  Measured on both platforms: the same query raises `ElementNotFound` one
+  moment and answers the next, with the window unchanged, and *which* control
+  misses differs run to run -- on Windows 11 one run resolved `entry ''` but
+  not `text 'Gamma'` after a tab switch, another the reverse; on a GTK3 probe
+  window one run resolved the `Save` button and the password field but not the
+  `Name` entry, and the next the entry but not the password field.
+  `find_elements()` on the same window finds what the single lookup missed, so
+  a retry is enough to work around it -- which is what the live checks do now
+  -- but the miss itself is unexplained. A further run raised
+  `AttributeError: 'NoneType' object has no attribute 'roleName'` out of a
+  broad walk of a real GTK window, once, not since.
+- **`Element.click()` can raise a `ValueError` out of dogtail instead of
+  anything of this package's.** Recording the pyguitest-recorder control-set
+  window on the private display and replaying into a fresh copy: the script's
+  `gui.menu_item("Gamma").click()` -- an item in an open combo-box popup --
+  reached `atspi.py`'s `self.node.click()` and died with
+  `ValueError: Attempting to generate a mouse event at negative coordinates:
+  (-2147483647, -2147483647)`, from `dogtail/rawinput.py`. That is AT-SPI's
+  INT_MIN "not showing" sentinel: `extents()` refuses it (see
+  `test_a_component_with_no_position_is_none_rather_than_int_min`) but the
+  click path hands it straight to dogtail, which injects at those
+  coordinates. Everything before that point in the same script landed -- the
+  entry read back `Ada` and the check box was set -- so this is the one step,
+  not the recording. Worth fixing as a decision rather than a patch:
+  `Element.click()`'s docstring says it acts on the element with no
+  coordinates, so the honest outcomes are a working `do_action("click")` on
+  that popup item or a pyguitest error naming the sentinel, not a dependency
+  exception.
+
+## Run live on a private Xvfb against a GTK3 tree (2026-09-24)
+
+`Session.tree_items()` was checked against a real GTK3 tree on a private X
+server and a private accessibility bus -- the rig pyguitest-recorder's
+`live-capture-check.py` uses, with a runtime directory of its own so the
+accessibility socket is never bound where the developer's session keeps its
+own. The window is that repository's `scripts/gtk_probe_window.py`, and the
+page was switched by clicking the `Tree` page tab.
+
+**The two shapes, measured on one tree.** With `Documents` collapsed,
+`Documents.children` was `[]`; the tree container (`tree table 'Folders'`)
+held `['Folder' header, 'Documents', 'Trash']`; and `Documents.expand()`
+changed nothing *under* `Documents` -- `Documents.children` read `[]` again
+afterwards -- while the container became `[column header, 'Documents',
+'Reports', 'Q1', 'Q2', 'Notes', 'Trash']`. AT-SPI on GTK publishes a
+revealed row beside its branch, in pre-order, so a walk that recursed into
+`child.children` could only ever find rows that were already open.
+
+**After the fix**, same window, `Documents` and `Reports` both collapsed:
+`tree_items(container, role=Role.TABLE_CELL)` returned `['Documents',
+'Reports', 'Q1', 'Q2', 'Notes', 'Trash']` -- two levels of branch opened by
+the walk itself, `Reports` and its `Q1`/`Q2` having been in the container's
+child list only after `Documents` had been opened.
+
+**And the rows a `GtkTreeView` does not publish.** The same two tree views
+answered the question `row_values()` is about. The `Items` list (one
+column) publishes `['Item' header, 'First row', 'Second row', 'Third row']`
+directly inside its `table`; a three-column `Gtk.ListStore` publishes its
+three `table column header`s followed by six `table cell`s in row-major
+order. `table row` matched nothing in either, and `row_values()` on a cell
+answers `()`. A `GtkTreeView` therefore has no row element to read at *any*
+column count -- the docstring now says so, and the UIA half (WinDirStat's
+nesting `list item`) is what that method is for. The earlier text claiming a
+single-column GTK list nested was never measured, and this run is what
+corrected it.
+
+Everything ran under `Xvfb :71` from a throwaway script: its own session bus
+(`dbus-run-session`), its own `XDG_RUNTIME_DIR`, its own
+`at-spi-bus-launcher` and `at-spi2-registryd`, all stopped and removed
+afterwards. The desktop session and its accessibility bus were not touched.
+
+## A long wheel scroll, and a claim that was wrong (2026-09-24)
+
+Windows 11 build 26200, console session, driven over SSH through a scheduled
+task run with `/it` so the payload runs on the interactive desktop, against a
+window of its own whose window procedure counts what actually arrives.
+
+**The claim being checked was this file's own**: a scroll past
+`_MAX_WHEEL_STEPS` (273 detents, the most one wheel event can carry) arrives
+as the total detents asked for. It does not. `scroll(dy=300)` read back from
+the window procedure:
+
+  - **one message, delta -29536** -- that is 36000 summed in 16 bits and
+    wrapped, so the desktop scrolled *backwards* by 246 detents;
+  - and the backend had split it correctly: two events, `mouseData` 32760 and
+    3240. The split was real, and the merge happened afterwards.
+
+Two `SendInput` calls back to back merged identically, which located the merge
+in the message queue rather than in the batch: wheel deltas pending for the
+same window at once are added together. With the queue drained between them
+the pieces stay separate -- two calls 0.3s apart arrived as two messages,
+32760 and 3240, summing to 36000.
+
+**So the spacing was measured**, against a window pumping its own queue (as a
+real application does) while a second thread sent the two pieces:
+
+| gap between the pieces | what the window received |
+| --- | --- |
+| 0ms | 1 message, -29536 (merged, backwards) |
+| 1ms | 1 message, -29536 |
+| 5ms | 1 message, -29536 |
+| 10ms | 2 messages, 32760 + 3240 = 36000 |
+| 20ms | 2 messages, 32760 + 3240 = 36000 |
+| 50ms | 2 messages, 32760 + 3240 = 36000 |
+
+10ms is the threshold. `_WHEEL_PIECE_GAP` was first set to exactly that, and
+has since been raised to 50ms: this was an idle window, and one draining its
+queue later would fall back to scrolling *backwards*, not merely short. The same
+run corrected a second thing the docstring had wrong, and it is the more
+useful half of the finding: a scroll sent as *one* oversized event -- 36000
+raw, with the split suppressed -- arrives **clamped to 32767**, which is 273
+of the 300 detents asked for, in the right direction. Clamping is what the
+system does to one event that asks for too much; wrapping is what the queue's
+summing does to pieces that are pending together. A scroll within the limit
+is unchanged: one call, one piece per axis.
+
+**Confirmed after the fix**, same window and same readback: the probe pumping
+its own queue on one thread while `gui.scroll()` runs on another, which is
+what a real application does during the gap.
+
+| call | what arrived | time |
+| --- | --- | --- |
+| `scroll(dy=3)` | 1 message, 360 | 0ms |
+| `scroll(dy=300)` | 2 messages, 32760 + 3240 = 36000 | 11ms |
+| `scroll(dy=-300)` | 2 messages, -32760 + -3240 = -36000 | 11ms |
+| `scroll(dy=273)`, exactly the ceiling | 1 message, 32760 | 0ms |
+
+That last row is the one worth keeping: a scroll that fits one event costs
+nothing extra. And the shape of the confirmation matters -- a probe that calls
+`scroll()` and *then* pumps (the first payload's shape) reports the merge
+before and after the fix alike, because the gap only helps if somebody is
+reading the queue during it. That is what a real application is doing.
+
+**The same trip also re-ran the suite and re-synced the checkout.** With the
+working tree synced (verified by comparing `git diff | git hash-object` on
+both machines -- the same hash after the copy, and one stale `docs/api.md`
+found and brought across on the way), the suite on Windows 11 with Python
+3.13 was **1529 passed, 69 skipped, 26465 subtests**, the skips being the
+POSIX-only tests. And the box turned out to be a live case for the
+`.gitattributes` added here the same day: its `core.autocrlf` is `true` and
+`git ls-files --eol` reported `w/crlf` for the files git had touched. With
+that file in place the same command reports `attr/text=auto eol=lf` and
+`w/lf`.
+
+## Run live on Windows 11: the rest of the "Not run live" list (2026-09-24)
+
+Build 26200, console session 1, driven over SSH through scheduled tasks run
+with `/it` -- a plain SSH shell lands in Session 0 and cannot see, let alone
+drive, the interactive desktop's UI Automation tree. Every payload was a real
+window of its own (or a real application's), and every answer was read back
+from the desktop rather than from the claim.
+
+- **`windows()` really is bottom-to-top, and `find_window` takes the topmost
+  match.** Three windows, two of them *sharing* a title: the probes' relative
+  order in `gui.windows()` matched their order in the real Z chain
+  (`GetTopWindow` then `GetWindow(GW_HWNDNEXT)`) on all three raises, and the
+  shared-titled query answered x=400 when that window was raised and x=750
+  when the other was -- whichever was on top, read back through the rectangle
+  because the title cannot tell them apart. (At 125% DPI the requested
+  coordinates landed 25% further out, which is why the check compares
+  positions rather than assuming pixels.)
+- **A scroll bar's thumb is its own role, and the bar is not doubled.** A
+  native `LISTBOX` with `WS_VSCROLL` and 500 items: `elements(role=SCROLL_BAR)`
+  answered exactly one, `scroll bar 'Vertical'`, whose children were
+  `push button 'Line up'`, `thumb 'Position'`, `push button 'Page down'` and
+  `push button 'Line down'`, with one element of role `"thumb"` whose parent
+  is that bar. Folding the thumb into `Role.SCROLL_BAR` would therefore have
+  made Windows answer two where Linux answers one.
+- **`_initialize_com`'s `CoInitialize` is needed, and the backend does it for
+  itself.** On a fresh thread, `comtypes.client.CreateObject` against
+  `CUIAutomation` raised
+  `OSError: [WinError -2147221008] CoInitialize has not been called` -- the
+  failure that reads as "this machine has no UI Automation" -- while the same
+  call after `uia._initialize_com()` returned a real `IUIAutomation` pointer,
+  and `pyguitest.connect(backend="uia")` on a *fresh thread* worked: root
+  `panel 'Desktop 1'`. Incidentally the same finding from the other side: a
+  UIA element touched from a thread whose apartment was not initialized
+  answered `None` for its own parent.
+- **`pyguitest inspect` groups windows under the desktop element's own name.**
+  `tree_data` returned exactly one group, named `Desktop 1`, holding four
+  windows (this run's probe, the Python console, VirtualBox, the shell), and
+  the rendering opened with `Application: Desktop 1`. UIA publishes no
+  per-application node, so one group named after the desktop element is what
+  the AT-SPI-shaped grouping becomes there.
+- **`tree_items()` opens branches on a real UIA tree, and `row_values()` reads
+  a real row.** WinDirStat was the intended target and cannot be driven
+  unattended: starting it from a scheduled task raises a UAC prompt on the
+  secure desktop -- two `consent.exe` processes, no window at all after 24s,
+  measured -- and nothing over SSH can answer it, which is why that
+  repository's WinDirStat scripts assume it is already open. This
+  repository's sibling probe window needs no elevation and publishes both
+  shapes: a `SysTreeView32` two levels deep with its branches collapsed, and a
+  report-view `SysListView32` with two columns. Before the walk only
+  `['Documents', 'Trash']` were in the tree; `tree_items(tree,
+  role=Role.TREE_ITEM)` returned six --
+  `['Documents', 'Reports', 'Q1', 'Q2', 'Notes', 'Trash']` -- having opened
+  two levels itself, and both branches read `expanded` afterwards. The list's
+  rows read `('Alpha', '1')`, `('Beta', '2')`, `('Gamma', '3')`: both
+  columns, one `text` child each.
+- **`window_events()` did not stay quiet, and now does.** Seventeen events
+  arrived while a probe window's own controls were clicked and typed into, of
+  which the `new` entries for `Click Me` and for the static label whose text
+  the click changed, plus seven `focus` entries on untitled handles, were
+  control-level: a `wait_for_window` could have been satisfied by a button.
+  The fix needed one ordering detail that only the second live run found --
+  `EVENT_OBJECT_DESTROY` has to be answered *before* the toplevel check,
+  because a destroy is delivered once the window is gone, so the first version
+  silently stopped reporting every `close` while the unit tests (whose fake
+  keeps the handle) stayed green. After both: the same churn produced seven
+  `focus` events for the window itself and nothing else, and a second window's
+  `new` and `close` both arrived -- the close matched by handle, as
+  `wait_window_close` matches it, and carrying no title because the window is
+  already gone when the event is read. One more thing the same run showed, and
+  it is the reason a subscription needs a control like this at all: *quiet* is
+  only worth reporting next to evidence the hook was live.
+
+What **remains** open on Windows, and why: multi-monitor DPI arithmetic needs
+a second screen and `EnumDisplayMonitors` returning false needs a broken
+desktop (this box has one working screen); a suspended UWP application's
+cloaked window through the event path needs a Store application and a way to
+suspend it, and is the one item nothing in this run came near.
+

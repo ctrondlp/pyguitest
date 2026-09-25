@@ -597,6 +597,14 @@ class X11Backend(GUIBackend):
         ConfigureRequest, but positioned by the client window's own corner.
         Only the values that are not None are included in the request, so a
         pure move leaves size alone and a pure resize leaves position alone.
+
+        The window manager is what acts on this, so there has to be one: with
+        nothing listening, measured on a bare Xvfb with no manager running,
+        both calls do nothing at all -- no error and no change in geometry --
+        while WINDOW_PLACEMENT and WINDOW_RESIZE stay declared. And a request
+        that arrives before the manager has finished placing a newly mapped
+        window is lost to that placement, which is why move_window's docstring
+        says to wait for `is_window_viewable` first.
         """
         handle = self._handle(window)
         flags = self._MOVERESIZE_GRAVITY_STATIC | self._MOVERESIZE_SOURCE_APPLICATION
@@ -620,16 +628,19 @@ class X11Backend(GUIBackend):
     def move_window(self, window, x, y):
         """Move a window's top-left corner to (x, y), in screen coordinates.
 
-        Confirmed visually on GNOME/Mutter (XWayland): the window does move
-        to the requested position. A geometry() call made right afterward may
-        still disagree, though -- see its docstring for why that appears to
-        be a separate, unconfirmed issue on the read side.
+        The window manager does the moving, so this needs one running -- see
+        `_moveresize` for what that costs, and for why a move issued before a
+        newly mapped window has been placed goes nowhere.
         """
         self.require(Capability.WINDOW_PLACEMENT)
         self._moveresize(window, x=x, y=y)
 
     def resize_window(self, window, width, height):
-        """Resize a window to `width` by `height`."""
+        """Resize a window to `width` by `height`.
+
+        The same `_NET_MOVERESIZE_WINDOW` route as move_window, including what
+        that costs: nothing happens without a window manager.
+        """
         self.require(Capability.WINDOW_RESIZE)
         self._moveresize(window, width=width, height=height)
 

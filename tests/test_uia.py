@@ -62,7 +62,7 @@ class TestTheValuesAreNamesACallerCouldHaveLearned(unittest.TestCase):
     def test_the_sets_say_exactly_what_they_claim_to(self):
         self.assertEqual(
             _ATSPI_NAMES_WITHOUT_CONSTANTS,
-            {"calendar", "header", "menu bar", "table column header", "tool tip"},
+            {"calendar", "header", "menu bar", "tool tip"},
         )
         self.assertEqual(
             _NO_ATSPI_COUNTERPART, {"custom", "semantic zoom", "thumb", "title bar"}

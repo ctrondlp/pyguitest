@@ -28,6 +28,7 @@ from pyguitest.backends.base import Window
 from pyguitest.backends.win32 import (
     _CURSOR_SHAPES,
     _DIAGONAL_SHAPES,
+    _WHEEL_PIECE_GAP,
     _WINDOW_EVENT_RANGES,
     VK,
     Win32Backend,
@@ -150,6 +151,7 @@ class Win32TestCase(unittest.TestCase):
         self.point_window = 0
         self.send_count = None
         self.sent = None
+        self.sent_calls = []
         self.cursor = (0, 0)
         self.cursor_handle = 0
         self.cursor_showing = 1
@@ -384,6 +386,7 @@ class Win32TestCase(unittest.TestCase):
 
     def _send_input(self, count, events, size):
         self.sent = (count, events, size)
+        self.sent_calls.append((count, list(events), size))
         return count if self.send_count is None else self.send_count
 
     def _get_dpi_for_monitor(self, hmonitor, dpi_type, x_ptr, y_ptr):
@@ -1085,9 +1088,26 @@ class TestClassifyWindowEvent(Win32TestCase):
         self.assertEqual(change, "close")
         self.assertNotIn(handle, known)
 
+    def test_a_destroy_still_reports_close_after_the_window_is_gone(self):
+        # The window is already destroyed when the event is delivered -- that
+        # is what a destroy event means -- so anything asking "is this still a
+        # window" before reporting it drops every close. Measured live: the
+        # toplevel's own close stopped being reported the moment such a check
+        # was added ahead of the destroy branch, while this suite stayed green,
+        # because a fake keeps the handle in its table until a test says
+        # otherwise.
+        handle = self.add_window(1)
+        known = {handle}
+        del self.windows[handle]
+        change = self.gui._classify_window_event(
+            _winapi.EVENT_OBJECT_DESTROY, handle, known
+        )
+        self.assertEqual(change, "close")
+        self.assertNotIn(handle, known)
+
     def test_a_destroy_for_an_unknown_handle_is_nothing(self):
         # The ordinary case: a child control's own destroy, which was never
-        # added to `known` because it never passed `_is_listable`. Windows
+        # added to `known` because it never passed the toplevel check. Windows
         # fires EVENT_OBJECT_DESTROY for every window-class object, not only
         # the toplevels this package reports.
         known: set = set()
@@ -1095,6 +1115,77 @@ class TestClassifyWindowEvent(Win32TestCase):
             _winapi.EVENT_OBJECT_DESTROY, 99, known
         )
         self.assertIsNone(change)
+
+    def test_a_child_control_is_not_a_window(self):
+        # A WinEvent hook fires for every window-class object on the desktop,
+        # child controls included, where EnumWindows -- the walk `windows()` is
+        # built on -- returns toplevels only. `_is_listable` asks style
+        # questions and a visible child passes all of them, so nothing here is
+        # dropped without the toplevel check. Measured live, driving a probe
+        # window's own controls: the stream reported `new` for its `Click Me`
+        # button and for the static label whose text the click changed, and
+        # `focus` for handles carrying no title at all.
+        parent = self.add_window(1)
+        child = self.add_window(2, root=parent)
+        known: set = set()
+        for event in (
+            _winapi.EVENT_OBJECT_CREATE,
+            _winapi.EVENT_OBJECT_SHOW,
+            _winapi.EVENT_OBJECT_NAMECHANGE,
+            _winapi.EVENT_SYSTEM_FOREGROUND,
+            _winapi.EVENT_OBJECT_DESTROY,
+        ):
+            with self.subTest(event=event):
+                self.assertIsNone(self.gui._classify_window_event(event, child, known))
+        self.assertNotIn(child, known)
+
+    def test_a_window_created_invisible_is_new_once_shown(self):
+        # VITAL -- keep this test. Measured live on Windows 11: a window
+        # created visible fires CREATE and even FOREGROUND while
+        # IsWindowVisible still answers False, so both were dropped, and with
+        # no SHOW hook the window was never reported -- wait_for_window timed
+        # out on a window windows() listed. SHOW is the event that catches it.
+        handle = self.add_window(1, visible=False)
+        known: set = set()
+        for event in (_winapi.EVENT_OBJECT_CREATE, _winapi.EVENT_SYSTEM_FOREGROUND):
+            self.assertIsNone(self.gui._classify_window_event(event, handle, known))
+        self.windows[handle]["visible"] = True
+        change = self.gui._classify_window_event(
+            _winapi.EVENT_OBJECT_SHOW, handle, known
+        )
+        self.assertEqual(change, "new")
+        self.assertIn(handle, known)
+
+    def test_the_hook_covers_show(self):
+        # VITAL -- keep this test: the classifier branch above is useless if
+        # the hook's ranges stop delivering SHOW at all.
+        self.assertTrue(
+            any(
+                low <= _winapi.EVENT_OBJECT_SHOW <= high
+                for low, high in _WINDOW_EVENT_RANGES
+            )
+        )
+
+    def test_showing_a_known_window_again_is_nothing(self):
+        handle = self.add_window(1)
+        known = {handle}
+        change = self.gui._classify_window_event(
+            _winapi.EVENT_OBJECT_SHOW, handle, known
+        )
+        self.assertIsNone(change)
+
+    def test_a_known_window_reparented_into_another_is_close(self):
+        # Reported once as a window, then docked into another via SetParent:
+        # it is no longer in windows(), and must not linger in `known` with
+        # every later event silently dropped by the toplevel check.
+        parent = self.add_window(1)
+        handle = self.add_window(2, root=parent)
+        known = {handle}
+        change = self.gui._classify_window_event(
+            _winapi.EVENT_OBJECT_NAMECHANGE, handle, known
+        )
+        self.assertEqual(change, "close")
+        self.assertNotIn(handle, known)
 
     def test_a_foreground_change_for_a_known_window_is_focus(self):
         handle = self.add_window(1)
@@ -1124,11 +1215,11 @@ class TestClassifyWindowEvent(Win32TestCase):
         self.assertIsNone(change)
 
     def test_an_unrelated_event_is_nothing(self):
-        # EVENT_OBJECT_SHOW, say -- deliberately not hooked; see the module
+        # EVENT_OBJECT_LOCATIONCHANGE, say -- deliberately not hooked; see the module
         # docstring's "extras" note. Reachable here even though no hook
         # delivers it in practice, since this method has no idea which
         # events a caller's hooks actually cover.
-        change = self.gui._classify_window_event(0x8002, 1, set())
+        change = self.gui._classify_window_event(0x800B, 1, set())
         self.assertIsNone(change)
 
 
@@ -1263,6 +1354,14 @@ class TestInput(Win32TestCase):
         self.assertEqual(count, len(events))
         return list(events)
 
+    def sent_call_events(self):
+        """Every `SendInput` call made, as one list of `INPUT` per call.
+
+        The scroll path makes more than one call now, so a test about how a
+        scroll is *delivered* has to read the calls rather than the last one.
+        """
+        return [list(events) for _count, events, _size in self.sent_calls]
+
     def sent_one(self):
         """The single `INPUT` from the last call."""
         (event,) = self.sent_events()
@@ -1324,10 +1423,16 @@ class TestInput(Win32TestCase):
         self.assertEqual(self.sent_one().mi.mouseData, 0xFFFFFF88)
 
     def test_both_scroll_axes_go_in_one_call(self):
-        self.gui.scroll(1, -1)
+        # One piece per axis, so nothing needs spacing them apart: a vertical
+        # and a horizontal piece are different messages and cannot be summed
+        # with each other, whatever is pending.
+        with mock.patch("pyguitest.backends.win32.time.sleep") as slept:
+            self.gui.scroll(1, -1)
         flags = [event.mi.dwFlags for event in self.sent_events()]
         self.assertEqual(flags, [_winapi.MOUSEEVENTF_WHEEL, _winapi.MOUSEEVENTF_HWHEEL])
         self.assertEqual(self.sent[0], 2)
+        self.assertEqual(len(self.sent_calls), 1)  # one call, not one per axis
+        slept.assert_not_called()
 
     def test_no_scroll_sends_nothing(self):
         self.gui.scroll()
@@ -1335,14 +1440,15 @@ class TestInput(Win32TestCase):
 
     def test_a_scroll_too_large_for_one_wheel_message_is_split(self):
         # 300 detents is 36000, which no longer fits the 16 signed bits every
-        # consumer reads the delta back through: as one event it arrives as
-        # -29536 and scrolls the other way. Each piece has to stay within the
-        # limit, and they still have to add up to what was asked for.
-        self.gui.scroll(0, 300)
-        events = self.sent_events()
-        self.assertGreater(len(events), 1)
+        # consumer reads the delta back through. Each piece has to stay within
+        # the limit, and they still have to add up to what was asked for.
+        with mock.patch("pyguitest.backends.win32.time.sleep"):
+            self.gui.scroll(0, 300)
+        calls = self.sent_call_events()
+        self.assertGreater(len(calls), 1)
         deltas = []
-        for event in events:
+        for call in calls:
+            (event,) = call
             self.assertEqual(event.mi.dwFlags, _winapi.MOUSEEVENTF_WHEEL)
             delta = event.mi.mouseData
             if delta > 0x7FFFFFFF:
@@ -1351,13 +1457,33 @@ class TestInput(Win32TestCase):
             deltas.append(delta)
         self.assertEqual(sum(deltas), 300 * _winapi.WHEEL_DELTA)
 
+    def test_the_pieces_of_a_large_scroll_wait_between_calls(self):
+        # What makes the split work is the wait, not the separate calls: pieces
+        # pending for the same window at once are summed by the message queue
+        # in 16 bits, so 273 + 27 detents arrive as one delta of -29536 and the
+        # scroll goes backwards -- measured live, and measured the same way for
+        # two calls back to back. 10ms is where the pieces stop being merged.
+        with mock.patch("pyguitest.backends.win32.time.sleep") as slept:
+            self.gui.scroll(0, 300)
+        self.assertEqual([len(call) for call in self.sent_call_events()], [1, 1])
+        slept.assert_called_once_with(_WHEEL_PIECE_GAP)
+
+    def test_the_wheel_gap_keeps_a_margin_over_the_measured_threshold(self):
+        # VITAL -- keep this test. 10ms was the measured merge threshold on an
+        # idle window, and falling short of it on a busier one scrolls the
+        # *wrong way* rather than a little short. Do not tune the gap back
+        # down to the bare measurement.
+        self.assertGreaterEqual(_WHEEL_PIECE_GAP, 0.030)
+
     def test_a_large_scroll_the_other_way_is_split_the_same_way(self):
-        self.gui.scroll(0, -300)
+        with mock.patch("pyguitest.backends.win32.time.sleep"):
+            self.gui.scroll(0, -300)
         deltas = []
-        for event in self.sent_events():
-            delta = event.mi.mouseData - 0x100000000
-            self.assertLessEqual(abs(delta), 32767)
-            deltas.append(delta)
+        for call in self.sent_call_events():
+            for event in call:
+                delta = event.mi.mouseData - 0x100000000
+                self.assertLessEqual(abs(delta), 32767)
+                deltas.append(delta)
         self.assertEqual(sum(deltas), -300 * _winapi.WHEEL_DELTA)
 
     def test_a_key_name_is_resolved_to_a_virtual_key(self):

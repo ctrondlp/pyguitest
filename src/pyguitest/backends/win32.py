@@ -36,8 +36,9 @@ dedicated pump thread for the life of one call, the same per-call lifecycle
 method's docstring for the event set, the `known`-handles bookkeeping that
 tells "new" from "title" and filters a WinEvent hook's much noisier stream
 down to the toplevels `windows()` would also report, and what is deliberately
-not covered (`EVENT_OBJECT_SHOW`/`_HIDE`, `EVENT_OBJECT_LOCATIONCHANGE`,
-`EVENT_SYSTEM_MINIMIZEEND` -- the design document's own "extras").
+not covered (`EVENT_OBJECT_HIDE`, `EVENT_OBJECT_LOCATIONCHANGE`,
+`EVENT_SYSTEM_MINIMIZEEND` -- the design document's own "extras";
+`EVENT_OBJECT_SHOW` is hooked, but only as a second source of "new").
 
 This module has not yet driven a real Windows desktop. The suite it belongs
 to passes on Windows 11 build 26200, so every prototype here at least loads
@@ -452,6 +453,29 @@ ceiling that actually applies rather than the field's own. `_wheel_events`
 splits anything larger.
 """
 
+_WHEEL_PIECE_GAP = 0.050
+"""Seconds to wait between the wheel events a large scroll is split into.
+
+Measured live on Windows 11: wheel deltas pending for the same window at the
+same time are *summed* by the message queue, in 16 bits, so the 273 + 27
+detents `scroll(dy=300)` splits into arrive as one delta of -29536 and the
+scroll goes backwards -- exactly the outcome the split exists to prevent. The
+pieces do not have to be in one `SendInput` call for that: two calls back to
+back merge identically, because the merge is about what is pending when the
+window reads its queue. Waiting between them is what works, and 10ms is where
+it starts: measured against a window draining its own queue, 0ms, 1ms and 5ms
+all merged while 10, 20 and 50ms each delivered both pieces. Real wheel
+hardware arrives this way too -- one message per notch, tens of milliseconds
+apart rather than in a burst.
+
+50ms rather than the 10ms threshold itself: 10ms was measured on an idle
+window, and a window busier on its UI thread, a loaded machine or a remote
+session drains its queue later -- and missing the threshold does not degrade
+gracefully, it scrolls backwards. Five times the threshold is still within
+what real wheel hardware produces, and it is paid once per extra 273 detents,
+which no ordinary scroll reaches.
+"""
+
 _BUTTON_VK = {
     1: _winapi.VK_LBUTTON,
     2: _winapi.VK_MBUTTON,
@@ -638,17 +662,22 @@ def _normalize(offset, span):
 # `GnomeShellBackend.window_events` gives its D-Bus subscription.
 
 _WINDOW_EVENT_RANGES = (
-    (_winapi.EVENT_OBJECT_CREATE, _winapi.EVENT_OBJECT_DESTROY),
+    (_winapi.EVENT_OBJECT_CREATE, _winapi.EVENT_OBJECT_SHOW),
     (_winapi.EVENT_OBJECT_NAMECHANGE, _winapi.EVENT_OBJECT_NAMECHANGE),
     (_winapi.EVENT_SYSTEM_FOREGROUND, _winapi.EVENT_SYSTEM_FOREGROUND),
 )
 """The (min, max) ranges `_run_event_pump` hooks, one `SetWinEventHook` call
-each. `EVENT_OBJECT_CREATE`..`_DESTROY` is one contiguous range; the other two
+each. `EVENT_OBJECT_CREATE`..`_SHOW` is one contiguous range; the other two
 events are not adjacent to it or to each other, so each gets its own hook
 sharing the same callback. This is the design document's core event set for
-`WINDOW_EVENTS` -- not the "extras" (`EVENT_OBJECT_SHOW`/`_HIDE`,
-`EVENT_OBJECT_LOCATIONCHANGE`, `EVENT_SYSTEM_MINIMIZEEND`) it also lists,
-which would extend this tuple if a use case asked for them."""
+`WINDOW_EVENTS`, plus `EVENT_OBJECT_SHOW` -- one of its "extras", hooked
+because the core set alone cannot see a window open: measured live, a window
+created visible fires CREATE *and* FOREGROUND while `IsWindowVisible` still
+answers False, so both were dropped as unlistable, and `wait_for_window` on a
+window opened by another process timed out while `windows()` listed it. SHOW
+is what arrives once it is visible. The rest of the extras (`_HIDE`,
+`EVENT_OBJECT_LOCATIONCHANGE`, `EVENT_SYSTEM_MINIMIZEEND`) would extend this
+tuple if a use case asked for them."""
 
 
 def _relay_window_event(sink):
@@ -1072,6 +1101,12 @@ class Win32Backend(GUIBackend):
         libei situation, and the reason `Session.double_click` and `drag` want
         it.
 
+        The one caller that deliberately gives this up is `scroll`, and only
+        for a scroll too large for one wheel event: its pieces have to be
+        delivered apart, or the message queue sums them into a scroll the
+        wrong way, so other input can land between them. Nothing that needs
+        to be one gesture is ever split that way.
+
         The failure this cannot diagnose is the one that matters: a call
         blocked by UIPI returns the *full* count and delivers nothing, and
         neither `GetLastError` nor the return value says so. Zero is the other
@@ -1162,11 +1197,15 @@ class Win32Backend(GUIBackend):
         it in the signed high word of `wParam`, which is what
         `GET_WHEEL_DELTA_WPARAM` casts to a `short`, and raw input carries it in
         `RAWMOUSE.usButtonData`. So a single event cannot say more than
-        `_MAX_WHEEL_STEPS` detents, and one that tries does not merely saturate:
-        `scroll(dy=300)` is 36000, which reads back as -29536 and scrolls the
-        *other way*. Splitting is the only way to deliver a large scroll, and
-        the pieces still go in one `SendInput` call, so nobody else's input can
-        land in the middle of one.
+        `_MAX_WHEEL_STEPS` detents, and one that tries does not deliver them:
+        measured live, `scroll(dy=300)` sent as a single event of 36000 arrives
+        *clamped* to 32767, which is 273 of the 300 detents asked for. Splitting
+        is the other half of the answer, and the half that is easy to get
+        wrong: pieces pending for the same window at once are summed by the
+        message queue, in those same 16 bits, so split pieces sent together
+        arrive as one delta of -29536 and scroll *backwards*. `scroll` spaces
+        them by `_WHEEL_PIECE_GAP` for that reason, and the measurement is
+        recorded there.
         """
         events = []
         remaining = steps
@@ -1277,21 +1316,30 @@ class Win32Backend(GUIBackend):
         Windows counts wheel units in 120ths of a detent and takes a positive
         value as "away from the user", which is up -- so the base class's sign
         convention needs no negation here, unlike the portal and libei
-        backends. Each axis is its own event with its own flag, and both go in
-        one call, so a diagonal scroll cannot be split in half.
+        backends.
 
         An axis asking for more than `_MAX_WHEEL_STEPS` detents becomes several
-        events rather than one -- see `_wheel_events` for why a single event
-        cannot carry them, and what a scroll that ignored the limit would do.
+        events rather than one, and those pieces are then sent *apart* rather
+        than together -- see `_WHEEL_PIECE_GAP` for the measurement behind
+        that, which is the difference between a large scroll going the way it
+        was asked to and going backwards. A scroll needing no more than one
+        piece per axis still goes in one `SendInput` call, where nothing can be
+        added to anything: the two axes are different messages, so they cannot
+        be summed with each other.
         """
         self.require(Capability.POINTER_SCROLL)
-        events = []
-        if dy:
-            events.extend(self._wheel_events(_winapi.MOUSEEVENTF_WHEEL, dy))
-        if dx:
-            events.extend(self._wheel_events(_winapi.MOUSEEVENTF_HWHEEL, dx))
-        if events:
-            self._send(events, Capability.POINTER_SCROLL)
+        vertical = self._wheel_events(_winapi.MOUSEEVENTF_WHEEL, dy) if dy else []
+        horizontal = self._wheel_events(_winapi.MOUSEEVENTF_HWHEEL, dx) if dx else []
+        pieces = vertical + horizontal
+        if not pieces:
+            return
+        if len(vertical) <= 1 and len(horizontal) <= 1:
+            self._send(pieces, Capability.POINTER_SCROLL)
+            return
+        for index, piece in enumerate(pieces):
+            self._send([piece], Capability.POINTER_SCROLL)
+            if index < len(pieces) - 1:
+                time.sleep(_WHEEL_PIECE_GAP)
 
     def press_key(self, key):
         """Press a key by name, without releasing it."""
@@ -1847,36 +1895,75 @@ class Win32Backend(GUIBackend):
         window is tearing down. `EVENT_SYSTEM_FOREGROUND` reports "focus" for
         a known handle and falls back to the same "new" treatment for one that
         is not, on the theory that a window cannot become the foreground
-        window without existing.
+        window without existing -- though it can, measured live, become the
+        foreground window before it is *visible*, so that fallback misses the
+        same windows CREATE does. `EVENT_OBJECT_SHOW` is what catches them:
+        "new" for an unknown handle that passes `_is_listable` once shown, and
+        nothing for a known one being shown again.
 
         Returns None for an event this stream reports nothing about, which is
         the ordinary answer for most of what a WinEvent hook delivers.
         """
-        if event == _winapi.EVENT_OBJECT_CREATE:
-            if not self._is_listable(hwnd):
-                return None
-            known.add(hwnd)
-            return "new"
-        if event == _winapi.EVENT_OBJECT_NAMECHANGE:
-            if hwnd in known:
-                return "title"
-            if not self._is_listable(hwnd):
-                return None
-            known.add(hwnd)
-            return "new"
+        # A hook sees every window-class object on the desktop, child controls
+        # included, where `EnumWindows` -- the walk `windows()` is built on --
+        # returns toplevels only. `_is_listable` answers the style questions
+        # and a visible child passes all of them, so without this the stream
+        # reports a window's own controls as windows. Measured live, driving a
+        # probe window's controls: `new` for its `Click Me` button and for the
+        # static label whose text the click changed, and `focus` for handles
+        # with no title at all. `window_at` makes the same reduction, with the
+        # same call, for the same reason.
+        #
+        # `EVENT_OBJECT_DESTROY` is answered before this, and deliberately: a
+        # destroy arrives *after* the window is gone, so asking whether it is
+        # still a window answers no and the event would be dropped -- measured
+        # live, where the toplevel's own close stopped being reported the
+        # moment this check was added ahead of it. Destroy needs no toplevel
+        # test anyway: `known` holds only handles that passed one.
         if event == _winapi.EVENT_OBJECT_DESTROY:
             if hwnd not in known:
                 return None
             known.discard(hwnd)
             return "close"
+        lib = self._lib()
+        if not hwnd or not lib.IsWindow(hwnd):
+            return None
+        if lib.GetAncestor(hwnd, _winapi.GA_ROOT) != hwnd:
+            # A handle already reported as a window that is now a child was
+            # reparented (`SetParent`, docking a floating panel): it has left
+            # `windows()`, so it leaves the stream the same way rather than
+            # staying in `known` forever with its events silently dropped.
+            # Seen at its next event, since reparenting has none of its own
+            # hooked here.
+            if hwnd in known:
+                known.discard(hwnd)
+                return "close"
+            return None
+        if event == _winapi.EVENT_OBJECT_CREATE:
+            return self._new_if_listable(hwnd, known)
+        if event == _winapi.EVENT_OBJECT_SHOW:
+            # A second chance at "new" for a window that CREATE (and even
+            # FOREGROUND) arrived for while it was still invisible -- see
+            # `_WINDOW_EVENT_RANGES`. Re-showing a known window is nothing.
+            if hwnd in known:
+                return None
+            return self._new_if_listable(hwnd, known)
+        if event == _winapi.EVENT_OBJECT_NAMECHANGE:
+            if hwnd in known:
+                return "title"
+            return self._new_if_listable(hwnd, known)
         if event == _winapi.EVENT_SYSTEM_FOREGROUND:
             if hwnd in known:
                 return "focus"
-            if not self._is_listable(hwnd):
-                return None
-            known.add(hwnd)
-            return "new"
+            return self._new_if_listable(hwnd, known)
         return None
+
+    def _new_if_listable(self, hwnd, known):
+        """The "new" verb where `hwnd` is listable, adding it to `known`; else None."""
+        if not self._is_listable(hwnd):
+            return None
+        known.add(hwnd)
+        return "new"
 
     def wait_for_window(self, title, timeout=None):
         """Block until a window whose title matches `title` (regex) appears.

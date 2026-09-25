@@ -168,7 +168,9 @@ Raise on failure with a message naming what was actually found, for use directly
 | `is_window_cursor(window: Window, shape: int)` | `WINDOW_CURSOR_QUERY` |  | Whether `window` is currently showing cursor `shape`. |
 | `lower_window(window: Window)` | `WINDOW_LOWER` |  | Replaces LowerWindow -- no foreign-toplevel protocol offers this. |
 | `pointer_position()` | `POINTER_QUERY` |  | The global pointer position. Replaces GetMousePos. |
+| `row_values(row: Element)` |  |  | `row`'s own column values, as plain text, one per child cell. |
 | `set_window_title(window: Window, title: str)` | `WINDOW_TITLE_SET` |  | Replaces SetWindowName. Impersonation is possible under X11. |
+| `tree_items(root: Element, role: str \| None = None, max_depth: int = 24)` | `ELEMENT_ACTION`, `ELEMENT_TREE` |  | Every descendant of `root`, opening collapsed branches to reach them. |
 | `wait_for_pointer_activation(timeout: float \| None = None)` | `INPUT_CAPTURE` |  | Block for one real crossing of a screen edge, and return where. |
 | `wait_window_focus(window: Window, timeout: float \| None = None, interval: float = 0.1)` | `WINDOW_STATE` |  | Block until `window` holds keyboard focus, or timeout. |
 
@@ -201,10 +203,14 @@ One node of the accessible tree, as every backend agrees to expose it.
 | `children` | The elements directly inside this one. |
 | `choose(option: str)` | Pick `option` from this dropdown by its visible text. |
 | `click()` | Act on the element directly -- no coordinates, no injection. |
+| `collapse()` | Close a tree item or similar disclosure control. See `expand`. |
 | `description` | The element's longer accessible description, often a tooltip. |
 | `do_action(name: str)` | Perform a named accessible action, such as "click" or "activate". |
 | `double_click()` | Double-click the element: locate it, then inject the gesture. |
 | `enabled` | Whether the element accepts input, rather than being greyed out. |
+| `expand()` | Open a tree item or similar disclosure control. |
+| `expandable` | Whether the element can be expanded or collapsed, like a tree item. |
+| `expanded` | Whether a tree item or similar disclosure control is open. |
 | `find(role: str \| None = None, name: str \| None = None)` | Search this element's descendants by role and/or name. |
 | `focus()` | Give the element keyboard focus. |
 | `focused` | Whether the element currently has keyboard focus. |
@@ -381,9 +387,9 @@ DOCUMENT_FRAME  ENTRY  FRAME  HEADING  ICON  IMAGE  LABEL  LINK  LIST
 LIST_ITEM  MENU  MENU_ITEM  PAGE_TAB  PAGE_TAB_LIST  PANEL  PARAGRAPH
 PASSWORD_TEXT  PROGRESS_BAR  PUSH_BUTTON  RADIO_BUTTON
 RADIO_MENU_ITEM  SCROLL_BAR  SCROLL_PANE  SEPARATOR  SLIDER
-SPIN_BUTTON  STATUS_BAR  TABLE  TABLE_CELL  TABLE_ROW  TEXT
-TEXT_ROLES  TOGGLE_BUTTON  TOOL_BAR  TREE  TREE_ITEM  VIEWPORT  WINDOW
-WINDOW_ROLES
+SPIN_BUTTON  STATUS_BAR  TABLE  TABLE_CELL  TABLE_COLUMN_HEADER
+TABLE_ROW  TEXT  TEXT_ROLES  TOGGLE_BUTTON  TOOL_BAR  TREE  TREE_ITEM
+VIEWPORT  WINDOW  WINDOW_ROLES
 ```
 
 ## Exceptions

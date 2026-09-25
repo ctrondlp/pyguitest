@@ -55,8 +55,8 @@ class _ProbeTimedOut(Exception):
     """
 
 
-_HAS_AF_UNIX: bool = hasattr(socket, "AF_UNIX")
-"""Whether this platform has Unix sockets at all.
+_AF_UNIX: int | None = getattr(socket, "AF_UNIX", None)
+"""The Unix-socket address family, or None on a platform that has none.
 
 CPython does not define `socket.AF_UNIX` on Windows, and naming it raises
 `AttributeError` from inside `_address_connectable` -- which `except OSError`
@@ -64,11 +64,19 @@ does not catch, and which `pyguitest debug` would hit on any Windows box with
 `AT_SPI_BUS_ADDRESS` set or an X server's `DISPLAY` in the environment, since
 `_debug_data` asks this question on every platform.
 
-Asked as a flag rather than borrowing `ipc._AF_UNIX`'s `getattr(..., -1)`
-default, because -1 does not degrade the way that reads: it is CPython's
-"use the default" sentinel, so `socket.socket(-1, SOCK_STREAM)` succeeds and
-hands back an AF_INET socket, and connecting *that* to a path string raises
-TypeError rather than the OSError the caller treats as "nothing there"."""
+Read through `getattr` into the family itself rather than kept as a `hasattr`
+flag beside a bare `socket.AF_UNIX`, which is what this was. typeshed
+declares `AF_UNIX` for every platform *except* win32, so naming it under a
+flag mypy cannot follow is a failure of this package's own `mypy` gate on
+Windows -- where mypy reads the host platform, so it is every run there --
+and on no other platform. One value answering both "is it there" and "what
+is it" leaves the runtime guard and the type check saying the same thing.
+
+Not borrowed from `ipc._AF_UNIX`'s `getattr(..., -1)` default, because -1
+does not degrade the way that reads: it is CPython's "use the default"
+sentinel, so `socket.socket(-1, SOCK_STREAM)` succeeds and hands back an
+AF_INET socket, and connecting *that* to a path string raises TypeError
+rather than the OSError the caller treats as "nothing there"."""
 
 _A11Y_BUS_TIMEOUT = 5
 """Seconds to wait for the accessibility-bus probe. Short because it runs
@@ -365,7 +373,7 @@ def _address_connectable(address: str | None) -> bool | None:
     would have gone on to reach. False therefore means at least one unix
     address was tried and none accepted; None means none was there to try.
     """
-    if not address or not _HAS_AF_UNIX:
+    if not address or _AF_UNIX is None:
         # No AF_UNIX (Windows) means a unix address is one this cannot test,
         # which is the None case rather than a no. Not left to the connect
         # below to discover: `socket.socket(-1, ...)` does not fail, it builds
@@ -385,7 +393,7 @@ def _address_connectable(address: str | None) -> bool | None:
                 continue
             tried = True
             try:
-                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+                with socket.socket(_AF_UNIX, socket.SOCK_STREAM) as probe:
                     probe.settimeout(_A11Y_BUS_TIMEOUT)
                     probe.connect(target)
                 return True
@@ -533,6 +541,53 @@ class Element:
         return getattr(self.node, "selectable", False)
 
     @property
+    def expanded(self):
+        """Whether a tree item or similar disclosure control is open.
+
+        dogtail wires `checked` and `selected` to real AT-SPI states through
+        its own `AccessibleState`, but never got as far as EXPANDED --
+        `Node.collapsed` is the only trace of the pair, and GTK's own tree
+        rows publish EXPANDABLE/EXPANDED, not COLLAPSED, so that property
+        answers nothing useful here. Read directly off the node's own state
+        set instead, the same primitive dogtail's own helper is built on --
+        by each state's `.name`, not against `Atspi.StateType.EXPANDED`,
+        so reading this needs no `gi.repository.Atspi` import of its own:
+        every other property here stays within what dogtail's Node already
+        gives, and `expanded`/`expandable` follow that rather than becoming
+        the one pair that requires PyGObject wherever they are merely
+        imported, extras declaration or not. Measured live against a GTK3
+        GtkTreeView: a collapsed row's state set holds EXPANDABLE alone,
+        and gains EXPANDED once opened. Same caveat as `checked`: read
+        `expandable` first.
+        """
+        states = self._state_names()
+        if "EXPANDABLE" not in states:
+            return None
+        return "EXPANDED" in states
+
+    @property
+    def expandable(self):
+        """Whether the element can be expanded or collapsed, like a tree item."""
+        return "EXPANDABLE" in self._state_names()
+
+    def _state_names(self):
+        """This node's AT-SPI states, by name -- `{"EXPANDABLE", ...}`.
+
+        `state_set` is a GI enum list already; `.name` reads each member's
+        own name without this module ever importing the enum type that
+        defines it.
+
+        A node that died since it was found answers with no states rather
+        than raising: `tree_items()` reads this off every row it walks, and
+        one row closing mid-walk should read as a leaf, not end the walk.
+        """
+        try:
+            states = self.node.state_set or []
+            return {getattr(state, "name", str(state)) for state in states}
+        except Exception:  # noqa: BLE001 - a reaped node has no states to read
+            return set()
+
+    @property
     def focused(self):
         """Whether the element currently has keyboard focus."""
         return getattr(self.node, "focused", False)
@@ -579,30 +634,56 @@ class Element:
     def click(self):
         """Act on the element directly -- no coordinates, no injection.
 
-        dogtail's own `Node.click()` is coordinate-based even here, and
-        under Wayland it synthesizes that click through GNOME's
-        ponytail daemon -- absent on every other Wayland compositor
-        (KDE/KWin, sway, Hyprland, niri), where it raises a RuntimeError
-        before ever reaching AT-SPI. Falls back to AT-SPI's own action
-        interface in that case, which needs no coordinates or daemon at
-        all -- confirmed live against KDE Plasma 6 / KWin.
+        Tries AT-SPI's own action interface first, where the element offers
+        one. `doActionNamed` needs no coordinates or daemon at all, and it
+        is the reliable one: GTK measured live (a checkbox and a radio
+        button, both on the probe window in pyguitest-recorder) reports the
+        whole row as the element's rectangle, not the small toggle the row
+        actually reacts to, so dogtail's own coordinate click lands past it
+        and changes nothing -- silently. `element.click()` returned
+        normally having done nothing, while `element.do_action("click")` on
+        the identical element toggled it every time; nothing was ever
+        raised for a caller to catch, which is why the fix is in the
+        ordering rather than another exception to handle.
 
-        Some toolkits publish elements with no Action interface either --
-        KDE's QML-based Kickoff menu does this for its category labels --
-        leaving neither path able to act. Raised as ElementNotActionable
-        there rather than dogtail's raw, GNOME-specific ponytail message,
-        which names a daemon this compositor was never going to have.
+        dogtail's own `Node.click()` -- tried second now, where no action
+        interface answers -- is coordinate-based even on X11, and under
+        Wayland it synthesizes that click through GNOME's ponytail daemon,
+        absent on every other Wayland compositor (KDE/KWin, sway, Hyprland,
+        niri), where it raises a RuntimeError before ever reaching AT-SPI.
+        Caught below and turned into the same ElementNotActionable an
+        element with no Action interface at all gets -- KDE's QML-based
+        Kickoff menu does this for its category labels, and coordinate
+        clicking still works there, which is the case this order keeps the
+        coordinate path for.
+
+        The same except used to also be how an element with no usable
+        position was caught: dogtail injects at the widget's own rectangle,
+        and AT-SPI's INT_MIN "not showing" sentinel made `check_coordinates`
+        raise `ValueError: Attempting to generate a mouse event at negative
+        coordinates: (-2147483647, -2147483647)` before AT-SPI was asked
+        anything, measured replaying `gui.menu_item("Gamma").click()` into a
+        GTK3 combo box's popup. Acting through the published action first
+        means that path is not reached at all where one exists -- confirmed
+        live, the same combo item selects correctly through `do_action` with
+        no position of its own to give -- and the `ValueError` branch below
+        is what remains for an element offering neither.
         """
+        actions = self.node.actions or {}
+        name = next((a for a in actions if a.lower() in ("click", "press")), None)
+        if name is not None:
+            self.node.doActionNamed(name)
+            return
         try:
             self.node.click()
-        except RuntimeError as error:
-            if "ponytail" not in str(error).lower():
+        except (RuntimeError, ValueError) as error:
+            text = str(error).lower()
+            # dogtail's `check_coordinates` wording, not any mention of the
+            # word -- an unrelated error that happens to say "coordinates"
+            # must surface as itself.
+            if "ponytail" not in text and "negative coordinates" not in text:
                 raise
-            actions = self.node.actions or {}
-            name = next((a for a in actions if a.lower() in ("click", "press")), None)
-            if name is None:
-                raise ElementNotActionable(self.role, self.name) from error
-            self.node.doActionNamed(name)
+            raise ElementNotActionable(self.role, self.name) from error
 
     def double_click(self):
         """Double-click the element: locate it, then inject the gesture.
@@ -662,6 +743,43 @@ class Element:
     def select(self):
         """Select this element, for a list item, tab, or menu entry."""
         self.node.select()
+
+    def expand(self):
+        """Open this tree item or similar disclosure control.
+
+        A no-op where `expanded` already reads True: GTK (measured; likely
+        every AT-SPI toolkit, since the interface has no separate verbs)
+        publishes one action, "expand or contract", that toggles rather
+        than opening -- calling it on an already-open row would close it.
+        """
+        if self.expanded is True:
+            return
+        self._toggle_expansion()
+
+    def collapse(self):
+        """Close this tree item or similar disclosure control. See `expand`."""
+        if self.expanded is False:
+            return
+        self._toggle_expansion()
+
+    def _toggle_expansion(self):
+        """Invoke whichever published action opens or closes this node.
+
+        Named by substring rather than the exact string "expand or
+        contract" this was measured with, the same defensiveness `click`
+        already has for "click"/"press": an AT-SPI action's wording is the
+        toolkit's, not a contract this package can rely on staying fixed.
+        """
+        actions = self.node.actions or {}
+        name = next((a for a in actions if "expand" in a.lower()), None)
+        if name is None:
+            raise ElementNotActionable(
+                self.role,
+                self.name,
+                f"{self.role} {self.name!r} offers no action naming "
+                f"'expand'; it offers {', '.join(sorted(actions)) or 'none'}",
+            )
+        self.node.doActionNamed(name)
 
     def choose(self, option):
         """Pick `option` from this dropdown by its visible text.
@@ -944,9 +1062,58 @@ class AtspiBackend(GUIBackend):
         for _ in range(_MAX_DEPTH):
             child = _at_point(pyatspi, node, x, y)
             if child is None or not self._covers(child, x, y):
+                child = self._past_a_container(pyatspi, node, x, y)
+            if child is None:
                 return node
             node = child
         return node
+
+    def _past_a_container(self, pyatspi, node, x, y):
+        """A covering node one level further down, where the walk dead-ends.
+
+        The descent assumes the tree nests geometrically: that a node
+        covering the point has a child covering it too, which is what
+        `getAccessibleAtPoint` is asked for. GtkNotebook breaks that, and
+        it is not an exotic toolkit corner -- it is every application with
+        tabs. A notebook publishes its page *contents* as children of the
+        `page tab`, whose own rectangle is the little tab label at the top;
+        so the page tab does not contain its own children, and the `page
+        tab list` above it answers `getAccessibleAtPoint` with nothing at
+        all for any point in the page body -- the point is in no tab's
+        label. The walk stopped there and `element_at` answered with the
+        tab list for every widget on the page.
+
+        Measured on a GTK3 notebook: the page tab reports (133, 141, 54,
+        30), its content filler (113, 175, 494, 312), and the `Save` button
+        inside that (113, 217, 494, 34). Asked about the button's own
+        centre, the tab list answered `None` and the page tab answered the
+        filler correctly -- so one step through the tab is all that is
+        missing.
+
+        Only taken where the ordinary descent has already failed, so it
+        costs nothing on the common path, and it asks each child rather
+        than searching the subtree, so it adds one level of fan-out and not
+        a walk. The node it returns still has to cover the point, which is
+        the invariant `element_at` rests on: a toolkit reporting widgets in
+        window coordinates -- a native Wayland client cannot do otherwise --
+        is refused here exactly as it was before.
+        """
+        try:
+            children = list(node)
+        except Exception:  # noqa: BLE001 - a dead node has no children
+            return None
+        for child in children:
+            # One unanswerable child -- no Component interface, or gone since
+            # `list(node)` -- must not abandon the rest: uncaught, it escaped
+            # to `_hits_in`, which drops the whole application, a worse
+            # answer than the coarse node this step exists to refine.
+            try:
+                found = _at_point(pyatspi, child, x, y)
+            except Exception:  # noqa: BLE001 - try the next child instead
+                continue
+            if found is not None and self._covers(found, x, y):
+                return found
+        return None
 
     def _covers(self, node, x, y):
         """Whether the node's own rectangle contains the point."""

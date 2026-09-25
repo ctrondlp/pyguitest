@@ -67,6 +67,37 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON="${PYTHON:-python3}"
 RUFF="${RUFF:-ruff}"
 
+# Absolute from here on, and that is not cosmetic. One check -- `--full`'s
+# sdist self-test -- unpacks the sdist into a temporary directory and runs the
+# suite from inside it, where a relative `PYTHON` (`.venv/bin/python`, the
+# documented invocation) names a path that no longer exists. Everything up to
+# that point passes: the sdist and the wheel build, `twine check --strict`
+# accepts both, the tag check is clean -- and the check is then reported FAIL
+# at exit 127 with an error that reads like a missing interpreter rather than
+# a directory that moved.
+#
+# `command -v` alone does not close it: handed a path containing a slash it
+# echoes it back unchanged, so `.venv/bin/python` stays relative and the bug
+# survives the obvious fix. Resolved once, here, rather than guarded at the
+# use, so no check that changes directory can be the thing that breaks it.
+#
+# A directory that does not exist (a fresh checkout with no .venv yet) is a
+# setup problem and says so: without the explicit exit, the failed `cd` left
+# the substitution empty and PYTHON silently became `/python`.
+_python="$(command -v "$PYTHON" || printf '%s' "$PYTHON")"
+case $_python in
+    /*) PYTHON="$_python" ;;
+    *)
+        if ! _dir="$(cd "$(dirname "$_python")" 2>/dev/null && pwd)"; then
+            echo "pre-commit-test: no such interpreter: $PYTHON" >&2
+            exit 2
+        fi
+        PYTHON="$_dir/$(basename "$_python")"
+        unset _dir
+        ;;
+esac
+unset _python
+
 # name|command. Run from the repository root, via eval, so the quoting here
 # is ordinary shell quoting.
 CHECKS=(
