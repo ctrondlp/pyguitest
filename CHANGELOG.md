@@ -5,118 +5,7 @@ All notable changes to pyguitest are recorded here. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html) — with the usual
 0.x caveat that the API may still change between minor versions.
 
-## [Unreleased]
-
-### Added
-
-- **`Session.click_element()`: where an element publishes no accessible action at
-  all, `element.click()` now clicks it by coordinate instead of raising.** `uia`
-  and `macos` ended their click ladder with `ElementNotActionable` and a hint to
-  click by coordinate -- `gui.extents(element)` then `gui.click()` -- and now
-  take that step themselves, which is the shape `Element.double_click` already
-  had: the element stays the locator, its rectangle is read fresh, and the
-  pointer goes to the centre of it. Found by pyguitest-recorder's Windows live
-  check, which replays the script it generated against a probe window and
-  reached a `SysListView32` *cell* whose only advertised action is the legacy
-  MSAA shim, which for that control declares none -- so a recorded click had no
-  accessible route to name and the replay stopped there.
-  `Session.click_element(element, button=1)` is the same call spelled for an
-  element with no session of its own, mirroring `double_click_element`.
-  The ladder's loud-failure policy is untouched, which is the point of the
-  shape: the pointer is reached only where an element published *nothing*,
-  never where a published route refused, so a disabled button's failed Invoke
-  is still reported rather than turned into a click that looks like a success.
-  An element with no session behind it, or none with a rectangle to aim at,
-  still raises the same `ElementNotActionable` a caller already catches, with
-  this platform's reason in it. Linux is unchanged: `atspi.Element.click`
-  already ends in dogtail's own coordinate click, so this adds nothing there --
-  the three backends now agree on one contract, instead of it being built in on
-  Linux and left as homework on the other two. Pinned by
-  `tests/test_uia_backend.py::TestClickWithoutAPattern`,
-  `tests/test_macos_backend.py` and `tests/test_api.py::TestClickElement`,
-  including the case that must *not* fall through.
-
-### Fixed
-
-- **A search could answer with an element that is not on the desktop at all.**
-  `uia`'s element-array reader wrapped every slot in an `Element` without the
-  NULL check `_parent` already had for the same platform answer: a provider that
-  cannot fill a slot hands back a pointer to address zero, which is an ordinary
-  Python object, so `find_elements()` could report a phantom -- name `""`, role
-  `unknown`, `alive` False, no rectangle -- that a caller cannot tell from a real
-  element gone quiet, and that a resolution path would then try to name. Found by
-  writing the adversarial trees down as tests rather than finding them one live
-  audit at a time; `tests/test_uia_backend.py::TestTreesThatLie` pins it, and the
-  test fails against the old reader.
-- **A name that is not text raised `TypeError` out of a search.**
-  `CurrentName`/`CurrentHelpText` were passed to the filter as whatever the
-  provider answered, and `_matches_text` hands a non-string to `re.Pattern.search`
-  when a caller filters with a compiled regex -- so a provider reporting a number
-  for a name turned `gui.find_element(name=re.compile(...))` into a crash instead
-  of "no match". `_as_text` reads anything that is not a string as no name, which
-  is also what makes `Element.name` the string its docstring promises. The macOS
-  read path had the same hole from the other direction -- AX attributes are
-  `CFTypeRef`s, so an application can publish a title as a number, and
-  `_text_of` now refuses one the way `_text` already did for `text`.
-- **On macOS, one element could come back as a dozen search matches.** A tree
-  that reports an *ancestor* as its own child -- a broken application, or a stale
-  reference -- was followed, so the same element was visited and reported once
-  per depth level the loop carried it to: `find_elements` answered with twelve
-  copies of one widget where a resolution path expects one candidate per widget.
-  `MacosBackend.find_elements` now carries the lineage of the node it is looking
-  at and does not follow a child back into it, which is a stronger claim than the
-  `_MAX_DEPTH` bound could make; the depth limit and `_MAX_NODES` stay behind it
-  for a tree that is merely enormous. Pinned by
-  `tests/test_macos_backend.py::TestTreesThatLie`, whose cycle test fails against
-  the old walk (measured: twelve matches).
-
-Both platforms gained a systematic adversarial-tree class covering the
-combinations the review named -- every child reported at `(0, 0)`, one name in
-two windows of one process, a popup that closes between the capture and the read,
-a condition a provider answers with more than was asked, a parent chain that
-loops, and the node and depth budgets -- instead of one live finding at a time.
-
-## [0.14.1] — 2026-09-26
-
-### Fixed
-
-- **`screens()` raised `AttributeError` on every real Mac.** `MacosBackend.screens`
-  asked `CGGetActiveDisplayCount()` for the number of displays before requesting the
-  list — and there is no such function. CoreGraphics has no count-only call at all:
-  `CGGetActiveDisplayList`/`CGGetOnlineDisplayList` are handed the size of an array to
-  fill and answer the used count, which is what `_MAX_ACTIVE_DISPLAYS` exists for now.
-  Found by pyguitest-recorder's first live macOS `Recorder` run, whose environment
-  block carried `capability probe failed: CGGetActiveDisplayCount`; reproduced
-  directly on the same granted macOS 26.7 Mac —
-  `AttributeError: CGGetActiveDisplayCount` — and re-measured after the fix as
-  `Screen(0, 1280x800, scale 0.75, 'main')` in 38 ms, which is the reading
-  `docs/validation.md` had recorded from the revision where the count came from the
-  list call itself. The fake in `tests/test_macos_backend.py` is what hid it: it
-  provided the invented name, exactly the failure ADR 004 records one layer up for
-  `kAXActionNamesAttribute`. That fake now mirrors the real signature, and
-  `test_no_quartz_entry_point_is_invented` fails if the module ever calls a Quartz
-  name it does not also declare in `_QUARTZ_NEEDED`.
-- **A recorded click on a combo box had no route left to run on Windows.**
-  `uia.Element.click` walked Invoke, Toggle and `LegacyIAccessible`'s default action, and a
-  combo box is the one control with none of the three usable: it publishes
-  `ExpandCollapsePattern`, and its MSAA shim *advertises* a default action and then raises
-  .NET's `InvalidOperationException` (`-2146233079`, `0x80131509`) from it -- so the
-  documented loud-failure policy turned every click on one into
-  `CapabilityUnsupported: the do default action pattern failed on this element`. Found by
-  pyguitest-recorder's Windows live check, which records a real session against a probe
-  window and replays the script it generated: `gui.dropdown("clicked 4").click()` -- the
-  recorder's own rendering of a real click on a real Win32 combo box -- failed at that same
-  line in two runs. A combo box is now the one role whose click is routed through its own
-  ExpandCollapse *before* the MSAA shim, toggling in the direction its state reads, which is
-  what the native control does with a click; `expand()`/`collapse()` stay the explicit
-  one-direction forms, and a combo box publishing no ExpandCollapse still reaches the shim.
-  Deliberately narrow: a tree item publishes the same pattern and its click means *select*,
-  so nothing else gained a route. Re-run live on Windows 11 the same day: the replay now
-  gets past that line and on through the rest of the recorded sequence. The five tests that
-  pin the ladder, including one asserting a tree item is *not* expanded by a click, are in
-  `tests/test_uia_backend.py`.
-
-## [0.14.0] — 2026-09-26
+## [0.14.0] — 2026-09-27
 
 ### Added
 
@@ -248,6 +137,32 @@ loops, and the node and depth budgets -- instead of one live finding at a time.
   names it. The `input` line now says so too —
   `CGEventPost (opt-in: connect(backend="macquartz"))` — the caveat libei's
   line has carried since it was added.
+- **`Session.click_element()`: where an element publishes no accessible action at
+  all, `element.click()` now clicks it by coordinate instead of raising.** `uia`
+  and `macos` ended their click ladder with `ElementNotActionable` and a hint to
+  click by coordinate -- `gui.extents(element)` then `gui.click()` -- and now
+  take that step themselves, which is the shape `Element.double_click` already
+  had: the element stays the locator, its rectangle is read fresh, and the
+  pointer goes to the centre of it. Found by pyguitest-recorder's Windows live
+  check, which replays the script it generated against a probe window and
+  reached a `SysListView32` *cell* whose only advertised action is the legacy
+  MSAA shim, which for that control declares none -- so a recorded click had no
+  accessible route to name and the replay stopped there.
+  `Session.click_element(element, button=1)` is the same call spelled for an
+  element with no session of its own, mirroring `double_click_element`.
+  The ladder's loud-failure policy is untouched, which is the point of the
+  shape: the pointer is reached only where an element published *nothing*,
+  never where a published route refused, so a disabled button's failed Invoke
+  is still reported rather than turned into a click that looks like a success.
+  An element with no session behind it, or none with a rectangle to aim at,
+  still raises the same `ElementNotActionable` a caller already catches, with
+  this platform's reason in it. Linux is unchanged: `atspi.Element.click`
+  already ends in dogtail's own coordinate click, so this adds nothing there --
+  the three backends now agree on one contract, instead of it being built in on
+  Linux and left as homework on the other two. Pinned by
+  `tests/test_uia_backend.py::TestClickWithoutAPattern`,
+  `tests/test_macos_backend.py` and `tests/test_api.py::TestClickElement`,
+  including the case that must *not* fall through.
 
 ### Changed
 
@@ -363,6 +278,78 @@ loops, and the node and depth budgets -- instead of one live finding at a time.
   member, so the property reported a capability with nothing behind it. It
   answers `False` on Darwin now, which is the same read `can_capture` documents
   in the other direction: installed is not the same as able.
+- **`screens()` raised `AttributeError` on every real Mac.** `MacosBackend.screens`
+  asked `CGGetActiveDisplayCount()` for the number of displays before requesting the
+  list — and there is no such function. CoreGraphics has no count-only call at all:
+  `CGGetActiveDisplayList`/`CGGetOnlineDisplayList` are handed the size of an array to
+  fill and answer the used count, which is what `_MAX_ACTIVE_DISPLAYS` exists for now.
+  Found by pyguitest-recorder's first live macOS `Recorder` run, whose environment
+  block carried `capability probe failed: CGGetActiveDisplayCount`; reproduced
+  directly on the same granted macOS 26.7 Mac —
+  `AttributeError: CGGetActiveDisplayCount` — and re-measured after the fix as
+  `Screen(0, 1280x800, scale 0.75, 'main')` in 38 ms, which is the reading
+  `docs/validation.md` had recorded from the revision where the count came from the
+  list call itself. The fake in `tests/test_macos_backend.py` is what hid it: it
+  provided the invented name, exactly the failure ADR 004 records one layer up for
+  `kAXActionNamesAttribute`. That fake now mirrors the real signature, and
+  `test_no_quartz_entry_point_is_invented` fails if the module ever calls a Quartz
+  name it does not also declare in `_QUARTZ_NEEDED`.
+- **A recorded click on a combo box had no route left to run on Windows.**
+  `uia.Element.click` walked Invoke, Toggle and `LegacyIAccessible`'s default action, and a
+  combo box is the one control with none of the three usable: it publishes
+  `ExpandCollapsePattern`, and its MSAA shim *advertises* a default action and then raises
+  .NET's `InvalidOperationException` (`-2146233079`, `0x80131509`) from it -- so the
+  documented loud-failure policy turned every click on one into
+  `CapabilityUnsupported: the do default action pattern failed on this element`. Found by
+  pyguitest-recorder's Windows live check, which records a real session against a probe
+  window and replays the script it generated: `gui.dropdown("clicked 4").click()` -- the
+  recorder's own rendering of a real click on a real Win32 combo box -- failed at that same
+  line in two runs. A combo box is now the one role whose click is routed through its own
+  ExpandCollapse *before* the MSAA shim, toggling in the direction its state reads, which is
+  what the native control does with a click; `expand()`/`collapse()` stay the explicit
+  one-direction forms, and a combo box publishing no ExpandCollapse still reaches the shim.
+  Deliberately narrow: a tree item publishes the same pattern and its click means *select*,
+  so nothing else gained a route. Re-run live on Windows 11 the same day: the replay now
+  gets past that line and on through the rest of the recorded sequence. The five tests that
+  pin the ladder, including one asserting a tree item is *not* expanded by a click, are in
+  `tests/test_uia_backend.py`.
+- **A search could answer with an element that is not on the desktop at all.**
+  `uia`'s element-array reader wrapped every slot in an `Element` without the
+  NULL check `_parent` already had for the same platform answer: a provider that
+  cannot fill a slot hands back a pointer to address zero, which is an ordinary
+  Python object, so `find_elements()` could report a phantom -- name `""`, role
+  `unknown`, `alive` False, no rectangle -- that a caller cannot tell from a real
+  element gone quiet, and that a resolution path would then try to name. Found by
+  writing the adversarial trees down as tests rather than finding them one live
+  audit at a time; `tests/test_uia_backend.py::TestTreesThatLie` pins it, and the
+  test fails against the old reader.
+- **A name that is not text raised `TypeError` out of a search.**
+  `CurrentName`/`CurrentHelpText` were passed to the filter as whatever the
+  provider answered, and `_matches_text` hands a non-string to `re.Pattern.search`
+  when a caller filters with a compiled regex -- so a provider reporting a number
+  for a name turned `gui.find_element(name=re.compile(...))` into a crash instead
+  of "no match". `_as_text` reads anything that is not a string as no name, which
+  is also what makes `Element.name` the string its docstring promises. The macOS
+  read path had the same hole from the other direction -- AX attributes are
+  `CFTypeRef`s, so an application can publish a title as a number, and
+  `_text_of` now refuses one the way `_text` already did for `text`.
+- **On macOS, one element could come back as a dozen search matches.** A tree
+  that reports an *ancestor* as its own child -- a broken application, or a stale
+  reference -- was followed, so the same element was visited and reported once
+  per depth level the loop carried it to: `find_elements` answered with twelve
+  copies of one widget where a resolution path expects one candidate per widget.
+  `MacosBackend.find_elements` now carries the lineage of the node it is looking
+  at and does not follow a child back into it, which is a stronger claim than the
+  `_MAX_DEPTH` bound could make; the depth limit and `_MAX_NODES` stay behind it
+  for a tree that is merely enormous. Pinned by
+  `tests/test_macos_backend.py::TestTreesThatLie`, whose cycle test fails against
+  the old walk (measured: twelve matches).
+
+Both platforms gained a systematic adversarial-tree class covering the
+combinations the review named -- every child reported at `(0, 0)`, one name in
+two windows of one process, a popup that closes between the capture and the read,
+a condition a provider answers with more than was asked, a parent chain that
+loops, and the node and depth budgets -- instead of one live finding at a time.
 
 ### Notes
 
@@ -3278,8 +3265,14 @@ First public release.
 
 [Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.14.0...HEAD
 [0.14.0]: https://github.com/ctrondlp/pyguitest/compare/v0.12.0...v0.14.0
+[0.12.0]: https://github.com/ctrondlp/pyguitest/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/ctrondlp/pyguitest/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/ctrondlp/pyguitest/compare/v0.10.0...v0.10.1
+[0.10.0]: https://github.com/ctrondlp/pyguitest/compare/v0.9.0...v0.10.0
+[0.9.0]: https://github.com/ctrondlp/pyguitest/compare/v0.8.0...v0.9.0
+[0.8.0]: https://github.com/ctrondlp/pyguitest/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/ctrondlp/pyguitest/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/ctrondlp/pyguitest/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/ctrondlp/pyguitest/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/ctrondlp/pyguitest/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ctrondlp/pyguitest/compare/v0.2.0...v0.3.0

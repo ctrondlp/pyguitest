@@ -448,7 +448,7 @@ and nothing in this package can preflight or answer it: a human has to be
 present to click one of the two buttons. It has only been seen, not
 deliberately provoked, so which capture call triggers it is not yet
 narrowed down — see
-[validation.md](validation.md#macos-closing-four-open-items-on-the-same-vm-2026-09-27)
+[validation.md](validation.md#macos-closing-four-open-items-on-the-same-machine-2026-09-27)
 for what is confirmed. An automated script capturing screenshots on a Mac
 over SSH should expect this prompt at least once and cannot dismiss it
 itself.

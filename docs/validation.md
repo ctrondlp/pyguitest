@@ -1983,8 +1983,8 @@ its own live pass: on Windows, the replay line its own live check stopped at -- 
 `SysListView32` cell that publishes nothing to invoke -- so that the recorded
 `gui.element(role=Role.TEXT, name="Gamma").click()` reaches a real click on a real cell;
 on a Mac, a widget AX leaves actionless, a static text or a table cell, so that the
-pointer really goes to the centre of its rectangle. Both are in `[Unreleased]` rather
-than in a released version for that reason, and neither is claimed as measured. The three
+pointer really goes to the centre of its rectangle. Both ship in 0.14.0 with that
+pass still outstanding, and neither is claimed as measured. The three
 fixes the adversarial-tree classes found are a different case and need no desktop: they
 are pinned by tests that were each shown to fail against the old code, which is the
 evidence a fake *can* give.
