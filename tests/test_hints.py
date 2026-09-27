@@ -1,5 +1,6 @@
 """Install advice: distribution detection and what it recommends."""
 
+import contextlib
 import dataclasses
 import subprocess
 import unittest
@@ -9,31 +10,118 @@ from pyguitest.capabilities import Capability, CapabilitySet
 from pyguitest.hints import advice, detect_distro, hints_for
 from pyguitest.session import (
     Compositor,
+    Environment,
     SessionType,
     detect,
     toolkit_accessibility,
 )
 
+# The fields a fixture states for itself: the session's shape, read from
+# `detect()` on a platform pinned by hand. Everything else in `Environment` is a
+# probe of the machine, and belongs in `_ABSENT` -- `notes` included, which
+# `detect()` writes from those probes ("libatspi is present but PyGObject is
+# not") and which no hint reads. The guard below put `notes` here in the first
+# draft of this set, and failed until it moved.
+_SESSION_SHAPE = frozenset(
+    {"session_type", "compositor", "desktop", "display", "wayland_display"}
+)
+
+# Every machine-read field, at the value `Environment` declares for it: no tools
+# on PATH, no xlib, no portal, no SendInput, none of macOS' four grants. Those
+# defaults are the package's own statement of what a hand-built Environment means
+# -- "off Windows on purpose", "so a hint gated on this stays silent wherever it
+# does not apply" -- and a fixture *is* a hand-built Environment, so it should
+# say exactly that rather than describe the box the suite happens to run on.
+#
+# Derived from the dataclass instead of listed by hand, so a field added to
+# `Environment` is covered by every fixture in this file the moment it exists.
+# The one thing a derivation cannot know is a field whose declared default is
+# not the bare answer, and that is the guards' job -- see
+# `TestTheFixturesIgnoreTheMachine`.
+_ABSENT = {
+    f.name: (f.default_factory() if f.default is dataclasses.MISSING else f.default)
+    for f in dataclasses.fields(Environment)
+    if f.name not in _SESSION_SHAPE
+}
+
+
+def _every_tool(group, **flags):
+    """`discover()`'s answer on a machine that has every tool it looks for.
+
+    A macOS runner is one such machine without anybody installing anything:
+    `pbcopy`, `pbpaste` and `screencapture` ship with the OS.
+    """
+    return tuple(group)
+
+
+def _every_module(name):
+    """`_module()`'s answer on a box with every binding this package can use.
+
+    Named rather than a blanket True, which would also claim PyObjC on a machine
+    that has none and send `detect()` down code paths only a Mac can walk.
+    """
+    return name in {"Xlib", "evdev", "gi", "dogtail", "dbus"}
+
+
+@contextlib.contextmanager
+def a_machine_that_has_everything():
+    """`detect()`'s probes, answered as a host that has all of it.
+
+    The five things `detect()` asks the machine beyond the platform: which tools
+    are on PATH, which bindings import, whether a libei/Xtst library is there,
+    whether a session portal answered, and whether there is an 'input' group to
+    join. All of them answer "yes" inside this block, which is what lets a
+    Windows box run the macOS runner's case -- see the guards for why that
+    matters, and PR #41 for what it cost to learn.
+    """
+    with (
+        mock.patch("pyguitest.session._tools.discover", side_effect=_every_tool),
+        mock.patch("pyguitest.session._module", side_effect=_every_module),
+        mock.patch("pyguitest.session._lib", return_value=True),
+        mock.patch("pyguitest.session._portal", return_value=True),
+        mock.patch("pyguitest.session._has_input_group", return_value=True),
+    ):
+        yield
+
 
 def linux_detect(env):
-    """`detect(env)` as it would answer on Linux, from any machine.
+    """`detect(env)` as it would answer on Linux, on a machine with nothing.
 
-    Every fixture in this file goes through here, and the pin is the whole
-    point: `_classify` asks `_platform()` *first* and, on Windows, asks nothing
-    else -- the variables below mean nothing there, since several of them can
-    be set by something that is not the OS. Without it, every "X11 session" and
-    "wlroots session" in this file became a Windows one when the suite ran on
-    Windows, and 47 tests asserted Linux advice against a Windows report.
-    `detect()`'s own docstring names patching `_platform` as the way to test a
-    platform you are not on; it applies just as much to the one you are not on
-    by accident.
+    Every fixture in this file goes through here, and there are two pins, for
+    two leaks that each cost a CI run.
+
+    The first is the platform: `_classify` asks `_platform()` *first* and, on
+    Windows, asks nothing else -- the variables below mean nothing there, since
+    several of them can be set by something that is not the OS. Without this
+    pin, every "X11 session" and "wlroots session" in this file became a Windows
+    one when the suite ran on Windows, and 47 tests asserted Linux advice
+    against a Windows report. `detect()`'s own docstring names patching
+    `_platform` as the way to test a platform you are not on; it applies just as
+    much to the one you are not on by accident.
+
+    The second is subtler, because it was invisible everywhere the suite had
+    ever run: everything `detect()` does after the platform is a probe of the
+    *machine*, and on CI's Windows and Linux runners every answer is "nothing",
+    so the bare session this file is written against came out right there by
+    luck. A macOS runner is not those runners. `pbcopy`, `pbpaste` and
+    `screencapture` ship with the OS, so "a GNOME Wayland session with nothing
+    installed" was quietly a session with a clipboard and a screenshot path,
+    `can_use_clipboard` answered True, and the row producing "the clipboard"
+    never fired -- PR #41's macOS job, the only job that failed, on a test no
+    local run could have caught, because nothing on Windows or Linux has a
+    `pbcopy` to find.
+
+    So the machine's answers are replaced with `_ABSENT` rather than inherited,
+    and a fixture built on this describes a session instead of a runner.
+    `a_machine_that_has_everything()` puts the leak back deliberately, for the
+    guards that require the fixtures not to notice it.
     """
     with mock.patch("pyguitest.session._platform", return_value="linux"):
-        return detect(env)
+        return dataclasses.replace(detect(env), **_ABSENT)
 
 
 def environment(**overrides):
-    """The default fixture: a GNOME Wayland session."""
+    """The default fixture: a GNOME Wayland session, on a bare machine."""
     base = linux_detect(
         {"WAYLAND_DISPLAY": "wayland-0", "XDG_CURRENT_DESKTOP": "GNOME"}
     )
@@ -45,10 +133,12 @@ def windows_environment(**overrides):
 
     Made by replacing fields on a Linux one, so everything this session has
     nothing of -- no tools on PATH, no xlib, no portal -- is inherited rather
-    than restated in a second place. What differs is what a Windows detect()
-    sets, and the values here are the unremarkable ones: an interactive
-    desktop, no elevated window in front, a build past every version floor,
-    and the two things that really are installable already installed.
+    than restated in a second place. That inheritance is host-free by
+    construction now rather than by the luck of the runner: see `linux_detect`.
+    What differs is what a Windows detect() sets, and the values here are the
+    unremarkable ones: an interactive desktop, no elevated window in front, a
+    build past every version floor, and the two things that really are
+    installable already installed.
 
     Merged rather than passed twice, so that an override naming one of these
     fields wins instead of colliding with the default.
@@ -66,6 +156,47 @@ def windows_environment(**overrides):
         "image_tools": ("compare",),
     }
     return dataclasses.replace(environment(), **{**baseline, **overrides})
+
+
+class TestTheFixturesIgnoreTheMachine(unittest.TestCase):
+    """Neither fixture may describe whichever box built it.
+
+    This is PR #41's macOS runner, runnable anywhere: a host that answers every
+    probe `detect()` makes with "yes" -- the clipboard tools macOS ships, its
+    screenshot tool, python-xlib, a portal, an 'input' group -- must build the
+    same environments, and render the same advice, as the bare machine the
+    Windows and Linux runners already are. It failed on macOS and nowhere else,
+    because no other runner has a `pbcopy` to find, and this is the only place
+    that class of bug is caught before a push.
+    """
+
+    def test_the_split_of_shape_and_machine_is_exhaustive_and_spelled_right(self):
+        """`_ABSENT` is derived, so only the shape set can be wrong.
+
+        A name in `_SESSION_SHAPE` that is not a field is a machine-read field
+        left un-reset -- silently, since it is missing from `_ABSENT` too -- and
+        a field in neither set is one this file stopped resetting.
+        """
+        known = {f.name for f in dataclasses.fields(Environment)}
+        self.assertEqual(_SESSION_SHAPE - known, set())
+        self.assertEqual(set(_ABSENT) | _SESSION_SHAPE, known)
+
+    def test_a_loaded_host_builds_the_same_environments(self):
+        for build in (environment, windows_environment):
+            with self.subTest(fixture=build.__name__):
+                bare = build()
+                with a_machine_that_has_everything():
+                    loaded = build()
+                self.assertEqual(bare, loaded)
+
+    def test_a_loaded_host_renders_the_same_advice(self):
+        """The whole report, not just the rows: the wording is compared too."""
+        for build in (environment, windows_environment):
+            with self.subTest(fixture=build.__name__):
+                bare = advice(build(), distro="fedora")
+                with a_machine_that_has_everything():
+                    loaded = advice(build(), distro="fedora")
+                self.assertEqual(bare, loaded)
 
 
 class TestDistroDetection(unittest.TestCase):
@@ -1066,22 +1197,6 @@ class TestHintsNeverBorrowALinuxComponentName(unittest.TestCase):
     held apart by tests rather than by a comment asking nicely.
     """
 
-    _NOTHING_INSTALLED = {
-        "has_atspi": False,
-        "capture_tools": (),
-        "input_tools": (),
-        "image_tools": (),
-        "uinput_writable": False,
-        # Pinned rather than inherited: the udev hint fires only where there
-        # is an 'input' group to join, and that is read off the real machine.
-        # Left to inherit, this test passed on a distribution that has one and
-        # failed anywhere that does not -- Windows, and FreeBSD just as much,
-        # where /dev/uinput is root:wheel and no such group exists. The claim
-        # here is "every Linux component is produced by some environment", so
-        # each component's precondition belongs in the fixture.
-        "has_input_group": True,
-    }
-
     def _linux_environments(self):
         """One environment per shape that produces Linux components.
 
@@ -1089,21 +1204,27 @@ class TestHintsNeverBorrowALinuxComponentName(unittest.TestCase):
         tier-6 row needs a session with an X connection and no python-xlib,
         the KWin row needs AT-SPI present with the toolkit setting off, and so
         on. A single environment would only prove the point for itself.
+
+        Nothing here pins the machine, and nothing needs to: `environment()` is
+        a bare one already (`_ABSENT`), which is what lets the guard below hand
+        these environments a host that has everything and still expect the same
+        components out of them. AT-SPI is set here because a row needs *some*
+        environment that has it -- that this one does is the point of it -- and
+        not because a runner might supply it.
         """
-        nothing = self._NOTHING_INSTALLED
-        with_atspi = dict(nothing, has_atspi=True, has_pygobject=True, has_dogtail=True)
+        with_atspi = {"has_atspi": True, "has_pygobject": True, "has_dogtail": True}
         return [
-            environment(**nothing),
+            environment(),
             dataclasses.replace(
-                environment(**nothing), session_type=SessionType.X11, has_xlib=False
+                environment(), session_type=SessionType.X11, has_xlib=False
             ),
             dataclasses.replace(
-                environment(**nothing),
+                environment(),
                 session_type=SessionType.XWAYLAND,
                 has_xlib=False,
             ),
             dataclasses.replace(environment(**with_atspi), compositor=Compositor.KWIN),
-            dataclasses.replace(environment(**nothing), compositor=Compositor.MUTTER),
+            dataclasses.replace(environment(), compositor=Compositor.MUTTER),
         ]
 
     def _linux_components(self):
@@ -1138,6 +1259,22 @@ class TestHintsNeverBorrowALinuxComponentName(unittest.TestCase):
         # A rename would leave the check below comparing against a name nothing
         # emits, which passes for the wrong reason.
         self.assertEqual(self._linux_components(), LINUX_COMPONENTS)
+
+    def test_no_machine_can_drop_a_component(self):
+        """The same nine names on the macOS runner, run from anywhere.
+
+        PR #41, one job red and the other two green: `pbcopy` and `pbpaste` ship
+        with macOS, so on that runner `detect()` found clipboard tools where the
+        Windows and Linux runners find none, `can_use_clipboard` answered True,
+        and the row producing "the clipboard" never fired. Neither runner that
+        lacks a pbcopy could have seen it, and no run of this suite on either
+        one ever will -- unless it says so, which is what this does: every probe
+        `detect()` makes answers "yes" inside the block, so a component that
+        comes from a bare machine goes missing here, on any host.
+        """
+        with a_machine_that_has_everything():
+            produced = self._linux_components()
+        self.assertEqual(produced, set(LINUX_COMPONENTS))
 
     def test_the_windows_names_are_disjoint_from_the_linux_ones(self):
         windows = self._windows_components()
