@@ -79,7 +79,7 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T")
 
-__version__ = "0.12.0"
+__version__ = "0.14.1"
 
 __all__ = [
     "connect",
@@ -960,6 +960,39 @@ class Session:
         x, y, width, height = extents
         self.move_mouse(x + width // 2, y + height // 2)
         self.double_click()
+
+    def click_element(self, element: Element, button: int = 1) -> None:
+        """Click a named element through the pointer. `element.click()` ends here.
+
+        Where the element publishes no accessible action to name -- a widget
+        whose provider offers neither Invoke nor Toggle nor an MSAA default
+        action, measured live on a `SysListView32` cell in
+        pyguitest-recorder -- `element.click()` calls this instead of raising,
+        because a coordinate click is what a person does with such a widget and
+        what the refusal used to advise. The element is still the locator: its
+        rectangle is read fresh each call rather than baked in ahead of time,
+        and only the gesture falls back to the pointer.
+
+        The spelling for an element with no session behind it -- one taken
+        straight from a backend, where `element.click()` has nothing to
+        delegate to. Either reads the same to a caller; this one is also what
+        `element.click()` ends up calling.
+
+        Needs Capability.ELEMENT_GEOMETRY, plus the pointer capabilities --
+        which come from whichever input backend the session was built with
+        (`win32`, `macquartz`, X11/XTEST, the portal), not from the
+        accessibility one. Raises PyGUITestError where extents() has no
+        rectangle for this element -- it is not showing, or the backend reports
+        none -- the same split `double_click_element` makes. `element.click()`
+        raises ElementNotActionable for that case instead, so that the typed
+        refusal a caller already catches keeps its meaning.
+        """
+        extents = self.extents(element)
+        if extents is None:
+            raise PyGUITestError(f"{element.name!r} has no extents to click")
+        x, y, width, height = extents
+        self.move_mouse(x + width // 2, y + height // 2)
+        self.click(button)
 
     def scroll(self, dx: int = 0, dy: int = 0) -> None:
         """Scroll by whole wheel detents: `dy` positive is up, `dx` right.
@@ -2196,18 +2229,19 @@ class Session:
     def _bind(self, element: Element) -> Element:
         """Give `element` a way back to this session, where it wants one.
 
-        `Element.double_click` has to reach the pointer, and the pointer
-        belongs to the session rather than to any element or backend -- an
-        AT-SPI element is a locator and nothing else. So every element
-        handed out here carries a reference back to this session, and
-        elements made while walking the tree inherit it from the one they
-        came from, which is what keeps `gui.root_element().child(...)` able
-        to double_click.
+        `Element.double_click` has to reach the pointer, and so does the
+        fallback `Element.click` takes where a widget publishes no accessible
+        action at all; the pointer belongs to the session rather than to any
+        element or backend -- an AT-SPI element is a locator and nothing else.
+        So every element handed out here carries a reference back to this
+        session, and elements made while walking the tree inherit it from the
+        one they came from, which is what keeps `gui.root_element().child(...)`
+        able to double_click.
 
         Offered rather than assigned: an element type with no room for the
-        reference keeps working for everything but double_click, which says
-        so itself, instead of this raising for a backend that never asked
-        for any of it.
+        reference keeps working for everything but double_click and click's
+        fallback, which both say so themselves, instead of this raising for a
+        backend that never asked for any of it.
         """
         binder = getattr(element, "_bind_session", None)
         if binder is not None:

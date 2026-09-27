@@ -15,6 +15,7 @@ from __future__ import annotations
 import ctypes.util
 import importlib.util
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -57,6 +58,21 @@ class SessionType(Enum):
     a table, and deliberately *not* "windows" -- `backends/windows.py` is
     already the compositor-IPC module for sway, Hyprland, niri and KWin,
     where "windows" means GUI windows."""
+    DARWIN = "darwin"
+    """A native macOS desktop, spelled the way `sys.platform` spells it for
+    the same reason `WIN32` is -- so the platform string and the session type
+    connect without a table. Deliberately not "macos": that is the name of
+    the extra and of the element backend, and a session type sharing a word
+    with a backend reads as "the macos backend's session" rather than as the
+    desktop it describes.
+
+    Reported for a Mac running XQuartz too, which is why `_classify()` asks
+    the platform before it reads `DISPLAY`. An X connection on a Mac reaches
+    the X clients drawing into that server and no native window at all, so
+    reading the display first would hand `X11Backend` a fraction of a desktop
+    and report full support for it -- the same failure the Windows branch was
+    written for.
+    """
     HEADLESS = "headless"
     UNKNOWN = "unknown"
 
@@ -81,6 +97,15 @@ class Compositor(Enum):
     compositor" would be false, and because `for_compositor()` branches on
     this member -- the Windows window backend is `win32`, not a
     foreign-toplevel client, and the branch has to be able to say so."""
+    QUARTZ = "quartz"
+    """macOS's window server, and the second member that is effectively a
+    constant. Named Quartz rather than "aqua" or "macos" because Quartz is
+    what the APIs behind it are called -- `CGWindowListCopyWindowInfo`,
+    `CGEventPost` -- and so is the name a reader will find in Apple's own
+    documentation. Declared rather than left to `OTHER` for `DWM`'s reason:
+    `for_compositor()` has nothing to answer with here, since the macOS
+    window backend is `macos` and the capture half is a tool, so the branch
+    has to be able to name the desktop it is declining."""
     OTHER = "other"
     NONE = "none"
 
@@ -134,6 +159,24 @@ def _platform() -> str:
     change what `importlib`, `os` and `pathlib` do inside the same call.
     """
     return sys.platform
+
+
+def _darwin_version() -> str:
+    """The macOS release (`26.7`), or "" where it could not be read.
+
+    `platform.mac_ver()` and deliberately not `os.uname().release`, which
+    reports the Darwin kernel version -- 25.6.0 on macOS 26.6. No arithmetic
+    recovers the marketing number from that either: Apple renumbered to 26
+    for 2026, after Darwin 24 had stood for macOS 15, so the long-standing
+    `major - 9` rule stops holding at exactly the release this was first run
+    against. Verified there rather than assumed -- see docs/validation.md.
+
+    "" rather than a raise, like every other probe here: `detect()` answers.
+    """
+    try:
+        return platform.mac_ver()[0] or ""
+    except Exception:  # noqa: BLE001 - a probe that failed knows nothing
+        return ""
 
 
 def _uinput() -> tuple[bool, bool]:
@@ -196,6 +239,10 @@ def _portal(env: Mapping[str, str]) -> bool:
 _WINDOWS = "win32"
 """What `sys.platform` says on a native Windows session, and the string
 `SessionType.WIN32` uses for the same fact."""
+
+_DARWIN = "darwin"
+"""What `sys.platform` says on macOS, and the string `SessionType.DARWIN`
+uses for the same fact. One spelling, two uses, exactly as `_WINDOWS` is."""
 
 _WINSTA0 = "WinSta0"
 """The one window station an interactive desktop is attached to. Every other
@@ -758,6 +805,159 @@ def _windows_environment() -> dict[str, Any]:
     }
 
 
+def _darwin_environment() -> dict[str, Any]:
+    """The macOS-only `Environment` fields, probed.
+
+    Called only once `_classify()` has said this is a Darwin session, so
+    every probe here may assume macOS.
+
+    Four TCC services are asked about and none of them is prompted for -- the
+    non-prompting forms are `backends._macapi`'s, and the reason they are
+    ctypes rather than PyObjC is that module's docstring. Nothing here asks
+    for a grant either: the request form is called only from a named backend's
+    constructor, where the caller has asked for the capability the grant is
+    for, and `detect()` runs before anyone has decided to want one. Whether a
+    request shows anything is a separate question and is not assumed here --
+    measured on one Mac, `CGRequestPostEventAccess()` was silent. See
+    `macquartz.request_post_event` and docs/validation.md.
+
+    `backends` is imported here rather than at the top of this module on
+    purpose: `backends/__init__.py` imports `atspi`, which imports this
+    module, so a module-level import would close a cycle. Nothing is lost by
+    it, since this function only runs on a Mac -- and a Mac that has got as
+    far as `detect()` is about to import `backends` anyway.
+
+    The two binding flags are separate fields rather than one `has_pyobjc`
+    because they gate different halves. Quartz's `CGEventPost` and
+    ApplicationServices' AX wrappers come from two distributions inside one
+    extra, so a single flag would send a reader to install something they
+    half have; `_module` is asked about the module a caller would import.
+    """
+    from .backends import _macapi
+
+    return {
+        "has_pyobjc_quartz": _module("Quartz"),
+        "has_pyobjc_application_services": _module("ApplicationServices"),
+        "has_ax": _macapi.accessibility_trusted(),
+        "has_screen_recording": _macapi.screen_recording_allowed(),
+        "has_post_event": _macapi.post_event_allowed(),
+        "has_listen_event": _macapi.listen_event_allowed(),
+        "macos_version": _darwin_version(),
+    }
+
+
+def _windows_notes(windows: Mapping[str, Any]) -> list[str]:
+    """What a Windows session has to be told about itself, or nothing.
+
+    Three notes, and each is about something the reader cannot see for
+    themselves: Windows prompts nothing and reports nothing, so without these
+    a failure is a test that quietly does not work. They lived inline in
+    `detect()` until these and the macOS notes arrived; the two sets are the
+    same shape, so they are written the same way.
+
+    `foreground_is_elevated` needs both halves, not just this process's own
+    integrity. UIPI only bites where the *target* is the more privileged of
+    the two, and "not elevated" on its own is the ordinary state of every
+    normal login -- a note that fired on it would appear in every Windows
+    report ever printed, which is how a reader learns to skip the notes.
+    None is not a finding either: the probe answers None where it could not
+    ask. Same gate as hints._windows_hints' matching row, deliberately.
+    """
+    notes = []
+    if not windows["is_interactive_desktop"]:
+        notes.append(
+            "this process is not on an interactive desktop; no windows "
+            "are visible from here -- and no prompt or error will say so"
+        )
+    if windows["foreground_is_elevated"] and not windows["is_elevated"]:
+        notes.append(
+            "the window in the foreground is elevated and this process is "
+            "not, so input aimed at it will be dropped silently: UIPI "
+            "blocks it, with no error and no prompt"
+        )
+    if not windows["has_comtypes"]:
+        notes.append(
+            "elements unavailable; install the 'windows' extra "
+            "(pip install 'pyguitest[windows]') for UI Automation"
+        )
+    return notes
+
+
+def _darwin_notes(darwin: Mapping[str, Any]) -> list[str]:
+    """What a macOS session has to be told about itself, or nothing.
+
+    A function rather than five more branches inside `detect()`, which is
+    the longest function in this module already -- and the same is now true
+    of the Windows notes above.
+
+    Every one of them is about an API whose failure mode is silence. A
+    denied Accessibility grant does not make `root_element()` raise -- it
+    returns an empty tree. A denied Screen Recording grant does not make
+    `screencapture` fail -- it writes a black PNG and exits 0. A denied
+    PostEvent grant does not make `CGEventPost` fail -- it drops the event.
+    Without these notes a reader cannot tell a Mac that is refusing from a
+    suite that is broken, which is the same reason the Windows notes exist.
+
+    TCC records consent against a *binary*, not against a user, so the
+    resolved path of the interpreter is named wherever a grant is missing.
+    A reader who granted permission to a different interpreter -- the system
+    Python rather than the virtualenv, or the one from before an upgrade --
+    otherwise reads the second prompt as "I already did this".
+
+    That path is not necessarily the name the row appears under, which is the
+    part a live run has settled only partly: a process started from a terminal
+    is attributed to the responsible app, so the PostEvent note names both and
+    says so. docs/validation.md records the measurement and what it leaves
+    open rather than implying the two are interchangeable.
+    """
+    notes = []
+    quartz = darwin["has_pyobjc_quartz"]
+    application_services = darwin["has_pyobjc_application_services"]
+    if not quartz and not application_services:
+        notes.append(
+            "the PyObjC bindings are not installed, so element automation, "
+            "input injection and screen geometry are all unavailable; install "
+            "the 'macos' extra (pip install 'pyguitest[macos]')"
+        )
+    elif not application_services:
+        notes.append(
+            "pyobjc-framework-ApplicationServices is not installed, so element "
+            "automation is unavailable; it comes from the 'macos' extra "
+            "(pip install 'pyguitest[macos]')"
+        )
+    elif not quartz:
+        notes.append(
+            "pyobjc-framework-Quartz is not installed, so input injection and "
+            "screen geometry are unavailable; it comes from the 'macos' extra "
+            "(pip install 'pyguitest[macos]')"
+        )
+    if not darwin["has_ax"]:
+        notes.append(
+            f"Accessibility is not granted to {sys.executable}: element "
+            "queries will come back empty rather than raise, so grant it "
+            "under System Settings > Privacy & Security > Accessibility"
+        )
+    if not darwin["has_screen_recording"]:
+        notes.append(
+            f"Screen Recording is not granted to {sys.executable}: screencapture "
+            "still exits 0, and writes a uniformly black image instead of the "
+            "screen, so grant it under System Settings > Privacy & Security > "
+            "Screen Recording"
+        )
+    if not darwin["has_post_event"]:
+        notes.append(
+            f"the PostEvent grant is not held by {sys.executable}, so injected "
+            "input is dropped silently; System Settings files it under Privacy "
+            "& Security > Accessibility, and TCC records the answer against "
+            "the app that launched this process -- Terminal, or the IDE that "
+            "ran the test -- or against the signed interpreter that app runs, "
+            "which is why the row to allow may be named for either. Naming the "
+            "backend asks for the grant; on the one Mac this has been measured "
+            "on it showed no dialog to answer, so the grant is made by hand"
+        )
+    return notes
+
+
 _X11_ONLY_INPUT_TOOLS = frozenset(
     tool.name for tool in _tools.INPUT_TOOLS if tool.x11_only
 )
@@ -774,6 +974,7 @@ def _input_transport(
     uinput_writable: bool,
     has_evdev: bool,
     has_sendinput: bool,
+    has_post_event: bool,
     has_libei: bool,
 ) -> str | None:
     """Rank the input mechanisms and name the one that will carry events.
@@ -787,9 +988,29 @@ def _input_transport(
     reaches every client on the seat; only the X-only tools are limited the
     way that note described. Confirmed live on GNOME Shell 51.rc -- see
     docs/validation.md.
+
+    Windows and macOS are answered first and on their own. SendInput and
+    `CGEventPost` are both in-process, need no tool and open no device, so
+    there is nothing on either platform for the ranking below to choose
+    between; the Windows half also exists because every mechanism named
+    below is a Linux one, so a Windows session used to rank itself by tools
+    it cannot install.
     """
     if session_type is SessionType.WIN32:
         return "SendInput" if has_sendinput else None
+    if session_type is SessionType.DARWIN:
+        # One mechanism, and no tool: `CGEventPost` is in-process through
+        # the binding, so the same reasoning as SendInput above. The label is
+        # the API's own name, because a Mac reader searching for it will find
+        # Apple's documentation and nothing about this package -- and it
+        # carries the opt-in caveat the way libei's does below, because
+        # `macquartz` is registered `opt_in` and automatic composition
+        # therefore never selects it. Without that, a granted Mac reports
+        # "input CGEventPost" beside a `connect()` that injects nothing, which
+        # is exactly the disagreement this function exists to prevent.
+        if not has_post_event:
+            return None
+        return 'CGEventPost (opt-in: connect(backend="macquartz"))'
     keymap_safe = {t.name for t in _tools.INPUT_TOOLS if t.keymap_safe}
     for name in input_tools:
         if name in keymap_safe:
@@ -893,6 +1114,48 @@ class Environment:
     removing it, or 0 off Windows. See _low_level_hooks_timeout_ms: this is
     the recorder's silent-gap window, and 300 ms is the platform default."""
 
+    # macOS-only probes, defaulted for the same reason the Windows ones are:
+    # a hand-built Environment, and every Linux session, keeps the answers it
+    # always had. The four grants are separate fields because they are four
+    # separate TCC services, and a caller that conflated them would withdraw
+    # the wrong half of a backend's capability set -- see _darwin_environment.
+    has_pyobjc_quartz: bool = False
+    """Whether PyObjC's Quartz distribution is importable. Gates input
+    injection and screen geometry through it, which are `CGEventPost` and
+    `CGGetActiveDisplayList`; the clipboard is `NSPasteboard`, which arrives
+    with the Cocoa Quartz pulls in and is served by the element backend ADR
+    004 lists as still to be built -- see `can_use_clipboard`, which says so
+    rather than reporting the binding as the capability."""
+    has_pyobjc_application_services: bool = False
+    """Whether PyObjC's ApplicationServices distribution is importable, which
+    is what the AX element tree is reached through. A separate distribution
+    inside the same extra, so a machine can have exactly one of the two."""
+    has_ax: bool = False
+    """Whether this process holds the Accessibility grant
+    (`kTCCServiceAccessibility`). Denied, the AX attribute reads return an
+    empty tree rather than raising, so this is the only way to tell "no
+    elements" from "untrusted"."""
+    has_screen_recording: bool = False
+    """Whether this process holds the Screen Recording grant
+    (`kTCCServiceScreenCapture`). Denied, `screencapture` exits 0 and writes
+    a uniformly black image, so an unguarded `capture()` returns a
+    plausible-looking picture of nothing."""
+    has_post_event: bool = False
+    """Whether this process holds the PostEvent grant
+    (`kTCCServicePostEvent`), which is what `CGEventPost` requires -- not
+    Accessibility, which System Settings happens to file under the same pane.
+    Denied, posted events are dropped with no error."""
+    has_listen_event: bool = False
+    """Whether this process holds the Input Monitoring grant
+    (`kTCCServiceListenEvent`). Nothing in this package consumes it yet; it
+    is probed and reported because which grant an event tap needs is the one
+    TCC question ADR 004 leaves open, and the first machine that prints it
+    settles it."""
+    macos_version: str = ""
+    """The macOS release (`26.7`), or "" where it could not be read. See
+    `_darwin_version` for why this is not derived from the Darwin kernel
+    version every `uname` reports."""
+
     input_tools: tuple[str, ...] = field(default_factory=tuple)
     capture_tools: tuple[str, ...] = field(default_factory=tuple)
     window_tools: tuple[str, ...] = field(default_factory=tuple)
@@ -915,9 +1178,17 @@ class Environment:
         Windows session injected input perfectly well and reported False
         here -- and every hint gated on that then sent the reader off to
         install ydotool.
+
+        macOS answers from its own field too, and from the *right* one: what
+        `CGEventPost` needs is the PostEvent grant, not Accessibility, even
+        though System Settings files both under one pane. Reading `has_ax`
+        here would refuse input on a machine that had granted exactly what
+        input requires.
         """
         if self.session_type is SessionType.WIN32:
             return self.has_sendinput
+        if self.session_type is SessionType.DARWIN:
+            return self.has_post_event
         return (
             bool(self.input_tools)
             or self.has_libei
@@ -988,6 +1259,13 @@ class Environment:
         # work added while these two were missed.
         if self.session_type is SessionType.WIN32:
             return True
+        if self.session_type is SessionType.DARWIN:
+            # The tool is always there -- `screencapture` ships with the OS --
+            # so the grant is the whole question. Answering from
+            # `capture_tools` instead would report capture as available on a
+            # Mac that had denied Screen Recording, which is precisely the
+            # machine whose screenshots are black.
+            return self.has_screen_recording
         if self.capture_tools:
             return True
         # X11 only, not XWayland. X11Backend withdraws SCREEN_CAPTURE
@@ -1013,6 +1291,16 @@ class Environment:
         involved and an empty `clipboard_tools` says nothing. Confirmed on
         Windows 11, where this was False beside a backend declaring
         CLIPBOARD -- the same miss as `can_capture` above.
+
+        macOS answers False, and that is deliberately not an omission: the
+        clipboard there is `NSPasteboard.general` through the element backend,
+        which ADR 004 still lists as to be built, so no member of this package
+        serves CLIPBOARD on Darwin today and no CLI tool does either. Answering
+        from `has_pyobjc_quartz` -- the binding that would carry it, pulled in
+        by Quartz -- would report a capability one backend too early, which is
+        the same read `can_capture` above exists to avoid in the other
+        direction. The branch that answers it is one line, to add when that
+        backend lands.
         """
         if self.session_type is SessionType.WIN32:
             return True
@@ -1060,6 +1348,7 @@ class Environment:
             uinput_writable=self.uinput_writable,
             has_evdev=self.has_evdev,
             has_sendinput=self.has_sendinput,
+            has_post_event=self.has_post_event,
             has_libei=self.has_libei,
         )
 
@@ -1077,6 +1366,12 @@ class Environment:
             )
             level = "elevated" if self.is_elevated else "not elevated"
             session += f" ({station}, {level})"
+        elif self.session_type is SessionType.DARWIN:
+            # The release goes here for the Windows branch's reason: it is
+            # the answer to "which macOS is this", and it decides which of
+            # the permission panes a reader is about to be sent to.
+            release = f" {self.macos_version}" if self.macos_version else ""
+            session += f" (macOS{release})"
         lines = [
             f"session      {session}",
             f"compositor   {self.compositor.value}"
@@ -1105,12 +1400,18 @@ class Environment:
                         ("uinput", self.uinput_writable and self.has_evdev),
                         ("at-spi", self.can_use_atspi),
                         ("xtest", self.has_xtest),
-                        # Windows' two, listed here so that the line cannot
-                        # say "none detected" beside an `input` line that
-                        # says SendInput -- the disagreement that made this
-                        # line worth having in the first place.
+                        # Windows' two and macOS' five, listed here so that
+                        # the line cannot say "none detected" beside an
+                        # `input` line that says SendInput or CGEventPost --
+                        # the disagreement that made this line worth having
+                        # in the first place.
                         ("sendinput", self.has_sendinput),
                         ("comtypes", self.has_comtypes),
+                        ("ax", self.has_ax),
+                        ("quartz", self.has_pyobjc_quartz),
+                        ("screen-recording", self.has_screen_recording),
+                        ("post-event", self.has_post_event),
+                        ("input-monitoring", self.has_listen_event),
                     )
                     if ok
                 )
@@ -1131,9 +1432,10 @@ class Environment:
 def _classify(env: Mapping[str, str]) -> SessionType:
     """Decide the session type from the environment variables.
 
-    The platform is asked first, and on Windows it is the only thing asked:
-    no variable in `env` means what a Linux session means by it, and several
-    of them can be set there by something that is not the OS.
+    The platform is asked first, and on Windows and macOS it is the only
+    thing asked: no variable in `env` means what a Linux session means by
+    it, and several of them can be set there by something that is not the
+    OS -- an X server on Windows, XQuartz on a Mac.
 
     `WAYLAND_DISPLAY`/`DISPLAY` are trusted over `XDG_SESSION_TYPE` where
     they disagree, not the other way around -- confirmed live on a
@@ -1161,6 +1463,14 @@ def _classify(env: Mapping[str, str]) -> SessionType:
         # first handed X11Backend a fraction of a desktop and reported full
         # support for it.
         return SessionType.WIN32
+
+    if _platform() == _DARWIN:
+        # Before any variable is read, for the Windows branch's reason and
+        # one of its own. XQuartz sets `DISPLAY`, and a Mac running it is
+        # still not an X11 session: what `X11Backend` would be handed is the
+        # fraction of the desktop that X clients draw, reported as full
+        # support for a desktop it cannot see.
+        return SessionType.DARWIN
 
     wayland = env.get("WAYLAND_DISPLAY", "")
     display = env.get("DISPLAY", "")
@@ -1207,6 +1517,14 @@ def _compositor(env: Mapping[str, str], session_type: SessionType) -> Compositor
         # Windows 8 it cannot be turned off, which is why this member exists
         # rather than leaving NONE to mean "no compositor" here.
         return Compositor.DWM
+
+    if session_type is SessionType.DARWIN:
+        # Read off the session type rather than the platform, for DWM's
+        # reason: the `sys.platform` question is asked in exactly one place.
+        # Quartz is the window server on every Mac -- it cannot be replaced
+        # or turned off -- and there is no desktop-name variable to read it
+        # from, since `XDG_CURRENT_DESKTOP` is a freedesktop convention.
+        return Compositor.QUARTZ
 
     desktop = env.get("XDG_CURRENT_DESKTOP", "")
     haystack = " ".join(
@@ -1371,6 +1689,12 @@ def detect(env: Mapping[str, str] | None = None) -> Environment:
     means patching `_platform`, and everything they then report is read from
     the machine the test is running on, which is why they are asserted on
     what they report where they cannot ask rather than on Windows-only values.
+
+    The macOS probes are gated the same way and driven by the same patch, but
+    are *faked* rather than recorded -- `tests/test_macos.py` replaces the
+    four questions in `backends._macapi`. What they answer is a property of
+    the machine's TCC database, so asserting on what this one reports would
+    pin the developer's grants into the suite.
     """
     env = os.environ if env is None else env
 
@@ -1379,6 +1703,10 @@ def detect(env: Mapping[str, str] | None = None) -> Environment:
     # Probed only once the session type says Windows, which is also what
     # keeps every one of these calls off a Linux session entirely.
     windows = _windows_environment() if session_type is SessionType.WIN32 else {}
+    # The same gate for the macOS probes, which ask four TCC services about
+    # this process. On a Darwin session only, so no other platform pays for
+    # a framework load it has no use for.
+    darwin = _darwin_environment() if session_type is SessionType.DARWIN else {}
     uinput_present, uinput_writable = _uinput()
     has_atspi = _lib("atspi")
     has_pygobject = _module("gi.repository")
@@ -1387,33 +1715,13 @@ def detect(env: Mapping[str, str] | None = None) -> Environment:
     notes = []
 
     if session_type is SessionType.WIN32:
-        # Three notes, and each is about something the reader cannot see for
-        # themselves: Windows prompts nothing and reports nothing, so without
-        # these the failure is a test that quietly does not work.
-        if not windows["is_interactive_desktop"]:
-            notes.append(
-                "this process is not on an interactive desktop; no windows "
-                "are visible from here -- and no prompt or error will say so"
-            )
-        if windows["foreground_is_elevated"] and not windows["is_elevated"]:
-            # Both halves, not just this process's own integrity. UIPI only
-            # bites where the *target* is the more privileged of the two, and
-            # "not elevated" on its own is the ordinary state of every normal
-            # login -- a note that fired on it would appear in every Windows
-            # report ever printed, which is how a reader learns to skip the
-            # notes. `foreground_is_elevated` is None where the question could
-            # not be asked, and None is not a finding either. Same gate as
-            # hints._windows_hints' matching row, deliberately.
-            notes.append(
-                "the window in the foreground is elevated and this process is "
-                "not, so input aimed at it will be dropped silently: UIPI "
-                "blocks it, with no error and no prompt"
-            )
-        if not windows["has_comtypes"]:
-            notes.append(
-                "elements unavailable; install the 'windows' extra "
-                "(pip install 'pyguitest[windows]') for UI Automation"
-            )
+        notes.extend(_windows_notes(windows))
+
+    if session_type is SessionType.DARWIN:
+        # One call, because these are four permission questions and a
+        # missing extra, each with a page of advice behind it -- see
+        # _darwin_notes, which is that page.
+        notes.extend(_darwin_notes(darwin))
 
     # Element automation asks the toolkit, and this variable stops the toolkit
     # from answering. GTK3 and Qt read it at startup and skip registering with
@@ -1496,6 +1804,7 @@ def detect(env: Mapping[str, str] | None = None) -> Environment:
             uinput_writable=uinput_writable,
             has_evdev=has_evdev,
             has_sendinput=bool(windows.get("has_sendinput", False)),
+            has_post_event=bool(darwin.get("has_post_event", False)),
             has_libei=_lib("ei"),
         )
         if transport in _X11_ONLY_INPUT_TOOLS:
@@ -1533,6 +1842,7 @@ def detect(env: Mapping[str, str] | None = None) -> Environment:
         uinput_writable=uinput_writable,
         has_input_group=input_group,
         **windows,
+        **darwin,
         has_atspi=has_atspi,
         has_pygobject=has_pygobject,
         has_dogtail=has_dogtail,

@@ -5,7 +5,377 @@ All notable changes to pyguitest are recorded here. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html) — with the usual
 0.x caveat that the API may still change between minor versions.
 
+## [Unreleased]
+
+### Added
+
+- **`Session.click_element()`: where an element publishes no accessible action at
+  all, `element.click()` now clicks it by coordinate instead of raising.** `uia`
+  and `macos` ended their click ladder with `ElementNotActionable` and a hint to
+  click by coordinate -- `gui.extents(element)` then `gui.click()` -- and now
+  take that step themselves, which is the shape `Element.double_click` already
+  had: the element stays the locator, its rectangle is read fresh, and the
+  pointer goes to the centre of it. Found by pyguitest-recorder's Windows live
+  check, which replays the script it generated against a probe window and
+  reached a `SysListView32` *cell* whose only advertised action is the legacy
+  MSAA shim, which for that control declares none -- so a recorded click had no
+  accessible route to name and the replay stopped there.
+  `Session.click_element(element, button=1)` is the same call spelled for an
+  element with no session of its own, mirroring `double_click_element`.
+  The ladder's loud-failure policy is untouched, which is the point of the
+  shape: the pointer is reached only where an element published *nothing*,
+  never where a published route refused, so a disabled button's failed Invoke
+  is still reported rather than turned into a click that looks like a success.
+  An element with no session behind it, or none with a rectangle to aim at,
+  still raises the same `ElementNotActionable` a caller already catches, with
+  this platform's reason in it. Linux is unchanged: `atspi.Element.click`
+  already ends in dogtail's own coordinate click, so this adds nothing there --
+  the three backends now agree on one contract, instead of it being built in on
+  Linux and left as homework on the other two. Pinned by
+  `tests/test_uia_backend.py::TestClickWithoutAPattern`,
+  `tests/test_macos_backend.py` and `tests/test_api.py::TestClickElement`,
+  including the case that must *not* fall through.
+
+### Fixed
+
+- **A search could answer with an element that is not on the desktop at all.**
+  `uia`'s element-array reader wrapped every slot in an `Element` without the
+  NULL check `_parent` already had for the same platform answer: a provider that
+  cannot fill a slot hands back a pointer to address zero, which is an ordinary
+  Python object, so `find_elements()` could report a phantom -- name `""`, role
+  `unknown`, `alive` False, no rectangle -- that a caller cannot tell from a real
+  element gone quiet, and that a resolution path would then try to name. Found by
+  writing the adversarial trees down as tests rather than finding them one live
+  audit at a time; `tests/test_uia_backend.py::TestTreesThatLie` pins it, and the
+  test fails against the old reader.
+- **A name that is not text raised `TypeError` out of a search.**
+  `CurrentName`/`CurrentHelpText` were passed to the filter as whatever the
+  provider answered, and `_matches_text` hands a non-string to `re.Pattern.search`
+  when a caller filters with a compiled regex -- so a provider reporting a number
+  for a name turned `gui.find_element(name=re.compile(...))` into a crash instead
+  of "no match". `_as_text` reads anything that is not a string as no name, which
+  is also what makes `Element.name` the string its docstring promises. The macOS
+  read path had the same hole from the other direction -- AX attributes are
+  `CFTypeRef`s, so an application can publish a title as a number, and
+  `_text_of` now refuses one the way `_text` already did for `text`.
+- **On macOS, one element could come back as a dozen search matches.** A tree
+  that reports an *ancestor* as its own child -- a broken application, or a stale
+  reference -- was followed, so the same element was visited and reported once
+  per depth level the loop carried it to: `find_elements` answered with twelve
+  copies of one widget where a resolution path expects one candidate per widget.
+  `MacosBackend.find_elements` now carries the lineage of the node it is looking
+  at and does not follow a child back into it, which is a stronger claim than the
+  `_MAX_DEPTH` bound could make; the depth limit and `_MAX_NODES` stay behind it
+  for a tree that is merely enormous. Pinned by
+  `tests/test_macos_backend.py::TestTreesThatLie`, whose cycle test fails against
+  the old walk (measured: twelve matches).
+
+Both platforms gained a systematic adversarial-tree class covering the
+combinations the review named -- every child reported at `(0, 0)`, one name in
+two windows of one process, a popup that closes between the capture and the read,
+a condition a provider answers with more than was asked, a parent chain that
+loops, and the node and depth budgets -- instead of one live finding at a time.
+
+## [0.14.1] — 2026-09-26
+
+### Fixed
+
+- **`screens()` raised `AttributeError` on every real Mac.** `MacosBackend.screens`
+  asked `CGGetActiveDisplayCount()` for the number of displays before requesting the
+  list — and there is no such function. CoreGraphics has no count-only call at all:
+  `CGGetActiveDisplayList`/`CGGetOnlineDisplayList` are handed the size of an array to
+  fill and answer the used count, which is what `_MAX_ACTIVE_DISPLAYS` exists for now.
+  Found by pyguitest-recorder's first live macOS `Recorder` run, whose environment
+  block carried `capability probe failed: CGGetActiveDisplayCount`; reproduced
+  directly on the same granted macOS 26.7 Mac —
+  `AttributeError: CGGetActiveDisplayCount` — and re-measured after the fix as
+  `Screen(0, 1280x800, scale 0.75, 'main')` in 38 ms, which is the reading
+  `docs/validation.md` had recorded from the revision where the count came from the
+  list call itself. The fake in `tests/test_macos_backend.py` is what hid it: it
+  provided the invented name, exactly the failure ADR 004 records one layer up for
+  `kAXActionNamesAttribute`. That fake now mirrors the real signature, and
+  `test_no_quartz_entry_point_is_invented` fails if the module ever calls a Quartz
+  name it does not also declare in `_QUARTZ_NEEDED`.
+- **A recorded click on a combo box had no route left to run on Windows.**
+  `uia.Element.click` walked Invoke, Toggle and `LegacyIAccessible`'s default action, and a
+  combo box is the one control with none of the three usable: it publishes
+  `ExpandCollapsePattern`, and its MSAA shim *advertises* a default action and then raises
+  .NET's `InvalidOperationException` (`-2146233079`, `0x80131509`) from it -- so the
+  documented loud-failure policy turned every click on one into
+  `CapabilityUnsupported: the do default action pattern failed on this element`. Found by
+  pyguitest-recorder's Windows live check, which records a real session against a probe
+  window and replays the script it generated: `gui.dropdown("clicked 4").click()` -- the
+  recorder's own rendering of a real click on a real Win32 combo box -- failed at that same
+  line in two runs. A combo box is now the one role whose click is routed through its own
+  ExpandCollapse *before* the MSAA shim, toggling in the direction its state reads, which is
+  what the native control does with a click; `expand()`/`collapse()` stay the explicit
+  one-direction forms, and a combo box publishing no ExpandCollapse still reaches the shim.
+  Deliberately narrow: a tree item publishes the same pattern and its click means *select*,
+  so nothing else gained a route. Re-run live on Windows 11 the same day: the replay now
+  gets past that line and on through the rest of the recorded sequence. The five tests that
+  pin the ladder, including one asserting a tree item is *not* expanded by a click, are in
+  `tests/test_uia_backend.py`.
+
+## [0.14.0] — 2026-09-26
+
+### Added
+
+- **`macos`, the AX read path: elements and their actions and geometry, the window
+  list and placement, and the screens on a Mac.** `MacosBackend` is registered at
+  90, in the read-only band beside `atspi` and `uia`, because its elements are acted
+  on through Accessibility itself — no coordinates, no injected input. It serves
+  `ELEMENT_TREE`, `ELEMENT_ACTION`, `ELEMENT_GEOMETRY`, the `WINDOW_*` read family,
+  `WINDOW_PLACEMENT`, `WINDOW_RESIZE`, `WINDOW_MINIMIZE`, `SCREEN_INFO`, and — as
+  ADR 004 §6 said it would — `POINTER_QUERY`, which is the gap `macquartz`
+  deliberately left open. A role table translates AX's vocabulary into at-spi's
+  (`AXButton` → `push button`, `AXPress` → `click`, `AXValueIndicator` → `thumb`),
+  so a script written on Linux keeps working, and a role this package has never
+  heard of is spelled out into words rather than reported as `unknown`.
+
+- **A synthetic desktop root, because a Mac has no desktop-wide AX tree.**
+  Measured: the system-wide element publishes four attributes and answers
+  `kAXChildrenAttribute` with `-25205`. So `root_element()` is a `desktop frame`
+  whose children are the applications that answer `AXApplication` — the XPC helpers
+  included, which is where a Save panel's own buttons live rather than in the
+  application that opened it. `find_elements` walks breadth first from there under a
+  depth ceiling and a node budget, because AX has no search: one attribute read is
+  one element, and a whole-desktop search measured 0.59 s for 43 push buttons.
+
+- **The window list, joined to CoreGraphics.** `windows()` reports the windows a
+  person can see — on screen *and* layer 0, which the live machine showed to be the
+  exact pair, where either field alone over-reports by twenty-odd helper surfaces
+  (menu-bar-shaped strips, cursor views, a `loginwindow`). Titles come from the AX
+  side of the join rather than from CoreGraphics, and that is a grant finding: only
+  one of fifteen on-screen entries had a `kCGWindowName`, because macOS withholds
+  them without Screen Recording. `geometry()`, `is_window_viewable()` and
+  `window_at()` answer without the grant as well, and `active_window()` takes its
+  ordering from the window server, because `kAXFocusedApplicationAttribute` answered
+  `err=0` on one run and `-25204` on the next, from the same shell.
+
+- **128 tests for it, fake-driven**, so they run on Linux CI the way the rest of the
+  macOS suites do — plus a live run on a granted macOS 26.7 Mac over SSH, whose
+  numbers `docs/validation.md` now records: the six windows by real title, the
+  deep-tree cost ADR 004 called unmeasured (17 nodes, 0.031 s), the hit test, the
+  move/resize round trip, and the two bugs below.
+
+- **macOS is now a detected session, with its own vocabulary, probes, advice,
+  packaging and input backend.** `SessionType.DARWIN` and `Compositor.QUARTZ`
+  are spelled the way `sys.platform` spells the platform, and `_classify()`
+  asks the platform *before* it reads any variable — a Mac running XQuartz has
+  a `DISPLAY` and is still not an X11 session, which is how `X11Backend` would
+  otherwise be handed the fraction of a desktop that X clients draw.
+  `detect()` asks the four non-prompting TCC functions (`AXIsProcessTrusted`,
+  `CGPreflightScreenCaptureAccess`, `CGPreflightPostEventAccess`,
+  `CGPreflightListenEventAccess`) through ctypes rather than PyObjC, so the
+  answers exist *before* the extra is installed: "Accessibility is not granted"
+  and "the binding is not installed" are two problems with two fixes, and a
+  probe that could only speak after `pip install` could not tell them apart.
+  Each denial lands in `Environment.notes` and in `hints.py` as its own row,
+  naming the *binary* the grant is recorded against — TCC records consent per
+  binary, so a reader who granted it to their system Python otherwise reads the
+  second prompt as "I already did this".
+
+- **`macquartz`, an opt-in input backend over `CGEventPost`.** Pointer, buttons,
+  scroll, keys and text, with no AX call anywhere in it: it preflights
+  **PostEvent** and not Accessibility, because Apple's own guidance is that the
+  Accessibility privilege is not what posting requires even though System
+  Settings files both under one pane. Posting is asynchronous and reports
+  nothing, so `INPUT_SYNC` is absent rather than a no-op. `type_text()` posts
+  Unicode through `CGEventKeyboardSetUnicodeString` rather than walking the US
+  keycode table, so it is layout-independent; `&` (AltGr) is refused instead of
+  aliased to Option, which is a real key on a Mac. Registered at 70 beside
+  `win32` and `opt_in`, because constructing it *asks* for the PostEvent grant —
+  the one place ADR 004 reverses ADR 003, and for the reason `register()`'s
+  own docstring gives. Asking turned out not to be prompting; see Fixed below.
+
+- **`capture:screencapture`, and the black-image refusal ADR 004 §8 asks for.**
+  The tool ships with macOS, so it is registered like `grim` and `spectacle`;
+  the difference is that a denied Screen Recording grant makes it exit 0 with a
+  uniformly black image, which is the worst of both failure modes. It is
+  refused *before* it runs — one `CGPreflightScreenCaptureAccess` call instead
+  of a screenshot and a PNG decoder, and it can say the reason rather than
+  inferring it from pixels. `Environment.can_capture` answers from the grant on
+  a Mac, because there is no tool to install and the grant is the whole
+  question.
+
+- **The `macos` extra.** `pyobjc-framework-ApplicationServices` and
+  `pyobjc-framework-Quartz`, each with a `sys_platform == 'darwin'` marker, so
+  `pip install "pyguitest[macos]"` on Linux resolves to two skipped
+  requirements and installs cleanly. No version floor is pinned: nothing has
+  measured an older PyObjC to fail, and a floor nobody has tested is a claim
+  rather than a constraint.
+
+- **A `macos` CI job, for the half of this a runner can settle.** It runs the
+  suite on `macos-latest` — which passes there for the same reason it passes on
+  Linux and Windows — and then a probe that only a Mac can run: `detect()`
+  against a real `platform.mac_ver()`, the four TCC preflights against
+  really-present frameworks (they must answer `False` on a runner that granted
+  nothing, and must not raise), and the `screencapture` refusal. A wrong
+  framework path or `argtypes` list is the likeliest way this entry is wrong,
+  and no fake can see it. It stopped being advisory on the strength of a run
+  against a real Mac: the suite and the probe were both run on a granted macOS
+  26.7 Mac (Python 3.13, x86_64) and `docs/validation.md` records what they
+  answered, after which the job went into `publish`'s `needs` and lost its
+  `continue-on-error` — the path the `windows` job took. That Mac is not the
+  runner in three ways, all of them written into the job's own comment: 3.13
+  against the job's 3.12, x86_64 against arm64, and granted where a runner
+  grants nothing.
+
+- **Live macOS checks, and a `_classify()` that cannot drift from its enum.**
+  `tests/test_macos.py` gained a class that drives the real `Quartz` and skips
+  itself unless the machine is both a Mac *and* granted PostEvent, so a granted
+  Mac runs it while every other machine skips it loudly. It pins the three things
+  a fake cannot: that every name in `macquartz._NEEDED` exists in the installed
+  PyObjC, that `move_mouse()` lands where the ungated pointer read says it did,
+  and that the capability set follows the grant rather than the intent. A second,
+  fake-driven class pins the deliberate split that leaves `POINTER_QUERY` to the
+  AX backend, so `gui.pointer_position()` refusing on a Mac is a decision under
+  test rather than an accident. `tests/test_session.py` now walks one environment
+  per `_classify()` branch and asserts the branches and `SessionType` cover each
+  other — the check that catches a member added without a branch, or a branch
+  returning something no member spells.
+
+- `pyguitest doctor` and `Environment.summary()` on macOS, which gains `ax`,
+  `quartz`, `screen-recording`, `post-event` and `input-monitoring` on the
+  mechanisms line — listed there so the line cannot say "none detected" beside
+  an `input` line reading `CGEventPost`, which is the disagreement the line
+  exists to prevent. Two advice rows landed with it that the first pass had
+  missed: Input Monitoring was probed, printed and documented but had no `Hint`
+  at all, and a Mac holding the PostEvent grant was told nothing about the fact
+  that a plain `connect()` still injects nothing, because `macquartz` is
+  `opt_in`. That second row is the macOS spelling of the Screenshot portal's:
+  the mechanism works and the capability is real, but only for a caller who
+  names it. The `input` line now says so too —
+  `CGEventPost (opt-in: connect(backend="macquartz"))` — the caveat libei's
+  line has carried since it was added.
+
+### Changed
+
+- The Windows notes moved out of `detect()` into `_windows_notes()`, beside
+  `_darwin_notes()`. Two platforms' permission-and-silence advice written the
+  same way is easier to keep consistent than one inline and one extracted —
+  and `detect()` had reached the complexity the linter permits.
+
+### Fixed
+
+- **`macquartz` refused fifteen key names a macOS recording emits, and pressed the
+  wrong key for a sixteenth.** `press_key`/`send_keys` resolve a name
+  case-insensitively against `_KEYCODES`, whose names follow the legend printed on a
+  Mac keyboard — `command`, `option`, `pageup`, `quote`, `delete`. Everything else
+  in this project names a key by its X11 keysym, and pyguitest-recorder's new
+  `CGEventTap` backend derives its keycode table from that same `_KEYCODES` and
+  renames each entry to the keysym of the key in that position, so a recording made
+  on a Mac named keys this backend could not press: `Command+S` came out as
+  `send_keys("{meta}s")` and died on `CapabilityUnsupported: 'Super_L' is not a key
+  this backend knows`, and so did `'` (`apostrophe`), Page Up (`Page_Up`) and `[`
+  (`bracketleft`). Found by the recorder's key-table test, which reads this table
+  across the repository boundary. Fixed with an X11-keysym table consulted ahead of
+  the fold — the eight modifiers, `BackSpace`, `Page_Up`/`Page_Down`,
+  `bracketleft`/`bracketright`/`apostrophe` — case-insensitive for every entry that
+  does not collide with a legend name.
+
+- **A recorded `Super_L` posted the Command key but stamped no flag on what
+  followed.** The keycode lookup and the held-modifier set are two lookups of the
+  same name, and only the first knew the keysym spellings, so
+  `press_key("Super_L")` then `press_key("s")` sent an unmodified `s` — a chord that
+  reads as a shortcut and acts as a plain key. One canonicalisation step now serves
+  both, which is also the only shape that keeps them from drifting apart again.
+
+- **`Delete` pressed backspace.** X11's `Delete` is the forward-delete key (117) and
+  its `BackSpace` is backspace (51); this backend names the backspace key `delete`
+  after the legend, and 117 `forwarddelete`. Lowercased, `Delete` and `delete` are
+  one string, so a recorded forward delete replayed as a backspace — silently, the
+  failure mode ADR 004 §7 refuses. The keysym spelling now resolves
+  case-sensitively *before* the fold, so `Delete` is 117 while `delete` and
+  `{DEL}`'s `forwarddelete` keep meaning what they always meant.
+
+- **A posted modifier press was recorded as a release by anything watching.** A
+  modifier's own press event was built *before* the key was recorded as held, so it
+  carried no flag — and a `kCGEventFlagsChanged` says press or release through its
+  flag set and nothing else. Measured on the macOS 26.7 Mac with pyguitest-recorder's
+  event tap on the same machine: `press_key("Super_L")` arrived at the tap as
+  `key_release Super_L`, where the same event posted by hand with
+  `kCGEventFlagMaskCommand` stamped on it arrived as `key_press Super_L` and the
+  chord after it read perfectly. So a replayed `Command+S` captured as "release
+  Command, press s" — a chord with no press left in it, which nothing downstream can
+  recognise as a chord. The held set is now updated before the press event is built,
+  which is what hardware does: its flags-changed event for a press carries the
+  modifier's own bit.
+
+- **`actions` read a constant PyObjC does not publish, so it raised on every
+  element that had any.** `kAXActionNamesAttribute` is absent from PyObjC 12.2.2 and
+  `AXUIElementCopyActionNames` is the call that exists; the first live run found it
+  by raising `AttributeError` where a fake had been happy to answer. Every other
+  `kAX`/`kCG` name in the new module was then checked against the real bindings — 41
+  of them — and that was the only gap.
+
+- **A window write left the join stale, so the write after a move failed.**
+  `move_window` succeeded and the `resize_window` immediately after it raised "no AX
+  window matches its handle": the cached CoreGraphics rectangle predated the move, so
+  the frame match went looking for the window where it no longer was. Writing now
+  drops both cached enumerations, and the frame match allows a point or two for the
+  gap between an AX write landing and the window server reporting it.
+
+- **`scripts/gen-api-docs.py` could not see a backend whose `capabilities` property
+  composes module-level sets**, so `MacosBackend` appeared nowhere in `docs/api.md`
+  — the capability table is generated from each property's source, and that one says
+  `CapabilitySet(_UNGATED | _AX_ONLY)`. It now follows those names through the
+  module, which is what the script's own docstring promised: a new backend appears
+  without editing it.
+
+- **macOS advice promised a PostEvent prompt that does not appear.** The note in
+  `Environment.notes`, the PostEvent `Hint` row, `macquartz`'s module and class
+  docstrings, `_macquartz_factory`'s docstring, ADR 004 §3 and the README table
+  all said that naming `macquartz` raises the PostEvent dialog. Measured on
+  macOS 26.7 (x86_64, launched from Terminal.app): `CGRequestPostEventAccess()`
+  returned `False` and put nothing on screen, and
+  `AXIsProcessTrustedWithOptions` was the only one of the four request forms
+  that showed anything at all. The grant is therefore made by hand, in the
+  **Accessibility** pane — and a later run on the same machine closed the rest
+  of that question: granting Accessibility is what flips `post_event` and
+  `listen_event` too, because tccd *composes* them from it rather than asking
+  about each separately, which its own log states as `Evaluated composed
+  authorization from kTCCServicePostEvent to parent service
+  kTCCServiceAccessibility`. The name the row is filed under is not necessarily
+  the one every message prints: TCC records it against the app that launched the
+  process — Terminal, or the IDE that ran the test — or against the signed
+  interpreter that app runs, while the virtualenv path in those messages is a
+  symlink to it. Over SSH it is neither: the request is attributed to the
+  session's `sshd-keygen-wrapper`, so a grant made for a terminal does not reach
+  a process started that way. The call itself stays where it is, since it is
+  still the closest thing to a request this package can make and a caller who
+  has already granted it gets `True` back; what changes is that no message tells
+  a reader to look for a dialog. `docs/validation.md` records both runs.
+
+- **`type_text()` passed `len()` where CGEvent counts UTF-16 code units.**
+  PyObjC declares `CGEventKeyboardSetUnicodeString`'s length as a `UniChar *`
+  count, and UniChar is 16 bits: one Python character outside the BMP — an
+  emoji, for instance — is *two* units. The old call told CGEvent to read half
+  a surrogate pair, so the character arrived wrong rather than dropped, with
+  nothing raised anywhere. Found by reading PyObjC's own declaration against
+  the call site; `_utf16_units` is the fix and `tests/test_macos.py` pins both
+  a one-unit and a two-unit character.
+
+- **`Session.can_use_clipboard` claimed a clipboard macOS cannot reach.**
+  It answered from `has_pyobjc_quartz`, on the grounds that the `macos` backend
+  serves `NSPasteboard` — but that backend does not exist yet (ADR 004's element
+  half is the next phase) and no macOS tool in `CLIPBOARD_TOOLS` ships a
+  member, so the property reported a capability with nothing behind it. It
+  answers `False` on Darwin now, which is the same read `can_capture` documents
+  in the other direction: installed is not the same as able.
+
+### Notes
+
+- **What macOS still does not have, now that both halves are one release.** `macos`
+  serves the element family, the window family and
+  `SCREEN_INFO`, with the permission-dependent capability set ADR 004 §6 asked for;
+  what is still absent is window events (`AXObserver`), input state queries and the
+  clipboard, which `clipboard.py` already owns on a Mac through `pbpaste`/`pbcopy`.
+  Everything in this section is fake-driven or measured on one Mac —
+  `docs/validation.md` says which, and `tests/test_macos.py` is the reading of it.
+
 ## [0.12.0] — 2026-09-24
+
 
 ### Fixed
 
@@ -2906,7 +3276,8 @@ First public release.
 - A `pyguitest` command-line entry point.
 - PEP 561 type information (`py.typed`); no hard runtime dependencies.
 
-[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/ctrondlp/pyguitest/compare/v0.12.0...v0.14.0
 [0.11.0]: https://github.com/ctrondlp/pyguitest/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/ctrondlp/pyguitest/compare/v0.10.0...v0.10.1
 [0.5.0]: https://github.com/ctrondlp/pyguitest/compare/v0.4.0...v0.5.0

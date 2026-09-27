@@ -86,27 +86,39 @@ Xfce already taught this package once.
 
 **3. Both PyObjC backends register `opt_in=True`.** This is the decision ADR 003
 reverses for Windows, and the reason is the one `register()`'s docstring names:
-`opt_in` is for a factory whose *construction* raises an interactive consent
-dialog. On macOS the dialog is real but the blocking is not:
-`AXIsProcessTrustedWithOptions` with `kAXTrustedCheckOptionPrompt` presents the
-prompt and returns the process's trust status *as it stands*, without waiting
-for an answer — so an untrusted process gets `false` immediately, with the
-dialog still on screen, and only sees `true` on some later call after the user
-has actually granted it in System Settings. Any design that reads the return
-value as "the user's answer" is wrong, and a backend cannot treat the call as
-the moment permission is settled.
+`opt_in` is for a factory whose *construction* has a side effect no caller
+should hit by surprise. On macOS the request form returns the process's trust
+status *as it stands*, without waiting for an answer:
+`AXIsProcessTrustedWithOptions` with `kAXTrustedCheckOptionPrompt` gets `false`
+back immediately, with the dialog still on screen, and only sees `true` on some
+later call after the user has actually granted it in System Settings. Any design
+that reads the return value as "the user's answer" is wrong, and a backend cannot
+treat the call as the moment permission is settled.
+
+**Measured afterwards, and it strengthens this rather than weakening it.** On
+macOS 26.7, launched from Terminal.app, `AXIsProcessTrustedWithOptions` was the
+only one of the four request forms that put anything on screen at all:
+`CGRequestPostEventAccess()` returned `False` and showed nothing, so the
+PostEvent grant is never offered and is made by hand in System Settings. What
+follows for this section is the `macquartz` half of the sentence above — its
+constructor still calls the request form, because that is where a request
+belongs and a caller who has already granted it gets `True` back, but no message
+may send a reader looking for a dialog. `docs/validation.md` records the
+measurement and the one thing it leaves open: whether the row that has to be
+allowed is named for the responsible app or for the signed interpreter.
 
 The decision is unchanged, because blocking was never the criterion.
 `register()`'s docstring reserves `opt_in` for "a factory whose construction
 has a side effect no caller should hit by surprise, **such as** raising an
 interactive consent dialog that blocks until a user answers it" — the blocking
-dialog is the example, the surprise is the rule. A prompt that appears
-unbidden and returns `false` underneath it is *more* surprising than one that
-waits, not less: a plain `connect()` would leave a dialog on a developer's
-screen and hand back a backend that reports no elements, with nothing tying
-the two together. §4.3's point survives in
-corrected form — the prompt can be answered "Don't Allow" by a developer who
-was not expecting it, and nothing this package can call will raise it again.
+dialog is the example, the surprise is the rule, and a request a developer did
+not ask for is still a request whether or not anything appears on screen. The
+measurement above makes that surprise *quieter* than this section originally
+assumed rather than smaller: a silent request returning `false` leaves the
+developer with no dialog to attach it to. §4.3's point survives in
+corrected form — the grant can sit in a refused state that nothing this package
+can call will offer again, and someone who never saw a dialog has less to
+connect that to, not more.
 `eiinput` is the existing precedent and the shape is the same.
 
 **4. The preflight/prompt split is the design, not an implementation detail.**
@@ -135,9 +147,11 @@ So `macquartz`, which posts events with `CGEventPost` and never touches an AX
 API, preflights **PostEvent** and not Accessibility; `macax`, which reads and
 writes AX attributes, preflights Accessibility. Conflating the two would make
 the input backend refuse itself on a machine that had granted exactly what it
-needs, and would make §6's reduced capability set withdraw the wrong half. The prompting forms are reachable only from a named
+needs, and would make §6's reduced capability set withdraw the wrong half. The *request* forms are reachable only from a named
 backend's constructor, never from an import, never from `detect()`, and never
-from a test that did not ask for the backend by name. A denial is reported in
+from a test that did not ask for the backend by name — which is what `opt_in`
+keeps true, and per §3 the request is silent on this platform, so the flag
+guards a side effect rather than a dialog. A denial is reported in
 `Environment.notes` and in `summary()`, because "empty element tree" and "not
 trusted" are indistinguishable from the caller's side otherwise, and because
 the APIs' failure mode under denial is silence — an empty tree, or a black
@@ -201,10 +215,21 @@ The vocabulary, the probes, the hints, the packaging, the role table and this
 ADR are written from the documentation, tested against faked `Quartz` and
 `ApplicationServices` modules in `sys.modules` — the shape `tests/test_x11.py`
 already establishes for `Xlib` — and run on a `macos-latest` job for
-collectability before anything macOS-specific exists. The gate
-(`scripts/pre-commit-test.sh`) is unchanged. Live tests are guarded by an
-environment variable and skipped by default, never skipped silently, the way
-`tests/test_portal_dbusmock.py` already is.
+collectability before anything macOS-specific exists. That job has landed, and
+what it is worth is narrower than the other runners' claims: the suite passes
+there for the same reason it passes on Linux and Windows, with every
+platform-specific test patching the platform it is about. So the job also runs
+a probe that only a Mac can run — `detect()` against a real
+`platform.mac_ver()`, the four TCC preflights against really-present
+frameworks, and the `screencapture` refusal — because a wrong framework path or
+`argtypes` list is the likeliest way this half is broken and a fake never sees
+it. It is `continue-on-error` and stays out of `publish`'s `needs` until it has
+been green on `main`, which is the path the `windows` job took for the same
+reason. The gate (`scripts/pre-commit-test.sh`) is unchanged. Live tests are
+guarded by an environment variable and skipped by default, never skipped
+silently, the way `tests/test_portal_dbusmock.py` already is — none are written
+yet, because what they would need is a Mac with a grant and a real window, which
+is the second phase's business rather than the first's.
 
 ## Rejected alternatives
 
@@ -316,9 +341,56 @@ documents will otherwise find an argument that ADR 003 already dismantled.
 
 ## What has landed, and what has not
 
-Nothing has landed. There is no `SessionType.DARWIN`, no probe, no extra, no
-backend, and no `macos-latest` job; `pyproject.toml`'s description names Linux,
-BSD and Windows, and that is currently true.
+**Phase one has landed, in 0.14.0 — the release both phases ship in, since neither
+had been released on its own — and it is the half this document said would
+need no Mac.** `SessionType.DARWIN` and `Compositor.QUARTZ` exist and
+`_classify()` asks the platform before it reads any variable; `detect()` asks
+the four non-prompting TCC functions and puts each denial in
+`Environment.notes`; `hints_for()` dispatches to `_darwin_hints`, whose rows
+name the binary a grant is recorded against; `detect_distro()` answers with
+`platform.mac_ver()`; the `macos` extra exists with a `sys_platform == 'darwin'`
+marker on each requirement; `capture:screencapture` is registered and refuses
+itself before running when Screen Recording is denied; and `macquartz` — the
+whole input half of §1's table — is registered at 70, `opt_in`, with
+`CGEventPost` behind it. `tests/test_macos.py` drives all of it against a fake
+`Quartz` in `sys.modules`, and a `macos` job in `.github/workflows/ci.yml`
+runs that suite on a real Darwin host with a probe for the parts only a Mac can
+answer — see §9 for what it is and is not worth.
+
+The TCC seam is `backends/_macapi.py`, and one decision there is worth
+recording because it departs from this document's letter: the four preflight
+functions are declared in **ctypes**, not reached through PyObjC. `detect()`
+must run before the extra is installed — "Accessibility is not granted" and
+"pyobjc-framework-ApplicationServices is not installed" are different problems
+with different fixes, and a probe that could only speak after `pip install`
+could not tell a reader which one they have. It also keeps an AppKit load out
+of every `Environment`. The *prompting* forms stay PyObjC's, in the backends
+that may call them.
+
+**Phase two has landed in the same release, and it is §1's element half with §6's
+capability set.** `backends/macos.py` is a `MacosBackend` at priority 90 — elements,
+element actions, element geometry, window listing and placement, screens — with the
+AX-to-CGWindowList join built the way §1 describes it and the permission-dependent
+capability set of §6 computed at construction, so a Mac without Accessibility
+declares the window-shaped subset and nothing more. §7's four permanent refusals are
+absences from `capabilities` rather than raises, which is how a caller finds them
+out. The `POINTER_QUERY` §6 assigned here is here, and `macquartz` still does not
+declare it.
+
+Two things this document did not predict, because a live run settled them rather
+than the documentation: the root a caller searches from is **synthetic** — the
+system-wide element publishes exactly four attributes and answers
+`kAXChildrenAttribute` with `-25205`, so there is no desktop-wide tree to search,
+and each application is its own — and the window list's filter is *on screen and
+layer 0*, where either field alone over-reports by twenty-odd helper surfaces.
+[docs/validation.md](../../docs/validation.md) carries those numbers, and the two
+bugs the first live run found.
+
+What has **not** landed: window events, which is the phase after this one and needs
+`AXObserver` on a `CFRunLoop` thread; input state queries, which
+`CGEventSourceButtonState`/`KeyState` would serve and nothing in this phase needed;
+and the clipboard, which `clipboard.py`'s tool backend already owns on a Mac
+through `pbpaste`/`pbcopy`.
 
 What exists is this decision and the research behind it — the 2026-09-13
 analysis covering the AX and CoreGraphics API mapping, the TCC model, the
@@ -328,15 +400,16 @@ packaging, docs and this file need no Mac at all, the AX read path is the first
 hardware phase and the largest single unknown, and input, capture and the
 recorder's event tap follow it.
 
-**Nothing in this document has been run on a Mac, and no Mac has yet been
-identified to run it on.** That is a stronger caveat than ADR 003 carried: the
-Windows work was written blind and then measured within days. Every claim here
-that hardware could settle — the AX-to-CGWindowList join, deep-tree cost,
-whether `CGEventKeyboardSetUnicodeString` is honoured per toolkit, the TCC
-attribution rules for a process launched from a terminal, and whether a
-listen-only event tap is granted by Accessibility or by Input Monitoring — is
-unmeasured. The last of those decides which permission the recorder asks for and
-is a task for the phase that needs it, not an assumption to encode now.
-[docs/validation.md](../../docs/validation.md) is where each is retired as it is
-measured, which is why the phase order puts everything reviewable without a
-machine first.
+**Everything in this document that hardware could settle has now been run on a
+Mac** — a macOS 26.7 machine reached over SSH, with Accessibility switched on by hand and
+the tree moved by `scp`, the machine having neither git nor the Xcode command-line
+tools. That retires the list this paragraph used to carry: the AX-to-CGWindowList
+join, deep-tree cost (17 nodes, 0.031 s for Terminal's window), whether
+`CGEventKeyboardSetUnicodeString` is honoured per toolkit, the TCC attribution rules
+for a process launched from a terminal, and which service gates a listen-only event
+tap. The last of those decides which permission the recorder asks for, and the answer
+is that it asks `kTCCServiceListenEvent`, whose authorization composes up the chain
+to Accessibility rather than needing a pane of its own. Screen Recording has never
+been granted on any Mac, so §8's black-image refusal is still only fake-driven.
+[docs/validation.md](../../docs/validation.md) is where each item above was
+retired as it was measured.

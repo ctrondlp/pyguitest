@@ -668,6 +668,15 @@ class Element:
         live, the same combo item selects correctly through `do_action` with
         no position of its own to give -- and the `ValueError` branch below
         is what remains for an element offering neither.
+
+        That last step is this backend's version of `click_by_pointer`, the
+        helper Windows and macOS call: there, a toolkit publishes actions per
+        widget and nothing at all for the widgets that publish none, so UIA
+        and AX delegate to the Session's pointer at the element's rectangle;
+        here dogtail's own `Node.click()` *is* that coordinate click, one rung
+        up the same ladder. Three backends, one contract: an element that
+        publishes an action is clicked through it, and one that publishes none
+        is clicked by coordinate.
         """
         actions = self.node.actions or {}
         name = next((a for a in actions if a.lower() in ("click", "press")), None)

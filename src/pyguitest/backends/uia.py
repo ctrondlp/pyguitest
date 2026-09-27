@@ -103,7 +103,7 @@ from ..errors import (
 )
 from ..roles import Role, spellings
 from . import _winapi
-from .base import GUIBackend
+from .base import GUIBackend, click_by_pointer
 
 if TYPE_CHECKING:
     # Imported for annotations only: Session.element and the widget finders are
@@ -344,6 +344,39 @@ _ACTION_ALIASES = {
 }
 """at-spi action spellings -> the UIA action that means the same thing."""
 
+_CLICK_IS_AN_EXPAND = frozenset({Role.COMBO_BOX})
+"""Roles where `Element.click` means "open the list", and does it the widget's way.
+
+A combo box is the one widget where the two vocabularies disagree about what a
+click *is*, and it is UIA's fault rather than the widget's: a combo box
+publishes `ExpandCollapsePattern` and nothing else usable -- no Invoke, and a
+`LegacyIAccessible` default action that is *advertised and then refused*, so
+`gui.dropdown(...).click()` had no working route on Windows at all while the
+same line reaches a GTK combo box on Linux through AT-SPI's own `press` action.
+
+Measured live, 2026-09-26, by the recorder's
+`scripts/win32-live-capture-check.py`. It recorded a real click on the probe
+window's combo box, generated `gui.dropdown(...).click()` for it, and the replay
+died with::
+
+    the do default action pattern failed on this element:
+    (-2146233079, ...)
+
+`0x80131509` is .NET's `InvalidOperationException`, which WinForms'
+`AccessibleObject` raises from the members it declares no action for -- so the
+pattern probe answers ("do default action" is in the element's own `actions`
+list) and the call then fails. There is no way to tell that apart from a real
+refusal by looking at the HRESULT in general, which is why the fix is an
+ordering rather than an exception list: for *this* role the widget's own
+ExpandCollapse is tried before the MSAA shim, and a combo box that offers no
+ExpandCollapse still reaches the shim below it.
+
+Deliberately only a combo box, and not "any element publishing
+ExpandCollapse": a tree item publishes that same pattern and its click means
+*select this row* -- opening it is `expand()`, or a double click, and widening
+this set would quietly rewrite every recorded tree click.
+"""
+
 _MAX_DEPTH = 24
 """Descent limit for `element_at`, so a cyclic tree cannot spin forever.
 
@@ -559,6 +592,20 @@ def _current(obj, name, default=None):
     return value() if callable(value) else value
 
 
+def _as_text(value):
+    """One string property, with anything that is not a string read as none.
+
+    A name or a help text is a string or it is not an answer: a provider that
+    hands back a number -- or a list, or an object whose `__str__` is its own
+    business -- has published nothing a caller's filter can be compared
+    against, and passing it through made `_matches_text` raise `TypeError` out
+    of a *search*, which is a crash where "this element does not match" is the
+    honest answer. `Element.name` is documented as a string, so this is also
+    what keeps that true.
+    """
+    return value if isinstance(value, str) else ""
+
+
 def _matches_text(value, wanted):
     """Whether `value` satisfies `wanted`.
 
@@ -680,8 +727,13 @@ class Element:
 
     @property
     def name(self):
-        """The element's accessible name, such as a button's label."""
-        return _current(self.node, "CurrentName", "") or ""
+        """The element's accessible name, such as a button's label.
+
+        Always a string: a provider that answers with something else has not
+        named the element, and `_as_text` is where that is decided -- see
+        `_build_predicate`, which compares callers' filters against this.
+        """
+        return _as_text(_current(self.node, "CurrentName", ""))
 
     @property
     def role(self):
@@ -732,7 +784,7 @@ class Element:
     @property
     def description(self):
         """The element's longer accessible description, often a tooltip."""
-        return _current(self.node, "CurrentHelpText", "") or ""
+        return _as_text(_current(self.node, "CurrentHelpText", ""))
 
     @property
     def text(self):
@@ -890,12 +942,21 @@ class Element:
     def click(self):
         """Act on the element directly -- no coordinates, no injection.
 
-        Three routes, in the order providers implement them: the Invoke
+        Four routes, in the order providers implement them: the Invoke
         pattern, which is a button's own "I have been pressed"; the Toggle
         pattern, which is what a check box or a switch publishes instead --
         `atspi.Element.click` reaches both on Linux, so a role of `check box`
-        has to keep working here; and `LegacyIAccessiblePattern`'s default
-        action, which is how a provider written for MSAA exposes its click.
+        has to keep working here; and then `LegacyIAccessiblePattern`'s
+        default action, which is how a provider written for MSAA exposes its
+        click -- *except* on a combo box, where the widget's own
+        ExpandCollapse pattern is tried first and the MSAA shim after it. That
+        one reordering is the whole of `_CLICK_IS_AN_EXPAND`, which is where
+        the live measurement behind it lives: a combo box advertises a default
+        action and then raises from it, so the shim cannot be the route a
+        recorded `gui.dropdown(...).click()` depends on. A click on a combo
+        box toggles its list, which is what the native control does with one;
+        `expand()` and `collapse()` are the explicit forms for a script that
+        wants one direction only.
 
         A pattern that is offered but refuses -- a disabled button, a provider
         that answers an error -- raises through `_call_pattern` with the
@@ -911,20 +972,40 @@ class Element:
         `element.do_action("do default action")` -- which is a caller saying
         they know what they are skipping.
 
-        An element that offers none of the three raises `ElementNotActionable`,
-        the same typed answer the AT-SPI backend gives when neither of its own
-        routes is open, with this platform's reason in it rather than that
-        one's.
+        An element that offers *none* of them is clicked by coordinate
+        instead, which is the step the refusal used to only advise: the
+        element stays the locator, its rectangle is read fresh, and the
+        pointer goes to the centre of it. That is `click_by_pointer`, the
+        same delegation `double_click` makes below, and it is what makes a
+        widget whose provider publishes nothing clickable at all -- measured
+        live on a `SysListView32` cell whose only advertised action was the
+        legacy shim, which then declared none, while the shim on the probe's
+        own `EDIT` control really does work. A *refusal* is still not one of
+        those cases: this is for an element that published nothing, never for
+        one that refused, so the policy above is untouched.
+
+        Where there is nothing to aim at, the typed answer stands:
+        `ElementNotActionable` is raised for an element with no session behind
+        it (one taken straight from a backend, rather than from a Session) and
+        for one that publishes no rectangle -- the same typed answer the AT-SPI
+        backend gives when neither of its own routes is open, with this
+        platform's reason in it rather than that one's.
         """
-        for action in ("invoke", "toggle", "do default action"):
+        for action in ("invoke", "toggle"):
             if self._backend._call_pattern(self.node, action):
                 return
-        raise ElementNotActionable(
-            self.role,
-            self.name,
+        if self.role in _CLICK_IS_AN_EXPAND and self.expandable:
+            if self.expanded:
+                self.collapse()
+            else:
+                self.expand()
+            return
+        if self._backend._call_pattern(self.node, "do default action"):
+            return
+        click_by_pointer(
+            self,
             "UI Automation offers it no Invoke, Toggle or LegacyIAccessible "
-            "pattern, so there is no accessible action to perform; click it by "
-            "coordinate instead, e.g. gui.extents(element) then gui.click()",
+            "pattern, so there is no accessible action to perform",
         )
 
     def double_click(self):
@@ -1440,13 +1521,21 @@ class UiaBackend(GUIBackend):
         control_types = None if role is None else _control_types(role)
 
         def matches(node):
-            """Whether this node has the wanted role and matches the filters."""
+            """Whether this node has the wanted role and matches the filters.
+
+            The two text filters read their property through `_as_text`, so a
+            provider that answers a name with something that is not a string is
+            "not a match" rather than a `TypeError` out of the search -- the
+            narrowing above can only come back coarser than asked, and a
+            provider that ignores a condition entirely answers with everything,
+            which is the case this half exists for.
+            """
             if control_types is not None and (
                 _current(node, "CurrentControlType", None) not in control_types
             ):
                 return False
             if name is not None and not _matches_text(
-                _current(node, "CurrentName", "") or "", name
+                _as_text(_current(node, "CurrentName", "")), name
             ):
                 return False
             if (
@@ -1460,7 +1549,7 @@ class UiaBackend(GUIBackend):
             ):
                 return False
             if description is not None and not _matches_text(
-                _current(node, "CurrentHelpText", "") or "", description
+                _as_text(_current(node, "CurrentHelpText", "")), description
             ):
                 return False
             if predicate is not None:
@@ -1620,6 +1709,15 @@ class UiaBackend(GUIBackend):
         rather than fatal: a desktop where windows open and close under a
         running test does that routinely, and one element closing is no reason
         to throw away the rest of the answer.
+
+        A **NULL** pointer in the array is skipped by the same rule `_parent`
+        records, and it was not: `GetElement` can hand back a pointer to address
+        zero -- a slot the provider could not fill -- and wrapping one put a
+        phantom `Element('unknown', '')` into a search's answer, an element that
+        is not anywhere on the desktop, whose `alive` is False and whose every
+        property answers the empty default. A caller filtering a search result
+        cannot tell one from a real element that has gone quiet; skipping it
+        says what the provider meant.
         """
         if array is None:
             return []
@@ -1627,9 +1725,11 @@ class UiaBackend(GUIBackend):
         found = []
         for index in range(count):
             try:
-                found.append(array.GetElement(index))
+                element = _null_to_none(array.GetElement(index))
             except Exception:  # noqa: BLE001 - an element gone mid-walk
                 continue
+            if element is not None:
+                found.append(element)
         return found
 
     # -- geometry ----------------------------------------------------------

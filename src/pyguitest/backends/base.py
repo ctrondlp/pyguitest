@@ -17,7 +17,7 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol, TypeVar
 
 from ..capabilities import Capability, CapabilitySet
-from ..errors import CapabilityUnsupported
+from ..errors import CapabilityUnsupported, ElementNotActionable
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
@@ -34,6 +34,7 @@ __all__ = [
     "Element",
     "check_region",
     "identity_scope",
+    "click_by_pointer",
 ]
 
 _Backend = TypeVar("_Backend", bound="GUIBackend")
@@ -150,6 +151,53 @@ def identity_scope(backend: GUIBackend | None) -> object:
     its own keeps the strict per-backend rule it always had.
     """
     return getattr(backend, "_identity_scope", None) or backend
+
+
+def click_by_pointer(element: Element, reason: str) -> None:
+    """Click `element` through the pointer, or refuse with the typed error.
+
+    The last route of `Element.click` on the two backends whose toolkits
+    publish an action per widget and nothing at all for the widgets that
+    publish none: UI Automation and AX. Both ended their ladder with a
+    refusal and a hint to click by coordinate; both now take that step
+    themselves. The element stays the locator and only the gesture falls
+    back to the pointer, which is the shape `Element.double_click` already
+    had, and which needs `Capability.ELEMENT_GEOMETRY` plus the pointer
+    capabilities -- those belong to whichever input backend the session was
+    built with, not to the accessibility one.
+
+    `AtspiBackend`'s ladder ends in the same step already, and does not call
+    this: dogtail's own `Node.click()` is coordinate-based even on X11, so
+    reaching here on Linux would be a second attempt at the same wall.
+
+    `reason` is the backend's own account of what it tried, in this
+    platform's words; this appends the one thing the pointer route needs and
+    may not have. Raises `ElementNotActionable` rather than doing nothing --
+    where there is no session to click through, which is an element taken
+    straight from a backend, and where the element publishes no rectangle to
+    aim at. `Session.click_element` is this call spelled for an element with
+    no session of its own.
+    """
+    session = getattr(element, "_session", None)
+    if session is None:
+        raise ElementNotActionable(
+            element.role,
+            element.name,
+            f"{reason}. It carries no session to click through either, so "
+            "there is nothing to aim the pointer with: it came from a backend "
+            "directly rather than from a Session. Take the element from the "
+            "session instead -- gui.button(...), gui.element(...), "
+            "gui.root_element() -- or call gui.click_element(element)",
+        )
+    if session.extents(element) is None:
+        raise ElementNotActionable(
+            element.role,
+            element.name,
+            f"{reason}, and it publishes no rectangle for that to aim at, so "
+            "the coordinate route is closed too: gui.extents(element) has "
+            "nothing to hand back",
+        )
+    session.click_element(element)
 
 
 class Window:
@@ -382,7 +430,21 @@ class Element(Protocol):
         ...
 
     def click(self) -> None:
-        """Act on the element directly -- no coordinates, no injection."""
+        """Act on the element: the accessible action where there is one.
+
+        The toolkit's own action first, named -- Invoke, Toggle, an MSAA
+        default action, AT-SPI's `click`. Where the element publishes none at
+        all, the click falls back to the pointer at the element's own
+        rectangle, which is what a person does with a widget that offers
+        nothing; `click_by_pointer` is that step on Windows and macOS, and on
+        Linux it is dogtail's own coordinate click, already the last item in
+        the ladder there.
+
+        An element with no session behind it -- one taken straight from a
+        backend -- has no pointer to reach, and raises `ElementNotActionable`
+        rather than doing nothing; `Session.click_element` is the same call
+        spelled for that case.
+        """
         ...
 
     def double_click(self) -> None:

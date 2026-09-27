@@ -24,6 +24,13 @@ the code does* — read the source and `docs/` for that.
   like a README pass), stop, report what changed, and ask before doing the
   next. This applies doubly to editing `README.md` specifically — ask
   first even within one approved plan.
+- **Local environment specifics stay out of checked-in docs and code.** One
+  contributor's machine setup — which VM software, which host OS, personal
+  file paths, usernames, hardware — belongs in that person's own private
+  notes, never in this repo's docs, `AGENTS.md`, code comments, or commit
+  messages. Describe requirements and behavior in portable terms ("a live
+  macOS session," not a specific VM stack at a specific local path); a
+  future contributor won't have the same setup.
 
 ## Verifying a change
 
@@ -53,7 +60,8 @@ something more formal — match the semver precedent in `CHANGELOG.md`'s
 history (new public API is a minor bump). Do this whenever a change adds
 enough shape to `[Unreleased]` to warrant it, particularly when
 `pyguitest-recorder`'s version floor needs a real released version to point
-at (see "This repo's place in the family").
+at (see "This repo's place in the family"). If the change touches
+platform-specific code, do this only after the live check below, not before.
 
 ## Testing against a real desktop
 
@@ -79,6 +87,24 @@ for itself — that flag in `win32.py` is deliberate. A live check of
 or a small IPC mechanism); testing hook-driven behavior same-process silently
 tests nothing, and looks like a hang or a false failure rather than a clear
 error about why.
+
+**A platform-specific change needs a live check on that platform before it
+ships, not just this repo's mocked test suite.** If a change touches
+`win32.py`, the X11/atspi/portal/eiinput backends, or `macos.py`/
+`macquartz.py` — anything that isn't shared, platform-agnostic logic — run
+it against a real desktop on each platform it touches before cutting a
+version that includes it (see "Cutting a version" above). CI's fakes verify
+logic; they can't catch a wrong native constant or an OS quirk that only a
+real desktop exposes — the 0.14.0 fix for `kAXActionNamesAttribute` (a
+PyObjC constant that doesn't exist; see `CHANGELOG.md`) was only found
+because a live macOS run raised where the fake had been happy to answer.
+Windows logistics are above. For macOS, use whatever live access you have —
+a physical Mac, a cloud device, an emulated or virtualized VM — the
+specifics are yours to work out and belong in your own local notes, not in
+this repo's checked-in docs; `docs/validation.md` records what one such live
+run measured, not a required setup. If a needed platform isn't reachable
+from here (no live Windows box, no macOS access this session), say so and
+ask rather than shipping the change unverified on that platform.
 
 ## This repo's place in the family
 

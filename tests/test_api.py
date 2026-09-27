@@ -1040,6 +1040,23 @@ What is skipped is the POSIX *route*, which on Windows is unreachable rather
 than broken.
 """
 
+PROC_PROCESS_TABLE = unittest.skipUnless(
+    pyguitest._have_proc(),
+    "these two read /proc directly, and a Mac has no /proc while a FreeBSD box "
+    "without linprocfs cannot read the one it has. Both reach the process table "
+    "through `ps` instead, which TestProcessTableFallsBackToPs covers -- so what "
+    "is skipped here is a route, not a behaviour",
+)
+"""Skips a test that pins the /proc *implementation* rather than the behaviour.
+
+Narrower than `POSIX_PROCESS_TABLE` on purpose, because "POSIX" is not the
+condition these two need. `_process_table` reaches `_proc_pids` and
+`_process_cmdline` only when `_have_proc()` is true, so on macOS neither helper
+is ever called by a caller -- and a test that called them anyway failed there
+with `FileNotFoundError: '/proc'` on the first run the suite ever had on a Mac,
+which is exactly the sort of over-broad guard this exists to stop.
+"""
+
 
 class TestWaitForProcess(unittest.TestCase):
     @unittest.skipIf(
@@ -1555,6 +1572,39 @@ class TestDoubleClickElement(unittest.TestCase):
             gui.double_click_element(element)
 
 
+class TestClickElement(unittest.TestCase):
+    """`element.click()` where the accessible ladder finds nothing ends here.
+
+    The gesture itself lives in Session.click_element -- the element is still
+    the locator, its rectangle read fresh -- so what is pinned here is the
+    pointer half: the centre of the element, one press/release pair, and the
+    same "no rectangle" refusal double_click_element gives.
+    """
+
+    def test_moves_to_the_elements_center_and_clicks_once(self):
+        element = FakeElement(Role.PUSH_BUTTON, "OK")
+        backend = _RecordingPointerAndExtents({"OK": (10, 20, 30, 40)})
+        gui = pyguitest.Session(backend, pyguitest.detect())
+        gui.click_element(element)
+        self.assertEqual(backend.moved_to, [(10 + 15, 20 + 20)])
+        self.assertEqual(backend.events, [("press", 1), ("release", 1)])
+
+    def test_the_button_argument_reaches_the_pointer(self):
+        element = FakeElement(Role.PUSH_BUTTON, "OK")
+        backend = _RecordingPointerAndExtents({"OK": (0, 0, 10, 10)})
+        gui = pyguitest.Session(backend, pyguitest.detect())
+        gui.click_element(element, button=3)
+        self.assertEqual(backend.events, [("press", 3), ("release", 3)])
+
+    def test_raises_without_extents(self):
+        element = FakeElement(Role.PUSH_BUTTON, "Ghost")
+        backend = _RecordingPointerAndExtents({})
+        gui = pyguitest.Session(backend, pyguitest.detect())
+        with self.assertRaises(PyGUITestError):
+            gui.click_element(element)
+        self.assertEqual(backend.events, [])
+
+
 class TestElementDoubleClick(unittest.TestCase):
     """`element.double_click()` is double_click_element, reached from the element.
 
@@ -1924,7 +1974,7 @@ class TestProcHelpers(unittest.TestCase):
         self.assertAlmostEqual(seconds, 0.44)
         self.assertAlmostEqual(resolution, 0.01)
 
-    @POSIX_PROCESS_TABLE
+    @PROC_PROCESS_TABLE
     def test_process_cmdline_reads_the_current_process(self):
         self.assertIn("python", pyguitest._process_cmdline(os.getpid()).lower())
 
@@ -1932,7 +1982,7 @@ class TestProcHelpers(unittest.TestCase):
     def test_process_cmdline_is_empty_for_a_pid_that_does_not_exist(self):
         self.assertEqual(pyguitest._process_cmdline(2**30), "")
 
-    @POSIX_PROCESS_TABLE
+    @PROC_PROCESS_TABLE
     def test_proc_pids_includes_the_current_process(self):
         self.assertIn(os.getpid(), set(pyguitest._proc_pids()))
 

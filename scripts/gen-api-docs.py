@@ -315,6 +315,14 @@ def providers() -> dict[str, set[str]]:
 
     Read from each backend's `capabilities` property rather than a list
     kept here, so a new backend appears without editing this script.
+
+    Two shapes are understood, because backends legitimately use both. A property
+    that builds its set from `Capability.` members inline is read directly. A
+    property that composes named module-level sets -- `macos.py` returns
+    `_UNGATED | _AX_ONLY` so that each half can carry its own argument in its own
+    docstring -- is followed through those names, which is the difference between
+    a table that lists that backend and one that silently omits it. Measured:
+    before this, `MacosBackend` appeared nowhere in docs/api.md.
     """
     found: dict[str, set[str]] = {}
     for info in pkgutil.iter_modules(backends_pkg.__path__):
@@ -328,6 +336,13 @@ def providers() -> dict[str, set[str]]:
             src = source_of(inspect.getattr_static(cls, "capabilities", None))
             for cap in re.findall(r"Capability\.([A-Z_]+)", src):
                 found.setdefault(cap, set()).add(name)
+            for constant in re.findall(r"\b(_[A-Z][A-Z_]*)\b", src):
+                values = getattr(module, constant, None)
+                if not isinstance(values, (set, frozenset)):
+                    continue
+                for value in values:
+                    if isinstance(value, Capability):
+                        found.setdefault(value.name, set()).add(name)
     return found
 
 

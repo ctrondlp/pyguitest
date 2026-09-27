@@ -20,6 +20,8 @@ from .eiinput import LibeiBackend
 from .imagesearch import ToolImageSearchBackend
 from .input import ToolInputBackend
 from .kwinevents import KWinEventsBackend
+from .macos import MacosBackend
+from .macquartz import MacquartzBackend
 from .null import NullBackend
 
 __all__ = [
@@ -36,6 +38,8 @@ __all__ = [
     "ToolImageSearchBackend",
     "KWinEventsBackend",
     "LibeiBackend",
+    "MacosBackend",
+    "MacquartzBackend",
     "register",
     "select",
     "available",
@@ -827,3 +831,72 @@ def _uia_factory(environment, **options):
 
 
 register(_uia_factory, "uia", priority=90)
+
+
+def _macquartz_factory(environment, **options):
+    """Build the macOS input backend, or None where CGEvent is unreachable.
+
+    `available()` is PyObjC's Quartz and the functions this backend calls, so
+    it is False on every host without that binding -- every host that is not a
+    Mac with the `macos` extra -- and this factory therefore needs no platform
+    test of its own. Priority 70 puts it beside `win32` and the Linux
+    tool-backed input backends, the band for "injects input".
+
+    `opt_in` is the one place ADR 004 reverses ADR 003. Constructing this asks
+    for the PostEvent grant, which is what `register`'s docstring reserves the
+    flag for: a plain `connect()` composes no backend that asks for anything on
+    a caller's behalf, and `connect(backend="macquartz")` is the caller asking
+    for it. The request has been measured *not* to raise a dialog -- see
+    `macquartz.request_post_event` -- so what the flag guards is the side effect
+    of asking rather than a window nobody can miss.
+
+    Construction can still raise `BackendUnavailable` -- a Quartz that imports
+    without the entry points, which is a PyObjC older than this backend -- and
+    a caller who named it gets that reason. See `register`'s docstring.
+    """
+    from . import macquartz as _macquartz
+
+    if not _macquartz.available():
+        return None
+    return _macquartz.MacquartzBackend(environment)
+
+
+register(_macquartz_factory, "macquartz", priority=70, opt_in=True)
+
+
+def _macos_factory(environment, **options):
+    """Build the macOS element and window backend, or None where AX is unreachable.
+
+    `available()` is PyObjC's ApplicationServices plus the entry points
+    `backends/macos.py` calls, so it is False on every host that is not a Mac with
+    the `macos` extra installed -- every host without that binding -- and this
+    factory therefore needs no platform test of its own.
+
+    Priority 90 puts it in the read-only band beside `atspi` and `uia`: its elements
+    are acted on through Accessibility itself rather than through coordinates or
+    injected input, and only one of the three is ever applicable on a given machine.
+
+    Deliberately **not** `opt_in`, which is where it parts company with `macquartz`
+    above. That flag exists for a constructor with a side effect no caller should hit
+    by surprise, and `macquartz` constructs by *asking* for its grant. This one
+    preflights instead -- `AXIsProcessTrusted` through `_macapi`, which is ctypes and
+    needs no binding -- and asks only when a caller passes `request=True`
+    (`connect(backend="macos", backend_options={"request": True})`). A plain
+    `connect()` on a Mac has to get elements, so this backend has to be in automatic
+    composition; what it must not do is put a dialog on screen for someone who never
+    asked, and `request` is that rule spelled as an option rather than as a registry
+    flag.
+
+    Construction can still raise `BackendUnavailable` for a reason `available()`
+    cannot see -- a binding that imports without the entry points, which is a PyObjC
+    older than this backend -- and a caller who named `macos` gets that reason. See
+    `register`'s docstring on what happens to it.
+    """
+    from . import macos as _macos
+
+    if not _macos.available():
+        return None
+    return _macos.MacosBackend(environment, **options)
+
+
+register(_macos_factory, "macos", priority=90)

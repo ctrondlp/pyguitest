@@ -13,11 +13,11 @@ name = "pyguitest"
 dynamic = ["version"]
 # PyPI searches this at the same x5 boost as `keywords` below, so the words
 # chosen here are search surface as much as description. "Cross-platform" was
-# both the vaguest thing it could say and a mild over-claim (there is no macOS
-# backend); naming the three platforms costs nothing and is checkable.
+# both the vaguest thing it could say and a mild over-claim when there was no
+# macOS support; naming the four platforms costs nothing and is checkable.
 # "X11::GUITest" stays, and tokenizes to x11+guitest, so the lineage keeps
 # earning its own search terms.
-description = "Desktop GUI automation and UI testing for Linux, BSD and Windows; successor to X11::GUITest"
+description = "Desktop GUI automation and UI testing for Linux, BSD, Windows and macOS; successor to X11::GUITest"
 # 3.9 reached end-of-life in October 2025; 3.10 is the oldest
 # version still receiving security fixes.
 requires-python = ">=3.10"
@@ -44,10 +44,10 @@ readme = "README.md"
 keywords = [
     "gui-automation", "gui-testing", "desktop-automation", "ui-testing",
     "ui-automation", "uia",
-    "linux", "freebsd", "windows", "win32",
+    "linux", "freebsd", "windows", "win32", "macos", "quartz", "cocoa",
     "x11", "wayland", "xwayland", "gnome", "kde", "sway",
-    "accessibility", "at-spi", "atspi", "dogtail",
-    "xdotool", "libei",
+    "accessibility", "at-spi", "atspi", "dogtail", "ax",
+    "xdotool", "libei", "cgevent",
 ]
 
 # No `License ::` classifier: with the PEP 639 `license` SPDX string above,
@@ -66,6 +66,11 @@ classifiers = [
     # statement about the wheel, which is universal (py3-none-any) and
     # installs and imports there.
     "Operating System :: Microsoft :: Windows",
+    # macOS likewise: the input backend (`macquartz`) and the element/window
+    # backend (`macos`, over Accessibility) are both here, and the wheel is
+    # still universal -- PyObjC's own wheels are the extra's problem, not
+    # this package's. See docs/developers/adr-004-macos.md.
+    "Operating System :: MacOS :: MacOS X",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -169,6 +174,31 @@ windows = ["comtypes; sys_platform == 'win32'"]
                                    # Windows 11 runs used, and nothing has
                                    # shown an older one to fail. See
                                    # docs/developers/adr-003-windows.md.
+macos = ["pyobjc-framework-ApplicationServices; sys_platform == 'darwin'",
+         "pyobjc-framework-Quartz; sys_platform == 'darwin'"]
+                                   # The two PyObjC distributions macOS
+                                   # support is built on, and two rather than
+                                   # one because they gate different halves:
+                                   # ApplicationServices is the Accessibility
+                                   # element tree, Quartz is CGEvent injection,
+                                   # the display list and NSPasteboard. The
+                                   # marker is on each *requirement* rather
+                                   # than on the extra's name -- PEP 508 has
+                                   # no way to mark the latter -- so
+                                   # `pip install 'pyguitest[macos]'` on Linux
+                                   # resolves to two skipped requirements and
+                                   # installs cleanly, which is what keeps the
+                                   # README's install line usable on every
+                                   # platform. Both default to a 10.15 floor
+                                   # upstream; no floor is pinned here for
+                                   # docs/developers/adr-004-macos.md's
+                                   # reason: nothing has measured an older
+                                   # PyObjC to fail, and a floor nobody has
+                                   # tested is a claim, not a constraint.
+                                   # ScreenCaptureKit is deliberately *not*
+                                   # here: it is a third distribution behind
+                                   # the same capability as `screencapture`,
+                                   # which ships with the OS.
 dev   = ["pytest>=7", "ruff>=0.6", "mypy>=1.11",
          "python-dbusmock>=0.30"]  # tests/test_portal_dbusmock.py: PortalBackend
                                    # against a real, private D-Bus session bus.
