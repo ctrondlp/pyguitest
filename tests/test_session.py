@@ -11,6 +11,7 @@ import subprocess
 import unittest
 from unittest import mock
 
+from pyguitest import session
 from pyguitest.session import Compositor, SessionType, detect
 
 
@@ -151,6 +152,46 @@ class TestSessionClassification(unittest.TestCase):
         e = linux_detect(env())
         self.assertIs(e.session_type, SessionType.HEADLESS)
         self.assertIs(e.compositor, Compositor.NONE)
+
+
+class TestSessionClassificationIsExhaustive(unittest.TestCase):
+    """Every `SessionType` member has a branch, and every branch has a member.
+
+    `_classify` is a chain of early returns over environment variables, and a
+    test that checks one environment at a time cannot see the two ways that
+    goes wrong: a member added without a branch (unreachable, and silently
+    reported as something else), or a branch returning something no enum
+    member spells. `UNKNOWN` is the member that reads most like decoration,
+    so it has an environment here rather than an assumption -- it is what a
+    session that *declares* a type this package does not recognise gets, which
+    is not the same as a session that declares nothing at all.
+    """
+
+    CASES = (
+        # (platform, variables, expected) -- one per branch, in order.
+        ("win32", {"DISPLAY": ":0"}, SessionType.WIN32),
+        ("darwin", {"DISPLAY": ":0"}, SessionType.DARWIN),
+        (
+            "linux",
+            {"WAYLAND_DISPLAY": "wayland-0", "DISPLAY": ":0"},
+            SessionType.XWAYLAND,
+        ),
+        ("linux", {"WAYLAND_DISPLAY": "wayland-0"}, SessionType.WAYLAND),
+        ("linux", {"DISPLAY": ":0"}, SessionType.X11),
+        ("linux", {"XDG_SESSION_TYPE": "wayland"}, SessionType.WAYLAND),
+        ("linux", {"XDG_SESSION_TYPE": "x11"}, SessionType.X11),
+        ("linux", {"XDG_SESSION_TYPE": "tty"}, SessionType.UNKNOWN),
+        ("linux", {}, SessionType.HEADLESS),
+    )
+
+    def test_the_branches_and_the_enum_cover_each_other(self):
+        seen = set()
+        for platform, variables, expected in self.CASES:
+            with mock.patch.object(session, "_platform", return_value=platform):
+                found = session._classify(dict(variables))
+            self.assertIs(found, expected, f"{platform} with {variables}")
+            seen.add(found)
+        self.assertEqual(seen, set(SessionType))
 
 
 class TestCompositorDetection(unittest.TestCase):

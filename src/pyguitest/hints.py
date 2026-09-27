@@ -17,21 +17,30 @@ driving it. `hints_for` branches on the session type before any Linux row is
 reached, and no Windows row reuses a Linux component name, which is what keeps
 `advice()`'s Linux-only appendixes -- the udev walkthrough and the atspi extra
 line -- out of a Windows report. Both halves of that are tested.
+
+macOS is the third shape, and the closest to Windows: no distribution to look
+up either, and its gaps are mostly TCC permissions, which no package can grant
+and no command can fix. It gets its own rows under the same rule about
+component names, and `hints_for` dispatches to it the same way -- see
+`_darwin_hints`, which also names the mistakes that rule prevents.
 """
 
 from __future__ import annotations
 
 import os
 import pathlib
+import sys
 import textwrap
 from collections.abc import Iterator
 
 from .capabilities import Capability, CapabilitySet
 from .session import (
+    _DARWIN,
     _INTERFACE_SCHEMA,
     _TOOLKIT_ACCESSIBILITY_KEY,
     _WGC_MIN_BUILD,
     Environment,
+    _darwin_version,
     _platform,
 )
 
@@ -195,6 +204,23 @@ def _windows_release() -> str:
     return f"{edition} (build {build})" if build else edition
 
 
+def _macos_release() -> str:
+    """The macOS release, where a distribution family would go.
+
+    `session._darwin_version()` rather than a second `platform.mac_ver()`
+    call: what the OS reports, and what to make of it, is decided once there
+    and this string is one of its readers -- the same reason `_windows_release`
+    reuses the edition name rather than re-deriving it.
+
+    There is no edition to add, so unlike the Windows string this is a
+    version and nothing else. And like the Windows string it is deliberately
+    not a key in `_PACKAGES`: that table holds package names, and there is no
+    package manager here. What a Mac installs is the extra.
+    """
+    version = _darwin_version()
+    return f"macOS {version}" if version else "macOS"
+
+
 def detect_distro(
     os_release: str | None = None, platform: str | None = None
 ) -> str | None:
@@ -203,22 +229,26 @@ def detect_distro(
     Reads /etc/os-release unless `os_release` supplies its contents, which is
     how the tests drive it.
 
-    `platform` defaults to `sys.platform`, and exists for the two cases where
-    that file is not the whole answer. On Windows there is no such file and no
-    distribution, so the answer describes the OS instead ("Windows 11 Pro
-    (build 22631)"); under Cygwin and MSYS2 the file *does* exist, and
+    `platform` defaults to `sys.platform`, and exists for the three cases
+    where that file is not the whole answer. On Windows there is no such file
+    and no distribution, so the answer describes the OS instead ("Windows 11
+    Pro (build 22631)"); under Cygwin and MSYS2 the file *does* exist, and
     describes the emulation layer rather than the machine, so those get the
-    Windows string too instead of a family whose every package name would fail
-    to install there. Neither answer is a key in `_PACKAGES`, which is the
-    point of returning them -- see `_WINDOWS_PLATFORMS`.
+    Windows string too instead of a family whose every package name would
+    fail to install there; on macOS the answer is the release ("macOS 26.7").
+    None of the three is a key in `_PACKAGES`, which is the point of
+    returning them -- see `_WINDOWS_PLATFORMS`.
 
     A caller-supplied `os_release` is never overridden by the platform: that
     form is `doctor` reading a *host image's* os-release, and the machine
     running the read has nothing to do with the file.
     """
     if os_release is None:
-        if (platform or _platform()) in _WINDOWS_PLATFORMS:
+        host = platform or _platform()
+        if host in _WINDOWS_PLATFORMS:
             return _windows_release()
+        if host == _DARWIN:
+            return _macos_release()
         path = pathlib.Path("/etc/os-release")
         if not path.exists():
             return None
@@ -321,6 +351,137 @@ def _windows_hints(environment: Environment) -> Iterator[Hint]:
         )
 
 
+def _darwin_hints(
+    environment: Environment, capabilities: CapabilitySet | None = None
+) -> Iterator[Hint]:
+    """The gaps a macOS session can have, and what closes each one.
+
+    Four of the seven rows are permissions rather than packages, because
+    that is what macOS support is missing when it is missing: TCC has no
+    installer. The other three are the extra itself, a backend that is opt-in
+    and so has to be named before it does anything at all, and one command no
+    package manager on the platform supplies. `Hint.command` is already
+    `str | None`, so a row that no package can fix says so with the field it
+    always had -- `installable=False`, which `advice()` renders as prose
+    rather than as something to run.
+
+    No row here reuses a Linux component name, and that is load-bearing
+    rather than tidy: `advice()` decides what to append by matching on them.
+    "AT-SPI" pulls in the `pyguitest[atspi]` line and "membership of the
+    'input' group" the whole /dev/uinput walkthrough, and either would print
+    a page of Linux instructions underneath a Mac that has neither AT-SPI nor
+    /dev/uinput. A test holds the two sets apart, because a comment asking
+    nicely is not a check.
+
+    The resolved path of the interpreter is named wherever a grant is
+    missing, for `_darwin_notes`' reason: TCC records consent against a
+    *binary*, and a reader who granted it to a different one -- the system
+    Python, or a virtualenv that predates an upgrade -- otherwise reads the
+    second prompt as "I already did this" and stops.
+
+    `capabilities` answers the one question the environment cannot: a Mac can
+    hold the PostEvent grant, have the binding installed, and still be
+    injecting nothing, because `macquartz` is `opt_in`. None means "not asked"
+    and skips that row, the way `hints_for` documents for the GNOME Shell
+    extension below.
+    """
+    python = sys.executable
+    if not (
+        environment.has_pyobjc_application_services and environment.has_pyobjc_quartz
+    ):
+        yield Hint(
+            "the PyObjC bindings",
+            "the in-process half of macOS support. Element queries go "
+            "through ApplicationServices and everything else -- input "
+            "injection, screen geometry, the clipboard -- through Quartz, "
+            "and both distributions arrive with this one extra. "
+            "`screencapture` needs neither, so screenshots work before it "
+            "is installed",
+            "pip install 'pyguitest[macos]'",
+            packages="pyobjc-framework-ApplicationServices, pyobjc-framework-Quartz",
+        )
+    if not environment.has_ax:
+        yield Hint(
+            "Accessibility",
+            "the element tree: finding a control by role and name, reading "
+            "its text, and element_at(). Denied, these calls return an "
+            f"empty tree instead of raising, so grant it to {python} under "
+            "System Settings > Privacy & Security > Accessibility. "
+            "`tccutil reset Accessibility` withdraws an earlier answer, "
+            "which is the only way back if the prompt was dismissed",
+            None,
+            installable=False,
+        )
+    if not environment.has_screen_recording:
+        yield Hint(
+            "Screen Recording",
+            "screencapture, which is the whole capture path on a Mac and "
+            "ships with the OS -- there is nothing here to install. Denied, "
+            "it still exits 0 and writes a uniformly black image, so the "
+            "failure looks like a test that ran and found nothing. Grant "
+            f"it to {python} under System Settings > Privacy & Security > "
+            "Screen Recording",
+            None,
+            installable=False,
+        )
+    if not environment.has_post_event:
+        yield Hint(
+            "PostEvent",
+            "injected input. System Settings files this under the "
+            "Accessibility pane, but it is a separate service: a Mac can "
+            "hold Accessibility and still drop every posted event, with no "
+            "error anywhere. Grant it under Privacy & Security > "
+            "Accessibility, remembering that TCC records the answer against "
+            "the app that launched this process -- Terminal, or an IDE -- or "
+            "against the signed interpreter it runs, so the row to allow may "
+            f"be named for either, and {python} is only this process's own "
+            "path. Naming the backend asks for it; it does not raise a dialog",
+            None,
+            installable=False,
+        )
+    if not environment.has_listen_event:
+        yield Hint(
+            "Input Monitoring",
+            "reading the user's own input (`kTCCServiceListenEvent`), which is "
+            "the grant an event tap needs and nothing this package asks for "
+            "yet -- no member of it reacts to input, so this row names the "
+            "grant rather than closing a gap. It is the read-side twin of "
+            "PostEvent, and System Settings keeps it in its own pane, Privacy "
+            "& Security > Input Monitoring; whether a tap is gated on it or on "
+            "Accessibility is the one TCC question ADR 004 leaves to the first "
+            "machine that tries it",
+            None,
+            installable=False,
+        )
+    if (
+        capabilities is not None
+        and environment.has_pyobjc_quartz
+        and environment.has_post_event
+        and Capability.POINTER_MOVE not in capabilities
+    ):
+        yield Hint(
+            "macquartz",
+            "input injection that this session is not using. The PostEvent "
+            "grant is held and the binding is installed, but `macquartz` is "
+            "registered `opt_in`, so automatic composition never selects it "
+            "and a plain `connect()` injects nothing at all -- no pointer, no "
+            'keys, no text. connect(backend="macquartz") is the whole fix',
+            None,
+            installable=False,
+        )
+    if not environment.image_tools:
+        yield Hint(
+            "ImageMagick",
+            "locating a control by an image of it, for widgets no "
+            "accessibility tree describes. The tool called here is "
+            "`compare`, macOS ships no equivalent, and there is no system "
+            "package manager to name either -- so this is the one row on a "
+            "Mac that is a command rather than a permission",
+            "brew install imagemagick",
+            packages="ImageMagick",
+        )
+
+
 def hints_for(
     environment: Environment,
     distro: str | None = None,
@@ -352,12 +513,21 @@ def hints_for(
     `distro` or this machine is read at all: Windows has no distribution to
     look up, and every row below is keyed on a Linux mechanism, a Linux
     compositor or a distribution package name. Dispatching from here keeps
-    that a caller's non-question.
+    that a caller's non-question. A macOS session is answered the same way by
+    `_darwin_hints`, and for a third reason: four of its rows are TCC
+    permissions and a fifth names a backend, neither of which a distribution
+    has a package name for.
+
+    `capabilities` reaches `_darwin_hints` for the reason it is read below:
+    one row there is about what this session *is* rather than about what is
+    installed, and only a live connection can say it.
     """
     from .session import SessionType
 
     if environment.session_type is SessionType.WIN32:
         return _windows_hints(environment)
+    if environment.session_type is SessionType.DARWIN:
+        return _darwin_hints(environment, capabilities)
     return _linux_hints(environment, distro, capabilities, toolkit_accessibility)
 
 

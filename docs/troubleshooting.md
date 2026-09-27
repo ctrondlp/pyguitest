@@ -438,6 +438,21 @@ X11 backend. `pyguitest doctor` reports which are available and
 tried in. Portal capture raises a consent dialog, which — dismissed — looks
 like failure.
 
+**On macOS, a system dialog appears asking to "bypass the system private
+window picker and directly access your screen and audio"**, naming
+`com.apple.sshd-session` or whatever process is actually capturing, with
+Allow and Open System Settings as the only choices. This is a separate,
+session-level consent gate on top of the Screen Recording grant under System
+Settings > Privacy & Security — seen even after that grant is already on —
+and nothing in this package can preflight or answer it: a human has to be
+present to click one of the two buttons. It has only been seen, not
+deliberately provoked, so which capture call triggers it is not yet
+narrowed down — see
+[validation.md](validation.md#macos-closing-four-open-items-on-the-same-machine-2026-09-27)
+for what is confirmed. An automated script capturing screenshots on a Mac
+over SSH should expect this prompt at least once and cannot dismiss it
+itself.
+
 ## `connect()` raises BackendUnavailable
 
 `connect()` is deliberately hard to fail: a session with almost no

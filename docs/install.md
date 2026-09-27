@@ -33,7 +33,7 @@ rather than an error.
 | `uinput` | in-process pointer and keyboard | `[uinput]` (evdev) | — | — (needs [`/dev/uinput` access](input.md#uinput-devuinput-permissions)) |
 | `eiinput` *(opt-in)* | keymap-safe input over libei | `[eiinput]` (`python-libei[portal]`, which brings PyGObject with it) | `libei`, gobject-introspection | — |
 | `portal` *(opt-in)* | keyboard and pointer buttons/scroll via the RemoteDesktop portal, and the clipboard with `clipboard=True` — the only clipboard path on GNOME | — | PyGObject | — |
-| `capture` | screenshots | — | — | `grim`, `gnome-screenshot`, `spectacle` or `import` |
+| `capture` | screenshots | — | — | `grim`, `gnome-screenshot`, `spectacle`, `import` or `screencapture` |
 | `portalcapture` *(opt-in)* | screenshots via the Screenshot portal, no tool needed | — | PyGObject | — |
 | `imagesearch` | finding a control by a picture of it | — | — | `compare` (ImageMagick) |
 | `x11` | everything, including tier-6, on X11 and XWayland | `[x11]` (python-xlib) | — | — |
@@ -86,6 +86,42 @@ manager to name, and no row of packages that pip cannot supply. What there is:
 The `windows` extra carries an environment marker, so installing it on Linux or
 macOS is a no-op rather than an error — `pip install "pyguitest[windows]"`
 succeeds everywhere and only does something on Windows.
+
+## On macOS
+
+None of the Linux tables apply here either, for the same reason as Windows —
+what there is:
+
+| | |
+|---|---|
+| `pip install pyguitest` | everything but the in-process half: `screencapture` needs no Python binding at all |
+| `pip install "pyguitest[macos]"` | + the Accessibility element and window tree (`macos`), and `CGEventPost` input injection (`macquartz`), through PyObjC's ApplicationServices and Quartz |
+| nothing on `PATH` | `screencapture` ships with the OS, so the capture path asks for no installation — only the Screen Recording grant, which `pyguitest doctor` names |
+
+The `macos` extra carries an environment marker on each requirement, so
+installing it on Linux or Windows resolves to two skipped requirements and
+succeeds. Its two backends gate on two separate grants: `macos` (elements,
+windows, screens) reads through Accessibility and is served wherever that
+grant is already on — nothing here asks for it — while `macquartz` (pointer,
+keys, text) is **opt-in**: constructing it asks for the PostEvent grant, so a
+plain `connect()` never asks on your behalf.
+`connect(backend="macquartz")` is you asking for it — and on macOS that request
+has been silent in the one place it has been measured (26.7, launched from
+Terminal.app: no dialog, `False` returned), so PostEvent is granted by hand
+under Privacy & Security > Accessibility. Which row to look for there is worth
+reading twice: TCC records the answer against the app that launched this
+process (Terminal, or an IDE) or against the signed interpreter it runs.
+
+Grants are recorded against a *binary* rather than against you, so a virtualenv
+rebuilt on a different Python can be a new client and be asked again — but the
+binary TCC names is the app responsible for the process or the signed
+interpreter, which is not necessarily the virtualenv path in `sys.executable`
+this package's messages print. That name is the open question
+`docs/validation.md` records. Grants also cannot travel: not in a repo, not in
+a container, and not across a `pip install --upgrade`. `tccutil reset
+Accessibility` withdraws one, which is the only way back if a prompt was
+dismissed or an answer has to be redone; nothing supported can grant it, and
+PostEvent is granted by hand in System Settings.
 
 The backends are registered by the same registry every other backend uses, and
 the marker is a runtime import guard inside
@@ -241,6 +277,21 @@ part of any automatic path; see [input.md](input.md#eiinput-keymap-safe-input-ov
 
 A virtualenv needs `--system-site-packages` to see any of these.
 
+## Building from source, on an older build environment
+
+Installing from a wheel needs nothing special, and this is the only section
+here about the *build* rather than the runtime. Both this package and
+pyguitest-recorder declare their license as an SPDX string (PEP 639), which is
+`license = "MIT"` in `pyproject.toml` rather than the older
+`license = {text = "MIT"}`. That form needs **setuptools 77 or newer**; an
+older one either fails the build or silently drops the license metadata from
+the wheel, and the error names the metadata rather than anything this package
+does. `pip` into a fresh virtualenv gets a new enough setuptools on its own —
+the failure belongs to a system Python with an old setuptools pinned, or to a
+build environment that has one. `pip list | grep -i setuptools` answers it, and
+`pip install -U setuptools` (or `python -m build` in a fresh virtualenv) fixes
+it.
+
 ## External tools (never installed by pip)
 
 Discovered on `PATH` at runtime. Absence degrades a capability; it never
@@ -249,7 +300,7 @@ raises.
 | Group | Tools |
 |---|---|
 | Input | `wdotool`, `wtype` *(wlroots only)*, `ydotool` *(keymap-unsafe)*, `xdotool` *(X11 only)* |
-| Capture | `grim`, `gnome-screenshot` *(real X11 only)*, `spectacle`, `import` *(X11 only, and real X11 only)* |
+| Capture | `grim`, `gnome-screenshot` *(real X11 only)*, `spectacle`, `import` *(X11 only, and real X11 only)*, `screencapture` *(macOS only)* |
 | Windows | `swaymsg`, `hyprctl`, `niri msg`, `kdotool` |
 | Image search | `compare` (ImageMagick) |
 

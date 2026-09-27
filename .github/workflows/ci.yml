@@ -326,6 +326,229 @@ jobs:
               sys.exit(f"only {skipped} tests skipped -- the Linux-only guards did not run")
           PY
 
+  macos:
+    name: macOS, where Darwin is the host rather than a mock
+    runs-on: macos-latest
+    # macOS support was written from documentation on a Windows machine, with
+    # every test driving a fake `Quartz` in `sys.modules` and a patched
+    # `_macapi`. There is exactly one claim such a suite cannot check: that
+    # the Darwin branch of `detect()` is the branch a real Mac takes. That is
+    # what this job is for, and it is why it runs the suite *and* a probe --
+    # the suite alone passes on this runner for the same reason it passes on
+    # the other two, with every platform-specific test patching the platform
+    # it is about.
+    #
+    # What the probe adds is the opposite of a patch: `sys.platform` is
+    # `"darwin"` because the machine is a Mac, `platform.mac_ver()` is the
+    # real release string rather than a stand-in, and the two frameworks are
+    # really on disk for `_macapi` to dlopen. A transcription error in the
+    # ctypes binding -- the likeliest way this code is wrong -- shows up here
+    # and nowhere else, because a fake never sees it.
+    #
+    # Promoted to a gate, by `windows`' route: the suite step below was run on a
+    # real Mac first -- a macOS 26.7 VM, with the Accessibility and PostEvent
+    # grants made by hand for the occasion -- where it came back 1816 tests, 33
+    # skips, no failures, clearing both floors. docs/validation.md records that
+    # run. Dropped with the promotion: `continue-on-error`, which is what kept a
+    # red macOS job from reddening somebody else's pull request while nobody had
+    # watched this file pass.
+    #
+    # The probe step after it is deliberately not part of that evidence. It
+    # asserts what `detect()` makes of a real Darwin host and that the four
+    # TCC preflights answer at all rather than raising out of a mistyped
+    # binding -- plus that `can_capture` and `can_inject_input` follow the two
+    # grants they are documented to follow, whichever way those read on the
+    # day. Not the grants themselves: this runner reports PostEvent as granted
+    # while granting nothing a person would recognise, so a job that required
+    # four `False` answers was pinning GitHub's image into the suite. What
+    # each grant does to those answers is recorded in docs/validation.md.
+    #
+    # One caution, recorded in the same place rather than left implicit: that
+    # Mac is not this runner. It is 3.13 where this job pins 3.12, x86_64 where
+    # the runner is arm64, and granted where the runner grants nothing -- so it
+    # exercises `tests/test_macos.py`'s live class, which the runner skips. A
+    # green run here is still the only thing that has watched the Darwin branch
+    # of `detect()` answer on a machine whose `sys.platform` is really Darwin.
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          # One version rather than the matrix, same as `windows`: this job is
+          # about the platform, and Python-to-Python differences are `tests`'.
+          python-version: "3.12"
+
+      - name: Run the suite, and check that the other platforms skipped
+        env:
+          PYTHONPATH: src
+        run: |
+          set -eo pipefail
+          python - <<'PY'
+          import sys
+          import unittest
+
+          result = unittest.TextTestRunner(verbosity=2).run(
+              unittest.TestLoader().discover("tests")
+          )
+          skipped = len(result.skipped)
+          print(
+              f"\nran {result.testsRun}, skipped {skipped}, "
+              f"failures {len(result.failures)}, errors {len(result.errors)}"
+          )
+          if result.failures or result.errors:
+              sys.exit(1)
+          # A floor rather than a target: a mass import failure would otherwise
+          # look like a suite that quietly ran almost nothing.
+          if result.testsRun < 800:
+              sys.exit(f"only {result.testsRun} tests ran -- something did not import")
+          # The X11, AT-SPI, D-Bus, portal and Windows tests have to skip
+          # *loudly* on a Mac, same as their Linux and Windows counterparts do
+          # elsewhere. Zero skips would mean the guards never fired, which
+          # reads as support for a platform that was not tested at all.
+          if skipped < 10:
+              sys.exit(f"only {skipped} tests skipped -- the guards did not run")
+          PY
+
+      # The one step only a Mac can run. `detect()` has to answer before the
+      # `macos` extra is installed -- that is the whole reason the four TCC
+      # preflights are ctypes in `_macapi` rather than PyObjC -- so this
+      # installs nothing, and every assertion below is about what this package
+      # derives from the machine's answers rather than about what those
+      # answers are.
+      - name: Check what detect() says on a real Mac
+        env:
+          PYTHONPATH: src
+        run: |
+          set -eo pipefail
+          python - <<'PY'
+          import platform
+          import sys
+
+          import pyguitest
+          from pyguitest import Compositor, SessionType
+          from pyguitest.backends import _macapi
+
+          env = pyguitest.detect()
+          print(f"host: macOS {platform.mac_ver()[0]}, python {sys.version.split()[0]}")
+          print(env.summary())
+
+          # Platform-first classification is why a Mac with XQuartz's DISPLAY
+          # set is not typed as X11. A runner may well have DISPLAY unset, so
+          # this reaches the branch rather than every input to it.
+          if env.session_type is not SessionType.DARWIN:
+              sys.exit(f"expected DARWIN, got {env.session_type}")
+          if env.compositor is not Compositor.QUARTZ:
+              sys.exit(f"expected QUARTZ, got {env.compositor}")
+
+          # The way this half of the work breaks is a transcription error -- a
+          # framework path or an argtypes list that is wrong -- and that
+          # arrives as a *raise*. So a raise is what fails here, reported with
+          # the probe's name attached: an exception left to escape came out as
+          # a traceback that named neither the probe it came from nor the
+          # ctypes binding as the cause, which is the one thing worth saying.
+          #
+          # What is deliberately *not* asserted is the polarity. This job used
+          # to require all four to be False, on the reasoning that a runner
+          # grants nothing -- and this runner answers True for PostEvent, so
+          # that was a claim about GitHub's image rather than about pyguitest,
+          # and it broke when the image changed rather than when the code did.
+          grants = {}
+          for name in (
+              "screen_recording_allowed",
+              "post_event_allowed",
+              "listen_event_allowed",
+              "accessibility_trusted",
+          ):
+              try:
+                  grants[name] = getattr(_macapi, name)()
+              except Exception as error:
+                  sys.exit(f"{name}() raised {error!r}: the binding, not the grant")
+              print(f"{name}() -> {grants[name]}")
+
+          # The derivation is the part that is ours, and it holds whatever the
+          # machine granted: on Darwin both of these read exactly one
+          # preflight -- and the *right* one, which is the mistake worth
+          # catching here. Reading has_ax for input, or capture_tools for
+          # capture, would refuse on a Mac that had granted precisely what the
+          # call needs, and a `screencapture` that ships with every Mac makes
+          # the tool-shaped answer look right while being wrong.
+          if env.can_capture != grants["screen_recording_allowed"]:
+              sys.exit(
+                  f"can_capture is {env.can_capture} with Screen Recording "
+                  f"{grants['screen_recording_allowed']}"
+              )
+          if env.can_inject_input != grants["post_event_allowed"]:
+              sys.exit(
+                  f"can_inject_input is {env.can_inject_input} with PostEvent "
+                  f"{grants['post_event_allowed']}"
+              )
+
+          # `screencapture` ships with the OS, so its absence means `tools.py`
+          # is naming something that is not there.
+          if "screencapture" not in env.capture_tools:
+              sys.exit(f"screencapture missing from {env.capture_tools}")
+
+          # And the refusal that keeps a denied Screen Recording grant from
+          # producing a black PNG with an exit status of 0. Called directly,
+          # the way tests/test_macos.py does: the guard is keyed by tool name
+          # in `_PERMISSION_GATES` and only fires on the `screencapture` path,
+          # so reaching it here would mean standing up a capture backend too.
+          from pyguitest.backends import capture
+          from pyguitest.errors import PermissionRequired
+
+          try:
+              capture.require_screen_recording()
+          except PermissionRequired as error:
+              if grants["screen_recording_allowed"]:
+                  sys.exit(f"refused with the grant held: {error}")
+              print(f"refused before running: {error}")
+          else:
+              if not grants["screen_recording_allowed"]:
+                  sys.exit("screencapture was not refused without the grant")
+              print("allowed through, which is what the grant means")
+          PY
+
+      # Last, so the probe above runs on the machine as CI finds it rather
+      # than on one with PyObjC already installed. This proves the extras
+      # markers resolve *on Darwin* -- they carry `sys_platform == 'darwin'`,
+      # and a marker that quietly excluded macOS would otherwise surface only
+      # as a packaging bug after release.
+      - name: The macos extra installs, and macquartz appears with it
+        env:
+          PYTHONPATH: src
+        run: |
+          set -eo pipefail
+          pip install '.[macos]'
+          python - <<'PY'
+          import sys
+
+          import ApplicationServices  # noqa: F401
+          import Quartz  # noqa: F401
+
+          import pyguitest
+          from pyguitest import SessionType
+
+          if pyguitest.detect().session_type is not SessionType.DARWIN:
+              sys.exit("detect() changed its mind once PyObjC was installed")
+          if "macquartz" not in pyguitest.backends.available():
+              sys.exit(f"macquartz missing from {pyguitest.backends.available()}")
+          # That listing is platform-blind on purpose -- it names every
+          # registered backend whether or not its imports resolve -- so it
+          # cannot fail for the reason this step exists, and would have stayed
+          # green with the `macos` extra uninstalled. The backend's own
+          # `available()` is the importability probe, and a `sys_platform`
+          # marker that quietly excluded macOS is the thing it catches.
+          from pyguitest.backends import macquartz
+
+          if not macquartz.available():
+              sys.exit("macquartz is registered but its PyObjC imports do not resolve")
+          # opt_in means the request is made by a caller naming the backend,
+          # never by composition, so nothing above has asked for a grant -- and
+          # per macquartz.request_post_event, asking shows no dialog on a Mac,
+          # so nothing here is waiting on a click either.
+          print("macos extra installed; PyObjC imported; macquartz registered")
+          PY
+
   build:
     name: build sdist and wheel
     runs-on: ubuntu-latest
@@ -395,7 +618,7 @@ jobs:
     # Windows is exactly what shipped once already: 0.10.1 carries a
     # module-scope `import grp`, so `import pyguitest` raises there, and no
     # gate said so at publish time.
-    needs: [tests, lint, imagemagick, portal, compositor, windows, build]
+    needs: [tests, lint, imagemagick, portal, compositor, windows, macos, build]
     runs-on: ubuntu-latest
     # Must match the environment named in the PyPI publisher config. A
     # required reviewer on it makes each publish a deliberate approval

@@ -10,24 +10,12 @@
   <img src="https://raw.githubusercontent.com/ctrondlp/pyguitest/main/docs/assets/pyguitest-demo.gif" alt="pyguitest driving a simple text editor">
 </p>
 
-Automate and test Linux, BSD and Microsoft Windows desktop applications from
+Automate and test Linux, BSD, Windows and macOS desktop applications from
 Python — even when the application has no automation API.
 
 Pyguitest provides one Python API for mouse, keyboard, window, screenshot, and
-accessible UI automation across Wayland, X11, XWayland and Windows. It is the
-Python successor to [X11::GUITest](https://metacpan.org/pod/X11::GUITest).
-
-**Microsoft Windows support arrives in 0.11.0**, the first release that
-imports there at all. Two backends drive it: `win32` — screens, input,
-windows, window events, screen capture and the clipboard, through `ctypes`
-with no dependency — and `uia`, the element tree, through UI Automation behind
-the `windows` extra. The suite passes on Windows 11 (build 26200) and four
-live runs have driven a real interactive desktop — but on one US-layout,
-single-monitor, unelevated machine, so multi-monitor arithmetic, `windows()`'s
-z-order claim, AltGr and dead keys are still open.
-[docs/validation.md](docs/validation.md) records which is which, and
-[docs/developers/adr-003-windows.md](docs/developers/adr-003-windows.md) what
-was decided and why.
+accessible UI automation across Wayland, X11, XWayland, Windows and macOS. It
+is the Python successor to [X11::GUITest](https://metacpan.org/pod/X11::GUITest).
 
 Use it to:
 
@@ -77,7 +65,7 @@ That shape decides what it is good at and what it is not:
   no runner. Use whatever you already use, and it will fit underneath it.
 - **Not for browsers or mobile.** Web pages have WebDriver and Playwright,
   phones have their own tooling. This drives desktop windows on Linux, the
-  BSDs and Microsoft Windows; macOS has no backend.
+  BSDs, Windows and macOS.
 - **Not the first choice where the application can help.** If a program ships
   a command line, a documented API or an in-app test hook, driving that is
   faster, more stable, and says what the test means instead of what it
@@ -87,50 +75,29 @@ That shape decides what it is good at and what it is not:
   that writes pyguitest scripts from a recorded session, and pyguitest does
   not depend on it.
 
-## Compared to other tools
-
-These overlap less than a search result makes it look, and for several jobs
-one of the others is the better answer.
-
-| | pyguitest | [PyAutoGUI][pyautogui] | [dogtail][dogtail] | [pywinauto][pywinauto] |
-|---|---|---|---|---|
-| Linux, X11 | yes | yes | yes | — |
-| Wayland | input through libei, the portal or `uinput`; windows through the compositor's own IPC | — | AT-SPI actions; synthetic input on GNOME only, through `gnome-ponytail-daemon` | — |
-| Windows | yes — `win32` and `uia`, from 0.11.0 | yes | — | yes |
-| macOS | — | yes | — | — |
-| Finds a widget by role and name | AT-SPI and UI Automation | — coordinates and image matching | AT-SPI | UI Automation and Win32 |
-| Required dependencies | none | several | pyatspi, PyGObject | comtypes, pywin32 |
-
-**Use PyAutoGUI** if you need macOS, or you want image matching behind a
-small API and your desktop is X11 or Windows. It is the most widely used of
-these by a wide margin, and that is worth real money in answered questions.
-
-**Use pywinauto** if the target is Windows and only Windows. It is mature and
-Windows-shaped throughout, with far more Windows-specific knowledge behind it
-than a package spanning four desktops can carry.
-
-**dogtail is not really a competitor.** The `atspi` extra installs it, and
-the element tree on Linux is dogtail underneath. Use it directly if AT-SPI on
-Linux is all you need and you would rather have one less layer.
-
-What is left is the awkward middle, and it is the only thing pyguitest claims
-to be better at: one API that keeps working when the session underneath
-changes — X11 to Wayland, GNOME to KDE to sway, Linux to Windows — and
-`gui.supports()` to ask what the session in front of you can actually do
-instead of discovering it by failing. If you do not have that problem, one of
-the above is a shorter road.
-
-These projects move, and the table is our reading of them rather than theirs
-— check their own documentation before deciding on it.
-
 ## Install
 
 Requires Python 3.10 or newer.
 
+**Linux and the BSDs**
+
 ```sh
 pip install pyguitest              # core; no dependencies
 pip install 'pyguitest[atspi]'     # + element automation
-pip install "pyguitest[windows]"   # + element automation on Windows (comtypes)
+```
+
+**Windows**
+
+```sh
+pip install pyguitest              # core; window and input control
+pip install "pyguitest[windows]"   # + element automation, through comtypes
+```
+
+**macOS**
+
+```sh
+pip install pyguitest              # core; screenshots only, through screencapture
+pip install "pyguitest[macos]"     # + elements, windows and input, through PyObjC
 ```
 
 Or from a checkout, if you are working from the source tree:
@@ -139,7 +106,9 @@ Or from a checkout, if you are working from the source tree:
 git clone https://github.com/ctrondlp/pyguitest.git
 cd pyguitest
 pip install .
-pip install '.[atspi]'
+pip install '.[atspi]'      # Linux and the BSDs
+pip install '.[windows]'    # Windows
+pip install '.[macos]'      # macOS
 ```
 
 You do not need `-e`; that flag is for developing *this package*, and is
@@ -147,8 +116,8 @@ covered in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 **None are required.** The package imports and runs with nothing else
 installed. What you add depends on which backend has to serve your desktop
-— extras (`atspi`, `x11`, `uinput`, `eiinput`, `windows`, `dev`), a few
-distribution packages pip cannot supply, and sometimes a tool on `PATH`.
+— extras (`atspi`, `x11`, `uinput`, `eiinput`, `windows`, `macos`, `dev`), a
+few distribution packages pip cannot supply, and sometimes a tool on `PATH`.
 Rather than work that out from a document, ask the machine:
 
 ```sh
@@ -178,6 +147,7 @@ is what `connect()` reports, what `backend.providers()` lists, and what
 | Any desktop with a portal | the RemoteDesktop portal (`portal`) | — | — | the Screenshot portal (`portalcapture`) |
 | Unattended CI | `x11` under Xvfb, or a headless session | AT-SPI, where a bus is running | `gnomeshell` on a headless GNOME | `x11` |
 | Windows | `win32` (`SendInput`) | `uia`, via the `windows` extra (UI Automation) | `win32` (`EnumWindows`, plus window events through `SetWinEventHook`) | `win32` (GDI `BitBlt`); one window un-occluded is not yet served |
+| macOS | `macquartz`, via the `macos` extra (`CGEventPost`) — opt-in, and the PostEvent grant is made by hand in System Settings | `macos`, via the `macos` extra (the Accessibility tree) — the Accessibility grant is made by hand in System Settings | `macos`, joined to CoreGraphics for the on-screen list; titles need the Screen Recording grant | `screencapture`, which ships with the OS |
 
 Two things the table cannot say. Whether an application publishes anything to
 AT-SPI is up to the application, and [testable-guis.md][testable-guis] is
@@ -188,9 +158,14 @@ way. That file is where the Windows row above needs reading twice: `win32` and
 `uia` are registered and composed exactly like every backend above them, and
 both have driven a real Windows 11 desktop — but on one machine, with one
 layout and one monitor, so the row says what is implemented and validation.md
-says what has been measured.
-[docs/developers/adr-003-windows.md](docs/developers/adr-003-windows.md)
-records the design and the alternatives rejected along the way.
+says what has been measured. The macOS row needs the same reading: `macquartz`
+and `macos` are registered and composed like every backend above them, and
+both have driven a real macOS 26 machine over SSH — but on one machine, with one
+grant history, so here too the row says what is implemented and
+validation.md says what has been measured.
+[docs/developers/adr-003-windows.md](docs/developers/adr-003-windows.md) and
+[docs/developers/adr-004-macos.md](docs/developers/adr-004-macos.md) record
+each platform's design and the alternatives rejected along the way.
 
 ## Usage
 
@@ -338,9 +313,6 @@ flags works unchanged.
 
 [recorder]: https://github.com/ctrondlp/pyguitest-recorder
 [testable-guis]: https://github.com/ctrondlp/pyguitest-recorder/blob/main/docs/testable-guis.md
-[pyautogui]: https://github.com/asweigart/pyautogui
-[dogtail]: https://gitlab.com/dogtail/dogtail
-[pywinauto]: https://github.com/pywinauto/pywinauto
 
 ## Documentation
 

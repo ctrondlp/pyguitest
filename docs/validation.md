@@ -1330,7 +1330,7 @@ the one `wait_for_process` branch that needs an unelevated session.
 ## Run live on Windows 11 (build 26200), interactive desktop
 
 2026-09-19, the console session itself (`query session` shows `>console
-denni Active`, not an SSH login) — the exact gap the previous section left
+<user> Active`, not an SSH login) — the exact gap the previous section left
 open. Driven against two targets: a hand-rolled native Win32 window
 (`EDIT`/`BUTTON`/`STATIC`/`SysTabControl32`/`COMBOBOX` children, a real menu
 bar) built for this purpose the same way the X11 validation scripts build a
@@ -1620,11 +1620,27 @@ will say so, which is correct for the SSH session it ran in.
     second monitor at a different DPI. (Coordinate accuracy on a single
     monitor is confirmed above; multi-monitor arithmetic still is not — this
     box has one screen.)
-  - **`windows()` really is bottom-to-top** once reversed — the ordering
+  - ~~**`windows()` really is bottom-to-top** once reversed — the ordering
     `Session.find_window` depends on. (The *set* `windows()` returns, and the
     cloaked/shell filtering, are confirmed live above; the *z-order claim
     specifically* is not, and is the one thing here a fake cannot settle
-    because it is a claim about `EnumWindows` itself.)
+    because it is a claim about `EnumWindows` itself.)~~ **Closed 2026-09-27:**
+    three plain native toplevels (`ZOrderProbeA`/`B`/`C`) were created in one
+    process and their relative z-order pinned deterministically with
+    `SetWindowPos(HWND_TOP, SWP_NOACTIVATE)` — no foreground/activation
+    contest involved, just three windows stacked in a known order. A raw
+    `EnumWindows` walk via ctypes, independent of pyguitest, read back
+    `A, B, C` top-down; `windows()` read back `C, B, A` — the exact reverse,
+    as claimed. The pin order was then flipped (`C` moved to top last instead
+    of `A`), which flipped the real stacking to `C, B, A` top-down and
+    `A, B, C` on `windows()` — ruling out creation order or coincidence, since
+    the reported order tracked the real one both ways. `find_window()` picked
+    the true topmost of the three (`A` in the first run, `C` in the second)
+    each time. Two additional back-to-back runs of the first ordering matched
+    cleanly as well, with no windows-station or foreground-lock complications:
+    unlike the `activate_window` retry test, `SetWindowPos(..., SWP_NOACTIVATE)`
+    never touches the foreground window, so this needed no third-process
+    control and no Task Scheduler indirection.
   - ~~`ShowWindow`'s other states (`minimize_window`/restore) are read back
     rather than trusted.~~ **Closed 2026-09-20:** each read back through
     `IsIconic`.
@@ -1892,6 +1908,86 @@ They found bugs no unit test could have:
 
 All are fixed and covered by regression tests. Capture in particular had to
 meet a real compositor before it was trustworthy.
+
+## The 2026-09-26 external review, and what it maps to here
+
+A static review of the public repositories (the reviewer could not run either package)
+listed eleven gaps plus four packaging notes, and two of them are pyguitest's own High and
+Medium items -- both already in the list above, which is the honest answer rather than a
+new finding: **Windows multi-monitor and mixed DPI** ("`MOUSEEVENTF_ABSOLUTE |
+VIRTUALDESK` lands where the arithmetic says on a second monitor at a different DPI",
+above) and **`windows()` bottom-to-top ordering** (also above, and for the same reason:
+this box has one screen). What would close them is hardware, not code: two monitors at
+different scale factors, and three overlapping windows with an independent
+`GetWindow(GW_HWNDNEXT)` read to compare `windows()`'s order against.
+
+The rest of the review's pyguitest half, in its own numbering:
+
+- **Portal input: negotiation is not delivery.** Already stated as the boundary of the
+  `inputcapture` run above -- `CreateSession`/`SelectDevices`/`Start` measured against a
+  real portal, and keyboard, pointer and scroll delivery *after* `Start()` not measured,
+  because it needs a live GNOME or KDE session with consent. Unchanged, and still the
+  most valuable single live run nobody has made.
+- **Hyprland and niri remain unvalidated.** Unchanged: sway has been run, its two
+  wlroots siblings have not, and they are listed in the untested material rather than
+  claimed by the capability model.
+- **`Environment.detect()` is heuristic, so "supported" means "worth attempting".**
+  Agreed as a documentation matter rather than a defect; the doctor and the backend
+  reasons are where the honesty lives, and both say *why* rather than "not supported".
+- **`wait_for_idle` measures CPU idle, not UI idle, and 1% is below the sampling floor.**
+  The docstring says so; the review's suggestion -- surface the effective resolution where
+  a caller sets the threshold -- is a good one and is not implemented.
+- **Accessibility adversarial trees.** Answered on this side as of 2026-09-26, and the
+  answer is one adversarial-tree class per platform rather than a live finding at a
+  time: `tests/test_uia_backend.py::TestTreesThatLie` and
+  `tests/test_macos_backend.py::TestTreesThatLie` build the *combinations* the review
+  named -- every child reported at `(0, 0)` with no size, one name in two windows of one
+  process, a popup that closes between the capture and the read, a condition a provider
+  answers with more than was asked, a parent chain that loops -- plus a title that is
+  not text, a child list that will not answer, and the node and depth budgets a merely
+  enormous tree has to stop at. Writing them down found three defects, which is the
+  argument for writing them down: `uia`'s element-array reader wrapped a NULL slot as a
+  real element (name `""`, role `unknown`, `alive` False, no rectangle) and handed it to
+  a caller inside a search's answer; a `CurrentName` or help text that is not a string
+  reached a compiled-regex filter as a `TypeError` instead of as "no match", with macOS
+  carrying the same hole from the other direction because an AX attribute can be any
+  type an application published; and on macOS a tree reporting an *ancestor* as its own
+  child was followed, so one widget came back as twelve `find_elements` matches in the
+  test's own fixture (measured by running the pre-fix walk over it, which is also how
+  the tests were shown to bite). All three are fixed. What stays open is the half no
+  fake can produce -- a real toolkit's lying tree, which is what the GTK4 `(0, 0)`
+  finding was -- and the recorder's resolver half of the same question, which is its
+  own row in its `docs/developers/status.md`.
+- **A compact tested/untested matrix.** This file's headings and dated runs are the long
+  form; the review asked for the one-page version. The `Status and known gaps` tables in
+  pyguitest-recorder's `docs/developers/status.md` are the shape it wants. **Answered by the
+  maintainer on 2026-09-26: no matrix on either front page.** The README's job is to say
+  what the package is for and how to start; the evidence belongs here, next to the runs it
+  came from, where a claim can carry its date and its conditions. A summary on the front
+  page would be a second copy of this file to keep true, and the copy nobody checks is the
+  one that goes stale. The README says which document holds the evidence and links to it,
+  and that is the whole of the claim it makes.
+- **PEP 639 / `setuptools>=77`.** Worth one line in install troubleshooting, per the
+  review: an older `pip` or a build environment without that floor fails on the license
+  metadata rather than on anything this package does.
+
+**One item on that list changed today**, and the review is why it was noticed at all:
+pyguitest's `screens()` raised `AttributeError` on every real Mac (see the re-measurement
+above). It is recorded there rather than here, with the fake that hid it.
+
+**One change in this branch is not run live on either platform yet, and this is where that
+is said.** The pointer fallback in `uia.Element.click`/`macos.Element.click`
+(`click_by_pointer`, with `Session.click_element` as the spelling for an element taken
+straight from a backend) is a platform-specific change on two platforms, and each wants
+its own live pass: on Windows, the replay line its own live check stopped at -- a
+`SysListView32` cell that publishes nothing to invoke -- so that the recorded
+`gui.element(role=Role.TEXT, name="Gamma").click()` reaches a real click on a real cell;
+on a Mac, a widget AX leaves actionless, a static text or a table cell, so that the
+pointer really goes to the centre of its rectangle. Both ship in 0.14.0 with that
+pass still outstanding, and neither is claimed as measured. The three
+fixes the adversarial-tree classes found are a different case and need no desktop: they
+are pinned by tests that were each shown to fail against the old code, which is the
+evidence a fake *can* give.
 
 ## Known caveat: `geometry()` on GNOME's XWayland
 
@@ -2339,4 +2435,743 @@ a second screen and `EnumDisplayMonitors` returning false needs a broken
 desktop (this box has one working screen); a suspended UWP application's
 cloaked window through the event path needs a Store application and a way to
 suspend it, and is the one item nothing in this run came near.
+
+
+## macOS: run live on one Mac, every grant denied and then three of four (2026-09-26)
+
+**The half of macOS support that needs no grant has now run on a Mac.** What was
+built is the half ADR 004 ordered first because it needs no hardware to review
+-- the session vocabulary, the four TCC preflights, the hints, the `macos`
+extra, `capture:screencapture` and the `macquartz` input backend -- and all of
+it is still driven from `tests/test_macos.py` against a fake `Quartz` in
+`sys.modules` and a patched `backends._macapi`. The same file also runs on a
+real Mac now, and so does the probe a fake cannot be: a macOS 26.7 (build
+25G229) x86_64 Mac, Python 3.13.15 from the python.org installer under
+`/Library/Frameworks`, with the tree copied onto it by `scp` because the machine
+has neither `git` nor the Xcode command-line tools, run as
+`PYTHONPATH=src .venv/bin/python mac_probe.py`.
+
+Two properties of that first run shape most of what follows, and the second was
+deliberately given up later the same day. **The machine held none of the four
+grants**, so every question whose answer lives behind one was open -- and that
+is most of this list, including the whole input half. And **it was reached over
+SSH**, where `__CFBundleIdentifier` is unset and no *application* is responsible
+for the process -- the responsible identity is the session's
+`sshd-keygen-wrapper` instead, which is what a row has to name for this route,
+and which the section on the grants below is where that was measured. A dialog
+cannot reach a console nobody is sitting at, either. The earlier PostEvent
+measurement this file already records came from a Terminal in that machine's
+own GUI session; these runs are the same machine reached the other way, and the
+difference is the point rather than a detail.
+
+**The grants were then made**, which is the half no fake can reach -- and which
+grant they were is a finding of its own, because the rows that changed anything
+are named for identities rather than for interpreters: `sshd-keygen-wrapper`,
+the identity TCC attributes a process reached over SSH to, and `Terminal`, the
+app that launched the GUI session's. Three of the four preflights answered
+`True` afterwards, and the input half of `macquartz` ran against a real desktop
+-- typing into TextEdit and reading the document back over the Accessibility API
+rather than off a screenshot, which is what makes the results below measurements
+instead of photographs. Screen Recording never flipped, and the second run
+replaced this file's first explanation of why: the pane it would flip in holds
+no rows at all. Nothing here was reached through `pyguitest`'s own AX read path,
+because there is not one yet: the observers are scratch PyObjC calls, which is
+also what makes the window-title finding below worth recording -- an eventual
+`macos` backend can have it.
+
+Two properties of the machine belong next to those grants, because together they
+make "three of four" a weaker claim than it looks. Its System Integrity
+Protection is in a custom configuration -- `csrutil status` answers `unknown
+(Custom Configuration)` with `NVRAM Protections: disabled` -- so it is not a
+stock Mac and this file does not treat it as one. And the rows respond to an
+*identity*, so switching them on widened what remote access to that box means:
+anything reached over SSH there inherits Accessibility, event posting and input
+monitoring for as long as the `sshd-keygen-wrapper` row is on. `tccutil reset
+Accessibility` is what undoes it.
+
+What the SSH run settles, in the probe's own terms:
+
+- **The Darwin branch of `detect()` is the branch a real Mac takes** --
+  `session_type darwin (macOS 26.7)`, `compositor quartz`,
+  `tools screencapture` -- and `python -m pyguitest doctor` exits 0 there.
+- **Both frameworks in `_macapi` dlopen although neither file exists.**
+  `ls -l` on the two paths `_FRAMEWORK_PATHS` names answers "No such file or
+  directory" on this machine, and the probe prints both loaded, so the dyld
+  shared cache is what resolved them. "The file itself is usually not on disk
+  since Big Sur" is measured rather than transcribed now, and the
+  `ctypes.util.find_library` fallback is not the route that worked -- it names
+  the same missing path.
+- **`platform.mac_ver()` answers with the marketing version**: 26.7, on a kernel
+  that calls itself Darwin 25.6.0, which is the `major - 9` arithmetic this file
+  already recorded as dead.
+- **The four preflights answer rather than raise**, all four `False`, and
+  `screencapture` is refused *before* it runs, in agreement with the preflight
+  that preceded it. Each of those is a ctypes binding detail -- a framework path
+  or an `argtypes` list -- and a fake `Quartz` never sees one.
+- **The PostEvent note reads on a Mac the way it now has to.** The corrected
+  tree prints a note that names Accessibility as the pane the grant is filed
+  under, says the grant is made by hand, and claims no prompt; the text it
+  replaced sent a reader looking for a dialog this machine does not show.
+
+### What the grants changed, on the same machine, the same day
+
+- **Accessibility is the grant that mattered, and two more followed from it.**
+  `accessibility_trusted()` flipped to `True`, and `post_event_allowed()` and
+  `listen_event_allowed()` flipped with it without either of those panes being
+  touched. tccd's log states the reason a dozen times over: `Evaluated composed
+  authorization from kTCCServicePostEvent to parent service
+  kTCCServiceAccessibility: Auth:Allowed (System Set)`. So this file's own
+  earlier correction needs correcting in turn: PostEvent is granted by hand,
+  yes, but the hand is on the Accessibility toggle and PostEvent is *composed*
+  from it. Nothing prompts for PostEvent, and nothing has to. What the second
+  run added is that the chain is three services deep rather than two -- the same
+  request logged `Evaluated composed authorization from
+  kTCCServiceListenEvent to parent kTCCServicePostEvent: Auth:Unknown (None)`
+  immediately before the hop above answered. `Unknown` there is the
+  intermediate hop finding no row of its own and deferring upward, which is why
+  the **Input Monitoring** pane reads `No Items` on a machine whose
+  `listen_event_allowed()` answers `True`.
+- **The grant is scoped to the identity the request is attributed to, and that
+  identity is the session's rather than the interpreter's.** The requests that
+  succeeded are logged with both halves of the chain, kept apart:
+  `AttributionChain: responsible={identifier=com.apple.sshd-keygen-wrapper,
+  responsible_path=/usr/libexec/sshd-keygen-wrapper,
+  binary_path=/usr/libexec/sshd-session},
+  accessing={identifier=org.python.python, ...}`, answered `ReqResult(Auth
+  Right: Allowed (System Set), promptType: 1, DB Action: None)`. Python is the
+  *accessing* process; its path appears nowhere in the responsible entry, and
+  the row that answered is the one filed under
+  `/usr/libexec/sshd-keygen-wrapper`. The identification is worth stating,
+  because the process is not named that on the box: macOS 26 runs the session's
+  worker as `sshd-session: <user>@notty` while the identifier TCC files it
+  under stays `com.apple.sshd-keygen-wrapper`.
+- **The same machine, the same user, the same interpreter, four answers
+  `False`.** A `LaunchAgent` in `gui/501` running the same `.venv` Python as the
+  SSH session, whose responsible process is `launchd`, answers `False` to all
+  four preflights. So the three `True`s are not a switch that was flipped for
+  the machine: they come from a row that names the SSH session's responsible
+  identity, and a process launched by anything else gets none of them. The
+  console session agrees from the other side -- a Terminal window in the
+  machine's own GUI session answered `True` to the same three preflights, the `Terminal`
+  row doing the work there rather than a second machine-wide setting.
+- **The recorder's tap is permitted, not merely predicted.** The preflights are
+  `CGPreflight*` calls, so the second run created the objects themselves:
+  `CGEventTapCreate` returned a live tap for the listen-only mask *and* for the
+  active mask, both released immediately afterwards. That closes the question
+  ADR 004 §6 carried about which service the recorder's tap is gated on -- it
+  asks `kTCCServiceListenEvent`, whose authorization composes up the chain
+  above and needs no row of its own.
+- **No TCC prompt can be raised on that route, which is why the row is switched
+  on rather than answered.** `tccd` computes `promptingPolicyForIdentity:
+  accessingService:withAttributionChain: → promptPolicy = 3;
+  isApplePlatformBinary = 1` for the responsible process and answers `Denied
+  (System Set)`. Putting the same process into the console session with
+  `launchctl asuser 501` changes nothing -- also tried, for exactly this reason
+  -- because the attribution chain is unchanged. The row that does answer
+  arrived by the one route left open to it: the Accessibility warning, recorded
+  in `com.apple.universalaccessAuthWarning` with
+  `/usr/libexec/sshd-keygen-wrapper`,
+  `/System/Applications/Utilities/Terminal.app` and `com.apple.Terminal` among
+  its entries. That warning is raised by the Accessibility API rather than by
+  tccd's prompt machinery, which is why the two paragraphs do not contradict
+  each other.
+- **Where these lines can be read, and where they cannot.** `tccd`'s persisted
+  log carries none of it: a 24-hour dump of it contains no `sshd`, no
+  `ssh-keygen` and no `python`, and the per-request entries it does keep are
+  redacted to `<private>`. The attribution and composition lines above come
+  from `log stream --level debug --predicate 'process == "tccd"'` while the
+  request is being made, which is the instrument any later attribution question
+  needs.
+- **The typing half, measured.** With PostEvent composed from Accessibility,
+  `type_text` delivered
+  `abcXYZ 0123456789 !@#$%^&*()_+-=[]{}|;:',.<>/?` exactly and `é€→中` exactly;
+  `type_text("one\ntwo")` and `send_keys("one~two")` both produced two lines;
+  `left` then `delete` removed the last character; `right` before typing
+  appended; a held `shift` across four `left`s selected exactly those four
+  characters and `delete` removed them. Two anomalies in the first pass were
+  both the instrument rather than the code: a leading character arrived
+  capitalized because TextEdit capitalizes automatically, and a stray extra
+  character came from reading the document before the previous edit had
+  settled. Reading back after every single call removed both.
+- **`scroll`'s sign is settled and needed no change.** `scroll(dy=5)` moved a
+  TextEdit document toward its start and `scroll(dy=-5)` toward its end, read
+  off the window's *vertical* scrollbar (`1.0 → 0.9238`) and its
+  `AXVisibleCharacterRange` (`400 → 368`), with `dy=±20` moving proportionally
+  and `dy=-20` correctly doing nothing at the bottom. A hand-built
+  `CGEventCreateScrollWheelEvent` with the same wheel value moved it the same
+  way. Two things about getting that reading took a second attempt: scroll
+  events go to the window *under the pointer* rather than to the focused app,
+  and a TextEdit window has two scrollbars, of which watching the horizontal
+  one reports "no movement" for a document that scrolled perfectly.
+- **`move_mouse` lands in the space `CGEventGetLocation` reads.**
+  `move_mouse(640, 450)` then a direct read answered `(640.0, 450.0)`, and
+  `move_mouse(541, 474)` answered `(541, 474)`. No grant is involved, which is
+  the ADR's claim and now a measurement rather than a hope.
+- **The AX read path works from an SSH session once Accessibility is granted,
+  and window *titles* need Screen Recording.** `AXIsProcessTrusted()` answered
+  `True`; `AXUIElementCreateApplication` plus `kAXWindowsAttribute` returned
+  windows with readable titles and children for Terminal; and the same walk
+  found the `AXTextArea`, its frame, and the document's own text, which is what
+  every check above was read through. `CGWindowListCopyWindowInfo` answered
+  *without* ScreenCapture with owner names and window numbers intact and every
+  `kCGWindowName` `None` -- the same gate as the capture refusal below, seen
+  from the other side. An eventual `macos` backend's window listing depends on
+  a grant for exactly that reason.
+- **Screen Recording did not flip, and the pane it would flip in is empty.**
+  `screencapture -x` refuses (`could not create image from display`, exit 1)
+  and the preflight still answers `False` with `ReqResult(Auth Right: Unknown
+  (None), promptType: 1, DB Action: None, UpdateVerifierData)` -- `Unknown`
+  rather than `Denied`. This bullet's first version read that as a row that
+  could have matched and did not, and blamed the verifier tccd computes; the
+  panes say otherwise. Read back through the Accessibility API, **Screen
+  Recording** and **Input Monitoring** both list `No Items`, while
+  **Accessibility** lists `AEServer`, `sshd-keygen-wrapper` and `Terminal` with
+  their toggles on, and **Full Disk Access** lists `siriactionsd` and
+  `Terminal`. There is no row in the capture pane for an attribution mismatch
+  to be about, and no prompt can offer one, so the missing grant is an absent
+  row rather than a mismatched one.
+- **The live container is not the runner's.** This run is Python 3.13.15
+  (python.org installer, x86_64) with the grants above; the `macos` job pins
+  **3.12** on arm64 and grants nothing, so it reaches `tests/test_macos.py`'s
+  live class only as skips. Both facts are in that job's own comment now,
+  because a green run there and this run here are not evidence of the same
+  thing.
+
+The `macos` job in `.github/workflows/ci.yml` runs the same probe on a runner,
+where the same five things are true and nothing else is: a runner grants
+nothing, shows no window and has no GUI session, so it neither replaces this run
+nor extends it. It stays advisory until a run of it has been watched green once.
+
+That leaves the following transcribed from documentation and **not confirmed**,
+each a candidate for the first run that can hold a grant:
+
+
+- **The `screencapture` argv beyond acceptance**, `-x` / `-R x,y,w,h` /
+  `-l <CGWindowID>`: transcribed from the man page, and the most a run without
+  the grant can show is that the tool *parses* them. It refused both forms --
+  `could not create image from display`, `could not create image from rect`,
+  exit 1, no file written -- which is the refusal the preflight in front of it
+  predicts rather than an argument error. Whether a crop covers the right
+  pixels is still unmeasured, and `-l` has not been run at all.
+- **The `kVK_*` table, for the keys a document can show.** `left`, `right`,
+  `delete`, `forwarddelete`, `return` (through `send_keys("~")`) and the
+  modifier keys have now been posted into TextEdit and read back, and each did
+  what its name says. The rest of the table is transcription in the way that
+  matters: `f1` and `f12` change the display or the volume on a Mac with the
+  standard keyboard settings, so checking those keycodes by pressing them is a
+  side effect this file will not cause. Posted without error is not verified.
+- **`CGEventKeyboardSetUnicodeString` with a Python `str`, and a bare newline
+  through it: both measured.** PyObjC accepted the string; `é`, `€` and `中`
+  arrived as themselves; `type_text("one\ntwo")` produced two lines. So
+  `send_keys("~")` is a convenience here rather than the only route to a line
+  break, and the parameter being `UniChar *` is not a problem PyObjC leaves to
+  the caller. The astral-plane case `_utf16_units` exists for is still
+  unit-tested only -- the live run typed nothing outside the BMP.
+- **`POINTER_QUERY` is refused by `macquartz` even though the call works.** The
+  module-level `pointer_position()` answered exactly, with no grant at all, and
+  the backend deliberately does not declare the capability: ADR 004 §6 assigns
+  it to the AX backend, which is not written. So `gui.pointer_position()` raises
+  on a real Mac today, with `[ no]` sitting in a tier whose description says
+  "deliberately prevented" -- the reading the ADR already called odd, now
+  measured rather than noticed. `tests/test_macos.py` pins the split.
+- **Screen Recording, and the two routes that would test it.** The first
+  version of this item said a pane row filed against
+  `/usr/libexec/sshd-keygen-wrapper` "does not satisfy Screen Recording, because
+  the verifier tccd computes comes from the interpreter's binary path instead".
+  The evidence above retires that reading: over SSH the interpreter is the
+  *accessing* process and the row that counts is the session's, which is the row
+  that answers three of the four. So the capture grant is untested rather than
+  impossible, and there are two ways to test it. One is a Screen Recording row
+  for `/usr/libexec/sshd-keygen-wrapper`, added by hand in that pane, with the
+  caveat that the picker will not reach inside a framework `.app` -- which is
+  what the `~/Desktop/python-psf` symlink was made for before the add was
+  abandoned. The other is the GUI session, where the responsible app is the
+  terminal or the IDE: `Terminal` already holds Accessibility and Full Disk
+  Access on this machine, the picker accepts an application bundle, and that is the
+  case `docs/install.md` describes. The second is the cheaper of the two, and
+  neither has been run.
+Still to be built, and so not listed above: the AX-to-CGWindowList join as
+this package's own code, and the permission-dependent capability set of ADR 004
+§6. The AX read path itself is no longer on that list -- it landed the same day,
+and the next section is its run.
+
+## macOS: the `macos` backend, run live through the AX read path (2026-09-26)
+
+**The half ADR 004 called its largest single unknown has now run, and every
+question that run was written to answer has an answer.** `backends/macos.py` is a
+`MacosBackend` at priority 90 -- elements, element actions, element geometry,
+window listing, window placement, screens -- plus a synthetic desktop root, a role
+table and an action table. It is exercised by `tests/test_macos_backend.py` (128
+tests, fake-driven, so they run on Linux CI) and on the same macOS 26.7 Mac the
+section above describes, reached over SSH with Accessibility granted, against the
+real desktop: Terminal, TextEdit with four documents open, a first-run installer
+panel, the Dock, the menu bar and two dozen helper processes.
+
+The runs were **read-first**: no window was raised to make a measurement. The one
+exception is the write round trip below, which moves and resizes a window that was
+already open and puts it back where it started.
+
+What the run settles:
+
+- **`windows()` reports exactly the windows a person can see.** Six of them:
+  Terminal's, TextEdit's four, and the installer panel -- each by its real title,
+  `pyguitest — caffeinate -dis -t 14400 — 120×30` and `live_doc4.txt` downward.
+  Getting there took the join, and two measurements decide its shape.
+  `kCGWindowListOptionAll` names **50** windows, 36 of them at layer 0, and 21 of
+  those layer-0 entries are helper surfaces: 1280×30 strips shaped like menu bars,
+  64×64 cursor views, 14×14 widget views, a 500×500 `loginwindow`. **Layer alone
+  over-reports.** Fifteen entries carry `kCGWindowIsOnscreen` at all and the
+  on-screen ones include the Dock (layer 20), the menu bar (layer 24) and Control
+  Center's widgets (layer 25). **On-screen alone over-reports too.** The pair -- on
+  screen *and* layer 0 -- is exact, and is what the backend filters on.
+- **Window titles come from AX, not from CoreGraphics, and that is a grant
+  finding rather than a preference.** One of the fifteen on-screen entries had a
+  non-empty `kCGWindowName`, and it was the Window Server's own menu bar. Every
+  other name is withheld without the Screen Recording grant, so on a Mac holding
+  only Accessibility the `kAXWindowsAttribute` read is the *only* source of a
+  title. The join matches an AX window to its window-server entry by process and
+  by rectangle, and the two agree exactly: Terminal at `153, 79, 877×499` both
+  ways.
+- **One direction of the join is not total, and the code tolerates it.** The
+  Window Server's own pid answers `-25204` (`kAXErrorCannotComplete`) for
+  `kAXWindowsAttribute`; Dock and Control Center answer with zero AX windows;
+  Finder answers with an **`AXScrollArea`** where its windows should be, and its
+  title reads `-25212` (`kAXErrorNoValue`). A malformed AX list has to degrade to
+  an empty title rather than to a wrong one, and a fake-driven test pins exactly
+  that Finder case.
+- **The system-wide element is not a tree, so the root is synthetic.** Measured: it
+  publishes exactly four attributes -- `AXFocusedApplication`,
+  `AXFocusedUIElement`, `AXRole`, `AXRoleDescription` -- and answers
+  `kAXChildrenAttribute` with `-25205` (`kAXErrorAttributeUnsupported`). So
+  `root_element()` is a `desktop frame` whose children are the applications that
+  answer `AXApplication`, built from the window server's pids. The live run found
+  **15** of them, including Dock, Control Center, Spotlight, `loginwindow` and
+  several XPC helpers -- the last of which is the point: the button in a Save panel
+  lives in `com.apple.appkit.xpc.openAndSavePanelService`, not in the application
+  that opened it.
+- **`kAXFocusedApplicationAttribute` is not reliable enough to build
+  `active_window()` on.** From the same shell against the same desktop it answered
+  `err=0` with Terminal's pid on one run and `-25204` on the next. So the ordering
+  comes from the window server's on-screen list -- which *is* front to back, and
+  demonstrably so: in the all-windows enumeration Terminal's window sat behind
+  TextEdit's four, and on screen it was in front of them, which is what the desktop
+  showed. The first entry of that list is `active_window()`, and `window_at()` for
+  the centre of the front-most window returned that same window.
+
+### What the AX read path costs, and what it cannot do
+
+- **A whole-desktop search costs under a second.** 43 push buttons in 0.59 s, five
+  text areas in 0.62 s, in-process on the machine. That is the number `_MAX_NODES` is a
+  budget against rather than against a hang, and it is much smaller than the
+  1.83 ms-per-node figure above would suggest: those calls each paid a round trip
+  over SSH, and the search does not.
+- **A breadth-first walk of Terminal's window cost 17 nodes, depth 4, 0.031 s**
+  -- 1.83 ms per node over SSH. That is ADR 004's "deep-tree cost", which was
+  unmeasured when the ADR was written.
+- **AX has no search, and the walk is the API.** `AXUIElementCopyAttributeValue`
+  reads one attribute of one element, so `find_elements` is a breadth-first walk
+  with a depth ceiling and a node budget. Measured against a real window
+  (`live_doc.txt`): 8 children -- a scroll pane, four push buttons, an image -- and
+  a search for `push button` inside it returned 8, by translated role, with
+  `Element('push button', 'Edited')` among them.
+- **`AXUIElementCopyElementAtPosition` answers, cross-session, and its rectangle
+  is a document's rather than a viewport's.** The deepest element at (640, 400) was
+  an `AXTextArea`, pid 690, `visible` True, `enabled` True, `alive` True, `focused`
+  True, `actions` `[]`, and the document's own text in `text` -- and its `extents`
+  were `(154, -6638, 860, 7217)`. A rectangle from `extents()` can therefore be far
+  larger than the screen with its centre off it, which is worth knowing before
+  aiming a click at one.
+
+### The writes, the two bugs the run found, and what is still open
+
+- **The window writes work, and one platform behaviour is worth recording.**
+  `move_window` and `resize_window` write `kAXPositionAttribute` and
+  `kAXSizeAttribute` through `AXValueCreate`, with no pointer involved. A TextEdit
+  window moved `+20, +20` and back, and resized `-40, -40` and back, reading back
+  each time exactly what was asked for. **A Terminal window refused the same
+  resize without an error**: it resizes in whole character cells, so a one-point
+  change is accepted by AX and then rounded away by the application. That is the
+  application's behaviour rather than the backend's, and it is why the write tests
+  use a document window.
+- **A window write invalidates the join, and finding that was the run's job.**
+  `move_window` succeeded and the `resize_window` immediately after it failed with
+  *"no AX window matches its handle"*: the cached CoreGraphics rectangle predated
+  the move, so the frame match looked for the window where it no longer was. The
+  fix drops both cached enumerations on the way out of a write, plus a tolerance of
+  a point or two for the gap between an AX write landing and the window server
+  reporting it. `tests/test_macos_backend.py` pins both halves.
+- **`ApplicationServices` publishes no `kAXActionNamesAttribute`.** Reading
+  `actions` the way AX's attribute documentation describes raised `AttributeError`
+  on every element that had any; `AXUIElementCopyActionNames` is the call. Every
+  other `kAX`/`kCG` name in the module was then checked against the real bindings
+  -- 41 names -- and that one was the only absence. The constants it *does* publish
+  are the ones a reader would check: `kAXPressAction`, `kAXRaiseAction`,
+  `kAXShowMenuAction` and the rest are there under their own names.
+- **`raise` is the one action measured end to end.** Terminal's window reports
+  `actions` as `['raise']` and `do_action("raise")` performed it; TextEdit's
+  title-bar button reports `['click']` -- the translation of `AXPress` -- while
+  `is_ancestor_of` walked from that button up to its window, answering `True` from
+  the window down and `False` back up.
+- **`screens()` reports DPI/96, and a virtual display reports a DPI below 96.**
+  One display: 1280×800 points and 1280×800 pixels, mode 1280×800, main, and
+  `scale` **0.75** -- the physical size the machine reports works out to 72 DPI. The
+  convention answering honestly is worth a line because 0.75 looks like a bug until
+  the arithmetic is done. **Re-measured 2026-09-26, after this raised on a real Mac:**
+  a later tidy-up had put a `CGGetActiveDisplayCount()` in front of the list call, a
+  function CoreGraphics does not have, so every `screens()` on a Mac was an
+  `AttributeError` while this file's own numbers said otherwise and the fake in
+  `tests/test_macos_backend.py` answered the invented name happily. pyguitest-recorder's
+  live macOS `Recorder` run is what surfaced it -- its environment block read
+  `capability probe failed: CGGetActiveDisplayCount` -- and the fix asks
+  `CGGetActiveDisplayList` for a maximum instead, which is how the count was obtained
+  when the numbers above were first measured: `Screen(0, 1280x800, 0.75, 'main')`,
+  38 ms. The lesson is ADR 004's, one layer down: a fake that supplies what the real
+  binding does not have turns a live failure into a green CI run, which is why the
+  module now has a test that reads its own source for `self._quartz.<name>` calls
+  outside `_QUARTZ_NEEDED`.
+- **`pointer_position()` needs no grant, and this backend is where that
+  capability lives.** ADR 004 §6 assigned it here and `macquartz` deliberately does
+  not declare it; the live pointer read answered `(946, 3)`, and
+  `connect(backend="macos")` reports `POINTER_QUERY` as supported on a machine
+  whose only grant is Accessibility.
+- **The whole way through works from `connect()`.** `pyguitest.connect(
+  backend="macos")` on that machine selected `MacosBackend`, reported 14 capabilities,
+  listed 6 windows and 1 screen, answered the pointer read, returned the desktop
+  root, and `gui.root_element().child(role="window", name="live_doc.txt")` found
+  the real TextEdit window through the session's own element API.
+
+What this run does **not** settle, and what is therefore still open:
+
+- **Screen Recording has not been granted on any Mac** -- closed 2026-09-27,
+  see "macOS: closing four open items" below.
+- **The clipboard is untouched.** `clipboard.py` owns `pbpaste`/`pbcopy` on a Mac,
+  and nothing here exercised it.
+- **`AXObserver`, and therefore `WINDOW_EVENTS`, is not implemented.** It is the
+  phase after this one, and `wait_for_window` on a Mac still has nothing under it.
+- **Selection and disclosure state were read off synthetic trees, not a real
+  one** -- closed 2026-09-27, see "macOS: closing four open items" below.
+- **`INPUT_STATE_QUERY` (`is_key_pressed`/`is_button_pressed`) is not
+  implemented.** `CGEventSourceButtonState`/`KeyState` would be the route, and
+  nothing in this phase needed them, so they are absent rather than guessed at.
+- **The quarter-second cache on the window-server lists is a design choice rather
+  than a measurement** -- closed 2026-09-27, see "macOS: closing four open items"
+  below.
+
+## macOS: `macquartz`, run live through an event tap on the same machine (2026-09-26)
+
+The other half of the platform, measured the same day and on the same machine, with
+pyguitest-recorder's CGEventTap backend listening in a second process over SSH. Two
+things were being asked: whether a *replayed* key arrives as the key that was
+recorded, and whether the key names a recording writes are names this package can
+press.
+
+**Setup, because the arrangement is most of the result.** A listen-only tap at the HID
+tap skips the events of the process that installed it, so the events have to come from
+somewhere else: a child process driving `macquartz` directly, with the tap in the
+parent translating what arrived. Nothing was clicked, and the only chord posted was
+Command+M, so the run could not open anything on the desktop it was measuring.
+
+- **The key names a recording emits now resolve, and the flag follows them.**
+  `press_key("Super_L")`, `press_key("a")` and their releases produced four translated
+  events, and the `a` arrived as `kCGEventKeyDown` with flags `0x20100000` -- Command
+  set. That flag is the fix being visible from outside: the held-modifier set is keyed
+  by `macquartz`'s own names, so a `Super_L` that resolved its keycode but not its held
+  entry would have posted the Command key and then sent a bare `a`. Recording the
+  window server's own `kCGEventFlagsChanged` for it was the other half: before the
+  keysym table, `Super_L` raised rather than resolving at all.
+- **A posted modifier press carried no flag, and a tap read it as a release.** The
+  measurement that found the bug: the same four `CGEvent`s, posted by hand with
+  `kCGEventFlagMaskCommand` stamped on each, arrived as `flags=0x20100000` -- and the
+  first of them translated to `key_press Super_L`. Posted by `press_key` as it was,
+  that event arrived as `flags=0x20000000` and translated to `key_release Super_L`,
+  because a flags-changed event says press-or-release in its flag set and nowhere else.
+  So a replayed `Command+S` captured as *release* Command, press s: a chord with no
+  press in it. Fixed by recording the modifier as held before its own event is built;
+  the chord now captures as `key_press Super_L`, `key_press a`, `key_release a`,
+  `key_release Super_L`, which is what the hand-built sequence produced all along.
+- **The window server passes a posted event's flag set through rather than recomputing
+  it.** This is the fact the fix rests on, and it is the reason a synthetic press has to
+  claim its own flag: the tap is handed what the poster wrote. It also means the
+  bit macOS uses for "the left command device is down" cannot stand in for
+  provenance -- see below.
+- **`0x20000000` is ambient, not a synthetic-event marker.** Every tapped event carried
+  it, including a `CGEventCreate(None)` that was never posted and events posted by
+  another process. It was the one flag on the first probe that had no explanation, and
+  the explanation is that it is always there.
+- **`injected` has nothing to read on macOS, and that is now measured rather than
+  assumed.** Every event arrived with `injected=False`, including events this
+  machine's own desktop had just been handed. The fields that *do* differ are about
+  who sent an event rather than how: `kCGEventSourceUnixProcessID` named the posting
+  process, and an `0xDEADBEEF` set into `kCGEventSourceUserData` survived to the tap.
+  Neither is a synthetic bit, and on hardware both are 0 or the session's own id.
+- **`osascript` is not a route to the tap, and that is worth knowing before blaming the
+  tap.** System Events posting `key code 0` produced *no* tapped event at all, where
+  the same key posted through `CGEventPost` at the HID tap produced one: the
+  AppleScript route delivers to the target process rather than through the HID stream,
+  so a tap never sees it. Anything measured with `osascript` as the source would have
+  looked like a broken capture.
+- **`CGEventKeyboardGetUnicodeString` marshals as `(length, text)`.** `(1, 'a')` for a
+  letter and `(1, '\x7f')` for the forward delete -- keycode 117, which is X11's
+  `Delete` and this package's `forwarddelete` -- so the recorder's `_text` unpacking is
+  right and its fold-to-`""` stays a belt rather than a load-bearing guess.
+- **A tap is told when the window server switches it off, and the notification is
+  teardown noise in practice.** `kCGEventTapDisabledByUserInput` (`0xffffffff`;
+  `...ByTimeout` is `0xfffffffe`) arrived once per live run, always after `stop()` had
+  disabled the tap itself, with every posted event already delivered -- 48 of 48 across
+  a three-second gap between two bursts. A 1.5 s callback, which is what the timeout is
+  charged against, produced no notification at all: a listen-only tap is never waited
+  on. So the recorder now puts a tap back only while a run is live, which is the guard
+  the measurement buys.
+
+What it still does not settle: **no human's own keyboard or pointer has been through
+the tap.** Every event above was posted, which is not the same as arriving from HID --
+provenance fields and the modifier-flag behaviour are exactly where the two could
+differ, and hardware is the one source a posted event cannot stand in for. Nothing has
+generated a script *from* a Mac either: the tap's translation was read directly rather
+than through a `Recorder` run.
+
+## macOS: a `Recorder` run against a live desktop, and its replay read back (2026-09-26)
+
+**Both gaps the section above names are closed, on the same machine and the same day.** A script
+has now been generated *from* a Mac, and what that script did when it ran was measured from a
+second process rather than assumed: a child posting through `macquartz` drove a real desktop
+(TextEdit with a document open), `pyguitest-recorder` captured it through its tap, generated a
+98-line script, and that script was then replayed unmodified while a second recorder captured
+what the replay put on the wire. What that says about this package:
+
+- **`connect(backend=["macquartz", "macos"])` is the right call on a Mac, and a generated
+  script has to name it.** A bare `connect()` answers with the Accessibility read path, whose
+  band ordering is deliberate: `macquartz` is `opt_in`. The replay's own
+  `require(KEY_EVENT, POINTER_BUTTON, POINTER_MOVE, POINTER_SCROLL, TEXT_ENTRY, TIMING)`
+  passes once the list is named, and the script fails it -- before posting a key -- when it is
+  not.
+- **The replay's input arrived exactly as posted, read by an independent tap.** 141 raw events
+  from the replay against the 113 the recording of the same actions produced, and the
+  *semantic* content is identical: 35 events either way, and two generated scripts that differ
+  only in `gui.wait()` values (13 lines: one pause the replay's tighter pacing did not
+  warrant, five waits off by 0.01-0.02 s) plus the header's timestamp.
+- **`scroll` signs survive the whole loop, in both directions.** `gui.scroll(dy=-3)`,
+  `gui.scroll(dy=5)` and `gui.scroll(dx=3)` replayed to exactly three scroll events carrying
+  `(0, -3)`, `(0, 5)` and `(3, 0)` -- the same numbers, in the same order, as the recording.
+  That is `kCGScrollWheelEventDeltaAxis1`/`2` passed straight through by *both* the recorder's
+  tap and this backend, which is the property a replayed scroll depends on.
+- **`drag` is a press, an interpolated path and a release.** `gui.drag((454, 204), (554, 234))`
+  posted a `button_press` at the origin, 38 `motion` events, and a `button_release` at the
+  destination. The recording of the same drag, posted by hand in five steps, has 7 motion
+  events -- the analyzer folds both into the one call, so the interpolation count is this
+  backend's business and nobody else's.
+- **`send_keys` chords decompose into modifier transitions, and they reorder.** `^(a)`,
+  `%(+({Up}))` and `%(^(+(a)))` all arrived with the right key and the right flag set; the
+  *order* of the `kCGEventFlagsChanged` events differs from the recording's, which posted each
+  modifier separately, and the tap reports the window server's order rather than the poster's.
+  Nothing downstream cares, because the flags present on the key event are what a chord is read
+  from.
+- **`type_text` is layout-independent, and that is now measured from the receiving side.**
+  `CGEventKeyboardSetUnicodeString` on a keycode-0 event arrives at a tap with the right
+  character in `CGEventKeyboardGetUnicodeString` and the ANSI `a` as the keycode -- so the
+  replayed `type_text('abc def')` reads `key_press 'a' 'b'`, `'c'`, `' '` ... The text is what
+  a script is regenerated from, which is why the second script says `type_text('abc def')`
+  too. Whether the *application* inserted the characters is still not measured here: the run
+  below left TextEdit behind a modal alert, so the document's own content was never read back
+  -- see the note at the end.
+
+**What that run did not settle, and one thing it found instead.** The desktop it drove was
+TextEdit, whose document file the harness rewrote between passes; TextEdit answered with a
+modal "could not be autosaved; the file has been changed by another application" alert, and
+the axis read back afterwards was `focused() == Element('dialog', 'alert')` with
+`element_at(454, 204)` answering that alert's own `label` -- which is this package's AX read
+path resolving a live dialog from a coordinate, and also why application-level delivery of a
+replayed `type_text` stays unmeasured. **And a capability that macOS simply does not have here:
+`CLIPBOARD`.** `Session.get_clipboard()` raises `CapabilityUnsupported: CLIPBOARD is
+unsupported on macquartz+macos: no member backend provides it` -- neither backend implements
+the pasteboard, so a script that copies and pastes, or asserts on the clipboard, is not
+portable to a Mac yet. It is a gap rather than a bug, and it is the one capability in this
+package's vocabulary with no macOS implementation at all.
+
+
+## Windows 11 (build 26200): the route a combo box click had none of (2026-09-26)
+
+Run through pyguitest-recorder's `scripts/win32-live-capture-check.py`, which is the
+Windows counterpart of `live-capture-check.py`: it opens a real native probe window on a
+real desktop, drives it with this package's own injected input, records the whole session
+through a real `SetWindowsHookExW` hook, generates a script from it, and then replays that
+script into a fresh probe window and reads the result back. Two runs, each with
+`--save-session` so the recording survives as JSON rather than only as the script it
+produced -- 156 raw events and 58 normalized ones, resolving the probe window's whole
+control set (entry, both title-bar buttons, four page tabs, the combo box and one of its
+items, a check box, a right click, Escape, scrolls, a double click, both radio groups and
+three tree rows).
+
+**The finding, and it is this package's.** The replay stopped at
+`gui.dropdown("clicked 4").click()` -- the recorder's own rendering of a real click on the
+probe's Win32 combo box -- with `CapabilityUnsupported: the do default action pattern
+failed on this element: (-2146233079, None, (None, None, None, 0, None))`, at the same
+line in both runs. `0x80131509` is .NET's `InvalidOperationException`, which WinForms'
+`AccessibleObject` raises from the members it declares no action for: the element's own
+`actions` list carries `do default action` (so the pattern probe answers) and the call
+then fails. `click()` is documented to stop rather than fall through when a pattern is
+offered and refuses, so the ladder had no route left -- a combo box publishes
+`ExpandCollapsePattern` and none of the three routes this backend walked.
+
+**What changed.** `uia._CLICK_IS_AN_EXPAND` names combo box as the one role whose click is
+tried through its own ExpandCollapse *before* the MSAA shim, toggling in the direction its
+state reads. A tree item publishes the same pattern and its click means *select*, so it is
+deliberately not in the set, and a combo box with no ExpandCollapse still reaches the shim.
+Five tests pin that ladder, one of them asserting the tree item is left alone.
+
+**Re-run, same day, same box: the replay passes that line** and continues through the
+recorded sequence. It then stops further in, at
+`gui.element(role=Role.TEXT, name="Gamma").click()` -- a `SysListView32` cell whose *only*
+advertised action is that same legacy shim, which this time really declares none, so there
+is no accessible action to name and the recorded click had to stay a coordinate in the
+first place. The measured distinction that makes it worth writing down rather than papering
+over: the probe's *entry* is shim-only too, and its shim works (`DoDefaultAction` on an
+EDIT control takes focus), so this is not "the shim is useless", it is "the shim's fidelity
+varies by control and cannot be asked in advance". The recorder's half of that -- what to
+render for an element whose only action is the shim -- is in its own
+`docs/developers/status.md`, and nothing in this package is waiting on it: the honest
+renderings there are an element call that raises a typed error or a coordinate, and both
+already exist.
+
+**Two things that run found in the check itself**, both fixed in the recorder that day: the
+script's 90-second watchdog fired *during* the ~92-second drive, so the last click never
+reached the hook -- and the report blamed the generator for a missing element three steps
+later rather than saying the capture had been cut short; and none of the JSON was kept, so
+the raw stream, which is what told the two apart, could not be read afterwards. The check
+now runs with a 180-second backstop that reports itself, and `--save-session` keeps the
+recording. A third run after both fixes confirms them (`validate` clean, no watchdog line,
+the recording's last click present, and the script's own check for the nested tree item
+passing) but failed earlier in its replay for a different reason worth knowing: the check
+is **not hermetic** -- the hook sees the whole desktop -- so a stray window the drive's
+pointer passes over lands in the generated script, and that run's script began by matching
+an editor window open beside the probe whose title then changed. The recorder noted it on
+the recording and the script's docstring now says to close what should not be recorded;
+the probe's own steps are still what the check verifies.
+
+**Reviewed in that JSON, and left as they are.** The combo box's name comes out
+`"clicked 4"` because UIA computed a label for an unlabelled control from the nearest
+static -- the probe's own status label, whose text changes as the recording runs. That is
+the probe window's doing (label your controls; the recorder's `docs/testable-guis.md`
+exists for it), not a resolution bug. And the click on the combo's own dropdown item, and
+the one on a submenu item, both resolve to coordinates: the popup has closed by the time
+the press is consumed, which the recorder's resolver already documents at length and
+handles with a remembered popup layout on Linux -- on Windows it relies on UIA
+hit-testing popups itself, which cannot see one that has already closed. Both replays
+landed, as coordinates do when the window is where the script expects it.
+
+**macOS, the same day, on the same machine as the runs above: no change, which is the point.**
+The recorder's own round-trip check (record a posted sequence, replay it, record the
+replay, compare the two event streams and the two generated scripts) reproduces the
+pre-fix figures exactly -- 80 differing event lines and 23 differing script lines, against
+80 and 21 before -- and both session JSONs carry `screens: [[0, 1280, 800, 0.75]]`, the
+`DARWIN` session type, a capability list with no AT-SPI in it, and a resolved
+`e2e_doc.txt` document text element with no Linux-only notes anywhere. The only note on
+either recording is the known one about the recorder falling behind live input (5.6s, then
+3.1s), which is `Session.focused()`'s 190 ms walk and is an open item in the recorder's
+`docs/developers/status.md` rather than anything this change touched.
+
+## macOS: closing four open items, on the same machine (2026-09-27)
+
+Four things the sections above left open -- Screen Recording, the selection and
+disclosure attributes, the window-list cache's staleness window, and whether a
+replayed `type_text` reaches the application -- closed in one sitting, once
+Screen Recording was granted by hand under System Settings > Privacy &
+Security (added for both `/System/Applications/Utilities/Terminal.app` and
+`/usr/libexec/sshd-keygen-wrapper`, the SSH session's own identity, which is
+also what the other three grants already answer for). The screen had also
+locked itself between sessions, which is its own finding: every app-activation
+and keystroke attempt against a locked screen fails silently rather than
+raising anything a caller could catch, because the events land on
+`loginwindow` instead of the target application -- a `CGSSessionScreenIsLocked`
+read off `CGSessionCopyCurrentDictionary()` is the one way to tell "nothing is
+happening because the screen is locked" from "nothing is happening because
+this backend is broken", and nothing in this package checks it today.
+
+- **`SCREEN_CAPTURE` works end to end with the grant held.** `screencapture -x`
+  now exits 0 and writes a real image (223 KB, not the empty black one a denied
+  grant produces), `Environment.can_capture` answers `True`, and
+  `pyguitest.connect().capture()` -- the composed session, not a bare backend --
+  wrote a 265 KB PNG through `ToolCaptureBackend`. `require_screen_recording`'s
+  refusal was exercised earlier on the same machine while the grant was still
+  missing; this is the other side of that gate.
+- **Screen Recording being granted is not the end of it: a fifth, session-level
+  consent gate exists that none of the four TCC preflights `_macapi` asks about
+  can see coming.** Partway through a later live session on the same machine, macOS
+  raised a system dialog naming the SSH daemon itself rather than the Python
+  interpreter or Terminal -- `"com.apple.sshd-session" is requesting to bypass
+  the system private window picker and directly access your screen and audio.
+  This will allow com.apple.sshd-session to record your screen and system
+  audio, including personal or sensitive information that may be visible or
+  audible.` -- with Allow and Open System Settings as the only two buttons, and
+  no way to preflight or answer it without a human physically present to click
+  one. This reads as a newer, session-level ScreenCaptureKit gate layered on
+  top of the Screen Recording grant rather than a restatement of it: the row
+  under Privacy & Security > Screen Recording was already on when this fired.
+  Which capture call specifically triggers it is not yet isolated -- it was
+  noticed rather than deliberately provoked -- so for now the honest claim is
+  narrower than "granted once, done forever": a script driving a Mac
+  unattended over SSH can still hit a prompt only a human can answer, even
+  after every preflight in this file reports `True`.
+- **The quarter-second cache's staleness window is bounded by 0.25s, measured
+  from outside it.** `CGWindowListCopyWindowInfo` was polled directly (bypassing
+  `MacosBackend` entirely) alongside `windows()`, every 50-70ms, while a new
+  TextEdit window came up. Ground truth changed at t=1.39s; `windows()` kept
+  answering the pre-change count through t=1.50s and had caught up by t=1.58s --
+  a lag of about 0.19s, under `_SNAPSHOT_SECONDS` and never over it across the
+  run. Window creation itself was the slow part here (1.39s on this machine,
+  not the double-digit milliseconds a quick desktop click normally takes),
+  which is what the first two attempts at this measurement got wrong: they
+  read `windows()` at a
+  fixed 50ms/400ms after opening a window and found no change either time,
+  because the window did not exist yet at either checkpoint -- a cache
+  cannot be caught stale by a state change that has not happened.
+- **Selection and disclosure attributes are real, named, and read live off
+  Finder's list view.** `~/pyguitest` opened in List View (`Cmd+2`) exposes an
+  `AXOutline` of 23 rows; a row's own attributes include `AXDisclosing`,
+  `AXDisclosedByRow` and `AXDisclosureLevel` (measured `False`, `None` and `0`
+  for a plain, unexpanded top-level file), and the outline's own attributes
+  include `AXSelectedRows`, `AXSelectedCells` and `AXSelectedColumns`. Setting
+  is the surprise: `AXUIElementSetAttributeValue(outline, "AXSelectedRows",
+  rows[:2])` returns `0` (success) but neither the outline's `AXSelectedRows`
+  readback nor the row's own `AXSelected` changed -- Finder's outline advertises
+  the attribute as settable and silently does not honour it. That is a fact
+  about Finder, not about this package, and it is why `Element.select` (were
+  one ever added) could not be built against `AXSelectedRows` alone without a
+  live check finding this first.
+- **A replayed `type_text` reaches the application, character for character.**
+  `abc XYZ 0123456789 é€中` typed through `MacosBackend`/`macquartz` into a new
+  TextEdit document, read back through the text area's own `AXValue`, matched
+  exactly -- the accented letter, the euro sign and the Han character included.
+  The only thing the previous attempt at this measurement left open was an
+  autosave conflict from rewriting the same file externally between passes;
+  this run typed into a fresh, untitled document nothing else touched, which
+  is what closed it.
+
+**Two things about driving a Mac live that are worth knowing before the next
+session tries it.** `osascript`'s `tell application "X" to ...` is gated by a
+fourth, separate TCC service -- Automation (`kTCCServiceAppleEvents`) -- which
+was not among the four this package probes, and was not granted; every such
+call hung for the ~2 minute AppleEvent timeout (`-1712`) rather than failing
+fast. Driving another application from a live-check script should go through
+`open` (Launch Services, ungated) plus this package's own keystrokes, never
+AppleScript, unless Automation is granted too. And `open -n -a Name` starts a
+*new process* every time rather than reusing the running one or opening a new
+window in it -- eight stray TextEdit processes accumulated across one
+afternoon of runs before this was noticed. Plain `open -a Name` is what the
+rest of this package's advice already assumes, and is also what a script
+needs to explicitly re-activate the target immediately before every keystroke
+sequence: `CGEventPost` delivers to whichever application the window server
+currently has focused, not to a pid, so an app that is merely *running* is not
+enough.
+
+One more platform fact, found while walking Finder's and TextEdit's AX trees
+for the measurements above: `AXUIElementCopyAttributeValue(el,
+kAXChildrenAttribute)` on an element whose role is `AXApplication` returns the
+application itself as the first entry of its own children, ahead of the real
+menu bar and windows. A naive recursive walk that does not skip it burns its
+entire depth budget on the self-reference and never reaches real content --
+which is exactly the shape of tree `MacosBackend.find_elements`'s ancestry
+check already guards against (see the "one element could come back as a dozen
+search matches" fix above), except this is that pathology occurring on a real
+machine rather than only in an adversarial test tree.
 

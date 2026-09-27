@@ -1199,12 +1199,15 @@ class TestElementActions(UiaTestCase):
         self.assertEqual(legacy.calls, ["DoDefaultAction"])
 
     def test_click_with_no_pattern_at_all_is_not_actionable(self):
+        # An element from a backend directly: nothing to name, and no session
+        # behind it to reach the pointer with, so the typed refusal stands and
+        # says which of the two ways out to take.
         node = self.node(name="Kickoff")
         with self.assertRaises(ElementNotActionable) as caught:
             self.element(node).click()
         self.assertEqual(caught.exception.role, "push button")
         self.assertEqual(caught.exception.name, "Kickoff")
-        self.assertIn("gui.extents(element)", str(caught.exception))
+        self.assertIn("gui.click_element(element)", str(caught.exception))
 
     def test_click_reports_a_pattern_that_refused_rather_than_trying_another(self):
         # A disabled button's Invoke really did fail, and quietly trying Toggle
@@ -1216,6 +1219,83 @@ class TestElementActions(UiaTestCase):
         with self.assertRaises(CapabilityUnsupported) as caught:
             self.element(node).click()
         self.assertIn("invoke pattern failed", str(caught.exception))
+
+    def test_click_opens_a_combo_box_that_offers_nothing_else(self):
+        # A native Win32 COMBOBOX publishes ExpandCollapse and no Invoke, no
+        # Toggle and no default action, so clicking one -- which is what the
+        # recorder generates for a real click on it -- had no route at all.
+        # See `uia._CLICK_IS_AN_EXPAND`.
+        node = self.node(control_type=50003)
+        expand = node.add_pattern(
+            "expand collapse",
+            FakePattern(expand_collapse_state=uia.ExpandCollapseState_Collapsed),
+        )
+        self.element(node).click()
+        self.assertEqual(expand.calls, ["Expand"])
+
+    def test_click_on_an_open_combo_box_closes_it(self):
+        # What the native control does with a second click, and what makes a
+        # recorded click that dismissed the list replay as itself.
+        node = self.node(control_type=50003)
+        expand = node.add_pattern(
+            "expand collapse",
+            FakePattern(expand_collapse_state=uia.ExpandCollapseState_Expanded),
+        )
+        self.element(node).click()
+        self.assertEqual(expand.calls, ["Collapse"])
+
+    def test_click_on_a_combo_box_uses_its_own_expand_collapse_first(self):
+        # The one reordering: a WinForms combo box advertises a default action
+        # and then raises InvalidOperationException from it (measured live --
+        # see `uia._CLICK_IS_AN_EXPAND`), so the widget's own ExpandCollapse is
+        # the route, and the MSAA shim is not asked at all.
+        node = self.node(control_type=50003)
+        legacy = node.add_pattern("legacy", FakePattern())
+        expand = node.add_pattern(
+            "expand collapse",
+            FakePattern(expand_collapse_state=uia.ExpandCollapseState_Collapsed),
+        )
+        self.element(node).click()
+        self.assertEqual(expand.calls, ["Expand"])
+        self.assertEqual(legacy.calls, [])
+
+    def test_click_on_a_combo_box_without_expand_collapse_uses_the_default_action(self):
+        # Not every provider publishes one: the shim is still behind it, which
+        # is what keeps this a reordering rather than a replacement.
+        node = self.node(control_type=50003)
+        legacy = node.add_pattern("legacy", FakePattern())
+        self.element(node).click()
+        self.assertEqual(legacy.calls, ["DoDefaultAction"])
+
+    def test_click_does_not_expand_a_tree_item(self):
+        # The narrowness matters: a tree item publishes the same pattern, and
+        # its click *selects* the row. Since nothing else is offered the answer
+        # is the ordinary typed refusal, and the pattern is left alone.
+        node = self.node(control_type=50024, name="Documents")
+        expand = node.add_pattern(
+            "expand collapse",
+            FakePattern(expand_collapse_state=uia.ExpandCollapseState_Collapsed),
+        )
+        with self.assertRaises(ElementNotActionable) as caught:
+            self.element(node).click()
+        self.assertEqual(caught.exception.role, "tree item")
+        self.assertEqual(expand.calls, [])
+
+    def test_click_on_a_combo_box_whose_expand_refused_reports_the_refusal(self):
+        # The loud-failure policy reaches the reordered route too: a pattern
+        # that is there and refuses is reported rather than quietly handed to
+        # the shim the ordering just skipped -- a disabled combo box's expand
+        # really did fail, and a click reported as successful would be worse.
+        node = self.node(control_type=50003)
+        node.add_pattern("legacy", FakePattern())
+        expand = node.add_pattern(
+            "expand collapse",
+            FakePattern(expand_collapse_state=uia.ExpandCollapseState_Collapsed),
+        )
+        expand.fail("Expand")
+        with self.assertRaises(CapabilityUnsupported) as caught:
+            self.element(node).click()
+        self.assertIn("expand pattern failed", str(caught.exception))
 
     def test_set_text_writes_through_the_value_pattern(self):
         node = self.node()
@@ -1457,13 +1537,23 @@ class TestGeometry(UiaTestCase):
 class FakeSession:
     """A Session, as far as an element needs one: somewhere to delegate to."""
 
-    def __init__(self):
-        """Start with nothing double-clicked."""
+    def __init__(self, extents=(10, 20, 30, 40)):
+        """Start with nothing double-clicked and one rectangle to hand out."""
         self.double_clicked = []
+        self.clicked = []
+        self._extents = extents
 
     def double_click_element(self, element):
         """Record the element a caller asked to double-click."""
         self.double_clicked.append(element)
+
+    def extents(self, element):
+        """The rectangle `element` publishes, or None where it publishes none."""
+        return self._extents
+
+    def click_element(self, element):
+        """Record the element a caller asked to click through the pointer."""
+        self.clicked.append(element)
 
 
 class TestSessionBinding(UiaTestCase):
@@ -1504,6 +1594,204 @@ class TestSessionBinding(UiaTestCase):
         self.assertEqual(self.backend.find_elements(), [])
         self.automation.root.children.append(self.node(name="Save"))
         self.assertIsNone(self.backend.find_elements()[0]._session)
+
+
+class TestClickWithoutAPattern(UiaTestCase):
+    """`click` where UI Automation publishes nothing at all.
+
+    The measured case is a `SysListView32` *cell*: its only advertised action is
+    the legacy MSAA shim, and for that control the shim declares no action, so a
+    recorded click had no accessible route to name. An element that offers
+    nothing is clicked by coordinate instead -- the element stays the locator --
+    which is the step the refusal used to only advise.
+    """
+
+    def test_a_click_with_no_pattern_clicks_by_coordinate_through_the_session(self):
+        session = FakeSession()
+        element = self.element(self.node(name="Gamma"), session)
+        element.click()
+        self.assertEqual(session.clicked, [element])
+
+    def test_a_click_with_no_pattern_and_no_rectangle_stays_not_actionable(self):
+        # Nothing to name and nothing to aim at: the typed refusal is the honest
+        # answer, and it is still what a caller catches rather than a new error
+        # type. The hint names the closed route, not a click that would land
+        # somewhere arbitrary.
+        session = FakeSession(extents=None)
+        element = self.element(self.node(name="Gamma"), session)
+        with self.assertRaises(ElementNotActionable) as caught:
+            element.click()
+        self.assertIn("no rectangle", str(caught.exception))
+        self.assertEqual(session.clicked, [])
+
+    def test_a_pattern_that_refused_is_not_fallen_through_to_the_pointer(self):
+        # The loud-failure policy, which the coordinate fallback must not soften:
+        # a disabled button's Invoke really did fail, and a coordinate click
+        # would be the click-reported-as-successful this package refuses to
+        # trade for a convenience.
+        session = FakeSession()
+        node = self.node(name="Save")
+        node.add_pattern("invoke", FakePattern()).fail("Invoke")
+        element = self.element(node, session)
+        with self.assertRaises(CapabilityUnsupported):
+            element.click()
+        self.assertEqual(session.clicked, [])
+
+    def test_a_combo_boxes_expand_refusal_is_not_fallen_through_either(self):
+        # The reordered route is still a refusal: an element that *published*
+        # something and had it fail is never handed to the pointer.
+        session = FakeSession()
+        node = self.node(control_type=50003, name="Country")
+        node.add_pattern("legacy", FakePattern())
+        expand = node.add_pattern(
+            "expand collapse",
+            FakePattern(expand_collapse_state=uia.ExpandCollapseState_Collapsed),
+        )
+        expand.fail("Expand")
+        with self.assertRaises(CapabilityUnsupported):
+            self.element(node, session).click()
+        self.assertEqual(session.clicked, [])
+
+
+class TestTreesThatLie(UiaTestCase):
+    """Trees whose shape and properties are not what they claim to be.
+
+    Every case here is a shape a real provider produces rather than a
+    hypothetical: a container reporting each of its children at the origin with
+    no size -- measured on GTK4 under at-spi, and the reason `_rect` refuses an
+    empty rectangle rather than answering with a box at (0, 0) -- a slot an
+    element array could not fill, a condition a provider answers with more than
+    was asked, one name in two windows of one process, an element that closes
+    between the search and the read, and a parent chain that loops. Writing them
+    found two things: a NULL pointer reaching a caller as an element, and a name
+    that is not text reaching a regex filter as a `TypeError`. See the
+    CHANGELOG.
+    """
+
+    def rect(self, node, left, top, right, bottom):
+        """Give `node` a screen rectangle and hand it back."""
+        node.CurrentBoundingRectangle = FakeRect(left, top, right, bottom)
+        return node
+
+    def test_a_container_whose_children_are_all_at_the_origin_hit_tests_as_itself(self):
+        # A real toolkit does this: GTK4 reports every child of a container at
+        # (0, 0) with no size at all. Descending into one would answer with a
+        # box at the origin that covers nothing, so the point is covered by the
+        # container and by nothing inside it -- which is the answer.
+        window = self.rect(
+            self.add(self.automation.root, name="Window", CurrentControlType=50033),
+            100,
+            100,
+            500,
+            400,
+        )
+        for _ in range(3):
+            self.rect(self.add(window, name="cell"), 0, 0, 0, 0)
+        self.automation.point_answer = window
+        self.assertEqual(self.backend.element_at(300, 250).node, window)
+
+    def test_a_child_that_reports_its_parent_as_its_own_child_cannot_spin(self):
+        # A stale reference, or a provider that has lost track of its tree: the
+        # child lists the window it sits in as one of its own children. The
+        # descent is bounded, so it comes back with an element from this tree
+        # rather than spinning or recursing until the stack goes.
+        window = self.rect(
+            self.add(self.automation.root, name="Window", CurrentControlType=50033),
+            0,
+            0,
+            400,
+            300,
+        )
+        child = self.rect(self.add(window, name="pane"), 0, 0, 400, 300)
+        child.children.append(window)
+        self.automation.point_answer = window
+        self.assertIn(self.backend.element_at(200, 150).node, (window, child))
+
+    def test_a_null_pointer_in_a_search_result_is_not_an_element(self):
+        # The element array's own version of the bug `_parent` records: a
+        # provider that cannot fill a slot answers with a pointer to address
+        # zero, which is an ordinary Python object. Wrapping one put an element
+        # that is nowhere on the desktop into a search's answer -- name "",
+        # role "unknown", alive False -- where a caller cannot tell it from a
+        # real element that has gone quiet.
+        real = self.add(self.automation.root, name="Save")
+        self.automation.root.FindAll = lambda _scope, _condition: FakeArray(
+            list(self.automation.root.children) + [NullPointer()]
+        )
+        found = self.backend.find_elements()
+        self.assertEqual([element.node for element in found], [real])
+
+    def test_a_provider_that_ignores_the_narrowing_is_still_checked(self):
+        # The pushed-down condition is a hint, and a provider is free to answer
+        # it with everything it has: the predicate after the search is what
+        # makes the answer right, which is the half a provider can lie about.
+        self.add(self.automation.root, name="Save")
+        self.add(self.automation.root, name="Cancel")
+        self.automation.root.FindAll = lambda _scope, _condition: FakeArray(
+            list(self.automation.root.children)
+        )
+        found = self.backend.find_elements(name="Save")
+        self.assertEqual([element.name for element in found], ["Save"])
+
+    def test_a_name_that_is_not_a_string_is_not_a_name(self):
+        # A provider that answers CurrentName with a number has not named the
+        # element, and a regex filter over it is "no match" rather than a
+        # TypeError raised out of a search.
+        liar = self.add(self.automation.root, name=17)
+        self.assertEqual(self.element(liar).name, "")
+        self.assertEqual(self.backend.find_elements(name=re.compile("1")), [])
+
+    def test_one_name_in_two_windows_is_found_once_per_window(self):
+        # Two windows of one process, which is the ordinary shape of an editor
+        # and the shape a resolution path has to be able to tell apart: an
+        # unscoped search sees both in tree order, and a scoped one sees the
+        # window it was told about.
+        first = self.add(self.automation.root, name="Editor", CurrentControlType=50033)
+        second = self.add(self.automation.root, name="Editor", CurrentControlType=50033)
+        save_first = self.add(first, name="Save")
+        save_second = self.add(second, name="Save")
+        self.assertEqual(
+            [element.node for element in self.backend.find_elements(name="Save")],
+            [save_first, save_second],
+        )
+        self.assertEqual(
+            [
+                element.node
+                for element in self.backend.find_elements(
+                    name="Save", within=self.element(second)
+                )
+            ],
+            [save_second],
+        )
+
+    def test_a_popup_that_closed_is_not_clicked_at_a_stale_rectangle(self):
+        # The other half of the closing-popup case, from the caller's side: the
+        # element they hold has gone, so it publishes no rectangle and no
+        # action, and the coordinate fallback refuses rather than aiming at
+        # wherever the popup used to be.
+        gone = FakeElement(self.automation, failure=ComFailure("0x80040201"))
+        session = FakeSession(extents=None)
+        with self.assertRaises(ElementNotActionable):
+            self.element(gone, session).click()
+        self.assertEqual(session.clicked, [])
+
+    def test_a_rectangle_that_is_inside_out_is_not_a_rectangle(self):
+        # A minimized window, or one mid-animation: corners the wrong way round
+        # are not a negative rectangle, they are no rectangle, and a click by
+        # coordinate has nowhere to land rather than a plausible place.
+        node = self.rect(self.node(name="Window"), 400, 300, 100, 100)
+        self.assertIsNone(self.backend.extents(self.element(node)))
+
+    def test_a_parent_chain_that_loops_answers_no_rather_than_spinning(self):
+        # Two elements each reporting the other as its parent, asked about a
+        # third: the walk is bounded, and False is the honest answer about a
+        # relation that cannot be settled.
+        first = self.node(name="A")
+        second = self.node(name="B")
+        third = self.node(name="C")
+        self.automation.walker.parents[first] = second
+        self.automation.walker.parents[second] = first
+        self.assertFalse(self.element(third).is_ancestor_of(self.element(first)))
 
 
 class TestTheTree(UiaTestCase):

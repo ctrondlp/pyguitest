@@ -153,6 +153,7 @@ Raise on failure with a message naming what was actually found, for use directly
 
 | Call | Needs | | What it does |
 |------|-------|---|--------------|
+| `click_element(element: Element, button: int = 1)` | `ELEMENT_GEOMETRY`, `POINTER_BUTTON`, `POINTER_MOVE` |  | Click a named element through the pointer. `element.click()` ends here. |
 | `double_click(button: int = 1)` | `POINTER_BUTTON` |  | Press and release a mouse button twice, as one double-click. |
 | `double_click_element(element: Element)` | `ELEMENT_GEOMETRY`, `POINTER_BUTTON`, `POINTER_MOVE` |  | Double-click a named element. `element.double_click()` does the same. |
 | `element_at(x: int, y: int)` | `ELEMENT_GEOMETRY` |  | The deepest accessible element at a screen coordinate, or None. |
@@ -202,7 +203,7 @@ One node of the accessible tree, as every backend agrees to expose it.
 | `child(role: str \| None = None, name: str \| None = None)` | Return the first descendant matching role and/or name, or None. |
 | `children` | The elements directly inside this one. |
 | `choose(option: str)` | Pick `option` from this dropdown by its visible text. |
-| `click()` | Act on the element directly -- no coordinates, no injection. |
+| `click()` | Act on the element: the accessible action where there is one. |
 | `collapse()` | Close a tree item or similar disclosure control. See `expand`. |
 | `description` | The element's longer accessible description, often a tooltip. |
 | `do_action(name: str)` | Perform a named accessible action, such as "click" or "activate". |
@@ -300,14 +301,20 @@ What the current login actually offers.
 | `dpi_awareness: str` |  |
 | `foreground_is_elevated: bool \| None` |  |
 | `has_atspi: bool` |  |
+| `has_ax: bool` |  |
 | `has_comtypes: bool` |  |
 | `has_dogtail: bool` |  |
 | `has_evdev: bool` |  |
 | `has_input_group: bool` |  |
 | `has_libei: bool` |  |
+| `has_listen_event: bool` |  |
 | `has_portal: bool` |  |
+| `has_post_event: bool` |  |
 | `has_pygobject: bool` |  |
+| `has_pyobjc_application_services: bool` |  |
+| `has_pyobjc_quartz: bool` |  |
 | `has_pywin32: bool` |  |
+| `has_screen_recording: bool` |  |
 | `has_sendinput: bool` |  |
 | `has_uiautomation: bool` |  |
 | `has_uinput: bool` |  |
@@ -318,6 +325,7 @@ What the current login actually offers.
 | `is_elevated: bool` |  |
 | `is_interactive_desktop: bool` |  |
 | `low_level_hooks_timeout_ms: int` |  |
+| `macos_version: str` |  |
 | `preferred_input` | The input *tool* to try first, or None if none is installed. |
 | `summary()` | A short, user-readable description of this environment. |
 | `uinput_writable: bool` |  |
@@ -336,31 +344,31 @@ Wayland prevents by design, which is why those rows are X11 only.
 | `PROCESS_LAUNCH` | T1 | *session itself* | Start and run applications |
 | `TIMING` | T1 | *session itself* | Waits, and inter-event and inter-key delays |
 | `IMAGE_LOCATE` | T1 | ToolImageSearchBackend | Find a template image's position inside an already-captured screenshot by pixel comparison; a new feature, X11::GUITest never had it, and needs no live display connection, only files |
-| `SCREEN_INFO` | T2 | GnomeShellBackend, KdotoolBackend, Win32Backend, X11Backend | Output enumeration, resolution, scale (wl_output) |
-| `POINTER_MOVE` | T4 | LibeiBackend, ToolInputBackend, UinputBackend, Win32Backend, X11Backend | Absolute pointer positioning; relative-only injection cannot do this |
-| `POINTER_BUTTON` | T4 | LibeiBackend, PortalBackend, ToolInputBackend, UinputBackend, Win32Backend, X11Backend | Button press and release |
-| `POINTER_SCROLL` | T4 | LibeiBackend, PortalBackend, ToolInputBackend, UinputBackend, Win32Backend, X11Backend | Axis events; X11 buttons 4/5 were scroll, Wayland's are not |
-| `KEY_EVENT` | T4 | LibeiBackend, PortalBackend, ToolInputBackend, UinputBackend, Win32Backend, X11Backend | Keycode press and release |
-| `TEXT_ENTRY` | T4 | LibeiBackend, PortalBackend, ToolInputBackend, UinputBackend, Win32Backend, X11Backend | Typing characters; needs a backend-controlled keymap, which raw uinput lacks |
+| `SCREEN_INFO` | T2 | GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Output enumeration, resolution, scale (wl_output) |
+| `POINTER_MOVE` | T4 | LibeiBackend, MacquartzBackend, ToolInputBackend, UinputBackend, Win32Backend, X11Backend | Absolute pointer positioning; relative-only injection cannot do this |
+| `POINTER_BUTTON` | T4 | LibeiBackend, MacquartzBackend, PortalBackend, ToolInputBackend, UinputBackend, Win32Backend, X11Backend | Button press and release |
+| `POINTER_SCROLL` | T4 | LibeiBackend, MacquartzBackend, PortalBackend, ToolInputBackend, UinputBackend, Win32Backend, X11Backend | Axis events; X11 buttons 4/5 were scroll, Wayland's are not |
+| `KEY_EVENT` | T4 | LibeiBackend, MacquartzBackend, PortalBackend, ToolInputBackend, UinputBackend, Win32Backend, X11Backend | Keycode press and release |
+| `TEXT_ENTRY` | T4 | LibeiBackend, MacquartzBackend, PortalBackend, ToolInputBackend, UinputBackend, Win32Backend, X11Backend | Typing characters; needs a backend-controlled keymap, which raw uinput lacks |
 | `INPUT_SYNC` | T4 | LibeiBackend | Confirm the compositor has consumed the events sent so far, instead of sleeping and hoping; proves delivery to the compositor, never that the application processed or repainted them |
 | `INPUT_CAPTURE` | T4 | InputCaptureBackend | Learn where the pointer is from a real crossing of a screen edge the caller sets up, exclusively diverting real input for the length of one activation; not a query -- see Session.wait_for_pointer_activation, which can return None rather than answer at all if nobody moves the pointer there in time |
-| `WINDOW_LIST` | T3 | AtspiBackend, GnomeShellBackend, Win32Backend, X11Backend | Enumerate toplevels, read titles and app ids |
+| `WINDOW_LIST` | T3 | AtspiBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Enumerate toplevels, read titles and app ids |
 | `WINDOW_EVENTS` | T3 | GnomeShellBackend, KWinEventsBackend, NiriBackend, SwayBackend, Win32Backend | Subscribe to open/close/title-change instead of polling |
-| `WINDOW_STATE` | T3 | AtspiBackend, GnomeShellBackend, Win32Backend, X11Backend | Read minimized and activated state |
-| `WINDOW_ACTIVATE` | T3 | AtspiBackend, GnomeShellBackend, Win32Backend, X11Backend | Raise and focus; there is no raise-without-focus operation |
-| `WINDOW_MINIMIZE` | T3 | GnomeShellBackend, NiriBackend, Win32Backend, X11Backend | Minimize and restore |
-| `WINDOW_GEOMETRY` | T3 | AtspiBackend, GnomeShellBackend, Win32Backend, X11Backend | Read position and size; no foreign-toplevel protocol carries this |
-| `WINDOW_PLACEMENT` | T3 | GnomeShellBackend, NiriBackend, Win32Backend, X11Backend | Move to a position; placement is the compositor's prerogative |
-| `WINDOW_RESIZE` | T3 | GnomeShellBackend, NiriBackend, Win32Backend, X11Backend | Change width and height; separate from placement because a tiling compositor can size a window without letting anyone position it |
-| `WINDOW_PID` | T3 | GnomeShellBackend, KdotoolBackend, Win32Backend, X11Backend | Map a window to a process id; prefer app_id |
-| `WINDOW_AT_POINT` | T3 | GnomeShellBackend, Win32Backend, X11Backend | Hit-test a coordinate; needs geometry and stacking order |
+| `WINDOW_STATE` | T3 | AtspiBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Read minimized and activated state |
+| `WINDOW_ACTIVATE` | T3 | AtspiBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Raise and focus; there is no raise-without-focus operation |
+| `WINDOW_MINIMIZE` | T3 | GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Minimize and restore |
+| `WINDOW_GEOMETRY` | T3 | AtspiBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Read position and size; no foreign-toplevel protocol carries this |
+| `WINDOW_PLACEMENT` | T3 | GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Move to a position; placement is the compositor's prerogative |
+| `WINDOW_RESIZE` | T3 | GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Change width and height; separate from placement because a tiling compositor can size a window without letting anyone position it |
+| `WINDOW_PID` | T3 | GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Map a window to a process id; prefer app_id |
+| `WINDOW_AT_POINT` | T3 | GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Hit-test a coordinate; needs geometry and stacking order |
 | `SCREEN_CAPTURE` | T3 | PortalCaptureBackend, ToolCaptureBackend, Win32Backend, X11Backend | Pixels; a new feature, X11::GUITest never had it |
 | `WINDOW_CAPTURE` | T3 | GnomeShellBackend, X11Backend | Pixels of one window, captured natively rather than cropped out of a screen shot -- so an occluded or offscreen window still comes back whole |
 | `CLIPBOARD` | T3 | PortalBackend, ToolClipboardBackend, Win32Backend | Read and write the clipboard's text content; a new feature, X11::GUITest never had it |
-| `ELEMENT_TREE` | T5 | AtspiBackend, UiaBackend | Walk the accessible tree; replaces the X11 window-tree walk |
-| `ELEMENT_ACTION` | T5 | AtspiBackend, UiaBackend | Act on an element without coordinates or injection permission |
-| `ELEMENT_GEOMETRY` | T5 | AtspiBackend, UiaBackend | Read an element's screen rectangle, and hit-test a coordinate against the accessible tree; one capability rather than the two windows get, because on AT-SPI both are the same Component call and no toolkit answers one without the other. Where it is withheld is a per-backend answer, not a property of the capability: AT-SPI offers it on X11 and XWayland only, since a pure Wayland client is never told where it sits on screen, while UI Automation answers it on any Windows session |
-| `POINTER_QUERY` | T6 | Win32Backend, X11Backend | Read the global pointer position; injection works, readback does not |
+| `ELEMENT_TREE` | T5 | AtspiBackend, MacosBackend, UiaBackend | Walk the accessible tree; replaces the X11 window-tree walk |
+| `ELEMENT_ACTION` | T5 | AtspiBackend, MacosBackend, UiaBackend | Act on an element without coordinates or injection permission |
+| `ELEMENT_GEOMETRY` | T5 | AtspiBackend, MacosBackend, UiaBackend | Read an element's screen rectangle, and hit-test a coordinate against the accessible tree; one capability rather than the two windows get, because on AT-SPI both are the same Component call and no toolkit answers one without the other. Where it is withheld is a per-backend answer, not a property of the capability: AT-SPI offers it on X11 and XWayland only, since a pure Wayland client is never told where it sits on screen, while UI Automation answers it on any Windows session |
+| `POINTER_QUERY` | T6 | MacosBackend, Win32Backend, X11Backend | Read the global pointer position; injection works, readback does not |
 | `INPUT_STATE_QUERY` | T6 | Win32Backend, X11Backend | Read global keyboard or button state; this is what a keylogger reads |
 | `WINDOW_TITLE_SET` | T6 | Win32Backend, X11Backend | Rewrite another application's title; that is impersonation |
 | `WINDOW_LOWER` | T6 | Win32Backend, X11Backend | Lower or restack; only activate exists, upward only |

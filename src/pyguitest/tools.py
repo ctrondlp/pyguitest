@@ -214,6 +214,19 @@ CAPTURE_TOOLS = (
         x11_only=True,
         x_root_only=True,
     ),
+    # Last, and the only one that is not a desktop's own tool: macOS ships
+    # `screencapture` with the OS, so it is not a package anyone installs and
+    # there is nothing to prefer it over. Listed here for the same reason the
+    # others are -- `Environment.capture_tools` is how `doctor` says what it
+    # found, and a capture path that exists without being named is a path a
+    # reader cannot see. It also serves the session with no `macos` extra,
+    # where `macos.py`'s WINDOW_CAPTURE is not available to reach it through.
+    ExternalTool(
+        "screencapture",
+        frozenset({Capability.SCREEN_CAPTURE}),
+        "macOS; ships with the OS, and the window form needs a CGWindowID "
+        "that only the macos backend can hand it",
+    ),
 )
 
 _WINDOW = frozenset(
