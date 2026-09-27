@@ -22,6 +22,26 @@ from pyguitest.errors import (
 from pyguitest.session import Compositor, SessionType, detect
 
 
+def nothing_registered(case):
+    """Empty the backend registry for `case`, and put it back afterwards.
+
+    Cleanups run last-added-first, and that is the whole trick: the clear has
+    to be added *last* so that it runs *first*, dropping whatever the test
+    registered, with the extend then restoring the real registrations. Written
+    the other way round the pair reads like a restore and is in fact a wipe --
+    of the module-level registry, for every test that follows in the same
+    process, which is how the name `macos` came to be missing from a full-suite
+    run on a Mac that had it registered while this file passed on its own.
+
+    The tests that need the real registry are the live ones, so this lives in
+    one place rather than as the two lines copied into each new setUp.
+    """
+    original = list(backends._REGISTRY)
+    backends._REGISTRY.clear()
+    case.addCleanup(backends._REGISTRY.extend, original)
+    case.addCleanup(backends._REGISTRY.clear)
+
+
 class TestNullBackend(unittest.TestCase):
     def setUp(self):
         self.backend = NullBackend()
@@ -60,6 +80,11 @@ class TestNullBackend(unittest.TestCase):
 
 
 class TestSelection(unittest.TestCase):
+    def setUp(self):
+        # Selection is a question asked about a registry, so this class owns
+        # the one it asks the question of.
+        nothing_registered(self)
+
     def test_falls_back_to_null_when_nothing_registered(self):
         backend = select(detect())
         self.assertIsInstance(backend, NullBackend)
@@ -89,11 +114,7 @@ class TestSelection(unittest.TestCase):
             built.append(1)
             return FakeOptIn()
 
-        original_registry = list(backends._REGISTRY)
-        backends._REGISTRY.clear()
         backends.register(factory, "fake-optin", priority=100, opt_in=True)
-        self.addCleanup(backends._REGISTRY.clear)
-        self.addCleanup(backends._REGISTRY.extend, original_registry)
 
         automatic = select(detect())
         self.assertIsInstance(automatic, NullBackend)
@@ -124,12 +145,8 @@ class TestSelection(unittest.TestCase):
                 self.closed = True
 
         first, second = FakeBackend("a"), FakeBackend("b")
-        original_registry = list(backends._REGISTRY)
-        backends._REGISTRY.clear()
         backends.register(lambda env: first, "fake-a", priority=100)
         backends.register(lambda env: second, "fake-b", priority=90)
-        self.addCleanup(backends._REGISTRY.clear)
-        self.addCleanup(backends._REGISTRY.extend, original_registry)
 
         with mock.patch.object(
             backends.CompositeBackend, "__init__", side_effect=RuntimeError("boom")
@@ -156,10 +173,7 @@ class TestSelectionLogging(unittest.TestCase):
         from pyguitest import backends
 
         self.backends = backends
-        original = list(backends._REGISTRY)
-        backends._REGISTRY.clear()
-        self.addCleanup(backends._REGISTRY.extend, original)
-        self.addCleanup(backends._REGISTRY.clear)
+        nothing_registered(self)
 
     def test_a_declining_factory_is_logged_with_its_reason(self):
         def factory(env):
@@ -225,10 +239,7 @@ class TestNamedComposition(unittest.TestCase):
         from pyguitest import backends
 
         self.backends = backends
-        original = list(backends._REGISTRY)
-        backends._REGISTRY.clear()
-        self.addCleanup(backends._REGISTRY.extend, original)
-        self.addCleanup(backends._REGISTRY.clear)
+        nothing_registered(self)
         self.built: dict = {}
 
     def _fake(self, name, caps=(), builds=True, reports=None):
@@ -385,6 +396,14 @@ class TestNamedComposition(unittest.TestCase):
 
 
 class TestSessionFacade(unittest.TestCase):
+    def setUp(self):
+        # Every test here is about a session with *few* capabilities -- one of
+        # them says so in its name -- so the registry this machine can fill is
+        # emptied rather than composed. Left populated, a Windows or macOS run
+        # builds a real backend and `require()` below stops being the
+        # whole-declared-set question it is written as.
+        nothing_registered(self)
+
     def test_connect_never_raises_on_a_limited_desktop(self):
         with connect() as gui:
             self.assertTrue(gui.supports(Capability.PROCESS_LAUNCH))
@@ -719,10 +738,7 @@ class TestConstructionFailuresPropagateWhenNamed(unittest.TestCase):
 
     def setUp(self):
         self.backends = backends
-        original = list(backends._REGISTRY)
-        backends._REGISTRY.clear()
-        self.addCleanup(backends._REGISTRY.extend, original)
-        self.addCleanup(backends._REGISTRY.clear)
+        nothing_registered(self)
 
     def _register_failing(self, name, priority=50, opt_in=False, reason="nope"):
         def factory(environment, **options):

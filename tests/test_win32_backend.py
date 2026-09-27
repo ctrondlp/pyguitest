@@ -1808,11 +1808,15 @@ class TestCapture(Win32TestCase):
     def test_a_bitmap_that_will_not_select_is_a_failure_not_a_black_image(self):
         # A failed selection leaves the DC's original 1x1 surface in place and
         # BitBlt then succeeds against that, so without this check the capture
-        # would be a plausible-looking black PNG.
+        # would be a plausible-looking black PNG. Nothing was yielded, so this
+        # is also the half where the generator deletes its own two objects --
+        # once each, and with no caller's `finally` to delete them again.
         self.small_desktop()
         self.gdi32.SelectObject = lambda hdc, obj: 0
         with self.assertRaises(PyGUITestError):
             self.gui.capture(path=self.temporary_path())
+        self.assertEqual(len(self.gdi32.args_for("DeleteObject")), 1)
+        self.assertEqual(len(self.gdi32.args_for("DeleteDC")), 1)
 
     def test_the_bitmap_is_deselected_before_its_pixels_are_read_back(self):
         # GetDIBits documents that the bitmap must not be selected into a
@@ -1847,6 +1851,20 @@ class TestCapture(Win32TestCase):
         self.gui.capture(path=self.temporary_path())
         names = [name for name, _args in self.gdi32.calls]
         self.assertLess(names.index("GetDIBits"), names.index("DeleteObject"))
+
+    def test_a_failed_draw_deletes_each_gdi_object_once(self):
+        # A draw that fails inside the caller's `with` body comes back into the
+        # generator at its `yield`, so a cleanup there would delete both objects
+        # and the caller's `finally` would delete them again. Windows reuses a
+        # deleted handle's value, and the second delete is then a delete of
+        # whatever was created with it in the meantime -- so the count is the
+        # assertion rather than the fact.
+        self.small_desktop()
+        self.gdi32.BitBlt = lambda *args: 0
+        with self.assertRaises(PyGUITestError):
+            self.gui.capture(path=self.temporary_path())
+        self.assertEqual(len(self.gdi32.args_for("DeleteObject")), 1)
+        self.assertEqual(len(self.gdi32.args_for("DeleteDC")), 1)
 
 
 class TestWindowCapture(Win32TestCase):
@@ -1966,6 +1984,17 @@ class TestWindowCapture(Win32TestCase):
             self.gui.capture(window=window, path=path)
         self.assertIn(window.title, str(raised.exception))
         self.assertFalse(os.path.exists(path))
+
+    def test_a_failed_print_deletes_each_gdi_object_once(self):
+        # The same ownership question as the blit's failure path: PrintWindow
+        # answers 0 inside the caller's `with` body, so the two objects are the
+        # caller's `finally`'s to delete and nobody else's.
+        window = self.small_window()
+        self.user32.PrintWindow = lambda *args: 0
+        with self.assertRaises(PyGUITestError):
+            self.gui.capture(window=window, path=self.temporary_path())
+        self.assertEqual(len(self.gdi32.args_for("DeleteObject")), 1)
+        self.assertEqual(len(self.gdi32.args_for("DeleteDC")), 1)
 
     def test_a_print_failure_names_a_non_interactive_window_station(self):
         # PrintWindow is a desktop-bound call like the blit, so it earns the

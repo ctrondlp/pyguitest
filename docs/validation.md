@@ -3305,6 +3305,12 @@ unattended over SSH):
 What this run does **not** settle: only text was exercised, so an image or rich
 pasteboard type is untested and the tool route has no way to ask for one (the
 tables carry plain text only); the paste was read back through `pbpaste` rather
+than pasted into a real application's own field, since the unattended run had no
+terminal for the by-hand step the script still asks for; and the consent question
+is unanswered for a locked screen or a second logged-in user, where the
+pasteboard this reaches as the console user may not be the one a GUI app would
+see. Nothing here needed a TCC grant, which is worth knowing given that every
+other macOS capability in this file did.
 
 ## macOS: `screencapture -l`, measured with the grant in hand (2026-09-27)
 
@@ -3398,12 +3404,65 @@ Mac's own copy, the test failed with `(432, 384)` against `(320, 272)` — 112 p
 more in each direction, which is the key window's shadow padding, and the same figure
 the changelog's account of this run records. Restoring `-o` made it pass again.
 
-than pasted into a real application's own field, since the unattended run had no
-terminal for the by-hand step the script still asks for; and the consent question
-is unanswered for a locked screen or a second logged-in user, where the
-pasteboard this reaches as the console user may not be the one a GUI app would
-see. Nothing here needed a TCC grant, which is worth knowing given that every
-other macOS capability in this file did.
+**And the size that assertion accepts is a tolerance now, because the unit is
+`screencapture`'s choice rather than this package's.** The strict assertion above holds
+on the machine it ran on because that display reports bounds 1280x800 *and* pixels
+1280x800 — the two units coincide there by accident of the display rather than by
+contract. A Retina display is the case it does not cover, and what it would produce
+there is a red test on a machine whose capture is right. So the live assertion now
+computes the backing scale at the window's own centre (`_backing_scale`, from
+`CGGetActiveDisplayList`, `CGDisplayBounds` and `CGDisplayPixelsWide`/`High`, falling
+back to 1.0 when no display answers for that point) and accepts the rectangle in
+either unit (`_accepted_sizes`). The arithmetic sits in those two pure functions
+precisely so that everything but the measurement is testable off a Mac:
+`TestTheWindowCaptureSizeTolerance` holds the scale-1 collapse, the scale-2 pair, the
+second-display and no-display fallbacks and the shadow-padding sizes below, and runs
+in the Windows and CI jobs where the live test skips.
+
+What the same Mac settled for the tolerance, re-measured 2026-09-27 with the grants
+still in hand:
+
+| | |
+| --- | --- |
+| the display list | `CGGetActiveDisplayList` answered `err=0`, one display; bounds `0, 0, 1280x800` and pixels `1280x800`, so `_backing_scale` answered **1.0** at the origin and at the display's centre |
+| the consequence | the accepted set collapsed to the single strict `(w, h)`, so on this machine the assertion is the one the paragraph above recorded rather than a looser one |
+| a real capture | the window `geometry()` answers `(199, 117, 877, 499)` for came back **877x499** from `-x -o -l`, in the accepted set |
+| falsified again | that window captured without `-o` came back **989x611** — 112 more in each direction, the key window's shadow padding above — in the accepted set at neither 1.0 nor a hypothetical 2.0 |
+| why not `Screen.scale` | it answered **0.75** (DPI/96, as `macos.screens` documents), which is not the scale this needs |
+| the suite on the Mac | `tests/test_macos.py` 52 passed, 0 skipped: the five live tests ran there, the capture test asserted against a real `screencapture`, and the eight tolerance tests passed |
+
+Still unmeasured, and written down here rather than left implied: **no Retina display
+has been run**, so the backing-pixel half of the accepted set is tolerance for an
+unmeasured case. A Retina Mac is what would show which unit the tool writes; the
+acceptance is deliberately either-or until one is.
+
+**That macOS run also turned up a pre-existing isolation fault in the suite, not one
+this change caused.** `pytest tests` there answered 1 failed / 2029 passed / 49 skipped,
+and the failure was `TestLiveWindowCapture` raising `BackendUnavailable: unknown backend
+'macos'; available: none`, because `tests/test_backends.py` left the module-level registry
+empty for the rest of the session: two of its cleanups added `clear` before `extend`
+(lines 95-96 and 131-132) and cleanup runs LIFO, so the original list was restored and then
+wiped, while the pair at 161-162 had that order the right way round. `tests/test_macos.py`
+alone passed, after `test_backends.py` it failed, and the same suite with the **pre-change**
+`tests/test_macos.py` failed identically (1 failed, 2021 passed) — which is what made it
+pre-existing rather than this change's doing. It only appeared on a Mac with the extra
+installed, since the live test skips everywhere else, and that is why CI had never seen it.
+
+**Fixed in 0.15.0, and the fix turned out to be more than the two lines that caused it.**
+The pair lives in one helper now (`nothing_registered`), where the order cannot be written
+backwards — and restoring the registry showed how much had been passing *because* of the
+wipe. Two tests had been reading a registry another test happened to empty and asserting
+that a session with no backends behaves a certain way; they empty it deliberately now.
+Emptying it deliberately is also what put the remaining four failures in view, and they
+were pre-existing in exactly the same way:
+
+| | |
+| --- | --- |
+| Windows 11, before | `tests/` **6 failed / 1815 passed**: `test_falls_back_to_null_when_nothing_registered`, `test_require_raises_for_the_whole_declared_set`, and four of `test_uia_backend.TestAvailability` |
+| why the UIA four | composing a real session loads it, and the restored registry let that happen: the failure above is the composition itself, `<CompositeBackend 'uia+win32' caps=27>` — building the `uia` member asks `uia.available()`, which is a type-library load, and the real `UIAutomationClient` it registers is what `client_module()` answers from afterwards. The four then failed against a mocked `comtypes_client`, with `<module 'comtypes.gen.UIAutomationClient' from '...site-packages\comtypes\gen\UIAutomationClient.py'> is not None`. A probe (a teardown hook recording the first test whose teardown sees the cache loaded) finds one loader still in the run once those two tests are arranged: `tests/test_win32.py::TestRegistration::test_the_element_factory_answers_for_the_machine_it_is_actually_on`, which asks `uia.available()` because that is what it is about. So `UiaTestCase.setUp` resets the cache to `None` rather than saving whatever it held |
+| why the other two | the first asserts the NullBackend fallback and the second that `require()` refuses unless *every* named capability is served — `CapabilityUnsupported not raised`, because the composed `uia+win32` session serves `WINDOW_LIST`. Both had been reading a registry another test had emptied, so both now empty it deliberately |
+| Windows 11, after | `tests/` **1821 passed / 74 skipped / 0 failed**, 31843 subtests — the same subtest count as before, so nothing else was riding on the empty registry |
+| macOS 26.7, after | `tests/` **2030 passed / 49 skipped / 0 failed** — the count the 2029 passed + 1 failed above was always going to be, with no new failure behind it |
 
 ## Windows 11 (build 26200): the same routes re-run after the capture refactor (2026-09-27)
 
@@ -3447,6 +3506,37 @@ cause`: right about what is missing, wrong about which cause is usual, since
 `CF_HDROP` is what a desktop actually presents. The message now names that first and
 the test pins it; the refusal itself is unchanged, because answering `""` would be
 indistinguishable from an empty clipboard.
+
+**And the GDI ownership question under those routes, measured on the same desktop
+after the fix (2026-09-27).** Both routes draw through one `_memory_dc` helper and
+delete through the caller's `_release`; the change here moved the deletion so that a
+draw failing *inside* the caller's `with` no longer deletes the pair on its way out of
+the `yield` as well, which handed `_release` two handles the generator had already
+deleted. Fakes count calls and so pin the count; what they cannot answer is whether the
+live API agrees that each object is deleted exactly once. A probe on the console
+desktop ran the *failing* path 200 times — a real screen DC, the helper's real pair, a
+draw that raises what a `0` from `PrintWindow` raises, and `_release` in the `finally`
+— with `GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS)` read around every
+iteration and across the loop: **0 net change, and 0 of 200 iterations with any
+delta**. The measurement was shown to be able to fail before it was believed: leaking
+three bitmaps moved the count 1 -> 4 and deleting them moved it back to 1.
+
+The same probe against `git archive HEAD`'s tree — the code before the change —
+answered 0 net change and 0 destroyed victims too, and the reason is worth recording
+rather than smoothing over. It allocated one `CreateCompatibleDC` and one
+`CreateCompatibleBitmap` between the failure and the caller's cleanup, which is the
+object a stale delete would have to hit to do harm, and asked whether they survived.
+They always did, in both trees, because the allocation after a freed value answered a
+**different** value each time it was asked (freed bitmap `285549300`, next bitmap
+`302326516`; freed DC `318841588`, next DC `335618804`). So the double delete's harm is
+latent rather than reproduced on this build, and the fix's own docstring says exactly
+that. The detector was falsified first — a victim deleted behind the check's back reads
+as destroyed, so the zeros are a measurement rather than a blind spot. The route itself
+was re-measured in the same run: `screenshot(region=(0, 0, 40, 24))` wrote a 40x24 PNG,
+mean brightness 39.0, through the same helper pair. (The probe's own first version
+leaked 400 objects of its own making, because the raised exception left before the
+accounting ran; the accounting lives in the `finally` now. A live check's probe is part
+of the measurement.)
 
 ## macOS 26 (Tahoe), Intel: `locate_image` against a real desktop (2026-09-27)
 

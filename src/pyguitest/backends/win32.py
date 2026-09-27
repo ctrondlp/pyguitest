@@ -2376,7 +2376,26 @@ class Win32Backend(GUIBackend):
         the DC's original 1x1 monochrome surface in place, the draw then
         succeeds against *that*, and the capture comes back black with nothing
         having reported a failure. That path deletes what it created, since no
-        caller's `finally` will have seen either object.
+        caller's `finally` will have seen either object -- and setup is the only
+        thing here that deletes anything at all.
+
+        **Deleting on the way back out of the `yield` would delete twice.** A
+        draw that fails inside the caller's `with` body arrives here as an
+        exception at the `yield`, so an `except` wrapped around the yield would
+        delete both objects and re-raise -- and the caller's `finally` then
+        hands those same two handles to `_release`. Deleting a value that is no
+        longer in use is usually inert, since Windows answers 0 for it, but the
+        pair is not this generator's to delete once it is yielded, and a handle
+        value GDI handed out again would take whatever now holds it with it.
+        Measured on Windows 11 build 26200, with a probe that fails the draw 200
+        times and allocates the same two kinds of object in between the failure
+        and the caller's cleanup: the second delete never landed on a live
+        object, because the allocation after a freed value answered a *different*
+        value every time it was asked -- so the harm is latent rather than
+        something the live run reproduced, and what the fix buys is single
+        ownership rather than a repair. Ownership passes to the caller the moment
+        the pair is yielded, which is what `_release` is for: this generator
+        deselects the bitmap on the way out and does nothing else.
         """
         memory_dc = gdi.CreateCompatibleDC(screen)
         bitmap = gdi.CreateCompatibleBitmap(screen, width, height)
@@ -2390,14 +2409,14 @@ class Win32Backend(GUIBackend):
             previous = gdi.SelectObject(memory_dc, bitmap)
             if not previous:
                 raise PyGUITestError("could not select the capture bitmap into its DC")
-            try:
-                yield memory_dc, bitmap
-            finally:
-                gdi.SelectObject(memory_dc, previous)
         except BaseException:
             gdi.DeleteObject(bitmap)
             gdi.DeleteDC(memory_dc)
             raise
+        try:
+            yield memory_dc, bitmap
+        finally:
+            gdi.SelectObject(memory_dc, previous)
 
     def _release(self, gdi, lib, memory_dc, bitmap, screen):
         """Delete a capture's GDI objects and release its screen DC.

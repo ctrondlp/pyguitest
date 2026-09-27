@@ -509,9 +509,14 @@ class UiaTestCase(unittest.TestCase):
         patcher = mock.patch.object(uia, "_connection", self._connection)
         patcher.start()
         self.addCleanup(patcher.stop)
-        # The type-library cache is module-level state: a test that exercises
-        # client_module() would otherwise leave a fake in it for the next one.
-        cache = mock.patch.object(uia, "_CLIENT_MODULE", uia._CLIENT_MODULE)
+        # The type-library cache is module-level state, and it has to start
+        # *empty* rather than at whatever it happens to hold: a fake left in it
+        # by the test before is one leak, but so is a real
+        # `UIAutomationClient` module loaded earlier in the process by a test
+        # that composed a live Windows session. `client_module()` answers from
+        # the cache without asking `comtypes_client()`, so `TestAvailability`
+        # would be reading the cache rather than the seam it is a test of.
+        cache = mock.patch.object(uia, "_CLIENT_MODULE", None)
         cache.start()
         self.addCleanup(cache.stop)
         self.backend = uia.UiaBackend()

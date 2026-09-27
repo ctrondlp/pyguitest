@@ -113,10 +113,27 @@ All notable changes to pyguitest are recorded here. The format follows
 
   The size assertion is a live test now, because this is the one part of the route a
   fake cannot reach: `tests/test_macos.py`'s `TestLiveWindowCapture` captures a real
-  titled window, reads the PNG's IHDR and asserts both dimensions equal `geometry()`'s.
-  It skips without PyObjC or without the grant, so CI skips it and a development Mac
-  runs it, and it was falsified before being trusted -- with `-o` removed it fails with
-  `(432, 384)` against `(320, 272)`.
+  titled window, reads the PNG's IHDR and checks its dimensions against the rectangle
+  `geometry()` reports. It skips without PyObjC or without the grant, so CI skips it and
+  a development Mac runs it, and it was falsified before being trusted — with `-o`
+  removed it fails with `(432, 384)` against `(320, 272)`.
+
+  What "checks against" means came out of the live run, because `screencapture -l` does
+  not document its unit: on a display whose backing scale is above 1 the image comes
+  back in backing pixels, so the assertion accepts the rectangle in *either* unit — the
+  points `geometry()` reports, or those points multiplied by the backing scale of the
+  display the window is on. The factor is read from that display and not from
+  `Screen.scale`, which is not the same number: measured on a Mac, a display of
+  1280x800 points with 1280x800 pixels has a backing scale of 1.0 while `Screen.scale`
+  answers 0.75, and at that scale the accepted set collapses to the strict size this
+  test always asserted — a real title-bar window at `geometry()` 877x499 came back
+  877x499. No display with a backing scale above 1 was available to run, so that branch
+  is exercised by the fake rather than measured; the shadow-padded image `-o` exists to
+  crop is still rejected at either scale (989x611 for that same window, 112px wider and
+  taller), so the tolerance did not buy the size check away. The arithmetic is a plain
+  function over (width, height, scale), which is why
+  `TestTheWindowCaptureSizeTolerance` can cover both units and the sizes that must stay
+  rejected without a Mac. See `docs/validation.md` for the run.
 
 ### Fixed
 
@@ -232,6 +249,58 @@ All notable changes to pyguitest are recorded here. The format follows
   banner to prove the name found is really ImageMagick, so a name collision cannot claim a
   check ran. Run both ways on Windows 11: SKIP with nothing installed, PASS with ImageMagick
   7's directory on PATH.
+
+- **The capture's bitmap and memory DC are deleted by one owner, not two.** This release's
+  shared `_memory_dc` helper deleted both objects on the way out of its `yield` when the
+  draw inside the caller's `with` body failed — so a write that failed mid-capture deleted
+  the pair there and then left the caller's own `finally` to hand the same two handles to
+  `_release` for a second delete. Deleting a value no longer in use is usually inert, since
+  Windows answers 0 for it, but the pair is not the generator's to delete once it has been
+  yielded: a value GDI had meanwhile handed out again would take whatever now holds it.
+  Found by review reading the new helper, not by a failing test. Measured on Windows 11
+  build 26200 with a probe that failed the draw 200 times and allocated the same two kinds
+  of object between the failure and the cleanup: the second delete never landed on a live
+  object, because the allocation after a freed value answered a *different* value every
+  time it was asked (285549300 then 302326516, 318841588 then 335618804), and the tree
+  before the fix shows a flat GDI count as well — 0 net change over 200 iterations against
+  a detector that three leaked bitmaps falsified first. So the harm was latent rather than
+  reproduced, and what the change buys is single ownership: deletion now covers only setup,
+  on the two paths where no caller has seen either handle, and the pair belongs to the
+  caller from the `yield` on, with the generator deselecting the bitmap and nothing else.
+  Two tests count the deletes on both routes' failure paths (`tests/test_win32_backend.py`),
+  and the reasoning is written down at the helper. See `docs/validation.md`.
+
+- **Two backend-selection tests emptied the module-level registry for every test after
+  them, and the tests that had been leaning on that were fixed with them.** Both replaced
+  `backends._REGISTRY` with their own fakes and restored the original through two
+  `addCleanup` calls in the order that undoes itself: cleanups run last-added-first, so the
+  `extend` that put the real registrations back ran before the `clear` that then threw them
+  away, leaving the registry empty for the rest of the process. Invisible in CI, where
+  nothing afterwards selects a backend by name; on a Mac the full run reached
+  `TestLiveWindowCapture` and failed `BackendUnavailable: unknown backend 'macos';
+  available: none` — a test that passes on its own, and a failure that reproduces against
+  `tests/test_macos.py` as it stood before this release's size-tolerance change above, so
+  the ordering was the cause and not the test.
+
+  The pair is now one helper, `nothing_registered`, whose order cannot be written
+  backwards — and putting the registry back showed how much had been passing *because* of
+  the wipe. `TestSelection` and `TestSessionFacade` both ask what a session with no
+  backends does, and both had been reading a registry another test had emptied; they empty
+  it deliberately now. Four more failures came from the same place, equally pre-existing:
+  `test_uia_backend`'s `TestAvailability`, because composing a real session loads the type
+  library — with the registry restored and nothing else arranged yet,
+  `test_falls_back_to_null_when_nothing_registered` composed `uia+win32`, the name its own
+  failure carried, and that left the real `UIAutomationClient` module in
+  `uia._CLIENT_MODULE` for `client_module()` to answer from without ever asking
+  `comtypes_client()` — so those four were reading the cache rather than the seam they are
+  tests of. A probe over the whole run still finds one loader left once those tests are
+  arranged (`tests/test_win32.py`'s registration test, which asks `uia.available()` because
+  that is what it is about), so the reset belongs in the tests that are about the seam:
+  `UiaTestCase.setUp` sets the cache to `None` instead of saving whatever it held, which is
+  what its own comment had been about all along. Whole-suite numbers, both platforms, with
+  the subtest count unchanged at 31843: Windows 11 **1815 passed / 6 failed** before and
+  **1821 passed / 0 failed** after, macOS 26.7 **2030 passed / 0 failed**. See
+  `docs/validation.md`.
 
 ## [0.14.0] — 2026-09-27
 
