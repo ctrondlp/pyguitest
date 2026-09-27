@@ -76,7 +76,7 @@ pyguitest/
 │       ├── uinput.py           injection in-process via python-evdev
 │       ├── capture.py          screenshots via desktop tools
 │       ├── crop.py             cutting a rectangle out, via ImageMagick
-│       ├── imagesearch.py      locate a template image via ImageMagick's compare
+│       ├── imagesearch.py      locate a template image via ImageMagick
 │       └── x11.py              X11 via python-xlib
 └── tests/                      unit tests, no display server required
 ```
@@ -172,7 +172,7 @@ whatever answers. Priority decides who wins a contested capability.
 | 60 | `capture` | screenshots |
 | 58 | `portalcapture` *(opt-in)* | screenshots via the Screenshot portal, needing no tool installed |
 | 57 | `kwinevents` | window events on KDE, via an ad hoc KWin script pushing to a D-Bus service this backend hosts; `kdotool` has no subscription mechanism of its own |
-| 55 | `imagesearch` | locating a template image, via ImageMagick's `compare` |
+| 55 | `imagesearch` | locating a template image, via ImageMagick's `compare` or its IM7 dispatcher `magick` |
 | 40 | `x11` | everything, on X11 and XWayland sessions only |
 | — | `null` | fallback when nothing else answers |
 
@@ -244,7 +244,8 @@ build raises `BackendUnavailable` instead of being quietly skipped, and
 which backend an option was meant for. `session.backend` is then the
 composite, so one member's own extras are reached through
 `member("eiinput")` — which takes the registry name even for the backends
-that report the tool they found (`imagesearch:compare`, `input:wtype`).
+that report the tool they found (`imagesearch:compare` or
+`imagesearch:magick`, `input:wtype`).
 
 `eiinput` shares that priority and that reasoning -- it raises the same
 consent dialog -- so it is registered `opt_in=True` too, and the shared 80

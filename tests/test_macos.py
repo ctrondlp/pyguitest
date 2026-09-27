@@ -15,6 +15,7 @@ for a process launched from a terminal.
 
 import importlib
 import os
+import struct
 import sys
 import tempfile
 import time
@@ -298,7 +299,7 @@ class TestScreenRecordingGate(unittest.TestCase):
         )
         self.assertEqual(
             capture.screencapture_argv("/tmp/a.png", window_id=99),
-            ["screencapture", "-x", "-l", "99", "/tmp/a.png"],
+            ["screencapture", "-x", "-o", "-l", "99", "/tmp/a.png"],
         )
 
     def test_a_denied_grant_raises_before_the_tool_runs(self):
@@ -705,6 +706,62 @@ class TestLiveQuartz(unittest.TestCase):
             self.assertIn(capability, capabilities)
         # PostEvent's own permanent refusal, absent with the grant in place.
         self.assertNotIn(Capability.INPUT_SYNC, capabilities)
+
+
+@unittest.skipUnless(
+    sys.platform == "darwin",
+    "the real `screencapture` and a real window exist only on a Mac",
+)
+class TestLiveWindowCapture(unittest.TestCase):
+    """The one thing a fake cannot check about `screencapture -l`: its output.
+
+    A fake can pin the argv -- `TestScreenRecordingGate` does, `-o` included --
+    but not what the tool does with it, and the live run that measured this
+    found a bug a fake was happy to hide: without `-o` the image carries the
+    drop shadow as padding, 68 pixels more than the window in each direction, so
+    the image and `geometry()` disagree and a caller who measures a window before
+    screenshotting it gets a picture of a different rectangle. The assertion
+    below is the whole of that regression: the two numbers must match.
+
+    Skipped wherever there is no grant, which is every CI runner. The `macos` job
+    grants nothing and installs no PyObjC before running the suite, so this
+    reaches a real measurement on a development Mac and a skip everywhere else,
+    which is the same arrangement `TestLiveQuartz` has.
+    """
+
+    def setUp(self):
+        from pyguitest.backends import _macapi
+
+        try:
+            importlib.import_module("Quartz")
+            importlib.import_module("ApplicationServices")
+        except ImportError:
+            self.skipTest("PyObjC is not installed, so there is no real capture here")
+        if not _macapi.screen_recording_allowed():
+            self.skipTest(
+                "Screen Recording is not granted, so `screencapture -l` would "
+                "write a black image rather than a measurement"
+            )
+
+    def test_the_image_is_the_rectangle_geometry_reports(self):
+        gui = pyguitest.connect(backend="macos")
+        candidates = [w for w in gui.windows() if w.title and gui.geometry(w)[2] > 40]
+        if not candidates:
+            self.skipTest("no titled window on this Mac is wide enough to measure")
+        window = candidates[0]
+        width, height = gui.geometry(window)[2:]
+        descriptor, path = tempfile.mkstemp(suffix=".png")
+        os.close(descriptor)
+        self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
+
+        self.assertEqual(gui.screenshot(path, window=window), path)
+
+        with open(path, "rb") as handle:
+            header = handle.read(24)
+        # A PNG signature, then IHDR: width and height are the two big-endian
+        # ints at offset 16, which is all the decoder this needs.
+        self.assertEqual(header[:8], b"\x89PNG\r\n\x1a\n")
+        self.assertEqual(struct.unpack(">II", header[16:24]), (width, height))
 
 
 class TestRegistration(unittest.TestCase):

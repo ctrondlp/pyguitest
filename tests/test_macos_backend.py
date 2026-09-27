@@ -15,20 +15,26 @@ write -- are pinned here, because both reproduce without a Mac once the fake is 
 like the real binding.
 """
 
+import os
 import re
 import sys
+import tempfile
 import types
 import unittest
 from unittest import mock
 
-from pyguitest import backends, session
+from pyguitest import backends, session, tools
+from pyguitest.backends import capture as capture_backend
 from pyguitest.backends import macos
+from pyguitest.backends.capture import ToolCaptureBackend
+from pyguitest.backends.composite import CompositeBackend
 from pyguitest.capabilities import Capability
 from pyguitest.errors import (
     BackendUnavailable,
     CapabilityUnsupported,
     ElementNotActionable,
     ElementNotFound,
+    PermissionRequired,
     PyGUITestError,
     WindowNotFound,
 )
@@ -1157,6 +1163,152 @@ def counting(original, log):
         return original(element, attribute, out)
 
     return read
+
+
+class TestWindowCapture(BackendTestCase):
+    """`screencapture -l`: the one route where this backend owns the pixels.
+
+    Driven through `capture.py`'s own `_run_tool`, patched, so what is under test
+    is the wiring -- which number goes to which command line, and that the grant is
+    checked before the tool is spawned. The runner itself, its timeout and its two
+    failure messages have their own tests in `tests/test_capture.py`.
+
+    The question a fake cannot answer is the one this route still carries: what
+    `-l` hands back for a real window -- whether the drop shadow comes with it, and
+    whether the image is `geometry()`'s rectangle or the window's frame around
+    that. Both are live-Mac measurements, and until one exists the image's content
+    is trusted while its dimensions are not.
+    """
+
+    def make_capturing(self, granted=True, **kwargs):
+        """A backend, and the argv of every tool invocation it makes.
+
+        `granted` patches the Screen Recording preflight, for the same reason the
+        AX one is patched by `make`: the real answer on anything but a Mac is no,
+        and the gate is deliberately checked before the tool would run.
+        """
+        backend = self.make(**kwargs)
+        calls = []
+
+        def run_tool(argv):
+            calls.append(argv)
+            with open(argv[-1], "w", encoding="utf-8") as handle:
+                handle.write("png-ish")
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        patched = mock.patch.object(capture_backend, "_run_tool", run_tool)
+        patched.start()
+        self.addCleanup(patched.stop)
+        allowed = mock.patch(
+            "pyguitest.backends._macapi.screen_recording_allowed",
+            return_value=granted,
+        )
+        allowed.start()
+        self.addCleanup(allowed.stop)
+        return backend, calls
+
+    def destination(self):
+        """An empty file to write a fake screenshot into, cleaned up after."""
+        descriptor, path = tempfile.mkstemp(suffix=".png")
+        os.close(descriptor)
+        self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
+        return path
+
+    def test_the_capability_is_declared_with_and_without_the_ax_grant(self):
+        # Screen Recording gates this route and Accessibility does not, so the AX
+        # preflight has nothing to say about it. Declared either way, and refused at
+        # the call -- ADR 004 §6 is about what AX gates and no more.
+        self.assertIn(Capability.WINDOW_CAPTURE, self.make().capabilities)
+        self.assertIn(Capability.WINDOW_CAPTURE, self.make(trusted=False).capabilities)
+
+    def test_a_window_is_captured_by_the_number_it_carries(self):
+        backend, calls = self.make_capturing(onscreen=self.onscreen_windows())
+        window = backend.windows()[0]  # Terminal, whose number is 48.
+        path = self.destination()
+        self.assertEqual(backend.capture(window=window, path=path), path)
+        self.assertEqual(calls, [["screencapture", "-x", "-o", "-l", "48", path]])
+
+    def test_a_raw_handle_is_taken_as_itself(self):
+        # `_issuer` allows a caller who passed a handle rather than a Window, and
+        # this is the member a composite hands such a handle to.
+        backend, calls = self.make_capturing(onscreen=self.onscreen_windows())
+        path = self.destination()
+        backend.capture(window=265, path=path)
+        self.assertEqual(calls, [["screencapture", "-x", "-o", "-l", "265", path]])
+
+    def test_a_denied_grant_refuses_before_the_tool_is_spawned(self):
+        # A denied Screen Recording grant is exit 0 and a black image, so the gate
+        # has to come first: nothing after it could tell that the tool had failed.
+        backend, calls = self.make_capturing(
+            granted=False, onscreen=self.onscreen_windows()
+        )
+        path = self.destination()
+        with self.assertRaises(PermissionRequired) as raised:
+            backend.capture(window=backend.windows()[0], path=path)
+        self.assertIn("Screen Recording", str(raised.exception))
+        self.assertEqual(calls, [])
+        self.assertEqual(os.path.getsize(path), 0)
+
+    def test_a_tool_that_writes_nothing_is_caught(self):
+        # Exit 0 alone has already been measured to mean nothing on a Linux desktop;
+        # this route shares that check rather than re-deriving it.
+        backend = self.make(onscreen=self.onscreen_windows())
+        path = self.destination()
+        allowed = mock.patch(
+            "pyguitest.backends._macapi.screen_recording_allowed", return_value=True
+        )
+        allowed.start()
+        self.addCleanup(allowed.stop)
+        patched = mock.patch.object(
+            capture_backend,
+            "_run_tool",
+            lambda argv: types.SimpleNamespace(returncode=0, stdout="", stderr=""),
+        )
+        patched.start()
+        self.addCleanup(patched.stop)
+        with self.assertRaises(PyGUITestError) as raised:
+            backend.capture(window=backend.windows()[0], path=path)
+        self.assertIn("exited successfully but left", str(raised.exception))
+
+    def test_whole_screen_capture_names_the_backend_that_serves_it(self):
+        # Refused naming the route that does serve it, rather than reported as a
+        # capability this backend does not declare: on a Mac a missing grant and a
+        # missing route are different problems, and the tool that ships with the OS
+        # needs nothing from here.
+        backend, calls = self.make_capturing()
+        with self.assertRaises(CapabilityUnsupported) as raised:
+            backend.capture(path=self.destination())
+        self.assertIn("capture:screencapture", str(raised.exception))
+        self.assertEqual(calls, [])
+
+    def test_a_region_beside_a_window_is_refused(self):
+        backend, calls = self.make_capturing(onscreen=self.onscreen_windows())
+        with self.assertRaises(ValueError):
+            backend.capture(
+                window=backend.windows()[0],
+                region=(0, 0, 5, 5),
+                path=self.destination(),
+            )
+        self.assertEqual(calls, [])
+
+    def test_a_composite_routes_a_macos_window_here_rather_than_to_the_crop(self):
+        # The reason the capability is declared on the backend that issues the
+        # handles: route one of `CompositeBackend.capture` passes a window back only
+        # to the member that issued it, so with the provider anywhere else this window
+        # would be resolved to a rectangle and cropped out of a screen shot instead --
+        # occluder and all.
+        backend, calls = self.make_capturing(onscreen=self.onscreen_windows())
+        tool = next(t for t in tools.CAPTURE_TOOLS if t.name == "screencapture")
+        cropped = []
+        composite = CompositeBackend(
+            [backend, ToolCaptureBackend(tool, runner=cropped.append)]
+        )
+        path = self.destination()
+        self.assertEqual(
+            composite.capture(window=backend.windows()[0], path=path), path
+        )
+        self.assertEqual(calls, [["screencapture", "-x", "-o", "-l", "48", path]])
+        self.assertEqual(cropped, [])
 
 
 class TestElementReading(BackendTestCase):

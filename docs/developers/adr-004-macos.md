@@ -182,8 +182,10 @@ the same dishonesty in the other direction. Kept in the reduced set:
 `SCREEN_INFO`, which is `CGGetActiveDisplayList`/`CGDisplayBounds` and needs no
 grant; `POINTER_QUERY`, which the table above already marks **no grant at
 all**; `SCREEN_CAPTURE`/`WINDOW_CAPTURE`, which are gated on
-ScreenCapture — a different service, preflighted separately; and
-`IMAGE_LOCATE`, which is ImageMagick on a file. The input capabilities are
+ScreenCapture — a different service, preflighted separately — and of which the
+whole-screen half is `capture:screencapture`'s while the per-window half is this
+backend's, since it is what issues the numbers `screencapture -l` is addressed by;
+and `IMAGE_LOCATE`, which is ImageMagick on a file. The input capabilities are
 gated on **PostEvent**, per §4, so they are withdrawn when *that* preflight
 says no and not when Accessibility does. Only `ELEMENT_TREE`, `ELEMENT_ACTION`,
 `ELEMENT_GEOMETRY` and the AX-backed window writes
@@ -392,6 +394,37 @@ What has **not** landed: window events, which is the phase after this one and ne
 and the clipboard, which `clipboard.py`'s tool backend already owns on a Mac
 through `pbpaste`/`pbcopy`.
 
+Native per-window capture has landed too, in 0.15.0 rather than in the 0.14.0
+both those phases shipped in, and it is §1's mechanism unchanged: `MacosBackend`
+declares `WINDOW_CAPTURE` and its `capture()` passes the `CGWindowID` each `Window`
+already carries to `screencapture -l`, through the argv builder `capture.py` has
+had since it was written. The provider had to be this backend rather than the tool
+backend that owns the argv, for the reason `CompositeBackend._issuer` gives: a
+handle is backend-private, so a composite passes a window back only to the member
+that issued it — and on a Mac that is the join, not `capture:screencapture`. The
+tool backend still declares no `WINDOW_CAPTURE` and still owns whole-screen capture,
+so there is one provider and no ambiguity about which route a window takes.
+
+Two things about it are recorded here because they are decisions rather than
+details. Screen Recording gates it, so `WINDOW_CAPTURE` is declared whether or not
+the grant is in place and refused at the call — `PermissionRequired`, before the
+tool is spawned, naming the grant and the interpreter — which is `capture.py`'s own
+treatment of `screencapture` and not `_AX_ONLY`'s withdrawal, since Accessibility
+buys none of this route. And what `-l` returns for a real window is **measured now**,
+on macOS 26.7, with the answer written into the code rather than left as a question:
+the image carries the drop shadow as padding unless `-o` is passed — 388x340 against
+a `geometry()` of 320x272 without it, exactly 320x272 with it — so the argv passes
+`-o` and the image is the rectangle `geometry()` reports, the same rectangle the
+Windows route sizes from. The properties this route was chosen *for* were measured in
+the same run: the window's own pixels with another window covering its centre (where
+the same rectangle cut out of a screen shot held the occluder's, and `window_at()`
+named that occluder), and an offscreen window whole at full size where the region
+route clamped instead — 320x272 against 260x197 for a `(-60, 603, 320, 272)` window on
+a 1280x800 screen. That is the standing rule `kAXActionNamesAttribute` set, one layer
+down, now satisfied. The one thing no live run can settle is a window that closed
+between its id being read and the capture: the tool exits 0 and writes a black image,
+so it is documented at `capture_window_id` instead of detected.
+
 What exists is this decision and the research behind it — the 2026-09-13
 analysis covering the AX and CoreGraphics API mapping, the TCC model, the
 keyboard and role tables, and the phase plan, from which everything above is
@@ -409,7 +442,12 @@ join, deep-tree cost (17 nodes, 0.031 s for Terminal's window), whether
 for a process launched from a terminal, and which service gates a listen-only event
 tap. The last of those decides which permission the recorder asks for, and the answer
 is that it asks `kTCCServiceListenEvent`, whose authorization composes up the chain
-to Accessibility rather than needing a pane of its own. Screen Recording has never
-been granted on any Mac, so §8's black-image refusal is still only fake-driven.
+to Accessibility rather than needing a pane of its own. Screen Recording has since
+been granted on that machine, by hand, to both `Terminal.app` and
+`/usr/libexec/sshd-keygen-wrapper` — the SSH session's own identity — which moved
+§8's black-image refusal from "fake-driven only" to measured in both directions: with
+the grant denied the call exits 0 and writes a uniformly black PNG, and with it
+granted the same call writes a real image. The per-window route followed in the same
+session, and is measured above.
 [docs/validation.md](../../docs/validation.md) is where each item above was
 retired as it was measured.

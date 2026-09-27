@@ -29,7 +29,7 @@ broke.
 ## Design and internals
 
 [developers/](developers/) holds the rationale and the internals: why the API
-is not a port, the audit it derives from, the two ADRs, the repository
+is not a port, the audit it derives from, the four ADRs, the repository
 structure, and the protocol gaps worth taking upstream. None of it is needed
 to use the library.
 

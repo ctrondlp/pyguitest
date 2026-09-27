@@ -77,11 +77,17 @@ rules below are one shape of that mistake.
     `gui.close()`. Same for `gui.start_app(...)`, which returns an
     `Application` usable as a context manager.
 
-12. **Do not assume X11.** `pointer_position()`, `is_key_pressed()`,
+12. **Do not assume X11, and do not assume Windows is Linux with another
+    toolkit.** `pointer_position()`, `is_key_pressed()`,
     `is_button_pressed()`, `set_window_title()`, `lower_window()` and
-    `is_window_cursor()` are X11 and XWayland only — no Wayland compositor
-    will ever serve them, by design. If a task needs one of these, say that
-    it constrains the script to X11 rather than emitting it silently.
+    `is_window_cursor()` are the tier-6 capabilities: no Wayland compositor
+    can serve any of them, by design. They are ordinary calls on X11 and
+    XWayland and on Windows, and macOS serves `pointer_position()` alone,
+    through Quartz. So the platform matters twice over — a script using any
+    of them is constrained to those desktops, and one using all six cannot
+    run on a Mac at all. If a task needs one, say which desktops it
+    constrains the script to rather than emitting it silently, or check
+    `gui.supports(...)` and skip.
 
 13. **Do not hardcode screen dimensions.** Ask: `gui.screens()`, and use
     `Screen.size`. Multi-monitor layouts and fractional scaling make any

@@ -35,12 +35,13 @@ rather than an error.
 | `portal` *(opt-in)* | keyboard and pointer buttons/scroll via the RemoteDesktop portal, and the clipboard with `clipboard=True` — the only clipboard path on GNOME | — | PyGObject | — |
 | `capture` | screenshots | — | — | `grim`, `gnome-screenshot`, `spectacle`, `import` or `screencapture` |
 | `portalcapture` *(opt-in)* | screenshots via the Screenshot portal, no tool needed | — | PyGObject | — |
-| `imagesearch` | finding a control by a picture of it | — | — | `compare` (ImageMagick) |
+| `imagesearch` | finding a control by a picture of it | — | — | `compare` or `magick` (ImageMagick) |
 | `x11` | everything, including tier-6, on X11 and XWayland | `[x11]` (python-xlib) | — | — |
 
-`[windows]` (comtypes) and `[dev]` (pytest, ruff, mypy) are the remaining
-extras; the first is described under [On Windows](#on-windows), and the second
-in [CONTRIBUTING.md](../CONTRIBUTING.md).
+`[windows]` (comtypes), `[macos]` (PyObjC) and `[dev]` (pytest, ruff, mypy) are
+the extras that matrix does not carry; the first two are described under
+[On Windows](#on-windows) and [On macOS](#on-macos), and the third in
+[CONTRIBUTING.md](../CONTRIBUTING.md).
 
 Two rows are worth reading twice. `windows` on sway, Hyprland and niri needs
 **nothing at all** — window control speaks their unix sockets using only the
@@ -80,7 +81,8 @@ manager to name, and no row of packages that pip cannot supply. What there is:
 |---|---|
 | `pip install pyguitest` | everything but the element tree |
 | `pip install "pyguitest[windows]"` | + UI Automation, through `comtypes` — double quotes because Command Prompt does not strip single ones |
-| ImageMagick | `winget install ImageMagick.ImageMagick`, for locating a control by a picture of it — the one thing here pip cannot supply, and it needs its legacy command line, since the tool called is `compare` |
+| ImageMagick | `winget install ImageMagick.ImageMagick`, for locating a control by a picture of it — the one thing here pip cannot supply. The install provides `magick` and no legacy commands, which is enough: this package drives `magick compare` and `magick identify` directly. An install that *did* add the legacy command line works through `compare` instead |
+| nothing, for the clipboard | `CLIPBOARD` is the Win32 clipboard itself — `CF_UNICODETEXT` read and written through `GetClipboardData`/`SetClipboardData` — so it asks for no package, no extra and no grant. There is no PRIMARY selection beside it to ask for either: `primary=True` raises rather than answering from the clipboard |
 | nothing on `PATH` | no CLI tool is adapted or recommended: every Windows mechanism is an API call, so there is no ydotool-shaped gap |
 
 The `windows` extra carries an environment marker, so installing it on Linux or
@@ -96,7 +98,9 @@ what there is:
 |---|---|
 | `pip install pyguitest` | everything but the in-process half: `screencapture` needs no Python binding at all |
 | `pip install "pyguitest[macos]"` | + the Accessibility element and window tree (`macos`), and `CGEventPost` input injection (`macquartz`), through PyObjC's ApplicationServices and Quartz |
+| ImageMagick | `brew install imagemagick`, for locating a control by a picture of it — the same `compare` the Windows and Linux tables name, and the one thing here pip cannot supply. `magick compare` is driven too, so a build that provides only ImageMagick 7's entry point works. It needs a capture to search: with the bare install that is `screencapture`, which needs the Screen Recording grant |
 | nothing on `PATH` | `screencapture` ships with the OS, so the capture path asks for no installation — only the Screen Recording grant, which `pyguitest doctor` names |
+| nothing on `PATH`, no grant either | `pbcopy`/`pbpaste` ship with the OS too, so `CLIPBOARD` is the one macOS capability that asks for neither an install nor a TCC grant. It is not version-probed — every `pbcopy` run rewrites the pasteboard, so `doctor` reports the tool and leaves its version column blank rather than destroying what you had copied. A Mac has a single selection, so `get_clipboard(primary=True)` raises rather than answering from the clipboard |
 
 The `macos` extra carries an environment marker on each requirement, so
 installing it on Linux or Windows resolves to two skipped requirements and
@@ -301,8 +305,9 @@ raises.
 |---|---|
 | Input | `wdotool`, `wtype` *(wlroots only)*, `ydotool` *(keymap-unsafe)*, `xdotool` *(X11 only)* |
 | Capture | `grim`, `gnome-screenshot` *(real X11 only)*, `spectacle`, `import` *(X11 only, and real X11 only)*, `screencapture` *(macOS only)* |
+| Clipboard | `wl-copy`/`wl-paste` (wl-clipboard — not on GNOME, where the `portal` row above is the only clipboard path), `xclip`, `xsel` *(X11 only)*, `pbcopy`/`pbpaste` *(macOS only)* |
 | Windows | `swaymsg`, `hyprctl`, `niri msg`, `kdotool` |
-| Image search | `compare` (ImageMagick) |
+| Image search | `compare` or `magick` (ImageMagick) |
 
 *X11 only* means the tool needs an X connection, which XWayland carries, so
 it is selected on an XWayland session too. What limits it there is which
@@ -373,6 +378,16 @@ ImageMagick also does the cropping whenever a region is asked of a tool that
 has no exact-rectangle mode, so `gnome-screenshot` or `spectacle` alone
 gives you whole-screen capture, and `magick`/`convert` alongside either
 gives you regions and per-window capture too.
+
+It does the template matching for the same reason. `IMAGE_LOCATE` is served by
+`compare` (ImageMagick 6, or a 7 that installed the legacy commands) or by
+`magick` (`magick compare` and `magick identify` under IM7's dispatcher, which
+is the only entry point a `winget` install lays down) — see
+[troubleshooting.md](troubleshooting.md#template-matching-is-slow-or-times-out).
+Cost scales with the area searched and not with the template, so the same
+search inside one window is a second or two where a full 1080p desktop is
+about a minute on a build without the FFT delegate: `locate_image(within=...)`
+is worth passing for the speed as much as for the accuracy.
 
 `import` (ImageMagick) is a capture tool on a real X11 session only. Where it
 *is* selected, on Fedora 43 it is currently broken outright: `import -window

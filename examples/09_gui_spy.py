@@ -452,8 +452,9 @@ def _find(gui, args, as_json):
         if not gui.supports(capability):
             sys.exit(
                 f"{capability.name} is unavailable. Template matching "
-                "needs both a way to capture the screen and ImageMagick's "
-                "`compare` -- run `pyguitest doctor` for what to install."
+                "needs both a way to capture the screen and ImageMagick "
+                "-- `compare` or ImageMagick 7's `magick` -- run "
+                "`pyguitest doctor` for what to install."
             )
     try:
         match = gui.locate_image(template)

@@ -41,13 +41,27 @@ readme = "README.md"
 # (xdotool, dogtail, libei) belong here because a caller searching for one is
 # looking for exactly this; tools we merely compete with do not, and are
 # answered in the README where a comparison can be honest and has room.
+#
+# The same test decides the bindings: `comtypes` and `pyobjc` are what the
+# Windows element tree and the whole macOS support are actually built on, the
+# way `dogtail` is what the Linux element tree is built on, so a caller
+# searching for them is looking for a package that drives them.
+#
+# The last three are capabilities rather than tools, and each is a token a
+# user types on its own: `screenshot` is `Session.screenshot`, `clipboard` is
+# the `CLIPBOARD` capability (native on Windows, `pbcopy`/`pbpaste` on macOS,
+# a portal or a selection tool on Linux), and `template-matching` is what
+# `locate` does over ImageMagick. Kept to three: BM25 normalizes by field
+# length, so each addition costs the others a little, and a capability named
+# only in the README is a search a reader can still make.
 keywords = [
     "gui-automation", "gui-testing", "desktop-automation", "ui-testing",
     "ui-automation", "uia",
-    "linux", "freebsd", "windows", "win32", "macos", "quartz", "cocoa",
+    "linux", "bsd", "freebsd", "windows", "win32", "macos", "quartz", "cocoa",
     "x11", "wayland", "xwayland", "gnome", "kde", "sway",
-    "accessibility", "at-spi", "atspi", "dogtail", "ax",
+    "accessibility", "at-spi", "atspi", "dogtail", "ax", "comtypes", "pyobjc",
     "xdotool", "libei", "cgevent",
+    "screenshot", "clipboard", "template-matching",
 ]
 
 # No `License ::` classifier: with the PEP 639 `license` SPDX string above,
@@ -80,6 +94,12 @@ classifiers = [
     "Programming Language :: Python :: 3 :: Only",
     "Environment :: X11 Applications",
     "Environment :: Win32 (MS Windows)",
+    # The third desktop, so a macOS reader filtering the sidebar for it finds
+    # this package at all. The bare facet only: ":: Aqua"/":: Carbon"/":: Cocoa"
+    # each name an application written against AppKit or the old Carbon APIs,
+    # and this is neither -- it drives whatever the desktop is already showing,
+    # through Accessibility, which speaks to both.
+    "Environment :: MacOS X",
     "Topic :: Desktop Environment",
     "Topic :: Software Development :: Testing",
     # What this drives is a user interface, and what it is used for is

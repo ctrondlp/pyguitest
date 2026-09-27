@@ -1598,6 +1598,59 @@ attempted anyway" on a platform that attempts nothing of the sort. It also
 reported `is_interactive_desktop False` with the note that no prompt or error
 will say so, which is correct for the SSH session it ran in.
 
+## Run live on Windows 11 (build 26200): `WINDOW_CAPTURE` through `PrintWindow`
+
+2026-09-27, the console session itself — and the first run of the per-window
+capture anywhere, since the capability was not declared on this platform
+before. `screenshot(window=...)` on Windows had always been a crop out of a
+screen shot, and the run that confirmed *that* route's arithmetic (above,
+under the first interactive desktop) was this one's predecessor.
+
+The setup is two plain Win32 windows created by a **separate process**: a
+magenta probe and a larger green occluder over it, the occluder created last so
+that it is on top. Separate on purpose — a `PrintWindow` of a window this
+process owned would prove less than the cross-process case a test script
+meets. The pointer was never moved and nothing was clicked; both windows were
+gone when the check exited.
+
+What it established, in the order it would have broken:
+
+| | |
+| --- | --- |
+| the rectangle | `geometry()` answered `(75, 75) 400x300` for a probe that asked for `(60, 60) 320x240` from a process that is not DPI-aware — Windows scaled it by 125% — and the PNG was 400x300, the physical rectangle exactly |
+| unoccluded | the centre pixel of that PNG was `(255, 0, 255)`, the colour the probe paints |
+| occluded | `window_at(275, 225)` named the **occluder**, so it really was on top; the window capture still answered `(255, 0, 255)` |
+| the control | the same rectangle captured as a `region` answered `(0, 255, 0)` — green, the occluder. That is the route `WINDOW_CAPTURE` replaces, and this is the measurement that says the replacement is not cosmetic |
+| the occluder itself | its own capture answered `(0, 255, 0)`, so the magenta above was not a screenshot taken before the occluder appeared |
+| the flag | `PrintWindow(..., 0)` and `PrintWindow(..., PW_RENDERFULLCONTENT)` on a plain GDI window both draw (43,200 of 43,200 pixels non-black with `0`, 39,904 with the flag). On **Calculator**, whose client area is DirectComposition's: `0` returned **no** non-black pixels at all and `PW_RENDERFULLCONTENT` returned **101,655**, mean brightness 244.6 of a 418x675 window. The flag is load-bearing rather than decoration |
+| a minimized window | `PrintWindow` there does not fail — it **succeeds** and returns 249x43, mean brightness 213: the parked window's frame instead of its contents. Which is why the backend refuses a minimized window instead of answering |
+| the invisible border | `GetWindowRect` is 9px wider than `DWMWA_EXTENDED_FRAME_BOUNDS` on the left, right and bottom (0 on top), and the leftmost 8 columns of the image are black. Documented rather than corrected: the image is the rectangle `geometry()` reports, so that a caller who measures a window and then screenshots it gets that size back |
+
+**A bug only a live run could have found, and the fake that could not have.**
+The first run raised `GetDIBits returned 0 of 300 scanlines` — the per-window
+route had drawn correctly and then read its pixels back from a bitmap that had
+already been deleted. The DC and bitmap lifetime had just been moved into one
+shared helper, and that helper deleted both on the way out of its `with` block,
+which is *before* the caller's read; `GetDIBits`' documented precondition is
+the opposite order. The screen path read its pixels the same way, from the same
+helper, so it had the same defect by construction — nothing else could have
+shown it, because the whole test suite was green: the fake's `GetDIBits` kept
+answering after `DeleteObject`. The fix leaves both objects alive for the read
+and deletes them in the caller's `finally`; the fake now ends an object's life
+when Windows does, so two tests assert the read happens first and a scratch
+test that puts the deletion back fails with the live message
+(`GetDIBits returned 0 of 2 scanlines`).
+
+**One trap avoided, recorded because it looked exactly like a backend bug.** The
+probe's first version painted its client area with `GetDC(hwnd)` from inside
+`WM_PRINTCLIENT` — drawing into its own window DC instead of the DC
+`PrintWindow` hands it — which would have produced a black image and a
+"the capture is empty" conclusion about code that was working. A live check's
+probe is part of the measurement.
+
+`docs/api.md`'s capability table gained `Win32Backend` on the `WINDOW_CAPTURE`
+row as a result, generated from the backend's own `capabilities`.
+
 ## Not run live
 
 - **What the live Windows runs left unverified.** The suite passes on
@@ -2646,13 +2699,19 @@ That leaves the following transcribed from documentation and **not confirmed**,
 each a candidate for the first run that can hold a grant:
 
 
-- **The `screencapture` argv beyond acceptance**, `-x` / `-R x,y,w,h` /
+- ~~**The `screencapture` argv beyond acceptance**, `-x` / `-R x,y,w,h` /
   `-l <CGWindowID>`: transcribed from the man page, and the most a run without
   the grant can show is that the tool *parses* them. It refused both forms --
   `could not create image from display`, `could not create image from rect`,
   exit 1, no file written -- which is the refusal the preflight in front of it
   predicts rather than an argument error. Whether a crop covers the right
-  pixels is still unmeasured, and `-l` has not been run at all.
+  pixels is still unmeasured, and `-l` has not been run at all.~~ **Closed
+  2026-09-27**, once Screen Recording was granted: all three forms write real
+  files, a crop covers the pixels it was asked for and silently clamps at the
+  screen edge, and `-l` is the window's own pixels at exactly `geometry()`'s
+  rectangle -- see "macOS: `screencapture -l`, measured with the grant in
+  hand" below. The run found the bug it was for: without `-o` the image is 68
+  pixels wider and taller than `geometry()` on the window it measured.
 - **The `kVK_*` table, for the keys a document can show.** `left`, `right`,
   `delete`, `forwarddelete`, `return` (through `send_keys("~")`) and the
   modifier keys have now been posted into TextEdit and read back, and each did
@@ -2844,8 +2903,10 @@ What this run does **not** settle, and what is therefore still open:
 
 - **Screen Recording has not been granted on any Mac** -- closed 2026-09-27,
   see "macOS: closing four open items" below.
-- **The clipboard is untouched.** `clipboard.py` owns `pbpaste`/`pbcopy` on a Mac,
-  and nothing here exercised it.
+- **The clipboard is untouched here** -- and this bullet's own claim, that
+  `clipboard.py` owned `pbpaste`/`pbcopy` on a Mac, was wrong: nothing was
+  registered and the capability was missing outright. Closed 2026-09-27, see
+  "macOS: the clipboard, live — and the trap that was in probing it" below.
 - **`AXObserver`, and therefore `WINDOW_EVENTS`, is not implemented.** It is the
   phase after this one, and `wait_for_window` on a Mac still has nothing under it.
 - **Selection and disclosure state were read off synthetic trees, not a real
@@ -2986,7 +3047,9 @@ replayed `type_text` stays unmeasured. **And a capability that macOS simply does
 unsupported on macquartz+macos: no member backend provides it` -- neither backend implements
 the pasteboard, so a script that copies and pastes, or asserts on the clipboard, is not
 portable to a Mac yet. It is a gap rather than a bug, and it is the one capability in this
-package's vocabulary with no macOS implementation at all.
+package's vocabulary with no macOS implementation at all. Closed 2026-09-27: it was a gap
+that also turned out to be *reachable*, through `pbcopy`/`pbpaste` — see "macOS: the
+clipboard, live — and the trap that was in probing it" below.
 
 
 ## Windows 11 (build 26200): the route a combo box click had none of (2026-09-26)
@@ -3175,3 +3238,292 @@ check already guards against (see the "one element could come back as a dozen
 search matches" fix above), except this is that pathology occurring on a real
 machine rather than only in an adversarial test tree.
 
+## macOS: the clipboard, live — and the trap that was in probing it (2026-09-27)
+
+`CLIPBOARD` was the one capability in this package's vocabulary with no macOS
+implementation at all, and the paragraph two sections up says exactly that. A
+paragraph one section *earlier* said the opposite — that "`clipboard.py` owns
+`pbpaste`/`pbcopy` on a Mac" — and nothing behind it was true: neither name
+appeared in `tools.CLIPBOARD_TOOLS`, so `supports(Capability.CLIPBOARD)` was
+`False` and `get_clipboard()` raised, and the review that read the second
+paragraph reported the feature as merely unvalidated rather than missing. Both
+paragraphs have now been reduced to the one that was right.
+
+The two tools ship with the OS at `/usr/bin/pbcopy` and `/usr/bin/pbpaste`, so
+this is a tool-backed capability in the same shape as `screencapture` — nothing
+to install, nothing to prefer it over, and therefore last in
+`CLIPBOARD_TOOLS`. What the run settled, through
+`examples/_clipboard_validate.py` (which now exits 1 on a mismatch rather than
+only printing `False`, and takes its closing prompt's EOF as "done", so it runs
+unattended over SSH):
+
+- **Text round-trips byte for byte, and empty text stays empty.** The value
+  came back identical for an ASCII marker, for
+  `héllo — 日本語 ✅ 🎉` (29 UTF-8 bytes, no trailing newline either way), and
+  for `""` — the empty case matters because `pbpaste` on a pasteboard holding
+  nothing and a pasteboard holding an empty string both print nothing, and a
+  write that turned `""` into `"\n"` would only show up here. A second write
+  replaced the first, and writing again after the empty write recovered.
+- **The value outlives the writer, without a daemon.** Dropping the session
+  object, collecting, and connecting again still read the last value back, and
+  ten write/read cycles in a row each saw their own value. That is a different
+  mechanism from the Linux tools: `wl-copy`/`xclip` fork and stay resident to
+  keep serving the selection (which is why `clipboard.py` devnulls their output
+  and cannot use their exit status), where `pbcopy` writes into the user's
+  pasteboard server and exits — measured here as the pasteboard surviving a
+  process that had already terminated. `pbcopy` is therefore deliberately *not*
+  in `_FORKS_ON_WRITE`, and it is the one tool whose stderr is still worth
+  capturing.
+- **`primary=True` is refused, not aliased.** A Mac has one pasteboard and no
+  PRIMARY, so `get_clipboard(primary=True)` raises
+  `CapabilityUnsupported: CLIPBOARD is unsupported on clipboard:pbcopy: this
+  tool's platform keeps a single selection: macOS's pasteboard has no PRIMARY,
+  and answering from the clipboard would be answering a different question` —
+  the same choice `portal.py` makes, and for the same reason, because
+  `Cmd+C`/`Cmd+V` and a middle-click paste genuinely are one selection here.
+- **A plain `pyguitest.connect()` on a Mac offers it — not only a forced backend.** The
+  default session on the same machine reported
+  `macos+capture:screencapture+clipboard:pbcopy` with 18 capabilities and
+  `Capability.CLIPBOARD in gui.capabilities` answering `True`, and the round trip went
+  through that composed session rather than a `backend="clipboard"` connect. The
+  user-facing diagnostic is safe too: `pyguitest doctor` — the command most likely to be
+  run while something is on the clipboard — named the tool (`tools screencapture, pbcopy`)
+  with a sentinel pushed by `pbcopy` beforehand still on the clipboard afterwards. That is
+  `probe_version=False` doing what it exists for: one blank version column, and the user's
+  clipboard intact.
+- **Every `pbcopy` invocation rewrites the pasteboard, which is a trap this
+  package had to be shaped around.** `pbcopy < /dev/null` exits 0 and *clears*
+  the user's clipboard; so does asking it for help or a version. A tool that
+  answers `--version` by destroying what the user had copied is a tool whose
+  version must not be probed, so `ExternalTool` grew `probe_version` (default
+  `True`) and `pbcopy` is registered with it `False`: `tool.version()` answers
+  `None` rather than running anything. The probes themselves now also run with
+  `stdin=subprocess.DEVNULL`, since a probe that inherits a terminal's stdin is
+  a probe that can block on it — and, for this tool specifically, one that would
+  eat the pasteboard while it did.
+
+What this run does **not** settle: only text was exercised, so an image or rich
+pasteboard type is untested and the tool route has no way to ask for one (the
+tables carry plain text only); the paste was read back through `pbpaste` rather
+
+## macOS: `screencapture -l`, measured with the grant in hand (2026-09-27)
+
+The per-window route the sections above left unmeasured -- "whether a crop covers
+the right pixels is still unmeasured, and `-l` has not been run at all" -- run on
+the same macOS 26.7 machine, from the same SSH session, once Screen Recording was
+granted to `/usr/libexec/sshd-keygen-wrapper`. It is the third platform to answer
+this question and the three answers are not identical.
+
+**The arrangement, because it is most of the result.** Two windows in a *separate*
+process, which is what a test script meets: a magenta one, and a larger green one
+created after it so that it is on top with its origin over the magenta window's
+centre. An SSH session cannot put a window on the console desktop at all -- an
+`NSWindow` in a process started over SSH never reaches the window server -- so the
+child is launched with `open -a Terminal`, into the console session where the
+grants live, and reports through a file rather than a pipe. `window_at(360, 304)`
+answered `PGT green` in the same run, so the occluder was verifiably over the
+window being captured, and the region crop of the same rectangle is its control.
+
+What the run settled, in the order it would break:
+
+- **The drop shadow comes with the window unless `-o` is passed, and `-o` is what
+  makes the image the rectangle `geometry()` reports.** The same window:
+  `screencapture -x -l <number>` gave 388x340 with black corners, and
+  `screencapture -x -o -l <number>` gave 320x272, exactly `geometry()`'s rectangle.
+  The padding is the shadow's own extent rather than a constant: 68 pixels more in
+  each direction for the inactive window above, 112 for the key window (548x460
+  against 480x360 when the same pair was measured with the green window active).
+  The argv now passes `-o`, and the first run of the route is why anyone knew: it
+  measured 388x340, which is what this package would have shipped had the check
+  been a code review rather than a live run.
+- **The image is the window's own pixels, so occlusion is irrelevant.** The magenta
+  window's centre pixel was `(255, 0, 255)` in its own capture and `(0, 255, 0)`
+  -- the green occluder -- in the region crop of the identical rectangle. Both
+  files were 320x272; only the content differed, and only because one is the window
+  and the other is the screen.
+- **A window hanging off the edge of the display comes back whole.** This needed a
+  subclass overriding `constrainFrameRect:toScreen:`, because `NSWindow` moves a
+  window back onto the visible screen: a window asked for `(-60, 700) 320x240` first
+  came back at `geometry()` `(0, 463, 320, 272)` -- clamped clear of the left edge
+  and the Dock -- so the first attempt at this measurement measured a window that
+  was entirely on screen. Unconstrained, `geometry()` answered
+  `(-60, 603, 320, 272)` on a 1280x800 screen: the `-l -o` capture was the full
+  320x272 with the window's own colour where the display has no pixels at all, and
+  the region crop of the *same rectangle* came back **260x197**, silently clamped
+  to what exists -- 60 columns and 75 rows short, exit 0, no warning, no stderr.
+  That is the two routes' difference in one pair of numbers, and it is why the
+  README says the region route clips what is offscreen while the window route does
+  not.
+- **A window that has closed since its id was read is exit 0 and a black image.**
+  Closing the window under its own id and capturing that id produced a 388x340 PNG
+  of 2976 bytes with mean brightness `0.0`: the shadow-padded size, every pixel
+  black. So the route's non-empty check passes and the caller is handed a picture
+  of nothing -- and nothing in the file distinguishes it from a window that is
+  legitimately black. An id that never named a window is the other case: `999999`
+  exited **1** with `could not create image from window` and wrote no file, which
+  `_run_tool` raises on. The stale case is now written down at `capture_window_id`
+  instead of being guessed at, and the honest summary for a caller is that a window
+  which might have closed should have its `geometry()` read again before capturing.
+- **The route the session takes is the route, and the capability is declared.**
+  `pyguitest.connect()` on that machine reported `WINDOW_CAPTURE: 'macos'` among 17
+  providers -- the AX/CoreGraphics join, not `capture:screencapture`, which is what
+  `CompositeBackend._issuer` requires -- with `supports(Capability.WINDOW_CAPTURE)`
+  answering `True`, and `gui.screenshot(path, window=w)` wrote a file the same size
+  as the direct `-l -o` run to the byte (5718 both ways). Its first run wrote 12144
+  bytes, the `-l`-without-`-o` size, which is the same bug seen from the session API
+  rather than from the argv.
+- **The fifth consent gate did not fire for this route, in this run.** The
+  ScreenCaptureKit prompt described above -- "bypass the system private window
+  picker" -- is *about* the thing `-l` does, and every call here returned in
+  0.14-0.63 s with no dialog: the whole-screen shot taken after the last of them
+  shows an ordinary desktop with no prompt on it, and the session's window list
+  holds no dialog window. That is not the same as "never fires" -- the earlier
+  sighting was neither provoked nor narrowed down, and this is one run under one
+  grant.
+
+The four `-R`/`-l` argv questions the "Not run live" list carried are closed by the
+run above. What it adds to that list is one thing a run cannot close: the stale id,
+which is unclosable rather than unmeasured, and is documented in the code and in
+[troubleshooting.md](troubleshooting.md) for that reason.
+
+**And the size assertion is now a test, because a fake could not have caught this.**
+`tests/test_macos.py` gained `TestLiveWindowCapture`: it captures a real titled
+window through `connect(backend="macos")`, reads the PNG's IHDR with `struct` rather
+than a decoder, and asserts the two dimensions equal `geometry()`'s. It skips
+wherever PyObjC or the grant is missing, so the `macos` CI job — which grants nothing
+and installs no PyObjC before the suite — skips it, and a development Mac runs it.
+That it is a guard rather than a test that passes either way was checked the
+repository's usual way, by falsifying it: with `-o` taken back out of the argv in the
+Mac's own copy, the test failed with `(432, 384)` against `(320, 272)` — 112 pixels
+more in each direction, which is the key window's shadow padding, and the same figure
+the changelog's account of this run records. Restoring `-o` made it pass again.
+
+than pasted into a real application's own field, since the unattended run had no
+terminal for the by-hand step the script still asks for; and the consent question
+is unanswered for a locked screen or a second logged-in user, where the
+pasteboard this reaches as the console user may not be the one a GUI app would
+see. Nothing here needed a TCC grant, which is worth knowing given that every
+other macOS capability in this file did.
+
+## Windows 11 (build 26200): the same routes re-run after the capture refactor (2026-09-27)
+
+`capture.py`'s drawing and reading helpers were moved to module level so that
+`macos.py` could share one copy rather than grow a second, and those helpers are
+where the previous run had found its bug — the `GetDIBits`-after-`DeleteObject`
+lifetime fault no fake could see. A refactor of the code underneath a measurement
+is exactly what a recorded result does not cover, so the Windows measurements were
+re-run against the refactored tree, on the same machine, from the interactive
+desktop (session 1) rather than the Session-0 shell the earlier runs had to work
+around.
+
+The arrangement was the shape this run repeats: a magenta probe window and a larger
+occluder over its centre, both in a *separate* process. One difference cost a run
+and is worth recording — the first attempt pinned the occluder with Tk's `lift()`,
+and `window_at()` answered `PGT magenta`: the occluder was *behind* the window, so
+the region-crop control was magenta too and would have "confirmed" the window route
+for the wrong reason. `attributes("-topmost", True)` was what actually put the
+occluder above its sibling, and only then did the two readings differ in the
+direction they are supposed to:
+
+| | |
+| --- | --- |
+| the rectangle | `geometry()` answered `(75, 75) 420x349` for a probe asking for a 320x240 client area at `(60, 60)` — Windows scaled it by 125% — and `screenshot(window=...)` was 420x349, that rectangle exactly |
+| unoccluded | the centre pixel of that PNG was `(255, 0, 255)`, the magenta the probe paints |
+| occluded | `window_at(285, 249)` named `PGT green`, so the occluder really was on top; the window capture still answered `(255, 0, 255)` at that pixel |
+| the control | the same rectangle captured as a `region` answered `(0, 128, 0)` — the occluder. That is the route `WINDOW_CAPTURE` replaces, and the pair is what says the replacement is not cosmetic |
+| a minimized window | refused with `PrintWindow succeeds and returns the frame of the minimized window <title> rather than its contents`, unchanged from the earlier run |
+| the whole screen | 1920x1080, through the same `BitBlt` helper the window route reads its pixels with |
+| the clipboard | `pguitest marker`, `héllo — 日本語 ✅ 🎉` and `""` each round-tripped exactly, and the text the clipboard held before the run was put back |
+
+`wait_for_window("PGT late")` answered 3.2 s after the window appeared, in a *second*
+child process — the arrangement `WINEVENT_SKIPOWNPROCESS` requires, since a window
+created by the process that installs the hook never fires one for itself.
+
+**And one gap the run found, which the doc did not have.** With a *file list* on the
+clipboard — `Set-Clipboard -Path C:\Windows\notepad.exe`, the ordinary way a Windows
+user's clipboard stops holding text — `get_clipboard()` raised `the clipboard holds no
+CF_UNICODETEXT; an application that publishes only CF_TEXT or CF_HTML is the usual
+cause`: right about what is missing, wrong about which cause is usual, since
+`CF_HDROP` is what a desktop actually presents. The message now names that first and
+the test pins it; the refusal itself is unchanged, because answering `""` would be
+indistinguishable from an empty clipboard.
+
+## macOS 26 (Tahoe), Intel: `locate_image` against a real desktop (2026-09-27)
+
+The one image path this file had no result for. Everything in
+`tests/test_imagesearch.py` mocks the runner — it pins the command line and the
+output parsing, never that the numbers coming back mean what `locate()` claims —
+and its real-ImageMagick class generates the images it searches, so a Mac with a
+real desktop and a real ImageMagick had never been measured at all.
+
+ImageMagick 7.1.2-31 Q16-HDRI was installed on the Mac for the run, with the
+legacy `compare`/`identify` commands present and `fftw` among its delegates, so
+both entry points and the FFT-accelerated search were reachable. Screen Recording
+and Accessibility were already granted to the session the run was driven from,
+which is what makes `screencapture` return pixels rather than a black rectangle.
+
+The arrangement, with nothing test-only anywhere in the path: a real window on
+that desktop (a terminal, 877x499, at +199+117 on a 1280x800 screen) captured
+through the session's own `screenshot(window=...)`; a 200x60 rectangle cut out of
+that capture at +30+30 with the package's own `crop`; and that rectangle searched
+for with the package's own `locate_image` — once restricted with `within=window`,
+once over the whole desktop.
+
+| | |
+| --- | --- |
+| `locate_image(template, within=window)` | `x=229 y=147 w=200 h=60 score=0.0` — the window's origin plus the crop offset — in 2.9s |
+| `locate_image(template)`, whole desktop | the same `x=229 y=147` at `score=0.0`, 3.7s: the two agree on screen-absolute coordinates |
+| where `magick` is the only ImageMagick on PATH | identical answers, 2.7s and 4.0s, from `imagesearch:magick` |
+| a template that is not on screen, `threshold=0.001` | `ImageNotFound` |
+| that window capture against `geometry()` | 877x499 pixels for a rectangle `geometry()` answers 877x499 for |
+
+**And the run found the worst failure this call can have: a plausible wrong
+answer.** The first pass reported `x=199 y=117` — the window's own origin — with
+`score=0.264`, and the whole-desktop search reported `0,0` with `0.48`. Both are
+the top-left corner of the rectangle searched, which is what `compare` falls back
+to when it matches nothing, and both arrived with exit code 1 and nothing on
+stderr. The template was provably present: a fresh crop of the same capture at
+`+30+30` compared against the template at RMSE **0**, so the pair was
+pixel-identical before being searched for.
+
+Isolating it took five measurements, each ruling out one candidate:
+
+| | |
+| --- | --- |
+| the same search on synthetic noise, 877x499 with a 200x60 crop | `0 (0) @ 300,200` — correct, so not the size and not the search |
+| the real screen at the window's rectangle against the window capture | RMSE 871.7 (0.013), so the screen really did hold that window |
+| `-dissimilarity-threshold 1.0` | unchanged, so not the threshold |
+| `+repage` on both images | unchanged, so not the page offset the `compare` docs warn about |
+| the capture forced to `-alpha off -depth 8 -colorspace sRGB -strip` | `0 (0) @ 100,80` — **found**, and `-alpha off` was the flag that mattered |
+
+The real difference was the *channel sets*: `screencapture` writes
+`TrueColorAlpha` (srgba, 4 channels), while a template cut from it comes back
+`palette`/`srgb` (3 channels), because a crop of a fully opaque image loses its
+alpha in the PNG encoder and is then written as a palette image. All four
+combinations, on a 400x300 crop of the real screen searched for a 200x60 crop of
+itself at +100+80, and the same four on synthetic noise:
+
+| haystack | template | result |
+| --- | --- | --- |
+| RGBA | RGBA | `0 (0) @ 100,80` |
+| RGBA | RGB | `15423.5 (0.235347) @ 0,0` — wrong, no error |
+| RGB | RGBA | `0 (0) @ 100,80` |
+| RGB | RGB | `0 (0) @ 100,80` |
+
+Identical on noise, so it is the channel shapes and not the content, and
+`-metric NCC` and `-metric MSE` behaved the same way. `-channel RGB`, which makes
+the comparison about colour and not about alpha, located the template in all four
+combinations of the same images, through the legacy `compare` and through
+`magick compare` alike. That flag is now part of the search's command line, and
+the re-measured run is the table at the top of this section: `score=0.0` at the
+right coordinates, both entry points.
+
+This is not a macOS-only defect — it is a pair of channel sets, and any two
+images that disagree will do it — but macOS is where it is unavoidable rather
+than possible, since every capture there carries an alpha channel by
+construction. A Linux or Windows capture writes RGB, so a haystack and a template
+cut from it agree and the search works, which is why three platforms of fixtures
+and a Windows live run had all been happy. The failure mode is also why this
+needed a live run and not a better fake: every mocked test in
+`tests/test_imagesearch.py` would still pass with the wrong location, because the
+command line was fine and the parsing was fine. What was wrong was the answer.

@@ -58,9 +58,12 @@ _COMMANDS = {
         else ["import", "-window", "root", path]
     ),
     # macOS, and the one entry here that ships with the platform rather than
-    # with a desktop. Its argv is built by `screencapture_argv` below, because
-    # `macos.py` runs the same binary with a window id no tool backend can be
-    # handed.
+    # with a desktop. Its argv is built by `screencapture_argv` below rather
+    # than inline, because a second caller wants a window id rather than a
+    # region: `capture_window_id`, which MacosBackend drives for the native,
+    # un-occluded window capture. A *tool backend* still cannot be handed a
+    # window -- the class below turns one into a region, never a handle --
+    # so that route lives at module level beside the argv builder instead.
     "screencapture": lambda path, region: screencapture_argv(path, region),
 }
 
@@ -68,21 +71,73 @@ _COMMANDS = {
 def screencapture_argv(path, region=None, window_id=None):
     """The `screencapture` command line that writes `path`.
 
-    One builder for both callers: the table above, and `macos.py`'s
-    WINDOW_CAPTURE, which passes the CGWindowID its window join already
-    reads. Two builders would be two places for the rectangle syntax to be
-    wrong, and this is the one part no fake can check for itself.
+    One builder for two callers: the table above, and `capture_window_id`,
+    which MacosBackend drives with the CGWindowID `macos.py`'s window join
+    reads off each window. One builder rather than two because two would be
+    two places for the rectangle syntax to be wrong.
 
     `-x` is not decoration. Without it the tool plays the camera shutter
     sound; an unattended suite should not be doing that to the machine it
     runs on.
+
+    `-o` is the other flag that earns its place, and the live run on macOS
+    26.7 is what put it there. A window capture carries the drop shadow as
+    padding unless the tool is told not to: the same window measured 388x340
+    without `-o` against a `geometry()` of 320x272 -- 68 pixels more in each
+    direction, black in the corners -- and exactly 320x272 with it. Both are
+    honest pictures of the window; only one is the rectangle `geometry()`
+    reports, which is the rectangle the Windows route sizes from too, so a
+    caller who measures a window and then screenshots it gets that size back
+    on either platform.
     """
     argv = ["screencapture", "-x"]
     if window_id is not None:
-        argv += ["-l", str(window_id)]
+        argv += ["-o", "-l", str(window_id)]
     elif region is not None:
         argv += ["-R", "{},{},{},{}".format(*region)]
     return argv + [path]
+
+
+def capture_window_id(window_id, path=None):
+    """Write a screenshot of one native window, and return the path.
+
+    macOS's per-window route, and the reason `screencapture_argv` takes a
+    window id at all: `-l` asks the window server for one window's own
+    pixels, so anything stacked on top of it stays out of the image and a
+    window hanging off the edge of a display comes back whole -- the same
+    kind of grab `PrintWindow` is on Windows and `GetImage` is on X11.
+
+    Called by `MacosBackend.capture`, because that backend is what issues
+    the CGWindowIDs: a `Window`'s handle is backend-private, and the
+    composite only passes one to a member that issued it. `window_id` here
+    is therefore the raw number, already unwrapped.
+
+    The Screen Recording grant is checked **before** the tool runs, through
+    the same `require_screen_recording` the whole-screen route uses, and
+    for the same reason -- a denied grant is exit 0 and a black image, so
+    a route that ran first and inspected pixels after would have nothing to
+    inspect. The file is then checked for content, because exit 0 alone has
+    already been measured to mean nothing here (see `_check_written`).
+
+    What `-l` does with a window that has closed since its id was read is
+    neither asserted nor detectable, and the live run measured why. The tool
+    exits **0** and writes a *black* image of the shadow-padded size -- 2976
+    bytes of it on the run that closed the window under its own id -- so
+    `_check_written`'s non-empty test passes and the caller gets a picture of
+    nothing. An id that never named a window is the other case: exit 1,
+    `could not create image from window`, no file at all, which `_run_tool`
+    raises on. The two cannot be told apart from the file, and a stale id
+    cannot be told from a window that is genuinely black, so this is written
+    down rather than checked for. Read the window's geometry again before
+    capturing if a window may have closed.
+    """
+    require_screen_recording()
+    if path is None:
+        descriptor, path = tempfile.mkstemp(suffix=".png")
+        os.close(descriptor)
+    _run_tool(screencapture_argv(path, window_id=window_id))
+    _check_written(path, "screencapture")
+    return path
 
 
 def require_screen_recording() -> None:
@@ -120,6 +175,75 @@ is the exception, and the worst of both: exit 0, no stderr, black image. It
 is refused before it runs instead. Keyed by name and consulted in `capture()`,
 which is where a caller finds out.
 """
+
+
+def _run_tool(argv):
+    """Run one capture tool's command line, raising if it fails or hangs.
+
+    Module level rather than a method because there are two callers: the
+    `ToolCaptureBackend` below, and `capture_window_id` above, which
+    MacosBackend drives for a per-window grab. One implementation of the
+    timeout and the two failure messages rather than a second copy of them
+    in macos.py, drifting from this one.
+    """
+    try:
+        result = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=_SUBPROCESS_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # Deliberately short, and deliberately free of advice about
+        # what to try instead. This message gets embedded in a
+        # composite's fallback warning and again in its "everything
+        # failed" summary, once per member -- an advice paragraph
+        # here becomes three copies of itself in a single traceback,
+        # and worse, it recommends backends the composite has already
+        # tried and reported failing two lines further down. Guidance
+        # belongs where the whole picture is known: composite._grab.
+        #
+        # The fact worth stating is that the tool is installed and
+        # unresponsive, which is a different condition from missing
+        # and needs a different fix.
+        raise PyGUITestError(
+            f"{' '.join(argv)} did not finish within "
+            f"{_SUBPROCESS_TIMEOUT}s; it is installed but not "
+            "responding (these tools front for a desktop screenshot "
+            "service and can hang on it rather than failing)"
+        ) from exc
+    if result.returncode != 0:
+        raise PyGUITestError(
+            f"{' '.join(argv)} failed ({result.returncode}): "
+            f"{result.stderr.strip() or 'no output'}"
+        )
+    return result
+
+
+def _check_written(path, tool_name):
+    """Raise unless `path` holds a real image, not just a name.
+
+    A tool's exit code is not proof of a screenshot: confirmed live on
+    KDE Plasma 6, `spectacle -b -n -f -o path` exited 0 and left `path`
+    at 0 bytes, silently, with nothing on stderr -- four times in a
+    row before a fifth attempt produced a real image, with no code or
+    environment change in between. Whatever KWin's screenshot service
+    was doing, spectacle itself gave no sign anything had failed.
+    Checked here, once, rather than trusted through to a caller that
+    would otherwise get a path to a corrupt image back from a call
+    that claimed to succeed.
+
+    `tool_name` is passed rather than read off a backend so that
+    `capture_window_id` can use this without building one, and so the
+    message names the tool that actually ran.
+    """
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        raise PyGUITestError(
+            f"{tool_name} exited successfully but left {path!r} "
+            "empty -- the desktop's screenshot service silently failed; "
+            "try again"
+        )
 
 
 class ToolCaptureBackend(GUIBackend):
@@ -160,40 +284,13 @@ class ToolCaptureBackend(GUIBackend):
         return self.tool.name in _NO_REGION_FLAG
 
     def _run(self, argv):
-        """Run `argv`, raising if the tool reports failure or hangs."""
-        try:
-            result = subprocess.run(
-                argv,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                timeout=_SUBPROCESS_TIMEOUT,
-            )
-        except subprocess.TimeoutExpired as exc:
-            # Deliberately short, and deliberately free of advice about
-            # what to try instead. This message gets embedded in a
-            # composite's fallback warning and again in its "everything
-            # failed" summary, once per member -- an advice paragraph
-            # here becomes three copies of itself in a single traceback,
-            # and worse, it recommends backends the composite has already
-            # tried and reported failing two lines further down. Guidance
-            # belongs where the whole picture is known: composite._grab.
-            #
-            # The fact worth stating is that the tool is installed and
-            # unresponsive, which is a different condition from missing
-            # and needs a different fix.
-            raise PyGUITestError(
-                f"{' '.join(argv)} did not finish within "
-                f"{_SUBPROCESS_TIMEOUT}s; it is installed but not "
-                "responding (these tools front for a desktop screenshot "
-                "service and can hang on it rather than failing)"
-            ) from exc
-        if result.returncode != 0:
-            raise PyGUITestError(
-                f"{' '.join(argv)} failed ({result.returncode}): "
-                f"{result.stderr.strip() or 'no output'}"
-            )
-        return result
+        """Run `argv`, raising if the tool reports failure or hangs.
+
+        The implementation is module level -- see `_run_tool` above -- so the
+        per-window route in macos.py runs the same tool under the same
+        timeout and the same two messages without a second copy of either.
+        """
+        return _run_tool(argv)
 
     def capture(self, window=None, path=None, region=None):
         """Write a screenshot and return its path.
@@ -234,28 +331,8 @@ class ToolCaptureBackend(GUIBackend):
         if region is not None and self.crops_regions:
             return self._capture_then_crop(path, region)
         self._runner(self._build(path, region))
-        self._check_written(path)
+        _check_written(path, self.tool.name)
         return path
-
-    def _check_written(self, path):
-        """Raise unless `path` holds a real image, not just a name.
-
-        A tool's exit code is not proof of a screenshot: confirmed live on
-        KDE Plasma 6, `spectacle -b -n -f -o path` exited 0 and left `path`
-        at 0 bytes, silently, with nothing on stderr -- four times in a
-        row before a fifth attempt produced a real image, with no code or
-        environment change in between. Whatever KWin's screenshot service
-        was doing, spectacle itself gave no sign anything had failed.
-        Checked here, once, rather than trusted through to a caller that
-        would otherwise get a path to a corrupt image back from a call
-        that claimed to succeed.
-        """
-        if not os.path.exists(path) or os.path.getsize(path) == 0:
-            raise PyGUITestError(
-                f"{self.tool.name} exited successfully but left {path!r} "
-                "empty -- the desktop's screenshot service silently failed; "
-                "try again"
-            )
 
     def _capture_then_crop(self, path, region):
         """Whole-screen capture into a temporary file, cropped onto `path`.
@@ -269,9 +346,9 @@ class ToolCaptureBackend(GUIBackend):
         os.close(descriptor)
         try:
             self._runner(self._build(full, None))
-            self._check_written(full)
+            _check_written(full, self.tool.name)
             _crop.crop(full, region, path, runner=self._runner)
-            self._check_written(path)
+            _check_written(path, self.tool.name)
         finally:
             if os.path.exists(full):
                 os.unlink(full)

@@ -17,6 +17,7 @@ here, `pyguitest debug` collects everything a bug report needs — see
 - [Focus assertions never match anything](#focus-assertions-never-match-anything)
 - [The clipboard reads back empty](#the-clipboard-reads-back-empty)
 - [Screenshots fail, or contain the wrong thing](#screenshots-fail-or-contain-the-wrong-thing)
+- [Template matching is slow, or times out](#template-matching-is-slow-or-times-out)
 - [`connect()` raises BackendUnavailable](#connect-raises-backendunavailable)
 - [A test passes locally and fails in CI](#a-test-passes-locally-and-fails-in-ci)
 - [Which tool to reach for](#which-tool-to-reach-for)
@@ -423,10 +424,29 @@ which one you are on decides the fix. See
 ## Screenshots fail, or contain the wrong thing
 
 **A window screenshot includes what is on top of it.** There are two
-mechanisms and the difference is visible in the image: under X11 the
-window's own pixels are read, so anything stacked over it is absent;
-everywhere else the rectangle is looked up and cut out of a full-screen
-capture, which includes whatever covers it.
+mechanisms and the difference is visible in the image: where a backend
+serves `WINDOW_CAPTURE` the window's own pixels are read — its X11 drawable,
+`PrintWindow` on Windows, `screencapture -l` on macOS, or the GNOME Shell
+extension's own actor — so anything stacked over it is absent; everywhere
+else, the Linux tools that have no per-window mode among them, the rectangle
+is looked up and cut out of a full-screen capture, which includes whatever
+covers it.
+
+On macOS both of those routes need the **Screen Recording** grant, and a
+denied grant fails *successfully* — `screencapture` exits 0 and writes a
+uniformly black image, for a window and for the screen alike — so a
+`PermissionRequired` naming the grant and the interpreter is raised before
+the tool runs instead. Grant it under System Settings > Privacy & Security >
+Screen Recording, to the binary `pyguitest doctor` reports as the one this
+run is using. macOS's per-window capture is `screencapture -l`, and a live run
+on macOS 26.7 measured what it returns: the rectangle `geometry()` reports
+(the drop shadow is left out with `-o`, which this package passes), the
+window's own pixels with anything covering it absent, and a window hanging off
+the edge of a display whole rather than clipped. The one failure that cannot be
+detected is a window that has **closed since its id was read** — the tool exits
+0 and writes a black image of the right size, so nothing distinguishes it from
+a window that is genuinely black. Re-read the window's geometry before
+capturing it if the window may have gone.
 
 ```python
 gui.supports(Capability.WINDOW_CAPTURE)  # True = the native, un-occluded path
@@ -452,6 +472,53 @@ narrowed down — see
 for what is confirmed. An automated script capturing screenshots on a Mac
 over SSH should expect this prompt at least once and cannot dismiss it
 itself.
+
+## Template matching is slow, or times out
+
+**`locate_image` searches the whole desktop, and that is what it costs.**
+Matching is a subimage search over every pixel of the haystack, so its runtime
+tracks the *area searched* and not the template — a 16×16 button and a 200×200
+one cost the same. Measured live on Windows 11 build 26200 against the `winget`
+install of ImageMagick 7.1.2-31: 480×270 took 5.07s, 800×600 took 9.15s,
+960×540 took 15.08s, and 1920×1080 took **51.35s**. Nothing is wrong with any
+of those numbers; there is simply a lot of image between 4K and a button.
+
+**Pass `within=`.** `gui.locate_image("icon.png", within=window)` looks the
+window's rectangle up through `WINDOW_GEOMETRY` and searches only that
+rectangle, so one window is a fraction of a desktop rather than the whole of
+it — and it removes the chance of matching an identical control in a different
+window. The match still comes back in screen coordinates, so the result clicks
+without the window's own offset being added back on.
+
+```python
+window = gui.find_window("Text Editor")
+match = gui.locate_image("save-icon.png", within=window)
+gui.move_mouse(match.x + match.width // 2, match.y + match.height // 2)
+gui.click()
+```
+
+**A timeout used to be the outcome rather than slowness.** The subprocess
+budget was a flat 15 seconds, so the 1920×1080 timing above failed outright
+about 51 seconds in — on the platform with the slowest build, and past the
+point where `within=` could help, because the desktop really was what got
+searched. The budget is now derived from the area searched (`area × 40µs`,
+floored at 15s, capped at five minutes) and the error says which budget it
+used, so the message reads `timed out after 83s` rather than `timed out`.
+
+**Why Windows is the slow one.** ImageMagick's fast path for a subimage search
+is its FFTW delegate, which a distro build or Homebrew's usually has and the
+`winget` package does not — `magick -list delegate` is the check, and `fftw`
+simply will not appear in the output on a build without it. On such a build
+every search runs the slow path at 20–40µs per pixel, which is where those
+numbers come from. Installing a build with FFTW is the fix for a full-screen
+search; `within=` is the fix that needs no install.
+
+**`magick` alone is enough, and is all Windows gives you.** `IMAGE_LOCATE` is
+served by `compare`, by `magick`, or by both — `magick compare` and `magick
+identify` are the same two operations under ImageMagick 7's dispatcher — so the
+install the [Windows table](install.md#on-windows) names needs no legacy
+command line added. `pyguitest doctor` reports which of the two it found, and
+`IMAGE_LOCATE` is listed as missing only when neither is on `PATH`.
 
 ## `connect()` raises BackendUnavailable
 

@@ -175,6 +175,16 @@ CAPTUREBLT = 0x40000000
 the result. Without CAPTUREBLT a screenshot silently omits every window drawn
 with `WS_EX_LAYERED`, which is most modern application windows."""
 
+PW_RENDERFULLCONTENT = 0x00000002
+"""`PrintWindow`'s flag for content the window does not draw through GDI.
+
+Without it, a window whose contents are rendered through DirectComposition or
+DirectX -- every Store application, and the client area of most modern desktop
+ones -- is asked to draw itself and answers with an empty frame, which is the
+failure mode this flag exists to remove. Windows 8.1 and later; the parameter
+was documented as reserved before that, so there is no older spelling of it.
+"""
+
 DIB_RGB_COLORS = 0
 BI_RGB = 0
 """`GetDIBits`'s colour-table convention and the uncompressed DIB format, the
@@ -622,6 +632,12 @@ def _declare_user32(lib):
     lib.GetDC.restype = wintypes.HDC
     lib.ReleaseDC.argtypes = (wintypes.HWND, wintypes.HDC)
     lib.ReleaseDC.restype = ctypes.c_int
+    # The per-window half of the capture: the window renders itself into a DC
+    # the caller supplies, which is what makes the result independent of what
+    # is stacked on top of it. Argument order is (hwnd, hdc, flags) -- the DC
+    # second, unlike the blit's (destination DC first, source second).
+    lib.PrintWindow.argtypes = (wintypes.HWND, wintypes.HDC, wintypes.UINT)
+    lib.PrintWindow.restype = wintypes.BOOL
     lib.GetWindowRect.argtypes = (wintypes.HWND, LPRECT)
     lib.GetWindowRect.restype = wintypes.BOOL
     lib.GetWindowThreadProcessId.argtypes = (wintypes.HWND, LPDWORD)
@@ -762,9 +778,13 @@ def _declare_shcore(lib):
 def _declare_dwmapi(lib):
     """Declare the Desktop Window Manager calls this package makes.
 
-    Only cloaking so far: `DWMWA_EXTENDED_FRAME_BOUNDS` is the other
-    candidate, and it exists to answer a question `WINDOW_CAPTURE` will ask
-    rather than one `geometry()` asks.
+    Only cloaking so far. `DWMWA_EXTENDED_FRAME_BOUNDS` is the other attribute
+    of this call a capture would want, and it stays undeclared because nothing
+    in the package asks for it: `Win32Backend.capture` sizes a window's image
+    from `GetWindowRect`, deliberately, so that the image and `geometry()`
+    cannot disagree -- and the difference the attribute reports (the visible
+    frame, a few pixels inside the resizable one) is documented there rather
+    than corrected for.
     """
     lib.DwmGetWindowAttribute.argtypes = (
         wintypes.HWND,

@@ -59,15 +59,39 @@ this backend looked clean and the first real run through
 open for the daemon to inherit.
 
 `primary=True` reaches PRIMARY instead of the clipboard proper -- the
-X11/Wayland selection that middle-click paste reads, which every tool
-here supports as a second named selection rather than a separate command,
-so this is one argument, not a second backend.
+X11/Wayland selection that middle-click paste reads, which the Linux tools
+here support as a second named selection rather than a separate command, so
+this is one argument, not a second backend. It is also the one thing that
+does not carry over to macOS: the pasteboard there is a single selection, so
+`_no_primary` refuses the flag rather than answering it from the clipboard --
+the same read `portal.py` makes for the Clipboard interface, which has no
+PRIMARY either.
+
+macOS is served by `pbcopy`/`pbpaste`, which ship with the OS. That is the
+route `screencapture` takes for capture and the reason a bare `pip install
+pyguitest` reaches the clipboard on a Mac at all; ADR 004 left the choice
+open between this and an `NSPasteboard` element in the `macos` backend and
+named this one the obvious way in. Measured live on macOS 26.7 over SSH,
+against the console user's own pasteboard: `printf abc123 | pbcopy` followed
+by `pbpaste` in a *later* process returned exactly `abc123`, byte for byte,
+with no trailing newline added, and `héllo — 日本語 ✅` survived the same
+round trip. That is the reverse of the X11/Wayland story above and is worth
+naming, because it is why `_FORKS_ON_WRITE` does not include `pbcopy`: the
+pasteboard is stored by the `pbs` server, so the writing process exits and
+the value stays, and nothing inherited by a fork can hold a pipe open. Its
+write call therefore keeps `PIPE` and reports stderr like any other failure.
+
+`pbcopy` is also why `tools.ExternalTool` grew `probe_version`. Every run of
+it rewrites the pasteboard, and the version flag is no exception -- measured
+with a sentinel value on the clipboard, `pbcopy --version < /dev/null` exited
+0 having left it empty. A diagnostic that silently destroys what the user had
+copied is worse than a blank version column, so `doctor` does not probe it.
 """
 
 import subprocess
 
 from ..capabilities import Capability, CapabilitySet
-from ..errors import PyGUITestError
+from ..errors import CapabilityUnsupported, PyGUITestError
 from .base import GUIBackend
 
 __all__ = ["ToolClipboardBackend"]
@@ -92,6 +116,13 @@ _READ = {
         False: ["xsel", "--clipboard", "--output"],
         True: ["xsel", "--primary", "--output"],
     },
+    # No True key, deliberately: macOS has one pasteboard, so a call asking
+    # for PRIMARY is refused by `_no_primary` rather than answered from the
+    # clipboard. `-Prefer txt`/`-Prefer rtf` would select a *flavor* of the
+    # same selection, not a second one, so neither belongs here.
+    "pbcopy": {
+        False: ["pbpaste"],
+    },
 }
 
 _WRITE = {
@@ -107,7 +138,17 @@ _WRITE = {
         False: ["xsel", "--clipboard", "--input"],
         True: ["xsel", "--primary", "--input"],
     },
+    "pbcopy": {
+        False: ["pbcopy"],
+    },
 }
+
+# Tools that fork into the background on a write, and so must not be handed
+# PIPE for stdout/stderr -- see the module docstring. macOS's `pbcopy` is
+# deliberately absent: the pasteboard lives in the `pbs` server, so the
+# command is an ordinary client that exits, and capturing its stderr costs
+# nothing and buys a real error message on failure.
+_FORKS_ON_WRITE = frozenset({"wl-copy", "xclip", "xsel"})
 
 
 class ToolClipboardBackend(GUIBackend):
@@ -135,15 +176,17 @@ class ToolClipboardBackend(GUIBackend):
     def _run(self, argv, input_text=None):
         """Run `argv`, feeding `input_text` on stdin, and return its stdout.
 
-        `input_text is not None` is also the write/read switch that decides
-        stdout/stderr's fate: a write forks a daemon that inherits whatever
-        those are, so they must be DEVNULL, not PIPE -- see the module
-        docstring on the hang that confirmed this the hard way. A read
-        needs its stdout captured and never forks, so PIPE is safe there.
-        Losing stderr text on a write failure is the accepted cost; the
+        `input_text is not None` is the write/read switch for stdout/stderr
+        as well as for stdin: a write to a tool that forks a daemon leaves
+        that daemon holding whatever those are, so for `_FORKS_ON_WRITE` they
+        must be DEVNULL rather than PIPE -- see the module docstring on the
+        hang that confirmed this the hard way, and the same docstring on why
+        `pbcopy`, whose selection lives in the pasteboard server rather than
+        in a fork, is not one of them and keeps them captured. Losing stderr
+        text on a forking write failure is the accepted cost there; the
         alternative is a 15-second hang on every successful write.
         """
-        capture = input_text is None
+        capture = input_text is None or self.tool.name not in _FORKS_ON_WRITE
         try:
             result = subprocess.run(
                 argv,
@@ -171,19 +214,42 @@ class ToolClipboardBackend(GUIBackend):
             )
         return result.stdout or ""
 
+    def _no_primary(self, primary):
+        """Refuse PRIMARY for a tool whose platform has only one selection.
+
+        macOS keeps a single pasteboard, so `_READ`/`_WRITE` have no `True`
+        key for `pbcopy` at all. Answering a `primary=True` call from the
+        clipboard would answer a different question than the one asked -- and
+        the two selections are independent everywhere they do exist, so the
+        difference matters to a caller. This is the same typed refusal
+        `portal.py` makes for the Clipboard D-Bus interface, which has no
+        PRIMARY either.
+        """
+        if primary and True not in _READ[self.tool.name]:
+            raise CapabilityUnsupported(
+                Capability.CLIPBOARD,
+                self.name,
+                "this tool's platform keeps a single selection: macOS's "
+                "pasteboard has no PRIMARY, and answering from the clipboard "
+                "would be answering a different question",
+            )
+
     def get_clipboard(self, primary=False):
         """The current text content of the clipboard, or of PRIMARY."""
         self.require(Capability.CLIPBOARD)
+        self._no_primary(primary)
         return self._runner(_READ[self.tool.name][primary])
 
     def set_clipboard(self, text, primary=False):
         """Replace the text content of the clipboard, or of PRIMARY.
 
         See the module docstring and `_run` on why stdout/stderr must be
-        DEVNULL rather than PIPE for this call specifically: the tool forks
-        into the background on its own before this returns, which is what
-        keeps the clipboard answering after it does, and a PIPE the fork
-        inherits never reaches EOF.
+        DEVNULL rather than PIPE for this call on the Linux tools
+        specifically: those fork into the background on their own before this
+        returns, which is what keeps the clipboard answering after they do,
+        and a PIPE the fork inherits never reaches EOF. `pbcopy` does not
+        fork, for the reason named in the module docstring.
         """
         self.require(Capability.CLIPBOARD)
+        self._no_primary(primary)
         self._runner(_WRITE[self.tool.name][primary], input_text=text)

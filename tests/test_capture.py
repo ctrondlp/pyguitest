@@ -17,9 +17,13 @@ from types import SimpleNamespace
 from unittest import mock
 
 from pyguitest import tools
-from pyguitest.backends.capture import _SUBPROCESS_TIMEOUT, ToolCaptureBackend
+from pyguitest.backends.capture import (
+    _SUBPROCESS_TIMEOUT,
+    ToolCaptureBackend,
+    capture_window_id,
+)
 from pyguitest.capabilities import Capability
-from pyguitest.errors import CapabilityUnsupported, PyGUITestError
+from pyguitest.errors import CapabilityUnsupported, PermissionRequired, PyGUITestError
 
 BY_NAME = {t.name: t for t in tools.CAPTURE_TOOLS}
 
@@ -361,6 +365,83 @@ class TestASilentEmptyResultIsCaught(unittest.TestCase):
             gui.capture(path=SHOT, region=REGION)
         # Only the screenshot ran; the crop step never got a chance to.
         self.assertEqual(len(seen), 1)
+
+
+class TestTheMacWindowRoute(unittest.TestCase):
+    """`capture_window_id`: the argv, the grant and the write check, one place.
+
+    macOS's per-window grab, and the caller `screencapture_argv`'s window id
+    existed for. Driven here rather than through `MacosBackend` so the pieces stay
+    testable on a machine that is not a Mac: that backend's wiring has its own
+    tests in `tests/test_macos_backend.py`, and this is what the wiring calls.
+    """
+
+    def grant_screen_recording(self, allowed=True):
+        """Patch the TCC preflight, which on anything but a Mac answers no."""
+        patched = mock.patch(
+            "pyguitest.backends._macapi.screen_recording_allowed",
+            return_value=allowed,
+        )
+        patched.start()
+        self.addCleanup(patched.stop)
+
+    def test_the_command_line_addresses_one_window_by_its_number(self):
+        seen = []
+
+        def run(argv, **kwargs):
+            seen.append(argv)
+            _write_fake_image(argv)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        self.grant_screen_recording()
+        with mock.patch("subprocess.run", run):
+            written = capture_window_id(265, SHOT)
+        self.assertEqual(written, SHOT)
+        # The number arrives as an int from a `Window` handle and leaves as a
+        # string: argv is a list of strings, and `-l` wants the number. `-o`
+        # is in front of it because the drop shadow would otherwise pad the
+        # image past the rectangle `geometry()` reports (measured live; see
+        # `screencapture_argv`).
+        self.assertEqual(seen, [["screencapture", "-x", "-o", "-l", "265", SHOT]])
+
+    def test_no_path_given_allocates_a_png_of_its_own(self):
+        seen = []
+
+        def run(argv, **kwargs):
+            seen.append(argv)
+            _write_fake_image(argv)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        self.grant_screen_recording()
+        with mock.patch("subprocess.run", run):
+            written = capture_window_id(48)
+        self.addCleanup(lambda: os.path.exists(written) and os.unlink(written))
+        # The same convention the tool backends use: a temporary file whose suffix
+        # matches the format the tool writes.
+        self.assertTrue(written.endswith(".png"))
+        self.assertEqual(seen, [["screencapture", "-x", "-o", "-l", "48", written]])
+
+    def test_a_denied_grant_refuses_before_the_command_runs(self):
+        self.grant_screen_recording(allowed=False)
+        with mock.patch("subprocess.run") as run:
+            with self.assertRaises(PermissionRequired) as caught:
+                capture_window_id(48, NEVER_WRITTEN)
+        self.assertIn("Screen Recording", str(caught.exception))
+        # The gate's whole point: a black image is never produced, so the tool is
+        # never spawned and nothing is written.
+        run.assert_not_called()
+
+    def test_an_empty_result_is_refused_with_the_tool_named(self):
+        def nothing(argv, **kwargs):
+            open(argv[-1], "wb").close()
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        self.grant_screen_recording()
+        with mock.patch("subprocess.run", nothing):
+            with self.assertRaises(PyGUITestError) as caught:
+                capture_window_id(48, SHOT)
+        self.assertIn("screencapture", str(caught.exception))
+        self.assertIn("empty", str(caught.exception))
 
 
 if __name__ == "__main__":
