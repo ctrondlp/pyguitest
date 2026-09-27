@@ -12,10 +12,18 @@ The subprocess itself is still faked here (an injected `runner`), so the
 suite needs no ImageMagick installed. What remains unverified: metrics
 other than RMSE. NCC in particular reported a *different, wrong* offset for
 the same images, and PHASE did not finish within two minutes on a 200x120
-haystack -- well past this backend's 15s timeout. Treat RMSE as the
-supported metric and the rest as caller's-risk.
+haystack -- well past the 15s floor. Treat RMSE as the supported metric and
+the rest as caller's-risk.
+
+Two entry points are covered, because which one a machine has is not a
+platform constant. `compare`/`identify` are the legacy commands a package
+install gives you on Linux and macOS; the `winget` install on Windows lays
+down `magick.exe` alone, so `magick compare`/`magick identify` are pinned
+here too -- shapes run live against ImageMagick 7.1.2-31 Q16-HDRI on Windows
+11 build 26200, not transcribed.
 """
 
+import inspect
 import os
 import shutil
 import subprocess
@@ -34,14 +42,22 @@ BY_NAME = {t.name: t for t in tools.IMAGE_TOOLS}
 
 
 class Recorder:
-    """Stands in for the injectable runner, returning a scripted result per call."""
+    """Stands in for the injectable runner, returning a scripted result per call.
+
+    `timeouts` records the budget each call was given. As in `_run`, a caller
+    that passes nothing gets None here rather than the module default -- what
+    the default *is* belongs to the real runner, and a recorder that invented
+    it would make "did locate pass a budget down" unanswerable.
+    """
 
     def __init__(self, results=None):
         self.calls = []
+        self.timeouts = []
         self._results = list(results or [])
 
-    def __call__(self, argv, allowed_returncodes=(0,)):
+    def __call__(self, argv, allowed_returncodes=(0,), timeout=None):
         self.calls.append(argv)
+        self.timeouts.append(timeout)
         if self._results:
             return self._results.pop(0)
         return SimpleNamespace(stdout="", stderr="", returncode=0)
@@ -62,8 +78,13 @@ class TestImageSearch(unittest.TestCase):
             ToolImageSearchBackend(fake)
 
     def test_argv_shape_with_no_region(self):
+        # identify comes first, and that ordering is deliberate: the search's
+        # budget is derived from the haystack's area, so the haystack gets
+        # measured before compare is handed a timeout. It also means a missing
+        # template fails in milliseconds rather than after a long search.
         gui = self._backend(
             results=[
+                SimpleNamespace(stdout="1920 1080\n", stderr="", returncode=0),
                 SimpleNamespace(
                     stdout="", stderr="58.3651 (0.000890) @ 123,45", returncode=1
                 ),
@@ -73,8 +94,14 @@ class TestImageSearch(unittest.TestCase):
         match = gui.locate("/tmp/screen.png", "/tmp/btn.png")
         self.assertEqual(
             self.runner.calls[0],
+            ["identify", "-format", "%w %h", "/tmp/screen.png"],
+        )
+        self.assertEqual(
+            self.runner.calls[1],
             [
                 "compare",
+                "-channel",
+                "RGB",
                 "-metric",
                 "RMSE",
                 "-subimage-search",
@@ -84,7 +111,7 @@ class TestImageSearch(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            self.runner.calls[1], ["identify", "-format", "%w %h", "/tmp/btn.png"]
+            self.runner.calls[2], ["identify", "-format", "%w %h", "/tmp/btn.png"]
         )
         self.assertEqual(match.x, 123)
         self.assertEqual(match.y, 45)
@@ -117,12 +144,43 @@ class TestImageSearch(unittest.TestCase):
         crop_path = convert_call[5]
 
         compare_call = self.runner.calls[1]
-        self.assertEqual(compare_call[4], crop_path)
+        self.assertEqual(compare_call[6], crop_path)
         self.assertNotEqual(crop_path, "/tmp/screen.png")
 
         # Region offset (10, 20) added back onto compare's own (5, 6).
         self.assertEqual(match.x, 15)
         self.assertEqual(match.y, 26)
+
+    def test_the_search_is_restricted_to_colour_channels(self):
+        """The flag that keeps a channel mismatch from hiding a real match.
+
+        ImageMagick's subimage search answers with the wrong offset, and with
+        the output shape of a successful search, when the haystack and the
+        template disagree about how many channels they have. On macOS every
+        capture is RGBA -- `screencapture` writes an alpha channel -- and a
+        template cut out by another tool is usually RGB, so a template that
+        was on screen came back as `15423.5 (0.235347) @ 0,0`: the top-left
+        corner of the rectangle searched, exit code 1, nothing on stderr.
+        `-channel RGB` compares colour and ignores alpha, which located that
+        same template in all four combinations of RGBA and RGB haystack and
+        template.
+
+        Pinned as a test rather than left to the docstrings because dropping
+        an option from a command line looks harmless, and nothing this backend
+        parses would change if it went: the answers would just start being
+        wrong sometimes.
+        """
+        gui = self._backend(
+            results=[
+                SimpleNamespace(stdout="1920 1080\n", stderr="", returncode=0),
+                SimpleNamespace(stdout="", stderr="0 (0) @ 5,6", returncode=1),
+                SimpleNamespace(stdout="40 20\n", stderr="", returncode=0),
+            ]
+        )
+        gui.locate("/tmp/screen.png", "/tmp/btn.png")
+        search = self.runner.calls[1]
+        self.assertEqual(search[:3], ["compare", "-channel", "RGB"])
+        self.assertEqual(search[-1], "null:")
 
     def test_crop_temp_file_is_deleted_after_success(self):
         gui = self._backend(
@@ -138,7 +196,7 @@ class TestImageSearch(unittest.TestCase):
 
     def test_crop_temp_file_is_deleted_even_when_compare_fails(self):
         class FailingRecorder(Recorder):
-            def __call__(self, argv, allowed_returncodes=(0,)):
+            def __call__(self, argv, allowed_returncodes=(0,), timeout=None):
                 self.calls.append(argv)
                 if argv and argv[0] == "compare":
                     raise PyGUITestError("boom")
@@ -155,6 +213,7 @@ class TestImageSearch(unittest.TestCase):
         # Images identical -- still a valid (perfect) match.
         gui = self._backend(
             results=[
+                SimpleNamespace(stdout="1920 1080\n", stderr="", returncode=0),
                 SimpleNamespace(stdout="", stderr="0 (0) @ 0,0", returncode=0),
                 SimpleNamespace(stdout="10 10\n", stderr="", returncode=0),
             ]
@@ -167,6 +226,7 @@ class TestImageSearch(unittest.TestCase):
         # outcome of a subimage search, not a failure.
         gui = self._backend(
             results=[
+                SimpleNamespace(stdout="1920 1080\n", stderr="", returncode=0),
                 SimpleNamespace(stdout="", stderr="58.3 (0.0008) @ 7,8", returncode=1),
                 SimpleNamespace(stdout="10 10\n", stderr="", returncode=0),
             ]
@@ -177,6 +237,7 @@ class TestImageSearch(unittest.TestCase):
     def test_exit_code_2_is_a_failure(self):
         gui = self._backend(
             results=[
+                SimpleNamespace(stdout="1920 1080\n", stderr="", returncode=0),
                 SimpleNamespace(stdout="", stderr="no such file", returncode=2),
             ]
         )
@@ -194,9 +255,26 @@ class TestImageSearch(unittest.TestCase):
             with self.assertRaises(PyGUITestError):
                 gui.locate("/tmp/screen.png", "/tmp/btn.png")
 
+    def test_a_timeout_names_the_budget_it_used(self):
+        # "timed out" alone left a caller unable to tell a flat 15s budget
+        # from one sized to their desktop, and the number is the whole point
+        # now that the budget varies with what was searched. No region, so the
+        # search really is the call that expires: with one, the crop runs
+        # first and would be the call to time out.
+        gui = ToolImageSearchBackend(BY_NAME["compare"])
+        with mock.patch(
+            "subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="compare", timeout=15),
+        ):
+            with self.assertRaises(PyGUITestError) as ctx:
+                gui.locate("/tmp/screen.png", "/tmp/btn.png")
+        self.assertIn("timed out after 15s", str(ctx.exception))
+        self.assertIn("compare", str(ctx.exception))
+
     def test_unparseable_output_names_the_raw_stderr(self):
         gui = self._backend(
             results=[
+                SimpleNamespace(stdout="1920 1080\n", stderr="", returncode=0),
                 SimpleNamespace(stdout="", stderr="nonsense output", returncode=1),
             ]
         )
@@ -207,6 +285,7 @@ class TestImageSearch(unittest.TestCase):
     def test_below_threshold_match_returns_none(self):
         gui = self._backend(
             results=[
+                SimpleNamespace(stdout="1920 1080\n", stderr="", returncode=0),
                 SimpleNamespace(stdout="", stderr="58.3 (0.05) @ 1,2", returncode=1),
             ]
         )
@@ -216,6 +295,7 @@ class TestImageSearch(unittest.TestCase):
     def test_above_threshold_match_is_returned(self):
         gui = self._backend(
             results=[
+                SimpleNamespace(stdout="1920 1080\n", stderr="", returncode=0),
                 SimpleNamespace(stdout="", stderr="58.3 (0.0001) @ 1,2", returncode=1),
                 SimpleNamespace(stdout="10 10\n", stderr="", returncode=0),
             ]
@@ -223,6 +303,166 @@ class TestImageSearch(unittest.TestCase):
         result = gui.locate("/tmp/screen.png", "/tmp/btn.png", threshold=0.01)
         self.assertIsNotNone(result)
         self.assertEqual((result.x, result.y), (1, 2))
+
+
+class TestMagickEntryPoint(unittest.TestCase):
+    """ImageMagick 7's dispatcher, for the install that has only that one.
+
+    `winget install ImageMagick.ImageMagick` -- the command docs/install.md
+    and `pyguitest doctor` both name -- lands ImageMagick 7 with `magick.exe`
+    and no legacy commands (verified live on Windows 11 build 26200, where the
+    install directory holds exactly `magick.exe` and `unins000.exe`). Against
+    that install, `magick compare -metric RMSE -subimage-search` located a
+    crop at exactly the offset it was cut from, and `magick identify -format
+    "%w %h"` answered `40 24` -- so both shapes this class pins were run, not
+    just read about.
+    """
+
+    def _backend(self, results=None):
+        self.runner = Recorder(results=results)
+        return ToolImageSearchBackend(BY_NAME["magick"], runner=self.runner)
+
+    def test_it_is_a_supported_entry_point(self):
+        self.assertIn(Capability.IMAGE_LOCATE, self._backend().capabilities)
+
+    def test_it_names_itself_after_the_entry_point(self):
+        self.assertEqual(self._backend().name, "imagesearch:magick")
+
+    def test_the_search_is_dispatched_through_magick(self):
+        gui = self._backend(
+            results=[
+                SimpleNamespace(stdout="", stderr="", returncode=0),  # crop
+                SimpleNamespace(stdout="", stderr="0 (0) @ 5,6", returncode=1),
+                SimpleNamespace(stdout="40 24\n", stderr="", returncode=0),
+            ]
+        )
+        gui.locate("/tmp/screen.png", "/tmp/btn.png", region=(10, 20, 100, 50))
+        self.assertEqual(
+            self.runner.calls[1],
+            [
+                "magick",
+                "compare",
+                "-channel",
+                "RGB",
+                "-metric",
+                "RMSE",
+                "-subimage-search",
+                self.runner.calls[0][5],
+                "/tmp/btn.png",
+                "null:",
+            ],
+        )
+
+    def test_the_size_lookup_is_dispatched_through_magick(self):
+        gui = self._backend(
+            results=[
+                SimpleNamespace(stdout="", stderr="", returncode=0),  # crop
+                SimpleNamespace(stdout="", stderr="0 (0) @ 5,6", returncode=1),
+                SimpleNamespace(stdout="40 24\n", stderr="", returncode=0),
+            ]
+        )
+        gui.locate("/tmp/screen.png", "/tmp/btn.png", region=(0, 0, 10, 10))
+        self.assertEqual(
+            self.runner.calls[2],
+            ["magick", "identify", "-format", "%w %h", "/tmp/btn.png"],
+        )
+
+
+class TestSearchBudget(unittest.TestCase):
+    """The subprocess budget is sized to the area searched, not fixed.
+
+    A flat 15s was a defect rather than a tuning preference. Measured live
+    against the Windows install above, which has no FFT delegate: 480x270 took
+    5.07s, 960x540 15.08s and 1920x1080 51.35s -- so a full-screen
+    locate_image() failed outright on a 1080p desktop, on the platform whose
+    ImageMagick is the slow one.
+    """
+
+    def _backend(self, results=None):
+        self.runner = Recorder(results=results)
+        return ToolImageSearchBackend(BY_NAME["compare"], runner=self.runner)
+
+    def test_a_small_search_keeps_the_floor(self):
+        # The demo's 240x160 haystack, and everything else that already
+        # worked: an unchanged budget is the point of having a floor.
+        self.assertEqual(
+            imagesearch._search_timeout(240 * 160), imagesearch._SUBPROCESS_TIMEOUT
+        )
+
+    def test_a_1080p_desktop_gets_more_than_it_was_measured_to_need(self):
+        self.assertGreater(imagesearch._search_timeout(1920 * 1080), 51.35)
+
+    def test_a_4k_desktop_hits_the_ceiling_rather_than_scaling_forever(self):
+        self.assertEqual(
+            imagesearch._search_timeout(3840 * 2160),
+            imagesearch._MAX_SUBPROCESS_TIMEOUT,
+        )
+
+    def test_the_search_is_given_the_derived_budget(self):
+        gui = self._backend(
+            results=[
+                SimpleNamespace(stdout="1920 1080\n", stderr="", returncode=0),
+                SimpleNamespace(stdout="", stderr="0 (0) @ 0,0", returncode=1),
+                SimpleNamespace(stdout="10 10\n", stderr="", returncode=0),
+            ]
+        )
+        gui.locate("/tmp/screen.png", "/tmp/btn.png")
+        self.assertEqual(
+            self.runner.timeouts[1], imagesearch._search_timeout(1920 * 1080)
+        )
+
+    def test_a_region_budgets_the_region_rather_than_the_desktop(self):
+        # The same reason within= is worth passing: the crop is what compare
+        # searches, so the crop is what the budget is for.
+        gui = self._backend(
+            results=[
+                SimpleNamespace(stdout="", stderr="", returncode=0),  # crop
+                SimpleNamespace(stdout="", stderr="0 (0) @ 0,0", returncode=1),
+                SimpleNamespace(stdout="10 10\n", stderr="", returncode=0),
+            ]
+        )
+        gui.locate("/tmp/screen.png", "/tmp/btn.png", region=(0, 0, 200, 100))
+        self.assertEqual(self.runner.timeouts[1], imagesearch._SUBPROCESS_TIMEOUT)
+
+    def test_only_the_search_is_budgeted(self):
+        # identify and the crop are metadata operations on one image; they are
+        # left to the runner's own default rather than handed a budget derived
+        # from an area that has nothing to do with them.
+        gui = self._backend(
+            results=[
+                SimpleNamespace(stdout="1920 1080\n", stderr="", returncode=0),
+                SimpleNamespace(stdout="", stderr="0 (0) @ 0,0", returncode=1),
+                SimpleNamespace(stdout="10 10\n", stderr="", returncode=0),
+            ]
+        )
+        gui.locate("/tmp/screen.png", "/tmp/btn.png")
+        self.assertIsNone(self.runner.timeouts[0])
+        self.assertIsNone(self.runner.timeouts[2])
+
+    def test_the_runner_default_covers_those_metadata_calls(self):
+        default = inspect.signature(ToolImageSearchBackend._run)
+        self.assertEqual(
+            default.parameters["timeout"].default, imagesearch._SUBPROCESS_TIMEOUT
+        )
+
+    def test_a_haystack_that_cannot_be_measured_falls_back_to_the_floor(self):
+        # Two ways in, both ending at the floor: an injected runner hands back
+        # an unhelpful result, and the real _run raises for the nonzero exit.
+        # Neither is allowed out of the budget calculation -- compare reports
+        # an unreadable file in its own words, and the budget is no place to
+        # raise it from -- and neither may spend five minutes on an area that
+        # was never measured.
+        gui = self._backend(
+            results=[
+                SimpleNamespace(
+                    stdout="", stderr="identify: unable to open image", returncode=1
+                ),
+                SimpleNamespace(stdout="", stderr="0 (0) @ 0,0", returncode=1),
+                SimpleNamespace(stdout="10 10\n", stderr="", returncode=0),
+            ]
+        )
+        gui.locate("/tmp/gone.png", "/tmp/btn.png")
+        self.assertEqual(self.runner.timeouts[1], imagesearch._SUBPROCESS_TIMEOUT)
 
 
 class TestCropCommand(unittest.TestCase):
@@ -389,7 +629,8 @@ def _pattern(width, height, x0=0, y0=0):
 
 
 @unittest.skipUnless(
-    shutil.which("compare") and (shutil.which("magick") or shutil.which("convert")),
+    tools.best(tools.IMAGE_TOOLS)
+    and (shutil.which("magick") or shutil.which("convert")),
     "ImageMagick is not installed",
 )
 class TestAgainstRealImageMagick(unittest.TestCase):
@@ -405,6 +646,12 @@ class TestAgainstRealImageMagick(unittest.TestCase):
     than committed as fixtures: no binary files in the tree, and it
     exercises png.py against a real decoder at the same time.
 
+    Whichever entry point is present gets exercised, `compare` or `magick`:
+    requiring `compare` by name made this class skip on the install that has
+    only ImageMagick 7's dispatcher, which is the Windows one, so the one
+    machine shape whose command line had never been run was the one excluded
+    from the only test that runs a command line for real.
+
     Every call goes through `_locate`, which turns "ImageMagick could not
     complete" into a skip rather than a failure -- see its docstring for
     why that is not the same as hiding a bug.
@@ -415,9 +662,7 @@ class TestAgainstRealImageMagick(unittest.TestCase):
     TEMPLATE_SIZE = (8, 6)
 
     def setUp(self):
-        self.gui = ToolImageSearchBackend(
-            next(t for t in tools.IMAGE_TOOLS if t.name == "compare")
-        )
+        self.gui = ToolImageSearchBackend(tools.best(tools.IMAGE_TOOLS))
         self.haystack = self._write(_pattern(*self.HAYSTACK), self.HAYSTACK)
         self.template = self._write(
             _pattern(*self.TEMPLATE_SIZE, *self.TEMPLATE_AT), self.TEMPLATE_SIZE
@@ -434,9 +679,10 @@ class TestAgainstRealImageMagick(unittest.TestCase):
         """`locate()`, reporting a tool that could not run as a skip.
 
         This class checks *arithmetic* against real ImageMagick. When
-        ImageMagick itself fails to complete -- the 15s subprocess timeout,
-        or the resource exhaustion a loaded machine can push it into -- that
-        says nothing about the arithmetic, and a red suite for it teaches
+        ImageMagick itself fails to complete -- the derived subprocess budget
+        expiring, or the resource exhaustion a loaded machine can push it into
+        -- that says nothing about the arithmetic, and a red suite for it
+        teaches
         people to re-run rather than read. Observed once here: this class
         failed inside a full-suite run and passed in isolation and on every
         rerun, which is the shape of the machine being busy, not of a bug.

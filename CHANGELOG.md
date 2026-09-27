@@ -5,6 +5,303 @@ All notable changes to pyguitest are recorded here. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html) — with the usual
 0.x caveat that the API may still change between minor versions.
 
+## [0.15.0] — 2026-09-27
+
+### Added
+
+- **`WINDOW_CAPTURE` on Windows, through `PrintWindow` with `PW_RENDERFULLCONTENT`.**
+  `screenshot(window=...)` on Windows used to be a crop out of a screen shot —
+  `CompositeBackend` looking the window's rectangle up through `WINDOW_GEOMETRY` and
+  cutting it out of a full-screen grab — so anything stacked on top of the window was in
+  the image, and a window hanging off the edge of the desktop was clipped.
+  `Win32Backend` now declares the capability and reads the window's own pixels instead:
+  `PrintWindow` asks the window to draw itself into a bitmap of ours, so the screen is
+  never consulted. Measured on Windows 11 build 26200 with a probe window deliberately
+  occluded by a second one in another process — the capture came back with the probe's own
+  pixels while the same rectangle captured as a `region` came back showing the occluder.
+  The flag is load-bearing rather than decoration: Calculator, whose client area is
+  DirectComposition's, answered **no** non-black pixels at all without it and 101,655 with
+  it. Two limits are documented rather than hidden. A minimized window is refused, because
+  `PrintWindow` there *succeeds* and returns the parked frame — 249x43, mean brightness
+  213 when measured — rather than the window's contents. And the image is the rectangle
+  `geometry()` reports, which includes the invisible resize border DWM keeps around a
+  window: 9px on the left, right and bottom, black in the image, deliberately not cropped
+  so that the image and `geometry()` cannot disagree.
+
+  The live run also caught a bug no fake could. The bitmap the capture draws into was
+  deleted before its pixels were read back, which `GetDIBits` answers with
+  `0 of 300 scanlines` — and the screen path read its pixels the same way from the same
+  helper, so it carried the same defect. The suite had been green because the fake kept
+  answering after `DeleteObject`; it now ends an object's life when Windows does, and two
+  tests assert the read happens first — putting the deletion back fails them with the live
+  message. See `docs/validation.md`.
+
+- **`CLIPBOARD` on macOS, through the `pbcopy`/`pbpaste` the OS already ships.** A Mac had
+  no clipboard support at all — `supports(Capability.CLIPBOARD)` answered `False` and
+  `get_clipboard()` raised — while `docs/validation.md` claimed in one paragraph that
+  `clipboard.py` owned `pbpaste`/`pbcopy` and admitted in another that the capability was
+  missing outright. An external review read the first paragraph, reported the feature as
+  implemented-but-unvalidated, and that is how the contradiction surfaced. Both names were
+  in fact absent from `tools.CLIPBOARD_TOOLS` and from `clipboard.py`'s read/write tables;
+  they are now registered, so a Mac gets `CLIPBOARD` from the tool backend the way it already
+  got `SCREEN_CAPTURE` from `screencapture` — nothing to install, no extra needed, and no
+  PyObjC pasteboard binding to maintain.
+
+  Two measured platform facts shaped it. `pbcopy` **does not fork**: it hands the value to
+  the user's pasteboard server and exits, so unlike `wl-copy`/`xclip`/`xsel` it is
+  deliberately not in `_FORKS_ON_WRITE` and keeps its captured stderr. And **every
+  invocation of it rewrites the pasteboard** — `pbcopy --version < /dev/null` exited 0 and
+  left the clipboard empty, and `pbcopy -h` cleared it too — so `ExternalTool` grew a
+  `probe_version` field (default `True`, `False` for `pbcopy`) and `version()` answers `None`
+  for it rather than destroying whatever the user had copied to fill in a version column.
+  Every version probe now also runs with `stdin=subprocess.DEVNULL`, since a probe that
+  inherits stdin can block on it. A Mac keeps one selection, so `primary=True` raises
+  `CapabilityUnsupported` instead of being aliased to the clipboard — the same choice
+  `portal.py` makes — and never answers from a selection the caller did not ask about.
+
+- **`WINDOW_CAPTURE` on macOS, through `screencapture -l`.** A Mac could not capture one
+  window natively: `screenshot(window=...)` was the composite's crop path — the
+  rectangle resolved by `macos` and cut out of a whole-screen `screencapture` — so
+  anything stacked on top of the window was in the image and a window hanging off the
+  edge of a display was clipped, and `supports(Capability.WINDOW_CAPTURE)` answered
+  `False` there. `MacosBackend` now declares the capability and its `capture()` passes
+  the `CGWindowID` every `Window` already carries to the argv builder `capture.py` has
+  had since it was written — ADR 004 §1's mechanism, finally with a caller.
+
+  The provider is the window-listing backend rather than the tool backend that owns
+  that argv, and it has to be: a `Window`'s handle is backend-private, so a composite
+  hands one back only to the member that issued it (`CompositeBackend._issuer`), and on
+  a Mac the member that issues window numbers is the AX/CoreGraphics join.
+  `capture:screencapture` still declares no `WINDOW_CAPTURE` and still owns whole-screen
+  capture, so there is one provider and no ambiguity about which route a window takes —
+  the composite's first route simply fires where it used to fall through to the crop.
+
+  Screen Recording gates it, so true to `capture.py`'s own treatment of `screencapture`
+  the capability is declared whether or not the grant is in place and refused at the
+  call: `capture_window_id` checks it *before* the tool is spawned, so a Mac that has
+  denied the grant gets a `PermissionRequired` naming the grant and the interpreter
+  instead of the uniformly black PNG that is what `screencapture` writes when denied. It
+  is deliberately not withdrawn the way the AX-gated half is — Accessibility buys none
+  of this route. Running the tool, the timeout and the "did it write anything" check
+  moved to module level in `capture.py` (`_run_tool`, `_check_written`) so both callers
+  share one copy rather than macos.py growing a second.
+
+  **Measured on a live Mac, and the live run changed the code.** The argv now carries
+  `-o`, which is what makes the image the rectangle `geometry()` reports: the same window
+  came back 388x340 without it against a `geometry()` of 320x272 -- the drop shadow as
+  black padding, 68 pixels more in each direction for the inactive window measured and
+  112 for the key one -- and exactly 320x272 with it. The run also confirmed what the
+  route is *for*: with a second window created over the target's centre, the target's
+  image kept its own colour at that pixel while the same rectangle cut out of a screen
+  shot held the occluder's, and `window_at()` named that occluder at the same
+  coordinates, so the comparison had a control rather than an assumption. A window
+  hanging off two edges of the display (`geometry()` `(-60, 603, 320, 272)` on a
+  1280x800 screen, which took an override of `constrainFrameRect:` to arrange, since
+  `NSWindow` otherwise moves a window back onto the screen) came back whole at its full
+  size with its own pixels where the screen has none -- and the region route *silently
+  clamped* the same rectangle to 260x197, which is the difference between the two routes
+  in one pair of measurements.
+
+  One failure cannot be caught, and the run is what showed it: a window that has **closed
+  since its id was read** gives exit 0 and a black image of the shadow-padded size, so
+  the "did it write anything" check passes and the caller gets a picture of nothing. An
+  id that never named a window is the other case -- exit 1, `could not create image from
+  window`, no file, which `_run_tool` raises on. The first is written down at
+  `capture_window_id` rather than detected, because a genuinely black window is a
+  legitimate screenshot of something. See `docs/validation.md` for the run and
+  `docs/developers/adr-004-macos.md` for the decision.
+
+  The size assertion is a live test now, because this is the one part of the route a
+  fake cannot reach: `tests/test_macos.py`'s `TestLiveWindowCapture` captures a real
+  titled window, reads the PNG's IHDR and checks its dimensions against the rectangle
+  `geometry()` reports. It skips without PyObjC or without the grant, so CI skips it and
+  a development Mac runs it, and it was falsified before being trusted — with `-o`
+  removed it fails with `(432, 384)` against `(320, 272)`.
+
+  What "checks against" means came out of the live run, because `screencapture -l` does
+  not document its unit: on a display whose backing scale is above 1 the image comes
+  back in backing pixels, so the assertion accepts the rectangle in *either* unit — the
+  points `geometry()` reports, or those points multiplied by the backing scale of the
+  display the window is on. The factor is read from that display and not from
+  `Screen.scale`, which is not the same number: measured on a Mac, a display of
+  1280x800 points with 1280x800 pixels has a backing scale of 1.0 while `Screen.scale`
+  answers 0.75, and at that scale the accepted set collapses to the strict size this
+  test always asserted — a real title-bar window at `geometry()` 877x499 came back
+  877x499. No display with a backing scale above 1 was available to run, so that branch
+  is exercised by the fake rather than measured; the shadow-padded image `-o` exists to
+  crop is still rejected at either scale (989x611 for that same window, 112px wider and
+  taller), so the tolerance did not buy the size check away. The arithmetic is a plain
+  function over (width, height, scale), which is why
+  `TestTheWindowCaptureSizeTolerance` can cover both units and the sizes that must stay
+  rejected without a Mac. See `docs/validation.md` for the run.
+
+### Fixed
+
+- **`get_clipboard()` on Windows names the cause a desktop actually has.** A clipboard
+  holding copied *files* — the ordinary way a Windows user's clipboard stops being text —
+  raised `the clipboard holds no CF_UNICODETEXT; an application that publishes only
+  CF_TEXT or CF_HTML is the usual cause`, which named the uncommon case and not the common
+  one. Found by putting a file list on a live Windows 11 clipboard (`CF_HDROP`) and reading
+  it back; the message now names that first and keeps `CF_TEXT`/`CF_HTML`-only owners as the
+  other real case. The refusal itself is unchanged, because an empty string would be
+  indistinguishable from an empty clipboard.
+
+- **`examples/_clipboard_validate.py` exits 1 when a check fails.** It printed `False` and
+  returned 0, so an unattended run could not distinguish a working clipboard from a broken
+  one. It now tallies each comparison, names every failure in the summary, and treats the
+  end of stdin as "done" so it can run over SSH without a terminal. It also covers the cases
+  a clipboard actually goes wrong on — non-ASCII, empty text, a second write replacing the
+  first, the value outliving the session that set it, and a repeated write/read cycle —
+  rather than one happy path.
+
+- **Documentation that said pyguitest was X11-only, or Windows-less, where the capability
+  model now disagrees.** The tier-6 calls gained Windows providers and macOS gained a
+  `POINTER_QUERY` this release, and the prose written around them had not caught up:
+  `README.md` and `docs/troubleshooting.md` both explained a window screenshot as "under X11 the
+  window's own pixels are read ... everywhere else the rectangle is looked up and cut out of a
+  full-screen shot", which had a Windows reader on the crop path it left when `PrintWindow`
+  landed, and the README's own Windows row still called one window un-occluded "not yet served";
+  `docs/ai-assistants.md` told an assistant that `pointer_position()`,
+  `is_key_pressed()`, `is_button_pressed()`, `set_window_title()`, `lower_window()` and
+  `is_window_cursor()` are "X11 and XWayland only", which is true of a Wayland session and of
+  nothing else; and the `docs/api.md` legend still promised an **X11** mark that no row carries,
+  while defining that mark as "raises everywhere else" — the opposite of what a reader should
+  conclude from it. The generator now defines it as what the capability model actually asks: a
+  capability no backend but `X11Backend` provides, which today is no row at all, since Windows
+  serves all six and macOS serves `pointer_position()`. `install.md` gained the three install
+  facts it was missing — `[macos]` in the sentence that lists the extras (`[windows]` and `[dev]`
+  were called "the remaining" ones), the Windows clipboard's needing no package, extra or grant
+  because it is `CF_UNICODETEXT` through the Win32 API itself, with no PRIMARY selection beside
+  it to ask for, and ImageMagick on macOS, the same `compare` the Windows and Linux tables name.
+  `CONTRIBUTING.md` and `docs/README.md` both called a repo with four ADRs "the two ADRs".
+
+- **`CONTRIBUTING.md` documented developing on Windows and said nothing about macOS, and ADR 004
+  never said which provider owns a Mac's per-window capture.** The asymmetry was the documentation
+  half of a real gap: CI runs a `macos` job and `pyproject.toml` carries a `[macos]` extra, and
+  a contributor could reach neither from the file that tells them how to work here. There is now
+  a "Developing on macOS" section beside the Windows one — the job, what its probe adds over a
+  suite that passes identically on all three platforms, the `[dev,macos]` install, and the two
+  things that catch people: both PyObjC backends are `opt_in`, and grants do not travel in a
+  repo or survive a recreated virtualenv, because TCC records consent against a binary.
+  ADR 004 gains the paragraph its status list was missing — native per-window capture through
+  `screencapture -l`, which is **landed**: `MacosBackend` declares `WINDOW_CAPTURE` and its
+  `capture()` hands the `CGWindowID` every `Window` already carries to `capture.py`'s argv
+  builder, so `supports(WINDOW_CAPTURE)` answers `True` on a Mac. What that list had left out was
+  whose route it is — §1's table named `-l` from the start while §6's kept-list named
+  `SCREEN_CAPTURE`/`WINDOW_CAPTURE` as one item — and the comment in `capture.py` claiming
+  `macos.py` ran that binary with a window id said so before any caller existed: it now names
+  `capture_window_id`, which is where the id goes. The live run the ADR was waiting on is in it
+  too — what `-l` returns, `-o` included, rather than left as a question.
+
+- **A stock ImageMagick install on Windows serves `IMAGE_LOCATE` now.** `winget install
+  ImageMagick.ImageMagick` — the command this repo's own docs and `pyguitest doctor` name —
+  lays down ImageMagick 7 with `magick.exe` and **no** legacy commands: verified on Windows
+  11 build 26200, where the install directory holds exactly `magick.exe` and `unins000.exe`.
+  `IMAGE_TOOLS` knew only `compare`, so on that machine the package was installed, `crop.py`
+  was using `magick` to cut regions out happily, and template matching still reported itself
+  missing — the one image capability pip cannot supply, unusable by default on the platform
+  the docs send people to install it on. `magick` joins the registry as a second entry point
+  (last, deliberately: a machine with both, which is what Linux and macOS packages give you,
+  keeps selecting `compare` exactly as before), and `ToolImageSearchBackend` builds `magick
+  compare` and `magick identify` for it — the same two operations under IM7's dispatcher,
+  confirmed live on that install.
+
+- **A template search gets a budget sized to the desktop it was pointed at, instead of 15
+  seconds it could not meet.** Measured against the same Windows install: a subimage search
+  costs 20–40µs per pixel of haystack on a build with no FFT delegate, which is what that
+  package ships — `magick -list delegate` lists none — so 480×270 took 5.07s, 800×600 9.15s,
+  960×540 15.08s and 1920×1080 **51.35s**. A full-screen `locate_image()` on an ordinary
+  1080p desktop therefore failed outright, and `within=` could not rescue it, since the whole
+  desktop is what gets searched. The timeout is now derived from the area searched (`area ×
+  40µs`, floored at 15s, capped at five minutes), the error names the budget that expired
+  (`timed out after 83s`), and what is left is slowness rather than a spurious timeout —
+  `within=` documented as the fix that needs no install, in `Session.locate_image`'s
+  docstring, a new troubleshooting section, and the hints and install tables that named the
+  legacy command line as a requirement.
+
+- **A template search on macOS was answering with a plausible wrong location rather than with
+  the match.** `screencapture` writes PNGs that carry an alpha channel, so every haystack
+  `locate_image()` searches on a Mac is RGBA; a template cut out by any other tool is RGB,
+  because a crop of a fully opaque image loses its alpha in the PNG encoder and is then
+  written as a palette image. ImageMagick's subimage search does not error on that pair — it
+  answers with the top-left corner of whatever it searched, exit code 1, nothing on stderr,
+  and a score that reads like an ordinary imperfect match. Measured on macOS 26 with
+  ImageMagick 7.1.2-31 Q16-HDRI: a 400×300 crop of the real screen searched for a 200×60 crop
+  of itself taken at `+100+80` came back `15423.5 (0.235347) @ 0,0`, and searching a window
+  capture for a template cut from that same window reported the window's own origin. Synthetic
+  noise did exactly the same, so it is the channel sets and not the content, and it is not a
+  threshold artifact — `-dissimilarity-threshold 1.0` changed nothing. `-channel RGB`, which
+  makes the comparison about colour and not about alpha, located the template in all four
+  combinations of RGBA/RGB haystack and template on the same images, and is now part of the
+  search's command line, through both the legacy `compare` and `magick compare`. The
+  limitation is documented where a caller meets it: a match is made on colour, and alpha is
+  not part of one.
+
+- **`--full` called its ImageMagick check a failure on a Windows machine with no ImageMagick,
+  where the run meant to say SKIP.** The guard asked `command -v convert`, because ImageMagick
+  6's binary is spelled that way — and Windows has a `convert.exe` of its own in `system32`,
+  the FAT-to-NTFS one, on PATH on every Windows machine, answering `-version` with `Invalid
+  drive specification.` Measured: the guard exits 0, the suite that follows skips its five
+  tests that need a real ImageMagick, and `must_not_skip` turns that into a red check — a gate
+  reporting a missing tool as a failure on the one platform whose ImageMagick is `magick` and
+  whose install has no legacy commands at all. The guard now asks about the two names
+  `tools.IMAGE_TOOLS` carries, `compare` first and then `magick`, and requires a version
+  banner to prove the name found is really ImageMagick, so a name collision cannot claim a
+  check ran. Run both ways on Windows 11: SKIP with nothing installed, PASS with ImageMagick
+  7's directory on PATH.
+
+- **The capture's bitmap and memory DC are deleted by one owner, not two.** This release's
+  shared `_memory_dc` helper deleted both objects on the way out of its `yield` when the
+  draw inside the caller's `with` body failed — so a write that failed mid-capture deleted
+  the pair there and then left the caller's own `finally` to hand the same two handles to
+  `_release` for a second delete. Deleting a value no longer in use is usually inert, since
+  Windows answers 0 for it, but the pair is not the generator's to delete once it has been
+  yielded: a value GDI had meanwhile handed out again would take whatever now holds it.
+  Found by review reading the new helper, not by a failing test. Measured on Windows 11
+  build 26200 with a probe that failed the draw 200 times and allocated the same two kinds
+  of object between the failure and the cleanup: the second delete never landed on a live
+  object, because the allocation after a freed value answered a *different* value every
+  time it was asked (285549300 then 302326516, 318841588 then 335618804), and the tree
+  before the fix shows a flat GDI count as well — 0 net change over 200 iterations against
+  a detector that three leaked bitmaps falsified first. So the harm was latent rather than
+  reproduced, and what the change buys is single ownership: deletion now covers only setup,
+  on the two paths where no caller has seen either handle, and the pair belongs to the
+  caller from the `yield` on, with the generator deselecting the bitmap and nothing else.
+  Two tests count the deletes on both routes' failure paths (`tests/test_win32_backend.py`),
+  and the reasoning is written down at the helper. See `docs/validation.md`.
+
+- **Two backend-selection tests emptied the module-level registry for every test after
+  them, and the tests that had been leaning on that were fixed with them.** Both replaced
+  `backends._REGISTRY` with their own fakes and restored the original through two
+  `addCleanup` calls in the order that undoes itself: cleanups run last-added-first, so the
+  `extend` that put the real registrations back ran before the `clear` that then threw them
+  away, leaving the registry empty for the rest of the process. Invisible in CI, where
+  nothing afterwards selects a backend by name; on a Mac the full run reached
+  `TestLiveWindowCapture` and failed `BackendUnavailable: unknown backend 'macos';
+  available: none` — a test that passes on its own, and a failure that reproduces against
+  `tests/test_macos.py` as it stood before this release's size-tolerance change above, so
+  the ordering was the cause and not the test.
+
+  The pair is now one helper, `nothing_registered`, whose order cannot be written
+  backwards — and putting the registry back showed how much had been passing *because* of
+  the wipe. `TestSelection` and `TestSessionFacade` both ask what a session with no
+  backends does, and both had been reading a registry another test had emptied; they empty
+  it deliberately now. Four more failures came from the same place, equally pre-existing:
+  `test_uia_backend`'s `TestAvailability`, because composing a real session loads the type
+  library — with the registry restored and nothing else arranged yet,
+  `test_falls_back_to_null_when_nothing_registered` composed `uia+win32`, the name its own
+  failure carried, and that left the real `UIAutomationClient` module in
+  `uia._CLIENT_MODULE` for `client_module()` to answer from without ever asking
+  `comtypes_client()` — so those four were reading the cache rather than the seam they are
+  tests of. A probe over the whole run still finds one loader left once those tests are
+  arranged (`tests/test_win32.py`'s registration test, which asks `uia.available()` because
+  that is what it is about), so the reset belongs in the tests that are about the seam:
+  `UiaTestCase.setUp` sets the cache to `None` instead of saving whatever it held, which is
+  what its own comment had been about all along. Whole-suite numbers, both platforms, with
+  the subtest count unchanged at 31843: Windows 11 **1815 passed / 6 failed** before and
+  **1821 passed / 0 failed** after, macOS 26.7 **2030 passed / 0 failed**. See
+  `docs/validation.md`.
+
 ## [0.14.0] — 2026-09-27
 
 ### Added
@@ -3263,7 +3560,8 @@ First public release.
 - A `pyguitest` command-line entry point.
 - PEP 561 type information (`py.typed`); no hard runtime dependencies.
 
-[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/ctrondlp/pyguitest/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/ctrondlp/pyguitest/compare/v0.12.0...v0.14.0
 [0.12.0]: https://github.com/ctrondlp/pyguitest/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/ctrondlp/pyguitest/compare/v0.10.1...v0.11.0

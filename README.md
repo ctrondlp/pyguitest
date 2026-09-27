@@ -146,8 +146,8 @@ is what `connect()` reports, what `backend.providers()` lists, and what
 | sway, Hyprland, niri | a CLI tool, `uinput`, or libei (`eiinput`) | AT-SPI via `atspi` | their own sockets, standard library only | `grim` |
 | Any desktop with a portal | the RemoteDesktop portal (`portal`) | — | — | the Screenshot portal (`portalcapture`) |
 | Unattended CI | `x11` under Xvfb, or a headless session | AT-SPI, where a bus is running | `gnomeshell` on a headless GNOME | `x11` |
-| Windows | `win32` (`SendInput`) | `uia`, via the `windows` extra (UI Automation) | `win32` (`EnumWindows`, plus window events through `SetWinEventHook`) | `win32` (GDI `BitBlt`); one window un-occluded is not yet served |
-| macOS | `macquartz`, via the `macos` extra (`CGEventPost`) — opt-in, and the PostEvent grant is made by hand in System Settings | `macos`, via the `macos` extra (the Accessibility tree) — the Accessibility grant is made by hand in System Settings | `macos`, joined to CoreGraphics for the on-screen list; titles need the Screen Recording grant | `screencapture`, which ships with the OS |
+| Windows | `win32` (`SendInput`) | `uia`, via the `windows` extra (UI Automation) | `win32` (`EnumWindows`, plus window events through `SetWinEventHook`) | `win32` (GDI `BitBlt`, and `PrintWindow` for one window un-occluded) |
+| macOS | `macquartz`, via the `macos` extra (`CGEventPost`) — opt-in, and the PostEvent grant is made by hand in System Settings | `macos`, via the `macos` extra (the Accessibility tree) — the Accessibility grant is made by hand in System Settings | `macos`, joined to CoreGraphics for the on-screen list; titles need the Screen Recording grant | `screencapture`, which ships with the OS, and `-l` for one window un-occluded |
 
 Two things the table cannot say. Whether an application publishes anything to
 AT-SPI is up to the application, and [testable-guis.md][testable-guis] is
@@ -237,9 +237,13 @@ gui.screenshot("corner.png", region=(0, 0, 400, 300))
 `gui.geometry(window)` returns, on every backend. You never write a tool's
 own rectangle syntax; whichever tool the session picked gets its own built
 for it. `window` is served two ways, and the difference shows in the image:
-under X11 the window's own pixels are read, so anything stacked on top of it
-is absent; everywhere else the rectangle is looked up and cut out of a
-full-screen shot, which does include whatever is covering it.
+where the session serves `WINDOW_CAPTURE` the window's own pixels are read —
+its X11 drawable, `PrintWindow` on Windows, `screencapture -l` on macOS, or
+the GNOME Shell extension's own actor — so anything stacked on top of it is
+absent, and a window hanging off the edge of a display comes back whole;
+everywhere else, the Linux tools with no per-window mode among them, the
+rectangle is looked up and cut out of a full-screen shot, which does include
+whatever is covering it and does clip what is offscreen.
 `gui.supports(Capability.WINDOW_CAPTURE)` tells you which you are getting.
 
 **Automatically, when a test fails.** Nothing captures on its own — a

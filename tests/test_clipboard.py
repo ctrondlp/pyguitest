@@ -12,7 +12,12 @@ import unittest
 from unittest import mock
 
 from pyguitest import tools
-from pyguitest.backends.clipboard import ToolClipboardBackend
+from pyguitest.backends.clipboard import (
+    _FORKS_ON_WRITE,
+    _READ,
+    _WRITE,
+    ToolClipboardBackend,
+)
 from pyguitest.capabilities import Capability
 from pyguitest.errors import CapabilityUnsupported, PyGUITestError
 
@@ -74,6 +79,20 @@ class TestClipboardDispatch(unittest.TestCase):
         self.assertEqual(
             self.runner.calls[0], (["xsel", "--clipboard", "--input"], "hello")
         )
+
+    def test_pbcopy_read(self):
+        # macOS. No flag at all: `pbpaste` writes the pasteboard's text to
+        # stdout, and has no --no-newline equivalent because it never adds
+        # one -- measured live on macOS 26.7, where `printf abc123 | pbcopy`
+        # then `pbpaste` returned exactly "abc123".
+        gui = self._backend("pbcopy", stdout="hello")
+        self.assertEqual(gui.get_clipboard(), "hello")
+        self.assertEqual(self.runner.calls[0], (["pbpaste"], None))
+
+    def test_pbcopy_write(self):
+        gui = self._backend("pbcopy")
+        gui.set_clipboard("hello")
+        self.assertEqual(self.runner.calls[0], (["pbcopy"], "hello"))
 
     def test_wl_copy_read_primary(self):
         gui = self._backend("wl-copy", stdout="hello")
@@ -146,6 +165,49 @@ class TestClipboardDispatch(unittest.TestCase):
             ToolClipboardBackend(fake)
 
 
+class TestClipboardPrimaryIsRefusedOnMacos(unittest.TestCase):
+    """macOS has one pasteboard, so primary=True is a typed refusal.
+
+    Not an alias to the clipboard: the two selections are independent
+    everywhere they do exist, so answering one from the other would be
+    answering a different question than the caller asked -- the read
+    portal.py makes for the Clipboard interface, which has no PRIMARY either.
+    """
+
+    def _backend(self):
+        self.runner = Recorder()
+        return ToolClipboardBackend(BY_NAME["pbcopy"], runner=self.runner)
+
+    def test_get_clipboard_primary_raises_before_running_anything(self):
+        gui = self._backend()
+        with self.assertRaises(CapabilityUnsupported) as ctx:
+            gui.get_clipboard(primary=True)
+        self.assertIn("PRIMARY", str(ctx.exception))
+        self.assertEqual(self.runner.calls, [])
+
+    def test_set_clipboard_primary_raises_before_running_anything(self):
+        gui = self._backend()
+        with self.assertRaises(CapabilityUnsupported) as ctx:
+            gui.set_clipboard("hello", primary=True)
+        self.assertIn("PRIMARY", str(ctx.exception))
+        self.assertEqual(self.runner.calls, [])
+
+    def test_the_refusal_is_about_the_tool_that_cannot_serve_it(self):
+        gui = self._backend()
+        with self.assertRaises(CapabilityUnsupported) as ctx:
+            gui.get_clipboard(primary=True)
+        self.assertIn("clipboard:pbcopy", str(ctx.exception))
+
+    def test_the_linux_tools_are_unaffected(self):
+        # The refusal is keyed on the tool's own tables, not on the platform
+        # this test happens to run on: every Linux tool keeps reaching PRIMARY.
+        for name in ("wl-copy", "xclip", "xsel"):
+            self.assertIn(True, _READ[name])
+            self.assertIn(True, _WRITE[name])
+        self.assertEqual(_READ["pbcopy"], {False: ["pbpaste"]})
+        self.assertEqual(_WRITE["pbcopy"], {False: ["pbcopy"]})
+
+
 class TestClipboardRequiresTheCapability(unittest.TestCase):
     """Both methods refuse before running anything.
 
@@ -208,6 +270,47 @@ class TestClipboardRunFailures(unittest.TestCase):
             _args, kwargs = run.call_args
             self.assertNotIn("$(rm -rf /)", run.call_args.args[0])
             self.assertTrue(kwargs["input"].startswith("$(rm -rf /)"))
+
+
+class TestClipboardWriteCaptureFollowsTheFork(unittest.TestCase):
+    """_FORKS_ON_WRITE: DEVNULL only where a write really forks.
+
+    The Linux tools daemonize to keep serving the selection, so their writes
+    must not be given pipes a fork would hold open -- see the module
+    docstring on the 15-second hang that confirmed it. macOS's `pbcopy` is an
+    ordinary client talking to the pasteboard server, so it keeps captured
+    stderr and a failure there says why.
+    """
+
+    def _failure(self, name):
+        gui = ToolClipboardBackend(BY_NAME[name])
+        with mock.patch(
+            "pyguitest.backends.clipboard.subprocess.run",
+            return_value=mock.Mock(
+                returncode=1, stdout="", stderr="pbs: pasteboard unavailable"
+            ),
+        ) as run:
+            with self.assertRaises(PyGUITestError) as ctx:
+                gui.set_clipboard("hello")
+            return str(ctx.exception), run.call_args.kwargs
+
+    def test_a_forking_write_is_given_devnull(self):
+        message, kwargs = self._failure("wl-copy")
+        self.assertEqual(kwargs["stdout"], subprocess.DEVNULL)
+        self.assertEqual(kwargs["stderr"], subprocess.DEVNULL)
+        self.assertIn("stderr not captured", message)
+
+    def test_a_non_forking_write_keeps_stderr(self):
+        message, kwargs = self._failure("pbcopy")
+        self.assertEqual(kwargs["stdout"], subprocess.PIPE)
+        self.assertEqual(kwargs["stderr"], subprocess.PIPE)
+        self.assertIn("pbs: pasteboard unavailable", message)
+
+    def test_every_mapped_tool_is_covered_by_one_side_or_the_other(self):
+        # A new tool must land in _FORKS_ON_WRITE or be documented as not
+        # forking; this pins that the decision was made rather than defaulted.
+        self.assertEqual(_FORKS_ON_WRITE & set(_WRITE), _FORKS_ON_WRITE)
+        self.assertIn("pbcopy", set(_WRITE) - _FORKS_ON_WRITE)
 
 
 if __name__ == "__main__":

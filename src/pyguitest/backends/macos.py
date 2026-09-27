@@ -128,7 +128,8 @@ from ..errors import (
 )
 from ..roles import Role, spellings
 from . import _macapi
-from .base import GUIBackend, Screen, Window, click_by_pointer
+from .base import GUIBackend, Screen, Window, check_region, click_by_pointer
+from .capture import capture_window_id
 
 if TYPE_CHECKING:
     from .base import Element as _ElementInterface
@@ -1479,9 +1480,11 @@ server's list carries the windows, their owners, their pids, their rectangles an
 whether they are on screen; the display list carries the screens; and
 `CGEventGetLocation` reads the pointer, which ADR 004 §1 marks "no grant at all".
 Activation is here for a different reason -- it goes through AppKit's
-`NSRunningApplication` rather than through AX. Capture and image search are absent
-because `capture.py` and `imagesearch.py` already own those capabilities, and the
-clipboard because `clipboard.py` owns `pbpaste`/`pbcopy`.
+`NSRunningApplication` rather than through AX. Whole-screen capture and image search
+are absent because `capture.py` and `imagesearch.py` already own those capabilities,
+and the clipboard because `clipboard.py` owns `pbpaste`/`pbcopy`. Per-window capture
+is *not* here either, and is not grant-free when it does arrive: it is
+`_WINDOW_CAPTURE` below, which Screen Recording gates.
 """
 
 _AX_ONLY = frozenset(
@@ -1503,6 +1506,29 @@ serve it, because the AppKit route needs no grant: the set describes what the
 backend can *do*, not what its most capable route needs.
 """
 
+_WINDOW_CAPTURE = frozenset({Capability.WINDOW_CAPTURE})
+"""The one capture route this backend owns, and the only set here that is neither
+grant-free nor Accessibility's.
+
+`screencapture -l <window number>` is ADR 004 §1's native per-window route, and it
+needs the Screen Recording grant, so it is not `_UNGATED`. It is not `_AX_ONLY`
+either: Accessibility buys none of it, and a Mac with AX denied and Screen
+Recording granted captures windows perfectly well. So it is its own set, declared
+whether or not the grant is in place and checked at the call -- `PermissionRequired`
+before the tool is spawned, which is what tells a reader *which* grant to give and
+to which binary, where a withheld capability could only have said the window could
+not be captured. `capture.py` treats the whole-screen `screencapture` route the same
+way, so `supports(WINDOW_CAPTURE)` on a Mac means "there is a route here", not "it
+works without a grant"; `Environment.has_screen_recording` is the grant's own answer
+and `capture_window_id` is where the refusal happens.
+
+The reason it is declared *here* rather than in `capture.py`, which owns the argv
+and the gate: a `Window`'s handle is backend-private, and a composite hands one back
+only to the member that issued it -- see `CompositeBackend._issuer` -- so the
+provider of `WINDOW_CAPTURE` on a Mac has to be the backend that lists the windows.
+That is this one, and `capture_window_id` is what it calls with the number.
+"""
+
 
 class MacosBackend(GUIBackend):
     """Accessibility on macOS: elements and windows, joined to CoreGraphics.
@@ -1514,6 +1540,12 @@ class MacosBackend(GUIBackend):
     serves the `WINDOW_*` family, for the reason ADR 004 gives: AX is the only
     route to a Mac window's identity and placement, and the window server's list
     underneath needs no grant at all.
+
+    One capability here is not in that band's spirit and is worth naming: this is
+    the provider of `WINDOW_CAPTURE` on a Mac, because it is what issues the
+    window numbers a per-window grab is addressed by. The pixels come from
+    `screencapture -l` -- `capture.py`'s argv and gate -- and Screen Recording is
+    what that route needs; see `_WINDOW_CAPTURE` and `capture` below.
 
     Construction never prompts unless a caller says so, which is `opt_in`'s rule
     spelled as an option: `connect(backend="macos", backend_options={"request":
@@ -1578,10 +1610,15 @@ class MacosBackend(GUIBackend):
         so it is computed from what was measured at construction. ADR 004 §6 is
         the whole argument for why the ungated half is what it is, and why
         withdrawing more -- or less -- would misreport the machine.
+
+        `_WINDOW_CAPTURE` is in the set either way, and that is not an oversight:
+        it is gated by Screen Recording rather than by Accessibility, so the AX
+        grant has nothing to say about it. It is checked at the call instead --
+        see that set's own docstring.
         """
         if self._trusted:
-            return CapabilitySet(_UNGATED | _AX_ONLY)
-        return CapabilitySet(_UNGATED)
+            return CapabilitySet(_UNGATED | _AX_ONLY | _WINDOW_CAPTURE)
+        return CapabilitySet(_UNGATED | _WINDOW_CAPTURE)
 
     def screens(self):
         """One `Screen` per active display, in the display list's order.
@@ -1954,6 +1991,69 @@ class MacosBackend(GUIBackend):
         self.require(Capability.WINDOW_STATE)
         entry = self._entry_for(window.handle)
         return bool(entry and entry.get("kCGWindowIsOnscreen"))
+
+    def capture(self, window=None, path=None, region=None):
+        """Write a screenshot of one window's own pixels, and return its path.
+
+        `screencapture -l <window number>` -- the route ADR 004 §1's table names,
+        and what `capture.py`'s argv builder has taken a window id *for* since it
+        was written. Read from the window server rather than off the screen, so
+        whatever is stacked on top of the window is not in the image and a window
+        hanging off the edge of a display comes back whole: the same property
+        `PrintWindow` gives on Windows and `GetImage` on X11. Measured on the live
+        machine and not assumed -- §1's table is what put `-l` here.
+
+        `window` is a `Window` from `windows()`, whose handle *is* the window
+        number; a raw number is taken as itself, which is what `_issuer` means by
+        a caller who passed a handle rather than a Window. This is a Mac's only
+        `WINDOW_CAPTURE` provider and it has to be: a handle is backend-private and
+        a composite passes one back only to the member that issued it, so a tool
+        backend could never be handed this one -- see `_WINDOW_CAPTURE`.
+
+        Whole-screen capture is deliberately not served here. `window=None`
+        therefore refuses naming the member that does serve it, rather than
+        reporting a missing capability: on a Mac those are different problems, and
+        `capture:screencapture` needs nothing from this backend. `region` beside a
+        window is refused by `check_region`, for the reason it is everywhere else
+        -- a region is screen-absolute, and pairing the two could only mean one or
+        the other.
+
+        Screen Recording is checked before the tool is spawned, so a Mac that has
+        denied it raises `PermissionRequired` naming the grant and the interpreter
+        rather than writing a black PNG -- see `capture_window_id`, which owns that
+        gate, the argv and the "did it write anything" check.
+
+        Measured live on macOS 26.7, against a window created by a separate
+        process with a second window stacked over its centre. The image is the
+        rectangle `geometry()` reports, exactly -- 320x272 for a window
+        `geometry()` also called 320x272 -- once `-o` is passed; the same window
+        without it came back 388x340, the drop shadow as black padding. And the
+        occluded window's centre pixel was its own colour, where the same
+        rectangle cut out of a screen shot held the occluder's: `window_at()`
+        named that occluder at those coordinates in the same run, so the
+        comparison was against a control rather than an assumption. This is the
+        property `PrintWindow` gives on Windows and `GetImage` on X11, now
+        confirmed here rather than inferred from ADR 004 §1's table.
+
+        One thing does *not* carry over from the Windows route: a window that has
+        closed since its id was read is not detected, and cannot be. See
+        `capture_window_id` for what the tool answers there.
+        """
+        if window is None:
+            raise CapabilityUnsupported(
+                Capability.SCREEN_CAPTURE,
+                self.name,
+                "whole-screen capture on a Mac belongs to the tool that ships "
+                "with the OS (`capture:screencapture`); this backend serves the "
+                "per-window route, which needs a window's own number",
+            )
+        self.require(Capability.WINDOW_CAPTURE)
+        check_region(region, window)
+        return capture_window_id(self._window_number(window), path)
+
+    def _window_number(self, window):
+        """The window number for a `Window` or a raw handle."""
+        return window.handle if isinstance(window, Window) else window
 
     def move_window(self, window, x, y):
         """Move a window by writing its AX position, with no pointer involved.

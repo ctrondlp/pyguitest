@@ -172,14 +172,15 @@ class Win32TestCase(unittest.TestCase):
         }
         self.memory = FakeGlobalMemory()
         self.user32 = self._fake_user32()
+        self.deleted = set()
         self.gdi32 = FakeLibrary(
             CreateCompatibleDC=lambda hdc: 1,
             CreateCompatibleBitmap=lambda hdc, width, height: 2,
             SelectObject=lambda hdc, obj: 3,
             BitBlt=lambda *args: 1,
             GetDIBits=self._get_dib_bits,
-            DeleteObject=lambda obj: 1,
-            DeleteDC=lambda hdc: 1,
+            DeleteObject=self._delete_gdi,
+            DeleteDC=self._delete_gdi,
         )
         self.shcore = FakeLibrary(GetDpiForMonitor=self._get_dpi_for_monitor)
         self.dwmapi = FakeLibrary(DwmGetWindowAttribute=self._get_dwm_attribute)
@@ -227,6 +228,7 @@ class Win32TestCase(unittest.TestCase):
             SendInput=self._send_input,
             GetDC=lambda hwnd: 99,
             ReleaseDC=lambda hwnd, hdc: 1,
+            PrintWindow=self._print_window,
             OpenClipboard=self._open_clipboard,
             CloseClipboard=lambda: 1,
             EmptyClipboard=self._empty_clipboard,
@@ -326,6 +328,16 @@ class Win32TestCase(unittest.TestCase):
         rect_ptr._obj.right = right
         rect_ptr._obj.bottom = bottom
         return 1
+
+    def _print_window(self, hwnd, hdc, flags):
+        """`PrintWindow`, as Windows answers it: 1 for a live window, 0 without.
+
+        The fake draws nothing -- what `GetDIBits` then returns is `set_pixels`'
+        own business -- so recording the call and refusing a handle this desktop
+        no longer has is the whole of its behaviour. That refusal is what makes
+        a window closing between the listing and the print testable.
+        """
+        return 1 if hwnd in self.windows else 0
 
     def _set_foreground(self, hwnd):
         # `needs_input` is Windows' foreground lock: refused until this process
@@ -518,7 +530,21 @@ class Win32TestCase(unittest.TestCase):
                 data += bytes((blue, green, red, 0))
         self.pixels = bytes(data)
 
+    def _delete_gdi(self, obj):
+        """`DeleteObject` and `DeleteDC`, which really do end an object's life.
+
+        Not a no-op, because the lifetime is what the capture's ordering
+        depends on: `GetDIBits` on a deleted bitmap answers 0 scanlines on a
+        real desktop -- measured, when a refactor deleted it one line before
+        the read -- and a fake that kept answering would have hidden exactly
+        that and nothing else.
+        """
+        self.deleted.add(obj)
+        return 1
+
     def _get_dib_bits(self, hdc, bitmap, start, lines, buffer, header_ptr, usage):
+        if hdc in self.deleted or bitmap in self.deleted:
+            return 0
         ctypes.memmove(buffer, self.pixels, len(self.pixels))
         return lines
 
@@ -605,6 +631,7 @@ class TestTheCapabilitySet(Win32TestCase):
         for capability in (
             Capability.SCREEN_INFO,
             Capability.SCREEN_CAPTURE,
+            Capability.WINDOW_CAPTURE,
             Capability.POINTER_MOVE,
             Capability.POINTER_BUTTON,
             Capability.POINTER_SCROLL,
@@ -650,14 +677,12 @@ class TestTheCapabilitySet(Win32TestCase):
             with self.subTest(capability=capability.name):
                 self.assertNotIn(capability, self.gui.capabilities)
 
-    def test_one_window_un_occluded_is_not_claimed(self):
-        # PrintWindow is a later phase, so `screenshot(window=...)` must not
-        # silently return a crop that includes an occluding window.
-        self.assertNotIn(Capability.WINDOW_CAPTURE, self.gui.capabilities)
-        window = Window(1, self.gui, title="anything")
-        with self.assertRaises(CapabilityUnsupported) as raised:
-            self.gui.capture(window=window)
-        self.assertIs(raised.exception.capability, Capability.WINDOW_CAPTURE)
+    def test_one_window_un_occluded_is_claimed(self):
+        # `PrintWindow` has the window render itself into a DC of this
+        # backend's, so `screenshot(window=...)` excludes an occluding window
+        # -- which is exactly what the capability promises. What the image is,
+        # and is not, is TestWindowCapture's subject.
+        self.assertIn(Capability.WINDOW_CAPTURE, self.gui.capabilities)
 
     def test_the_event_feed_is_claimed(self):
         # SetWinEventHook, unlike PrintWindow-based WINDOW_CAPTURE, needs
@@ -1783,11 +1808,15 @@ class TestCapture(Win32TestCase):
     def test_a_bitmap_that_will_not_select_is_a_failure_not_a_black_image(self):
         # A failed selection leaves the DC's original 1x1 surface in place and
         # BitBlt then succeeds against that, so without this check the capture
-        # would be a plausible-looking black PNG.
+        # would be a plausible-looking black PNG. Nothing was yielded, so this
+        # is also the half where the generator deletes its own two objects --
+        # once each, and with no caller's `finally` to delete them again.
         self.small_desktop()
         self.gdi32.SelectObject = lambda hdc, obj: 0
         with self.assertRaises(PyGUITestError):
             self.gui.capture(path=self.temporary_path())
+        self.assertEqual(len(self.gdi32.args_for("DeleteObject")), 1)
+        self.assertEqual(len(self.gdi32.args_for("DeleteDC")), 1)
 
     def test_the_bitmap_is_deselected_before_its_pixels_are_read_back(self):
         # GetDIBits documents that the bitmap must not be selected into a
@@ -1813,6 +1842,218 @@ class TestCapture(Win32TestCase):
         self.assertIn(("getdibits", 3), order)
         self.assertNotIn(("getdibits", 2), order)
 
+    def test_the_pixels_are_read_before_the_bitmap_is_deleted(self):
+        # Measured on a real desktop, where the read answered 0 scanlines
+        # because the bitmap had already been deleted: the two objects have to
+        # outlive it. The fake ends an object's life when Windows does, so this
+        # is a test of that order rather than of the call sequence.
+        self.small_desktop()
+        self.gui.capture(path=self.temporary_path())
+        names = [name for name, _args in self.gdi32.calls]
+        self.assertLess(names.index("GetDIBits"), names.index("DeleteObject"))
+
+    def test_a_failed_draw_deletes_each_gdi_object_once(self):
+        # A draw that fails inside the caller's `with` body comes back into the
+        # generator at its `yield`, so a cleanup there would delete both objects
+        # and the caller's `finally` would delete them again. Windows reuses a
+        # deleted handle's value, and the second delete is then a delete of
+        # whatever was created with it in the meantime -- so the count is the
+        # assertion rather than the fact.
+        self.small_desktop()
+        self.gdi32.BitBlt = lambda *args: 0
+        with self.assertRaises(PyGUITestError):
+            self.gui.capture(path=self.temporary_path())
+        self.assertEqual(len(self.gdi32.args_for("DeleteObject")), 1)
+        self.assertEqual(len(self.gdi32.args_for("DeleteDC")), 1)
+
+
+class TestWindowCapture(Win32TestCase):
+    """`PrintWindow`: one window's own pixels, whatever covers it absent.
+
+    The fake desktop has no occluders in it -- a fake screen has no z-order to
+    hide anything behind. What makes occlusion irrelevant is that nothing here
+    reads the screen at all, which is what these tests assert: the call goes to
+    the window, into a DC of this backend's, and `BitBlt` never runs.
+    """
+
+    def small_window(self, handle=1):
+        """Add a window whose rectangle is two by two, and return the `Window`."""
+        self.add_window(handle, rect=(100, 200, 102, 202))
+        return self.gui.windows()[0]
+
+    def two_by_two(self):
+        """The pixels the print hands back, as `GetDIBits` would return them."""
+        self.set_pixels([b"\xff\x00\x00\x00\xff\x00", b"\x00\x00\xff\xff\xff\xff"])
+
+    def test_one_window_un_occluded_is_the_window_its_own_pixels(self):
+        window = self.small_window()
+        self.two_by_two()
+        width, height, rows = self.decode_png(
+            self.gui.capture(window=window, path=self.temporary_path())
+        )
+        self.assertEqual((width, height), (2, 2))
+        self.assertEqual(
+            rows, [b"\xff\x00\x00\x00\xff\x00", b"\x00\x00\xff\xff\xff\xff"]
+        )
+
+    def test_the_image_is_the_rectangle_geometry_reports(self):
+        # The same rectangle `move_window` and `resize_window` act on, so a
+        # caller who measures a window and then screenshots it gets that size
+        # back rather than something a few pixels off it.
+        window = self.small_window()
+        self.two_by_two()
+        width, height, _rows = self.decode_png(
+            self.gui.capture(window=window, path=self.temporary_path())
+        )
+        _x, _y, expected_width, expected_height = self.gui.geometry(window)
+        self.assertEqual((width, height), (expected_width, expected_height))
+
+    def test_the_window_renders_itself_into_a_dc_of_ours(self):
+        window = self.small_window()
+        self.two_by_two()
+        self.gui.capture(window=window, path=self.temporary_path())
+        hwnd, hdc, flags = self.user32.arg_for("PrintWindow")
+        self.assertEqual(hwnd, window.handle)
+        # The DC the bitmap was selected into, not the screen's: GetDC returns
+        # 99 in this fake, and drawing into *that* would be a screen capture
+        # wearing a window capture's name.
+        self.assertEqual(hdc, self.gdi32.args_for("SelectObject")[0][0])
+        self.assertNotEqual(hdc, 99)
+        # Without this flag a window whose contents are DirectComposition's --
+        # every Store application -- draws itself as an empty frame.
+        self.assertEqual(flags, _winapi.PW_RENDERFULLCONTENT)
+
+    def test_the_screen_is_never_blitted(self):
+        # The whole reason WINDOW_CAPTURE exists: the image does not come from
+        # the screen, so nothing stacked on the window can reach it.
+        window = self.small_window()
+        self.two_by_two()
+        self.gui.capture(window=window, path=self.temporary_path())
+        self.assertFalse(self.gdi32.was_called("BitBlt"))
+
+    def test_the_bitmap_is_deselected_before_its_pixels_are_read_back(self):
+        # The same requirement the screen path is held to, through the same
+        # helper: GetDIBits documents that its bitmap must not be selected into
+        # a DC, while the draw needs exactly that.
+        window = self.small_window()
+        self.two_by_two()
+        selected = [None]
+        order = []
+        real_get_dib_bits = self.gdi32.GetDIBits
+
+        def select(hdc, obj):
+            previous, selected[0] = selected[0], obj
+            order.append(("select", obj))
+            return previous or 3
+
+        def get_dib_bits(*args):
+            order.append(("getdibits", selected[0]))
+            return real_get_dib_bits(*args)
+
+        self.gdi32.SelectObject = select
+        self.gdi32.GetDIBits = get_dib_bits
+        self.gui.capture(window=window, path=self.temporary_path())
+        self.assertIn(("getdibits", 3), order)
+        self.assertNotIn(("getdibits", 2), order)
+
+    def test_the_pixels_are_read_before_the_bitmap_is_deleted(self):
+        # The same lifetime the screen path is held to: a deleted bitmap
+        # answers 0 scanlines from GetDIBits, measured on a real desktop.
+        window = self.small_window()
+        self.two_by_two()
+        self.gui.capture(window=window, path=self.temporary_path())
+        names = [name for name, _args in self.gdi32.calls]
+        self.assertLess(names.index("GetDIBits"), names.index("DeleteObject"))
+
+    def test_the_gdi_objects_are_released_afterwards(self):
+        window = self.small_window()
+        self.two_by_two()
+        self.gui.capture(window=window, path=self.temporary_path())
+        self.assertTrue(self.gdi32.was_called("DeleteObject"))
+        self.assertTrue(self.gdi32.was_called("DeleteDC"))
+        self.assertTrue(self.user32.was_called("ReleaseDC"))
+
+    def test_a_print_failure_is_raised_rather_than_written_out(self):
+        # A window that answers "no" has not been captured, and a black or
+        # half-drawn PNG returned as if it had been is the outcome worth
+        # failing over.
+        window = self.small_window()
+        path = self.temporary_path()
+        self.user32.PrintWindow = lambda *args: 0
+        with self.assertRaises(PyGUITestError) as raised:
+            self.gui.capture(window=window, path=path)
+        self.assertIn(window.title, str(raised.exception))
+        self.assertFalse(os.path.exists(path))
+
+    def test_a_failed_print_deletes_each_gdi_object_once(self):
+        # The same ownership question as the blit's failure path: PrintWindow
+        # answers 0 inside the caller's `with` body, so the two objects are the
+        # caller's `finally`'s to delete and nobody else's.
+        window = self.small_window()
+        self.user32.PrintWindow = lambda *args: 0
+        with self.assertRaises(PyGUITestError):
+            self.gui.capture(window=window, path=self.temporary_path())
+        self.assertEqual(len(self.gdi32.args_for("DeleteObject")), 1)
+        self.assertEqual(len(self.gdi32.args_for("DeleteDC")), 1)
+
+    def test_a_print_failure_names_a_non_interactive_window_station(self):
+        # PrintWindow is a desktop-bound call like the blit, so it earns the
+        # same diagnosis rather than the same terse message.
+        window = self.small_window()
+        self.gui.environment = types.SimpleNamespace(is_interactive_desktop=False)
+        self.user32.PrintWindow = lambda *args: 0
+        with self.assertRaises(PyGUITestError) as raised:
+            self.gui.capture(window=window, path=self.temporary_path())
+        self.assertIn("window station", str(raised.exception))
+
+    def test_a_minimized_window_is_refused_before_anything_is_created(self):
+        # Windows parks a minimized window off-screen instead of drawing it, so
+        # printing one returns whatever frame that rectangle holds -- an image
+        # of the wrong thing that looks exactly like an answer.
+        window = self.small_window()
+        self.windows[window.handle]["iconic"] = True
+        with self.assertRaises(PyGUITestError) as raised:
+            self.gui.capture(window=window, path=self.temporary_path())
+        self.assertIn("minimized", str(raised.exception))
+        self.assertFalse(self.user32.was_called("PrintWindow"))
+        self.assertFalse(self.gdi32.was_called("CreateCompatibleDC"))
+
+    def test_a_region_beside_a_window_is_still_refused(self):
+        window = self.small_window()
+        with self.assertRaises(ValueError):
+            self.gui.capture(window=window, region=(0, 0, 1, 1))
+        self.assertFalse(self.user32.was_called("PrintWindow"))
+
+    def test_a_window_from_another_backend_is_refused(self):
+        # Handles are backend-private, and another backend's is a plausible
+        # integer to hand to PrintWindow.
+        window = self.small_window()
+        other = Win32Backend()
+        with self.assertRaises(WindowNotFound):
+            self.gui.capture(window=Window(window.handle, other, title=window.title))
+        self.assertFalse(self.user32.was_called("PrintWindow"))
+
+    def test_a_window_that_has_closed_is_refused(self):
+        window = self.small_window()
+        del self.windows[window.handle]
+        with self.assertRaises(WindowNotFound):
+            self.gui.capture(window=window, path=self.temporary_path())
+        self.assertFalse(self.user32.was_called("PrintWindow"))
+
+    def test_a_machine_without_gdi32_cannot_print_a_window(self):
+        window = self.small_window()
+        with mock.patch.object(_winapi, "gdi32", lambda: None):
+            with self.assertRaises(BackendUnavailable):
+                self.gui.capture(window=window, path=self.temporary_path())
+
+    def test_a_capture_with_no_path_writes_a_temporary_file(self):
+        window = self.small_window()
+        self.two_by_two()
+        path = self.gui.capture(window=window)
+        self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
+        self.assertTrue(path.endswith(".png"))
+        self.assertEqual(self.decode_png(path)[:2], (2, 2))
+
 
 class TestClipboard(Win32TestCase):
     """One clipboard: the round trip, the retry, and the refusal for PRIMARY."""
@@ -1829,11 +2070,15 @@ class TestClipboard(Win32TestCase):
         self.assertEqual(self.gui.get_clipboard(), "second")
 
     def test_an_empty_clipboard_of_text_is_its_own_failure(self):
-        # An owner publishing only CF_TEXT or CF_HTML is the real case, and an
-        # empty string would be indistinguishable from an empty clipboard.
+        # A file list is the case a real desktop meets most: measured live by
+        # copying a file in Explorer (CF_HDROP on the clipboard) and reading,
+        # which raised this. An owner publishing only CF_TEXT or CF_HTML is the
+        # other case, and an empty string would be indistinguishable from an
+        # empty clipboard.
         with self.assertRaises(PyGUITestError) as raised:
             self.gui.get_clipboard()
         self.assertIn("CF_UNICODETEXT", str(raised.exception))
+        self.assertIn("CF_HDROP", str(raised.exception))
 
     def test_primary_has_no_meaning_and_says_so(self):
         with self.assertRaises(CapabilityUnsupported) as raised:

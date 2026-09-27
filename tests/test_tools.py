@@ -247,6 +247,69 @@ class TestVersion(unittest.TestCase):
         ):
             self.assertIsNone(fake.version())
 
+    def test_the_probe_never_inherits_the_callers_stdin(self):
+        # A probe that read the caller's stdin would consume input meant for
+        # whoever is reading the report -- and the clipboard tools take their
+        # content exactly that way.
+        fake = tools.ExternalTool("wdotool", frozenset())
+        with (
+            mock.patch("pyguitest.tools.shutil.which", return_value="/bin/wdotool"),
+            mock.patch("pyguitest.tools.subprocess.run") as run,
+        ):
+            run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+            fake.version()
+            self.assertIs(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
+
+
+class TestMacosClipboardTool(unittest.TestCase):
+    """pbcopy: the tool macOS ships, and the only unprobeable one.
+
+    It sits in CLIPBOARD_TOOLS the way `screencapture` sits in
+    CAPTURE_TOOLS -- last, because the OS ships it, so there is nothing to
+    rank it above -- and it carries a flag none of the others do: asking it
+    for its version would rewrite the pasteboard.
+
+    Measured live on macOS 26.7: with a sentinel value on the clipboard,
+    `pbcopy --version < /dev/null` exited 0 having cleared it, and `pbcopy -h`
+    cleared it too. Probing that tool would make `pyguitest doctor` destroy
+    whatever the user had copied.
+    """
+
+    def _by_name(self):
+        return {t.name: t for t in tools.CLIPBOARD_TOOLS}
+
+    def test_it_is_listed_with_pbpaste_as_its_second_half(self):
+        self.assertEqual(self._by_name()["pbcopy"].also_needs, "pbpaste")
+
+    def test_it_carries_none_of_the_linux_only_flags(self):
+        tool = self._by_name()["pbcopy"]
+        self.assertFalse(tool.x11_only)
+        self.assertFalse(tool.mutter_incompatible)
+        self.assertFalse(tool.wlroots_only)
+
+    def test_it_is_last_so_it_only_wins_when_nothing_else_can(self):
+        # The X11 tools must stay ahead of it: a Linux box carrying shim
+        # pbcopy/pbpaste wrappers still prefers its real clipboard tool.
+        names = [t.name for t in tools.CLIPBOARD_TOOLS]
+        self.assertEqual(names[-1], "pbcopy")
+        self.assertLess(names.index("xclip"), names.index("pbcopy"))
+
+    def test_it_is_the_one_tool_that_is_not_probed(self):
+        self.assertFalse(self._by_name()["pbcopy"].probe_version)
+        self.assertEqual(
+            [t.name for t in tools.CLIPBOARD_TOOLS if not t.probe_version],
+            ["pbcopy"],
+        )
+
+    def test_a_probe_of_it_never_runs_it(self):
+        fake = tools.ExternalTool("pbcopy", frozenset(), probe_version=False)
+        with (
+            mock.patch("pyguitest.tools.shutil.which", return_value="/usr/bin/pbcopy"),
+            mock.patch("pyguitest.tools.subprocess.run") as run,
+        ):
+            self.assertIsNone(fake.version())
+            run.assert_not_called()
+
 
 class TestDualBinaryTools(unittest.TestCase):
     """also_needs: wl-clipboard ships as two commands, not one.
@@ -271,6 +334,42 @@ class TestDualBinaryTools(unittest.TestCase):
     def test_present_is_unaffected_when_there_is_no_second_half(self):
         fake = tools.ExternalTool(REAL_BINARY, frozenset())
         self.assertTrue(fake.present)
+
+
+class TestImageSearchTools(unittest.TestCase):
+    """Two ImageMagick entry points, and which one a machine has is platform.
+
+    `compare`/`identify` are separate commands that a Linux or macOS package
+    installs. The `winget` install on Windows -- the one docs/install.md and
+    `pyguitest doctor` both name -- lays down ImageMagick 7 with `magick.exe`
+    and no legacy commands at all, verified live on Windows 11 build 26200,
+    so `magick` has to be selectable or that machine has no IMAGE_LOCATE while
+    the package sits there installed.
+    """
+
+    def test_both_entry_points_are_registered(self):
+        self.assertEqual([t.name for t in tools.IMAGE_TOOLS], ["compare", "magick"])
+
+    def test_both_serve_image_locate(self):
+        for tool in tools.IMAGE_TOOLS:
+            with self.subTest(tool=tool.name):
+                self.assertEqual(
+                    tool.capabilities, frozenset({Capability.IMAGE_LOCATE})
+                )
+
+    def test_magick_alone_is_selected_when_it_is_all_there_is(self):
+        def only_magick(name, *args, **kwargs):
+            return "/usr/bin/magick" if name == "magick" else None
+
+        with mock.patch("pyguitest.tools.shutil.which", side_effect=only_magick):
+            self.assertEqual(tools.best(tools.IMAGE_TOOLS).name, "magick")
+
+    def test_compare_still_wins_where_both_are_installed(self):
+        # The registry order is the preference order, and `compare` holds the
+        # first place it has always held: adding `magick` must not change what
+        # a Linux or macOS machine already selected.
+        with mock.patch("pyguitest.tools.shutil.which", return_value="/usr/bin/x"):
+            self.assertEqual(tools.best(tools.IMAGE_TOOLS).name, "compare")
 
 
 class TestMutterIncompatibleTools(unittest.TestCase):

@@ -15,6 +15,7 @@ for a process launched from a terminal.
 
 import importlib
 import os
+import struct
 import sys
 import tempfile
 import time
@@ -298,7 +299,7 @@ class TestScreenRecordingGate(unittest.TestCase):
         )
         self.assertEqual(
             capture.screencapture_argv("/tmp/a.png", window_id=99),
-            ["screencapture", "-x", "-l", "99", "/tmp/a.png"],
+            ["screencapture", "-x", "-o", "-l", "99", "/tmp/a.png"],
         )
 
     def test_a_denied_grant_raises_before_the_tool_runs(self):
@@ -705,6 +706,209 @@ class TestLiveQuartz(unittest.TestCase):
             self.assertIn(capability, capabilities)
         # PostEvent's own permanent refusal, absent with the grant in place.
         self.assertNotIn(Capability.INPUT_SYNC, capabilities)
+
+
+def _backing_scale(quartz, x, y):
+    """The backing scale of the display holding the point `(x, y)`.
+
+    Pixels over points, read from the display itself: 1.0 on the machine the
+    live run used, whose one display reported 1280x800 bounds *and* 1280x800
+    pixels, and 2.0 on a Retina display.
+
+    Deliberately not `Screen.scale`. This backend defines that as DPI/96 --
+    0.75 on that same display, because a 72 DPI virtual display is below 96 and
+    answering so is the convention -- so the two numbers are different measures,
+    and only one of them is about the image `screencapture` writes.
+
+    A point on no display, and a machine with no displays at all, answer 1.0:
+    the strict size is the right default for a factor nobody could read.
+    """
+    from pyguitest.backends import macos
+
+    err, displays, count = quartz.CGGetActiveDisplayList(
+        macos._MAX_ACTIVE_DISPLAYS, None, None
+    )
+    if err or not count:
+        return 1.0
+    for display in list(displays)[:count]:
+        bounds = quartz.CGDisplayBounds(display)
+        inside = (
+            bounds.origin.x <= x < bounds.origin.x + bounds.size.width
+            and bounds.origin.y <= y < bounds.origin.y + bounds.size.height
+        )
+        if inside:
+            points = bounds.size.width
+            return quartz.CGDisplayPixelsWide(display) / points if points else 1.0
+    return 1.0
+
+
+def _accepted_sizes(width, height, scale):
+    """The PNG sizes a correct capture of this window could have.
+
+    Two of them, because the unit is `screencapture`'s choice rather than this
+    package's: the window's rectangle in points, which the live run measured,
+    and the same rectangle in backing pixels, which is what a Retina display
+    would write and which no run has measured. At a scale of 1 the two are one
+    size, so the assertion there is the strict one it always was.
+
+    The shadow padding is a constant number of pixels per side, so it matches
+    neither -- which is what keeps this a regression test rather than a test
+    that passes either way.
+    """
+    return {(width, height), (round(width * scale), round(height * scale))}
+
+
+class TestTheWindowCaptureSizeTolerance(unittest.TestCase):
+    """The half of `TestLiveWindowCapture` that needs no Mac.
+
+    What `screencapture` actually writes can only be measured on a Mac, so that
+    assertion stays live. What can be checked anywhere is the decision around
+    it: which sizes a display's backing scale puts in play, and that the size
+    which must never be accepted -- the window plus its shadow padding -- is
+    not, at either scale.
+    """
+
+    class FakeDisplays:
+        """A display list of `((x, y, width, height), (pixels_wide, pixels_high))`.
+
+        The three calls are the ones `macos.screens` makes, in the shapes it
+        reads them: a list plus a count, a bounds rectangle, and a pixel width.
+        """
+
+        def __init__(self, displays):
+            self.displays = displays
+
+        def CGGetActiveDisplayList(self, maximum, _array, _count):
+            return 0, self.displays[:maximum], min(len(self.displays), maximum)
+
+        def CGDisplayBounds(self, display):
+            x, y, width, height = display[0]
+            return types.SimpleNamespace(
+                origin=types.SimpleNamespace(x=float(x), y=float(y)),
+                size=types.SimpleNamespace(width=float(width), height=float(height)),
+            )
+
+        def CGDisplayPixelsWide(self, display):
+            return display[1][0]
+
+    def test_a_one_to_one_display_answers_one(self):
+        quartz = self.FakeDisplays([((0, 0, 1280, 800), (1280, 800))])
+        self.assertEqual(_backing_scale(quartz, 640, 400), 1.0)
+
+    def test_a_retina_display_answers_two(self):
+        quartz = self.FakeDisplays([((0, 0, 1440, 900), (2880, 1800))])
+        self.assertEqual(_backing_scale(quartz, 700, 400), 2.0)
+
+    def test_a_second_display_is_asked_about_its_own_point(self):
+        # The factor belongs to the display the window is on rather than to the
+        # widest one in the list: a 1x display beside a Retina one is a real
+        # arrangement, and taking the first display for it would rescale an
+        # image nothing rescaled.
+        quartz = self.FakeDisplays(
+            [
+                ((0, 0, 1440, 900), (2880, 1800)),
+                ((-1280, 0, 1280, 1024), (1280, 1024)),
+            ]
+        )
+        self.assertEqual(_backing_scale(quartz, 700, 400), 2.0)
+        self.assertEqual(_backing_scale(quartz, -600, 400), 1.0)
+
+    def test_a_point_on_no_display_falls_back_to_the_strict_size(self):
+        quartz = self.FakeDisplays([((0, 0, 1280, 800), (1280, 800))])
+        self.assertEqual(_backing_scale(quartz, 9000, 9000), 1.0)
+
+    def test_a_machine_with_no_displays_falls_back_to_the_strict_size(self):
+        self.assertEqual(_backing_scale(self.FakeDisplays([]), 10, 10), 1.0)
+
+    def test_a_scale_of_one_accepts_only_the_window_itself(self):
+        self.assertEqual(_accepted_sizes(320, 272, 1.0), {(320, 272)})
+
+    def test_a_retina_scale_accepts_both_units(self):
+        self.assertEqual(_accepted_sizes(320, 272, 2.0), {(320, 272), (640, 544)})
+
+    def test_the_measured_shadow_padding_is_accepted_at_neither_scale(self):
+        # The regression the whole guard exists for, and the reason this is a
+        # tolerance rather than a dropped assertion: the live run measured `-l`
+        # without `-o` as 432x384 against `geometry()`'s 320x272 for the key
+        # window, and 388x340 for the inactive one before it.
+        for scale in (1.0, 2.0):
+            with self.subTest(scale=scale):
+                accepted = _accepted_sizes(320, 272, scale)
+                self.assertNotIn((432, 384), accepted)
+                self.assertNotIn((388, 340), accepted)
+
+
+@unittest.skipUnless(
+    sys.platform == "darwin",
+    "the real `screencapture` and a real window exist only on a Mac",
+)
+class TestLiveWindowCapture(unittest.TestCase):
+    """The one thing a fake cannot check about `screencapture -l`: its output.
+
+    A fake can pin the argv -- `TestScreenRecordingGate` does, `-o` included --
+    but not what the tool does with it, and the live run that measured this
+    found a bug a fake was happy to hide: without `-o` the image carries the
+    drop shadow as padding, 68 pixels more than the window in each direction, so
+    the image and `geometry()` disagree and a caller who measures a window before
+    screenshotting it gets a picture of a different rectangle. The assertion
+    below is the whole of that regression: the image has to be the window's own
+    rectangle, and its size is the only thing here that can say so.
+
+    The unit that rectangle is written in is `screencapture`'s choice rather
+    than this package's, so the measurement accepts either unit it could be: the
+    rectangle in points, which this live run measured, or the same rectangle in
+    backing pixels, which is what a Retina display would write. No Retina display
+    has been measured, so the second is a tolerance for an unmeasured case -- and
+    the factor comes from the display itself (`_backing_scale`), never from
+    `Screen.scale`. `TestTheWindowCaptureSizeTolerance` holds both halves of that
+    decision, the shadow padding included, without needing a Mac.
+
+    Skipped wherever there is no grant, which is every CI runner. The `macos` job
+    grants nothing and installs no PyObjC before running the suite, so this
+    reaches a real measurement on a development Mac and a skip everywhere else,
+    which is the same arrangement `TestLiveQuartz` has.
+    """
+
+    def setUp(self):
+        from pyguitest.backends import _macapi
+
+        try:
+            importlib.import_module("Quartz")
+            importlib.import_module("ApplicationServices")
+        except ImportError:
+            self.skipTest("PyObjC is not installed, so there is no real capture here")
+        if not _macapi.screen_recording_allowed():
+            self.skipTest(
+                "Screen Recording is not granted, so `screencapture -l` would "
+                "write a black image rather than a measurement"
+            )
+
+    def test_the_image_is_the_rectangle_geometry_reports(self):
+        quartz = importlib.import_module("Quartz")
+        gui = pyguitest.connect(backend="macos")
+        candidates = [w for w in gui.windows() if w.title and gui.geometry(w)[2] > 40]
+        if not candidates:
+            self.skipTest("no titled window on this Mac is wide enough to measure")
+        window = candidates[0]
+        left, top, width, height = gui.geometry(window)
+        descriptor, path = tempfile.mkstemp(suffix=".png")
+        os.close(descriptor)
+        self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
+
+        self.assertEqual(gui.screenshot(path, window=window), path)
+
+        with open(path, "rb") as handle:
+            header = handle.read(24)
+        # A PNG signature, then IHDR: width and height are the two big-endian
+        # ints at offset 16, which is all the decoder this needs.
+        self.assertEqual(header[:8], b"\x89PNG\r\n\x1a\n")
+        # The window's own rectangle, in whichever unit the tool wrote it in:
+        # the window's centre is what decides which display's backing scale is
+        # the one that could apply, and the shadow's padding belongs to neither
+        # unit's answer.
+        scale = _backing_scale(quartz, left + width // 2, top + height // 2)
+        observed = struct.unpack(">II", header[16:24])
+        self.assertIn(observed, _accepted_sizes(width, height, scale))
 
 
 class TestRegistration(unittest.TestCase):

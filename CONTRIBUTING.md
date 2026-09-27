@@ -2,7 +2,7 @@
 
 Everything here is about working *on* pyguitest. For using it, see
 [README.md](README.md); for how the pieces fit together, see
-[docs/developers/structure.md](docs/developers/structure.md) and the two ADRs
+[docs/developers/structure.md](docs/developers/structure.md) and the four ADRs
 beside it.
 
 Requires Python 3.10 or newer — 3.9 reached end-of-life in October 2025.
@@ -32,6 +32,7 @@ can drive a test against:
 ```sh
 pip install -e '.[dev,atspi,x11,uinput]'   # a Linux desktop
 pip install -e '.[dev,windows]'            # a Windows desktop
+pip install -e '.[dev,macos]'              # a macOS desktop
 ```
 
 The Linux set still needs the distribution packages pip cannot supply, which
@@ -153,6 +154,41 @@ interactive window station — a service, a scheduled task, an ssh session —
 which can enumerate no window at all. install.md names both, and
 [docs/troubleshooting.md](docs/troubleshooting.md#injected-input-vanishes-on-windows)
 has the symptoms.
+
+## Developing on macOS
+
+The suite runs there as well. CI's `macos` job collects and runs it on
+`macos-latest`, and a second step probes a real Darwin host — because the
+suite alone passes on that runner for the same reason it passes on the other
+two: every platform-specific test patches the platform it is about. What the
+probe adds is the opposite of a patch, and it is the whole point of the job:
+that the Darwin branch of `detect()` is the branch a real Mac takes, that
+`_macapi`'s four `ctypes` preflights answer rather than raising out of a
+mistyped binding, and that the other platforms' tests skip loudly. What the
+job cannot do is drive a real desktop — Accessibility needs a GUI login
+session rather than a runner, and a shared runner grants nothing. Live AX,
+`CGEventPost` and capture runs happen on a developer's own Mac and are
+recorded in [docs/validation.md](docs/validation.md); what was decided about
+them, and why, is [ADR 004](docs/developers/adr-004-macos.md).
+
+```sh
+pip install -e '.[dev,macos]'
+```
+
+Two things about that install. Both PyObjC backends are `opt_in`, so a plain
+`connect()` on a Mac composes the capture tool and whatever needs no grant
+without the extra at all — name the backend when you want the AX tree or
+injection. And the grants do not travel: not in a repo, not in a container,
+not in a tarball, and not reliably across a recreated virtualenv, since TCC
+records consent against a binary. That is also why a missing grant usually
+looks like a withheld capability rather than an exception — no Accessibility
+is an empty element tree, no PostEvent is a session that can read the pointer
+but not move it, and `pyguitest doctor` names the grant either way. Screen
+Recording is the exception: `screencapture` answers a denial with exit 0 and a
+black image, so `capture.py` refuses the call first, with a
+`PermissionRequired` naming the interpreter you are running as.
+`python -c "import pyguitest.backends.macos"` is what says a given install
+carries the platform.
 
 ## Lint, format, types
 

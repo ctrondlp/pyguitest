@@ -330,8 +330,10 @@ def _windows_hints(environment: Environment) -> Iterator[Hint]:
             "locating a control by an image of it, for widgets no "
             "accessibility tree describes. It is one of the few parts of "
             "this package with a Windows answer that pip cannot supply, and "
-            "it needs its legacy command line: the tool called here is "
-            "`compare`",
+            "what you get is enough as it comes: this package drives "
+            "`magick compare`, which is the command the winget install "
+            "provides, as well as the legacy `compare` on an install that "
+            "added it",
             "winget install ImageMagick.ImageMagick",
             packages="ImageMagick",
         )
@@ -393,7 +395,7 @@ def _darwin_hints(
             "the PyObjC bindings",
             "the in-process half of macOS support. Element queries go "
             "through ApplicationServices and everything else -- input "
-            "injection, screen geometry, the clipboard -- through Quartz, "
+            "injection and screen geometry -- through Quartz, "
             "and both distributions arrive with this one extra. "
             "`screencapture` needs neither, so screenshots work before it "
             "is installed",
@@ -474,9 +476,11 @@ def _darwin_hints(
             "ImageMagick",
             "locating a control by an image of it, for widgets no "
             "accessibility tree describes. The tool called here is "
-            "`compare`, macOS ships no equivalent, and there is no system "
-            "package manager to name either -- so this is the one row on a "
-            "Mac that is a command rather than a permission",
+            "`compare` -- or `magick compare`, which is what a build "
+            "providing only ImageMagick 7's entry point answers to -- macOS "
+            "ships no equivalent, and there is no system package manager to "
+            "name either, so this is the one row on a Mac that is a command "
+            "rather than a permission",
             "brew install imagemagick",
             packages="ImageMagick",
         )

@@ -17,17 +17,18 @@ as `SessionType.WIN32` is. The other `win32` in a Windows reader's mind is
 What this backend deliberately does **not** serve, and why:
 
 - **Elements.** They are UI Automation's, and `uia.py` owns them.
-- **`WINDOW_CAPTURE`.** Capturing one window un-occluded needs either
-  `PrintWindow` (a later phase) or Windows.Graphics.Capture, and declaring the
-  capability before one of them lands would make `supports()` claim that
-  `screenshot(window=...)` excludes an occluding window when it does not.
-  `CompositeBackend`'s geometry-plus-crop path answers that call meanwhile --
-  honestly, because the crop really does include what is on top.
 - **`INPUT_SYNC`.** `SendInput`'s return value is a count of events queued,
   not an acknowledgement that anything consumed them, and it cannot even
   report the failure that matters: a UIPI-blocked call returns the full count
   and delivers nothing. `sync()` refuses with that as its reason rather than
   pretending a sleep is a round trip.
+
+`WINDOW_CAPTURE` *is* served, by `PrintWindow` with `PW_RENDERFULLCONTENT`: the
+window is asked to render itself into a memory DC this backend supplies, so
+what comes back is that window's own pixels whether or not something is
+covering it. `capture()`'s docstring covers what the flag is for, and what the
+result therefore does and does not include.
+
 
 `WINDOW_EVENTS` *is* served, through `SetWinEventHook` rather than a message
 pump this backend keeps running: `window_events()` installs the hook and a
@@ -40,14 +41,15 @@ not covered (`EVENT_OBJECT_HIDE`, `EVENT_OBJECT_LOCATIONCHANGE`,
 `EVENT_SYSTEM_MINIMIZEEND` -- the design document's own "extras";
 `EVENT_OBJECT_SHOW` is hooked, but only as a second source of "new").
 
-This module has not yet driven a real Windows desktop. The suite it belongs
-to passes on Windows 11 build 26200, so every prototype here at least loads
-and every call is shaped as declared -- but that run was over SSH, which is
-not on an interactive window station, so nothing below has moved a pointer,
-enumerated a real window or captured a real screen. Every prototype lives in
-`_winapi.py`, transcribed from Microsoft's documentation, and the tests drive
-fakes; what a real desktop still has to confirm is listed in
-docs/validation.md's "Not run live" section.
+This module's prototypes live in `_winapi.py`, transcribed from Microsoft's
+documentation, and the bulk of them still have to be confirmed on an
+interactive desktop: every call is shaped as declared and the suite passes on
+Windows 11 build 26200, but a run over SSH is not on an interactive window
+station, so nothing there moved a pointer or enumerated a real window. What
+*has* been driven against a real desktop, on this platform, is what
+docs/validation.md records as such -- including capture, both the whole-screen
+blit and the per-window `PrintWindow`, each of which the fakes alone would have
+got wrong in ways only a live run exposed.
 
 Windows has three keyboard vocabularies where X11 has two:
 
@@ -99,6 +101,7 @@ import re
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
 
 from .. import png as _png
 from ..capabilities import Capability, CapabilitySet
@@ -833,7 +836,7 @@ class Win32Backend(GUIBackend):
 
     @property
     def capabilities(self):
-        """Everything but elements and un-occluded capture.
+        """Everything but elements.
 
         The tier-6 block is the surprising part and it is deliberate: four
         capabilities Wayland refuses outright are ordinary calls here, so a
@@ -845,6 +848,7 @@ class Win32Backend(GUIBackend):
             {
                 Capability.SCREEN_INFO,
                 Capability.SCREEN_CAPTURE,
+                Capability.WINDOW_CAPTURE,
                 Capability.POINTER_MOVE,
                 Capability.POINTER_BUTTON,
                 Capability.POINTER_SCROLL,
@@ -2136,9 +2140,13 @@ class Win32Backend(GUIBackend):
         the clipboard anyway, because a suite asserting on PRIMARY and getting
         the clipboard's own contents would pass for the wrong reason.
 
-        A missing `CF_UNICODETEXT` is its own typed failure. An owner that
-        publishes only `CF_TEXT` or `CF_HTML` is uncommon but real, and an empty
-        string would be indistinguishable from an empty clipboard.
+        A missing `CF_UNICODETEXT` is its own typed failure. A file list copied
+        in Explorer (`CF_HDROP`) is the common cause -- measured live by
+        putting one on the clipboard and reading it, which is the ordinary way
+        a Windows user's clipboard holds something that is not text -- and an
+        owner that publishes only `CF_TEXT` or `CF_HTML` is the rarer one. An
+        empty string would be indistinguishable from an empty clipboard, so
+        this refuses rather than answering `""`.
 
         One thing worth knowing before putting anything sensitive here: Windows
         clipboard history and cloud clipboard can retain and upload what a test
@@ -2152,8 +2160,9 @@ class Win32Backend(GUIBackend):
         try:
             if not lib.IsClipboardFormatAvailable(_winapi.CF_UNICODETEXT):
                 raise PyGUITestError(
-                    "the clipboard holds no CF_UNICODETEXT; an application that "
-                    "publishes only CF_TEXT or CF_HTML is the usual cause"
+                    "the clipboard holds no CF_UNICODETEXT; a file list copied "
+                    "in Explorer (CF_HDROP), or an application that publishes "
+                    "only CF_TEXT or CF_HTML, is the usual cause"
                 )
             handle = lib.GetClipboardData(_winapi.CF_UNICODETEXT)
             if not handle:
@@ -2271,40 +2280,158 @@ class Win32Backend(GUIBackend):
     def capture(self, window=None, path=None, region=None):
         """Write a screenshot and return its path.
 
-        `window=` is refused rather than half-answered. Capturing one window
-        un-occluded needs `PrintWindow` (a later phase) or Windows.Graphics
-        Capture, so WINDOW_CAPTURE is not declared -- which means this raises
-        `CapabilityUnsupported` rather than returning a crop that includes
-        whatever happens to be on top. Composite composition crops via
-        `geometry()` in the meantime, and that path is honest for exactly the
-        same reason.
+        Three routes, one per argument. Neither `window` nor `region` is the
+        whole virtual desktop. A `region` is one rectangle of it, in the same
+        virtual-desktop pixels. A `window` is that window's **own** pixels,
+        through `PrintWindow` -- which is the difference between this and
+        cutting the window's rectangle out of a screen shot: what is stacked on
+        top of the window is not in the image, and a window hanging off the
+        edge of the desktop still comes back whole.
 
-        The pixels come from GDI: `GetDC(NULL)` for the screen, a compatible
+        `PrintWindow` asks the window to draw itself into a memory DC this
+        backend supplies, which is what makes occlusion irrelevant.
+        `PW_RENDERFULLCONTENT` is the flag that carries that request to content
+        the window does not draw through GDI, and it is not decoration:
+        measured on a Windows 11 box, Calculator's client area came back with
+        *no* non-black pixels at all without it -- an empty frame -- and with
+        the flag drew everything. The bitmap is the rectangle `geometry()`
+        reports, so the image is of the same rectangle `move_window` and
+        `resize_window` act on. That rectangle includes the invisible resize
+        border DWM keeps around a window, which is a few pixels larger than
+        what is visibly drawn -- 9 left, 9 right and 9 bottom for an ordinary
+        frame when measured, so that much of the image along those edges is
+        black rather than window. `DwmGetWindowAttribute`'s
+        `DWMWA_EXTENDED_FRAME_BOUNDS` is what reports the visible frame
+        instead; this sizes from `GetWindowRect` deliberately, so that the
+        image and `geometry()` cannot disagree.
+
+        Screen pixels come from GDI: `GetDC(NULL)` for the screen, a compatible
         bitmap, `BitBlt` with `SRCCOPY | CAPTUREBLT`, and `GetDIBits` into a
         buffer. `CAPTUREBLT` is the flag that includes layered windows, without
-        which every window drawn with `WS_EX_LAYERED` -- most modern application
-        windows -- is missing from the result.
+        which every window drawn with `WS_EX_LAYERED` -- most modern
+        application windows -- is missing from the result.
 
-        Two limits are documented rather than detected, because neither can be
-        honestly detected from here. Content drawn outside GDI's knowledge (some
-        DirectX surfaces, overlay planes, protected video) comes back black, and
-        there is no grant that fixes it. And the blit covers the *virtual
-        desktop*, whose origin is not (0,0) when a monitor sits left of or above
-        the primary -- which is why `region`, when given, is in virtual-desktop
-        pixels like everything else here.
+        Three limits are documented rather than detected, because none can be
+        honestly detected from here. A minimized window is refused rather than
+        answered, since `PrintWindow` there succeeds and hands back the parked
+        window's frame instead of its contents -- 249x43 with a mean brightness
+        of 213 when measured, an image of the wrong thing that looks like an
+        answer. Content the window renders outside GDI's knowledge (some
+        DirectX surfaces, overlay planes, protected video) comes back black,
+        and there is no grant that fixes it. And the blit covers the *virtual
+        desktop*, whose origin is not (0,0) when a monitor sits left of or
+        above the primary -- which is why `region`, when given, is in
+        virtual-desktop pixels like everything else here.
         """
-        self.require(
-            Capability.WINDOW_CAPTURE
-            if window is not None
-            else Capability.SCREEN_CAPTURE
-        )
-        x, y, width, height = check_region(region, window) or self._virtual_screen()
+        region = check_region(region, window)
+        if window is not None:
+            self.require(Capability.WINDOW_CAPTURE)
+            width, height, rows = self._print_window(self._hwnd(window))
+        else:
+            self.require(Capability.SCREEN_CAPTURE)
+            x, y, width, height = region or self._virtual_screen()
+            rows = self._blit(x, y, width, height)
         if path is None:
             # The same convention the tool-driven capture backends use: a
             # temporary file whose suffix the encoder's format matches.
             descriptor, path = tempfile.mkstemp(suffix=".png")
             os.close(descriptor)
-        return _png.write_rgb(path, width, height, self._blit(x, y, width, height))
+        return _png.write_rgb(path, width, height, rows)
+
+    def _gdi(self):
+        """gdi32, or raise.
+
+        Both capture routes draw into a GDI bitmap, so a machine without gdi32
+        is one this backend cannot capture from at all -- the tool-driven
+        capture backends are what a session like that falls back on.
+        """
+        gdi = _winapi.gdi32()
+        if gdi is None:
+            raise BackendUnavailable(
+                "gdi32.dll is not available, so there is no way to read the "
+                "screen's pixels"
+            )
+        return gdi
+
+    @contextmanager
+    def _memory_dc(self, gdi, screen, width, height):
+        """A memory DC with a compatible bitmap already selected into it.
+
+        Yields `(memory_dc, bitmap)` and deselects the bitmap on the way out,
+        *before* the caller reads the pixels back: the draw -- `BitBlt` and
+        `PrintWindow` alike -- needs the bitmap selected into the DC it draws
+        into, while `GetDIBits` documents the opposite, that the bitmap "must
+        not be selected into a device context" when it is called. So the read
+        belongs to the caller, after this closes, which is why both routes read
+        their rows outside the `with` block.
+
+        The two objects are deliberately left alive on the way out. The read
+        that follows needs them, and a helper that deleted them here would
+        hand `GetDIBits` a bitmap whose lifetime had already ended -- measured
+        on a real desktop, where it answered 0 scanlines for a capture that had
+        drawn correctly. Deleting them is the caller's `finally`, after the
+        read.
+
+        A failed selection is a failure rather than a black image. It leaves
+        the DC's original 1x1 monochrome surface in place, the draw then
+        succeeds against *that*, and the capture comes back black with nothing
+        having reported a failure. That path deletes what it created, since no
+        caller's `finally` will have seen either object -- and setup is the only
+        thing here that deletes anything at all.
+
+        **Deleting on the way back out of the `yield` would delete twice.** A
+        draw that fails inside the caller's `with` body arrives here as an
+        exception at the `yield`, so an `except` wrapped around the yield would
+        delete both objects and re-raise -- and the caller's `finally` then
+        hands those same two handles to `_release`. Deleting a value that is no
+        longer in use is usually inert, since Windows answers 0 for it, but the
+        pair is not this generator's to delete once it is yielded, and a handle
+        value GDI handed out again would take whatever now holds it with it.
+        Measured on Windows 11 build 26200, with a probe that fails the draw 200
+        times and allocates the same two kinds of object in between the failure
+        and the caller's cleanup: the second delete never landed on a live
+        object, because the allocation after a freed value answered a *different*
+        value every time it was asked -- so the harm is latent rather than
+        something the live run reproduced, and what the fix buys is single
+        ownership rather than a repair. Ownership passes to the caller the moment
+        the pair is yielded, which is what `_release` is for: this generator
+        deselects the bitmap on the way out and does nothing else.
+        """
+        memory_dc = gdi.CreateCompatibleDC(screen)
+        bitmap = gdi.CreateCompatibleBitmap(screen, width, height)
+        if not memory_dc or not bitmap:
+            if bitmap:
+                gdi.DeleteObject(bitmap)
+            if memory_dc:
+                gdi.DeleteDC(memory_dc)
+            raise PyGUITestError("could not create a bitmap for the capture")
+        try:
+            previous = gdi.SelectObject(memory_dc, bitmap)
+            if not previous:
+                raise PyGUITestError("could not select the capture bitmap into its DC")
+        except BaseException:
+            gdi.DeleteObject(bitmap)
+            gdi.DeleteDC(memory_dc)
+            raise
+        try:
+            yield memory_dc, bitmap
+        finally:
+            gdi.SelectObject(memory_dc, previous)
+
+    def _release(self, gdi, lib, memory_dc, bitmap, screen):
+        """Delete a capture's GDI objects and release its screen DC.
+
+        Every route ends here, and each object is deleted only if it was
+        actually created: `_memory_dc` raises before a caller has either object
+        in hand, and a capture that never got its screen DC has nothing to
+        release.
+        """
+        if bitmap:
+            gdi.DeleteObject(bitmap)
+        if memory_dc:
+            gdi.DeleteDC(memory_dc)
+        if screen:
+            lib.ReleaseDC(None, screen)
 
     def _blit(self, x, y, width, height):
         """The pixels of one screen rectangle, as top-down RGB rows.
@@ -2313,40 +2440,14 @@ class Win32Backend(GUIBackend):
         of `_dib_rows` rather than in the encoder: `pyguitest.png` writes
         scanlines in the order it is given them, and an upside-down screenshot
         is a bug in whatever read it.
-
-        The order of the two GDI steps is a documented requirement rather than a
-        preference. `BitBlt` needs the bitmap selected into the memory DC --
-        that is what it draws into -- and `GetDIBits` documents the opposite,
-        that the bitmap "must not be selected into a device context" when it is
-        called. So the selection is undone between the two, and the pixels are
-        read back from a bitmap that is no longer selected anywhere.
         """
-        lib = self._lib()
-        gdi = _winapi.gdi32()
-        if gdi is None:
-            raise BackendUnavailable(
-                "gdi32.dll is not available, so there is no way to read the "
-                "screen's pixels"
-            )
+        lib, gdi = self._lib(), self._gdi()
         screen = lib.GetDC(None)
         if not screen:
             raise PyGUITestError("GetDC failed")
-        memory_dc = None
-        bitmap = None
+        memory_dc = bitmap = None
         try:
-            memory_dc = gdi.CreateCompatibleDC(screen)
-            bitmap = gdi.CreateCompatibleBitmap(screen, width, height)
-            if not memory_dc or not bitmap:
-                raise PyGUITestError("could not create a bitmap for the capture")
-            # A failed selection leaves the DC's original 1x1 monochrome
-            # surface in place, and `BitBlt` then succeeds against *that* --
-            # so the bitmap `GetDIBits` reads was never drawn into, and the
-            # screenshot comes back black with nothing having reported a
-            # failure.
-            previous = gdi.SelectObject(memory_dc, bitmap)
-            if not previous:
-                raise PyGUITestError("could not select the capture bitmap into its DC")
-            try:
+            with self._memory_dc(gdi, screen, width, height) as (memory_dc, bitmap):
                 if not gdi.BitBlt(
                     memory_dc,
                     0,
@@ -2362,22 +2463,70 @@ class Win32Backend(GUIBackend):
                         f"BitBlt failed for {width}x{height} at ({x}, {y})"
                         f"{self._off_desktop_note()}"
                     )
-            finally:
-                gdi.SelectObject(memory_dc, previous)
             return self._dib_rows(gdi, memory_dc, bitmap, width, height)
         finally:
-            if bitmap:
-                gdi.DeleteObject(bitmap)
-            if memory_dc:
-                gdi.DeleteDC(memory_dc)
-            lib.ReleaseDC(None, screen)
+            self._release(gdi, lib, memory_dc, bitmap, screen)
+
+    def _print_window(self, hwnd):
+        """One window's own pixels, as `(width, height, rows)`.
+
+        `PrintWindow` with `PW_RENDERFULLCONTENT` is the whole mechanism: the
+        window draws itself into the bitmap, so whatever is covering it on
+        screen has no say in the result. The bitmap is the window's own
+        rectangle, from `GetWindowRect` -- the one `geometry()` reports, which
+        is a few pixels larger than what is visibly drawn (measured on a
+        Windows 11 box: 9 left, 9 right, 9 bottom, 0 top for an ordinary
+        frame, with the leftmost 8 columns of the image black). See `capture`.
+
+        A minimized window is refused before any of that. Windows does not keep
+        a minimized window's contents, and `PrintWindow` there does not fail --
+        it succeeds and answers with a small image of the parked window's
+        frame instead, which is the outcome worth refusing: a plausible-looking
+        image of the wrong thing, the same reason `x11.py` raises rather than
+        returning a blank frame for an unmapped window.
+        """
+        lib, gdi = self._lib(), self._gdi()
+        if lib.IsIconic(hwnd):
+            raise PyGUITestError(
+                f"PrintWindow succeeds and returns the frame of the minimized "
+                f"window {self._title(hwnd)!r} rather than its contents -- "
+                "Windows parks a minimized window off-screen instead of "
+                "drawing it, so there is nothing to print. Restore it first, "
+                "or capture the screen."
+            )
+        rect = self._rect(hwnd)
+        width, height = rect.right - rect.left, rect.bottom - rect.top
+        if width <= 0 or height <= 0:
+            raise PyGUITestError(
+                f"the window {self._title(hwnd)!r} has a {width}x{height} "
+                "rectangle, which no bitmap can be drawn into"
+            )
+        screen = lib.GetDC(None)
+        if not screen:
+            raise PyGUITestError("GetDC failed")
+        memory_dc = bitmap = None
+        try:
+            with self._memory_dc(gdi, screen, width, height) as (memory_dc, bitmap):
+                if not lib.PrintWindow(hwnd, memory_dc, _winapi.PW_RENDERFULLCONTENT):
+                    raise PyGUITestError(
+                        f"PrintWindow failed for {self._title(hwnd)!r}"
+                        f"{self._off_desktop_note()}"
+                    )
+            return (
+                width,
+                height,
+                self._dib_rows(gdi, memory_dc, bitmap, width, height),
+            )
+        finally:
+            self._release(gdi, lib, memory_dc, bitmap, screen)
 
     def _dib_rows(self, gdi, memory_dc, bitmap, width, height):
-        """A blitted bitmap as RGB rows, top row first.
+        """A drawn bitmap as RGB rows, top row first.
 
         `GetDIBits` fills the buffer bottom-up, because `biHeight` is positive
         -- the platform's documented default. Read back in reverse, that
-        becomes the top-down order `_blit` promises and `pyguitest.png` writes.
+        becomes the top-down order `capture()` promises and `pyguitest.png`
+        writes.
 
         32-bit `BI_RGB`, so every pixel is four bytes with blue first and the
         alpha byte undefined -- three slices pick out the three colours, which
@@ -2386,7 +2535,8 @@ class Win32Backend(GUIBackend):
         removes the row padding a 24-bit DIB would need.
 
         `bitmap` must already have been deselected from `memory_dc`, which is
-        `GetDIBits`' own documented precondition; `_blit` is where that happens.
+        `GetDIBits`' own documented precondition and what `_memory_dc` does on
+        the way out -- for the blit and the per-window print alike.
         """
         header = _winapi.BITMAPINFOHEADER()
         header.biSize = ctypes.sizeof(_winapi.BITMAPINFOHEADER)

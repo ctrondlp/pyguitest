@@ -1122,10 +1122,10 @@ class Environment:
     has_pyobjc_quartz: bool = False
     """Whether PyObjC's Quartz distribution is importable. Gates input
     injection and screen geometry through it, which are `CGEventPost` and
-    `CGGetActiveDisplayList`; the clipboard is `NSPasteboard`, which arrives
-    with the Cocoa Quartz pulls in and is served by the element backend ADR
-    004 lists as still to be built -- see `can_use_clipboard`, which says so
-    rather than reporting the binding as the capability."""
+    `CGGetActiveDisplayList`. The clipboard is deliberately absent from that
+    sentence: no PyObjC binding serves it, and `can_use_clipboard` reaches it
+    through `pbcopy`/`pbpaste` instead -- the tools macOS ships, the same way
+    capture reaches `screencapture`."""
     has_pyobjc_application_services: bool = False
     """Whether PyObjC's ApplicationServices distribution is importable, which
     is what the AX element tree is reached through. A separate distribution
@@ -1292,15 +1292,23 @@ class Environment:
         Windows 11, where this was False beside a backend declaring
         CLIPBOARD -- the same miss as `can_capture` above.
 
-        macOS answers False, and that is deliberately not an omission: the
-        clipboard there is `NSPasteboard.general` through the element backend,
-        which ADR 004 still lists as to be built, so no member of this package
-        serves CLIPBOARD on Darwin today and no CLI tool does either. Answering
-        from `has_pyobjc_quartz` -- the binding that would carry it, pulled in
-        by Quartz -- would report a capability one backend too early, which is
-        the same read `can_capture` above exists to avoid in the other
-        direction. The branch that answers it is one line, to add when that
-        backend lands.
+        macOS answers from `clipboard_tools` as well, and reaches the
+        clipboard through a tool rather than through a binding: `pbcopy` and
+        `pbpaste` ship with the OS, so a Mac answers True unless they have
+        been kept off PATH. ADR 004 left the choice between this and an
+        `NSPasteboard` element in the `macos` backend open and named this one
+        the obvious way in -- and it needs no branch here at all, which is why
+        the last paragraph of this docstring is history rather than code.
+        `MacosBackend` declares no CLIPBOARD of its own, and the pasteboard is
+        a single selection, so `primary=True` is refused rather than aliased
+        (see clipboard.py).
+
+        What this deliberately does **not** do is answer from
+        `has_pyobjc_quartz`, the binding that pulls in Cocoa and so would
+        carry `NSPasteboard` if anything used it. That would report a
+        capability one backend too early -- the same read `can_capture` above
+        exists to avoid in the other direction, and the miss this property
+        was fixed for in 0.14.0.
         """
         if self.session_type is SessionType.WIN32:
             return True

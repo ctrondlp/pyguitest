@@ -189,10 +189,11 @@ Landed, machine-free, tested with fakes on every platform:
   Windows ABI rather than the host's — nothing loaded until a call needs it;
 - `backends/win32.py` — `Win32Backend` itself, registered at 70, serving
   screens and per-monitor DPI, `SendInput` input, `EnumWindows` window control,
-  the tier-6 state reads, GDI capture, the `CF_UNICODETEXT` clipboard, and
+  the tier-6 state reads, GDI capture (whole-screen, and per-window through
+  `PrintWindow`), the `CF_UNICODETEXT` clipboard, and
   `WINDOW_EVENTS` through `SetWinEventHook` and a pump thread installed for the
-  life of one `window_events()` call; refusing `WINDOW_CAPTURE` and `sync` with
-  the reason rather than with a generic "unsupported"; the virtual keys, the
+  life of one `window_events()` call; refusing `sync` with
+  its reason rather than with a generic "unsupported"; the virtual keys, the
   keysym mapping, the extended-key set and SendKeys' long names as data;
 - `backends/uia.py` — `UiaBackend` itself, registered at 90, serving element
   search, element actions, element geometry and hit-testing through UI Automation
@@ -212,8 +213,10 @@ distinction the Linux implementation insists on (`OpenProcess`'s
 `ERROR_ACCESS_DENIED` is the "cannot read" case; anything else failing the open
 reads as "gone").
 
-Not yet: the recorder's Windows backend and `WINDOW_CAPTURE` through
-`PrintWindow`.
+Not yet: the recorder's Windows backend. (`WINDOW_CAPTURE` through
+`PrintWindow` landed 2026-09-27 — see docs/validation.md for what the live run
+measured, including the flag that makes DirectComposition content appear at
+all.)
 
 **A gap this document's own audit missed, now closed with a documented cut:**
 `Session.wait_for_process` -- `PROCESS_LAUNCH`/`TIMING`, which section 6.4 of

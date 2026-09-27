@@ -111,6 +111,20 @@ class ExternalTool:
     wl-paste to read -- and a session with only one half installed cannot be
     offered as a working clipboard backend."""
 
+    probe_version: bool = True
+    """False for a tool that must not be run merely to ask its version, because
+    running it does something.
+
+    `pbcopy` is the case this exists for: every invocation rewrites the macOS
+    pasteboard, and the conventional version flag is no exception. Measured
+    live on macOS 26.7 -- with a sentinel value on the clipboard, `pbcopy
+    --version < /dev/null` exited **0** and left the clipboard empty, and
+    `pbcopy -h` cleared it too. Probing it would make `pyguitest doctor`
+    quietly destroy whatever the user had copied, so `version()` answers None
+    here instead. The cost is one blank version column for a tool that has no
+    version to report anyway.
+    """
+
     def path(self) -> str | None:
         """Full path to the tool, or None if it is not on PATH."""
         return shutil.which(self.name)
@@ -132,13 +146,18 @@ class ExternalTool:
         subprocess is not.
         """
         path = self.path()
-        if path is None:
+        if path is None or not self.probe_version:
             return None
         argv = [path, *_VERSION_ARGS.get(self.name, ("--version",))]
         try:
+            # stdin is DEVNULL rather than inherited: a probe that reads the
+            # caller's stdin would consume input meant for whoever is running
+            # the report, and the clipboard tools in particular take their
+            # content that way.
             result = subprocess.run(
                 argv,
                 capture_output=True,
+                stdin=subprocess.DEVNULL,
                 text=True,
                 encoding="utf-8",
                 timeout=_VERSION_TIMEOUT,
@@ -274,6 +293,26 @@ IMAGE_TOOLS = (
         "FFT-accelerated on an FFTW+HDRI build for the NCC, MSE, RMSE, "
         "PSNR, PHASE and DPC metrics",
     ),
+    # Second only, and that ordering is the whole point of it being here:
+    # a machine with both entry points keeps selecting `compare`, so this
+    # entry changes nothing on Linux or macOS, where the legacy commands are
+    # what packages install. It is on Windows that it decides the outcome.
+    # `winget install ImageMagick.ImageMagick` -- the command docs/install.md
+    # and `pyguitest doctor` both name -- lays down ImageMagick 7 with
+    # magick.exe and no legacy commands at all (verified live: the install
+    # directory holds exactly magick.exe and unins000.exe), so before this
+    # entry existed the package was installed, crop.py was using it, and
+    # IMAGE_LOCATE still reported itself missing because `compare` was not on
+    # PATH. `magick compare` and `magick identify` are the same two
+    # operations under IM7's dispatcher.
+    ExternalTool(
+        "magick",
+        frozenset({Capability.IMAGE_LOCATE}),
+        "ImageMagick 7's entry point, which is all a Windows install "
+        "provides: `magick compare` and `magick identify` are the same "
+        "subimage search and the same size lookup the legacy `compare` and "
+        "`identify` perform",
+    ),
 )
 
 CLIPBOARD_TOOLS = (
@@ -301,6 +340,23 @@ CLIPBOARD_TOOLS = (
         frozenset({Capability.CLIPBOARD}),
         "X11 selections; same fork-on-write behavior as xclip",
         x11_only=True,
+    ),
+    # Last for the same reason `screencapture` is last in CAPTURE_TOOLS: macOS
+    # ships it with the OS, so there is nothing to rank it above, and listing
+    # it is how `doctor` says the capability exists on a Mac at all. Two ways
+    # in which it is the odd one out among these: the pasteboard is held by
+    # the `pbs` server rather than by the process that set it, so nothing has
+    # to stay alive to keep answering a paste; and there is one selection, so
+    # `primary=True` is refused rather than aliased (see clipboard.py).
+    ExternalTool(
+        "pbcopy",
+        frozenset({Capability.CLIPBOARD}),
+        "macOS; ships with the OS. The pasteboard is stored by the pasteboard "
+        "server, not by the process that wrote it, so no daemon is left "
+        "behind and the value survives the call -- and there is one "
+        "selection, with no PRIMARY to reach",
+        also_needs="pbpaste",
+        probe_version=False,
     ),
 )
 

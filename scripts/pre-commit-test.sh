@@ -204,8 +204,28 @@ LOGDIR="$(mktemp -d "${TMPDIR:-/tmp}/pyguitest-checks.XXXXXX")"
 # service, proves nothing about either.
 
 # ImageMagick 7 renamed the binary; 6's `convert` is still what ships on many
-# distributions, and the tests accept either.
-needs_imagemagick() { command -v magick >/dev/null || command -v convert >/dev/null; }
+# distributions, and the package accepts either entry point. `convert` is
+# deliberately not one of the names asked about below, and it is why the
+# question has to be asked twice at all. Windows has a `convert.exe` of its own
+# in system32 -- the FAT-to-NTFS one -- which is on PATH on every Windows
+# machine and answers `-version` with "Invalid drive specification." A guard
+# that took any `convert` for ImageMagick made --full report a FAIL where the
+# run meant to say SKIP on the one platform whose ImageMagick is `magick`: the
+# guard said yes, the tests then skipped themselves, and `must_not_skip` was
+# what turned that into a red run.
+#
+# So the names asked about are the two `tools.IMAGE_TOOLS` entries the tests
+# resolve through `tools.best()` -- `compare` first, then `magick` -- and the
+# version banner decides whether the name found is really ImageMagick. Nothing
+# reaches this check that the suite's own setUp would not have selected a
+# moment later, and a name collision cannot claim a check ran.
+_says_imagemagick() {
+    local path
+    path="$(command -v "$1" 2>/dev/null)" || return 1
+    [[ $("$path" -version 2>/dev/null) == *ImageMagick* ]]
+}
+
+needs_imagemagick() { _says_imagemagick compare || _says_imagemagick magick; }
 
 needs_portal() {
     "$PYTHON" -c 'import dbus, dbusmock, gi' 2>/dev/null || return 1

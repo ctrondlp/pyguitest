@@ -76,7 +76,8 @@ def _demo():
     if not gui.supports(Capability.IMAGE_LOCATE):
         sys.exit(
             "IMAGE_LOCATE is unavailable -- template matching needs "
-            "ImageMagick's `compare`. Run `pyguitest doctor`."
+            "ImageMagick, either `compare` or ImageMagick 7's `magick`. "
+            "Run `pyguitest doctor`."
         )
     # locate() searches one file for another, where locate_image() below
     # captures the screen first. Reached through the session's forwarding to
@@ -111,8 +112,9 @@ for capability in (Capability.SCREEN_CAPTURE, Capability.IMAGE_LOCATE):
     if not gui.supports(capability):
         sys.exit(
             f"{capability.name} is unavailable. Template matching needs both "
-            "a way to capture the screen and ImageMagick's `compare` -- run "
-            "`pyguitest doctor` for what to install."
+            "a way to capture the screen and ImageMagick -- `compare` or "
+            "ImageMagick 7's `magick` -- run `pyguitest doctor` for what to "
+            "install."
         )
 
 # Narrowing to one window is worth doing when you can: it is faster, and it

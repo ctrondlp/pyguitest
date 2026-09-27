@@ -79,7 +79,7 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T")
 
-__version__ = "0.14.0"
+__version__ = "0.15.0"
 
 __all__ = [
     "connect",
@@ -2133,12 +2133,14 @@ class Session:
 
         How a window is captured depends on what the session offers, and
         the difference is visible in the image. A backend declaring
-        Capability.WINDOW_CAPTURE (X11 today) reads the window's own
-        pixels, so anything stacked on top of it is absent. Everywhere else
-        the window's rectangle is looked up through WINDOW_GEOMETRY and cut
-        out of a full-screen shot, which does include whatever is covering
-        it. Both are honest screenshots of a window; only one is a
-        screenshot of *just* that window.
+        Capability.WINDOW_CAPTURE (X11, GNOME Shell, Windows and macOS
+        today) reads the window's own pixels, so anything stacked on top of
+        it is absent, and a window hanging off the edge of the desktop comes
+        back whole. Everywhere else the window's rectangle is looked up
+        through WINDOW_GEOMETRY and cut out of a full-screen shot, which does
+        include whatever is covering it and does clip what is offscreen. Both
+        are honest screenshots of a window; only one is a screenshot of *just*
+        that window.
         """
         return self.backend.capture(window=window, path=path, region=region)
 
@@ -2203,6 +2205,19 @@ class Session:
 
         Raises ImageNotFound if no match clears `threshold`. With no
         `threshold`, the single best match is always returned, however poor.
+
+        The search compares colour: alpha is not part of a match, so a
+        template's transparency -- or the alpha channel a capture carries,
+        which every macOS one does -- cannot turn an identical template into a
+        miss.
+
+        Worth knowing what a search costs, since that is what makes `within`
+        worth passing. Matching runs at 20-40us per pixel of haystack on an
+        ImageMagick build with no FFT delegate, which is the slow path and
+        the one a Windows install gives you: a full-screen search takes the
+        better part of a minute on a 1080p desktop and several on a 4K one.
+        The same search inside one window is usually a second or two, and it
+        cannot match the same control in a different window.
         """
         region = None
         if within is not None:
