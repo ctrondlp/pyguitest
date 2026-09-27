@@ -13,6 +13,7 @@ CGWindowList join, deep-tree cost, and whether the TCC attribution rules hold
 for a process launched from a terminal.
 """
 
+import importlib
 import os
 import sys
 import tempfile
@@ -621,17 +622,31 @@ class TestThePointerReadIsDeliberatelyUndeclared(unittest.TestCase):
 class TestLiveQuartz(unittest.TestCase):
     """The real `Quartz`, on a Mac, with whatever grant that Mac happens to have.
 
-    Skipped from `setUp` -- per test, not per class -- unless PostEvent is
-    granted, so a Mac that granted nothing still proves the parts of this that
-    need no grant at all. These are the checks `tests/` cannot make from any
-    other machine: a transcription error in a framework path or an `argtypes`
-    list is invisible to a fake module, and the `macos` job's runner has no
-    grant, so it reaches exactly the tests below that need none.
+    These are the checks `tests/` cannot make from any other machine: a
+    transcription error in a framework path or an `argtypes` list is invisible
+    to a fake module, because a fake never sees one.
+
+    Two separate conditions skip from `setUp`, per test rather than per class,
+    and the binding is the first of them because the grant cannot stand in for
+    it. The `macos` extra is what puts PyObjC's `Quartz` on the path, and the
+    `macos` job runs this suite *before* installing it -- deliberately, so that
+    `detect()` is measured on a machine without it -- so there an absent
+    binding is the arrangement rather than a fault. That runner also reports
+    PostEvent as granted (its probe step prints all four preflights), which is
+    exactly why the grant check below cannot be the only gate: it lets every
+    test through on a machine with no `Quartz` to import.
     """
 
     def setUp(self):
         from pyguitest.backends import _macapi
 
+        try:
+            importlib.import_module("Quartz")
+        except ImportError:
+            self.skipTest(
+                "PyObjC's Quartz is not installed, so there is no real binding "
+                "here to check; the 'macos' extra is what puts one there"
+            )
         if not _macapi.post_event_allowed():
             self.skipTest("PostEvent is not granted, so every post is a no-op")
 

@@ -354,12 +354,14 @@ jobs:
     # watched this file pass.
     #
     # The probe step after it is deliberately not part of that evidence. It
-    # asserts the un-granted baseline only a runner has -- four `False`
-    # preflights, no capture, no input, `screencapture` refused -- and the VM
-    # that hosted the run had three of the four grants by then, so running it
-    # there would have stopped at the first `True`, which is the assertion
-    # working rather than the probe failing. What each grant does to those
-    # answers is recorded in docs/validation.md instead.
+    # asserts what `detect()` makes of a real Darwin host and that the four
+    # TCC preflights answer at all rather than raising out of a mistyped
+    # binding -- plus that `can_capture` and `can_inject_input` follow the two
+    # grants they are documented to follow, whichever way those read on the
+    # day. Not the grants themselves: this runner reports PostEvent as granted
+    # while granting nothing a person would recognise, so a job that required
+    # four `False` answers was pinning GitHub's image into the suite. What
+    # each grant does to those answers is recorded in docs/validation.md.
     #
     # One caution, recorded in the same place rather than left implicit: that
     # Mac is not this runner. It is 3.13 where this job pins 3.12, x86_64 where
@@ -410,8 +412,9 @@ jobs:
       # The one step only a Mac can run. `detect()` has to answer before the
       # `macos` extra is installed -- that is the whole reason the four TCC
       # preflights are ctypes in `_macapi` rather than PyObjC -- so this
-      # installs nothing and asserts the conservative answer a machine that
-      # granted nothing must get.
+      # installs nothing, and every assertion below is about what this package
+      # derives from the machine's answers rather than about what those
+      # answers are.
       - name: Check what detect() says on a real Mac
         env:
           PYTHONPATH: src
@@ -437,13 +440,19 @@ jobs:
           if env.compositor is not Compositor.QUARTZ:
               sys.exit(f"expected QUARTZ, got {env.compositor}")
 
-          # A runner is granted nothing, so False is the right answer. The
-          # other way this half of the work breaks is a transcription error --
-          # a framework path or an argtypes list that is wrong -- and that
-          # arrives as a *raise*, not as a True. The loop below said it caught
-          # both while only testing for the second: an exception came out as a
-          # traceback that named neither the probe it came from nor the ctypes
-          # binding as the cause, which is the one thing worth reporting.
+          # The way this half of the work breaks is a transcription error -- a
+          # framework path or an argtypes list that is wrong -- and that
+          # arrives as a *raise*. So a raise is what fails here, reported with
+          # the probe's name attached: an exception left to escape came out as
+          # a traceback that named neither the probe it came from nor the
+          # ctypes binding as the cause, which is the one thing worth saying.
+          #
+          # What is deliberately *not* asserted is the polarity. This job used
+          # to require all four to be False, on the reasoning that a runner
+          # grants nothing -- and this runner answers True for PostEvent, so
+          # that was a claim about GitHub's image rather than about pyguitest,
+          # and it broke when the image changed rather than when the code did.
+          grants = {}
           for name in (
               "screen_recording_allowed",
               "post_event_allowed",
@@ -451,14 +460,28 @@ jobs:
               "accessibility_trusted",
           ):
               try:
-                  allowed = getattr(_macapi, name)()
+                  grants[name] = getattr(_macapi, name)()
               except Exception as error:
                   sys.exit(f"{name}() raised {error!r}: the binding, not the grant")
-              print(f"{name}() -> {allowed}")
-              if allowed:
-                  sys.exit(f"{name}() is True on a runner that granted nothing")
-          if env.can_capture or env.can_inject_input:
-              sys.exit("an un-granted Mac must report no capture and no input")
+              print(f"{name}() -> {grants[name]}")
+
+          # The derivation is the part that is ours, and it holds whatever the
+          # machine granted: on Darwin both of these read exactly one
+          # preflight -- and the *right* one, which is the mistake worth
+          # catching here. Reading has_ax for input, or capture_tools for
+          # capture, would refuse on a Mac that had granted precisely what the
+          # call needs, and a `screencapture` that ships with every Mac makes
+          # the tool-shaped answer look right while being wrong.
+          if env.can_capture != grants["screen_recording_allowed"]:
+              sys.exit(
+                  f"can_capture is {env.can_capture} with Screen Recording "
+                  f"{grants['screen_recording_allowed']}"
+              )
+          if env.can_inject_input != grants["post_event_allowed"]:
+              sys.exit(
+                  f"can_inject_input is {env.can_inject_input} with PostEvent "
+                  f"{grants['post_event_allowed']}"
+              )
 
           # `screencapture` ships with the OS, so its absence means `tools.py`
           # is naming something that is not there.
@@ -476,9 +499,13 @@ jobs:
           try:
               capture.require_screen_recording()
           except PermissionRequired as error:
+              if grants["screen_recording_allowed"]:
+                  sys.exit(f"refused with the grant held: {error}")
               print(f"refused before running: {error}")
           else:
-              sys.exit("screencapture was not refused on a Mac with no grant")
+              if not grants["screen_recording_allowed"]:
+                  sys.exit("screencapture was not refused without the grant")
+              print("allowed through, which is what the grant means")
           PY
 
       # Last, so the probe above runs on the machine as CI finds it rather
