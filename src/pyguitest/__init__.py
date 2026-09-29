@@ -79,7 +79,7 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T")
 
-__version__ = "0.15.0"
+__version__ = "0.15.1"
 
 __all__ = [
     "connect",
@@ -1594,13 +1594,51 @@ class Session:
         Distinct from find_window, which returns a Window -- the backend-
         agnostic handle used for geometry and placement, not element search.
         Raises WindowNotFound if nothing matches, matching find_window.
+
+        A same-named decoration proxy is preferred against by process, where
+        one can be identified. Found live on a real GNOME/Mutter desktop: an
+        X11 client with no client-side decoration gets a second, shell-owned
+        AT-SPI application (`mutter-x11-frames`) publishing its own `frame`
+        carrying the *exact same title* as the real window -- chrome and a
+        `Close` button, none of the application's own widgets. Name matching
+        alone cannot tell the two apart, and `mutter-x11-frames` enumerated
+        first, so this returned the decoration and every search scoped
+        `within=` it found nothing. `find_window`, which answers from the
+        window manager's own list rather than the accessible tree, does not
+        see that proxy at all -- it is not a real toplevel -- so its `pid` is
+        trustworthy where the name alone is not, and is used here to prefer
+        an exact match when one is available. Falls back to the first name
+        match if `find_window` cannot place the title (nothing wrong with a
+        backend that fills no `pid`, or a title `find_windows` does not carry
+        the same way an accessible name does) -- so a desktop with no such
+        proxy, or a backend with no window list at all, sees no change.
         """
         pattern = _title_pattern(title)
+        pid = self._owning_pid(title)
+        fallback: Element | None = None
         for role in Role.WINDOW_ROLES:
             for candidate in self.elements(role=role):
-                if pattern.search(candidate.name or ""):
+                if not pattern.search(candidate.name or ""):
+                    continue
+                if pid is not None and getattr(candidate, "pid", None) == pid:
                     return candidate
+                if fallback is None:
+                    fallback = candidate
+        if fallback is not None:
+            return fallback
         raise WindowNotFound(f"no window with a title matching {title!r}")
+
+    def _owning_pid(self, title: str | re.Pattern[str]) -> int | None:
+        """The process of the real toplevel matching `title`, if `find_window` knows it.
+
+        None on any failure -- no window manager list, no match, no pid filled
+        in for the match found -- which is exactly when `window_element`
+        should fall back to matching by name alone, as it always has.
+        """
+        try:
+            return self.find_window(title).pid
+        except WindowNotFound:
+            return None
 
     def _poll_until(
         self,

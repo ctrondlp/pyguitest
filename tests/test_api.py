@@ -52,9 +52,11 @@ class FakeElement:
         expandable=False,
         expanded=None,
         reveals=(),
+        pid=None,
     ):
         self.role = role
         self.name = name
+        self.pid = pid
         self.clicked = False
         self.text = None
         self.chosen = None
@@ -2411,6 +2413,72 @@ class TestWindowElement(unittest.TestCase):
     def test_raises_when_nothing_matches(self):
         with self.assertRaises(WindowNotFound):
             self.gui.window_element("No Such Window")
+
+
+class TestWindowElementPrefersTheRealWindowByProcess(unittest.TestCase):
+    """A same-named decoration proxy must lose to the real window.
+
+    Found live on a real GNOME/Mutter desktop: an X11 client with no
+    client-side decoration gets a second, shell-owned AT-SPI application
+    (`mutter-x11-frames`) publishing its own `frame` with the *same title*
+    as the real window -- chrome only, none of the application's widgets.
+    It enumerated before the real application, so name matching alone
+    returned the decoration and every search scoped `within=` it found
+    nothing.
+    """
+
+    class _Backend:
+        def __init__(self, decoration_pid, real_pid):
+            self.decoration = FakeElement(Role.FRAME, "Probe", pid=decoration_pid)
+            self.real = FakeElement(Role.FRAME, "Probe", pid=real_pid)
+            # The decoration enumerates first, exactly as it did live.
+            self.elements = [self.decoration, self.real]
+            self._windows = [Window("w", self, title="Probe", pid=real_pid)]
+
+        @property
+        def capabilities(self):
+            return CapabilitySet(
+                {
+                    Capability.ELEMENT_TREE,
+                    Capability.ELEMENT_ACTION,
+                    Capability.WINDOW_LIST,
+                }
+            )
+
+        def find_elements(self, role=None, name=None, within=None, **_kwargs):
+            return [
+                e
+                for e in self.elements
+                if (role is None or e.role == role)
+                and (
+                    name is None
+                    or (
+                        name.search(e.name)
+                        if hasattr(name, "search")
+                        else e.name == name
+                    )
+                )
+            ]
+
+        def windows(self):
+            return self._windows
+
+    def test_the_element_whose_process_matches_find_window_is_returned(self):
+        backend = self._Backend(decoration_pid=111, real_pid=222)
+        gui = pyguitest.Session(backend, pyguitest.detect())
+        element = gui.window_element("Probe")
+        self.assertIs(element, backend.real)
+
+    def test_falls_back_to_the_first_match_when_find_window_does_not_know_it(self):
+        # No window in the window-manager list carries this title at all --
+        # find_window can say nothing, so the old name-only behavior is what
+        # a backend with no window list, or a title that only the
+        # accessible tree carries, still gets.
+        backend = self._Backend(decoration_pid=111, real_pid=222)
+        backend._windows = []
+        gui = pyguitest.Session(backend, pyguitest.detect())
+        element = gui.window_element("Probe")
+        self.assertIs(element, backend.decoration)
 
 
 class TestFocused(unittest.TestCase):

@@ -5,7 +5,7 @@ All notable changes to pyguitest are recorded here. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html) — with the usual
 0.x caveat that the API may still change between minor versions.
 
-## [Unreleased]
+## [0.15.1] — 2026-09-29
 
 ### Fixed
 
@@ -131,6 +131,40 @@ All notable changes to pyguitest are recorded here. The format follows
   question the entry above came from. GhostBSD stays, though `validation.md` records no BSD
   run: that claim is the recorder's own live GhostBSD session, and whether a list pointing at
   `validation.md` should carry it is a separate question, not one this change settles.
+
+- **`window_element` could return a same-named decoration instead of the real window.**
+  Found live on a real GNOME/Mutter desktop, recording an X11 client with the
+  pyguitest-recorder settings pass: an application with no client-side decoration gets a
+  second, shell-owned AT-SPI application (`mutter-x11-frames`) that publishes its own
+  `frame` carrying the *exact same title* as the real window -- chrome and a `Close`
+  button, none of the application's own widgets underneath. `window_element` matched by
+  name alone across every AT-SPI application on the desktop, with no way to prefer one
+  over the other, and `mutter-x11-frames` enumerated first -- so it returned the
+  decoration, and every element search scoped `within=` it found nothing at all, silently.
+  `find_window` was never fooled, because it answers from the window manager's own list
+  rather than the accessible tree and that proxy is not a real toplevel there; `window_element`
+  now uses its `pid`, where one is available, to prefer the element that actually belongs
+  to the window rather than merely sharing its title, and falls back to the previous
+  name-only match exactly where it always has -- no window in `find_windows`, or a backend
+  that fills no `pid` at all.
+
+### Changed
+
+- **The README no longer opens by defining pyguitest against a 2005 Perl module.**
+  "It is the Python successor to X11::GUITest" was the second sentence a new reader saw,
+  ahead of anything about Wayland, Windows or macOS support -- and the Status line right
+  below it led with "covering every X11::GUITest export" rather than with what the
+  capability list actually covers now. Read cold, both read as "this exists to replay an
+  old X11 API," which undersells a tool whose own platform table two screens down lists
+  five session kinds that have nothing to do with X11 at all. The migration scanner
+  paragraph and two documentation-link blurbs named it too, for the same reason each time:
+  it was the shortest way to say "the thing this replaces," not a claim about current
+  scope. All five are reworded to describe the same real features -- cross-platform
+  automation, the Wayland-tier scanner, the porting cheat sheet, the 50-export audit --
+  without leading with, or naming, X11::GUITest. Nothing about the migration tooling
+  changed: `pyguitest migrate`, `docs/recipes.md`'s cheat sheet and
+  `docs/developers/wayland-audit.md`'s own title (which is specifically about that
+  module and keeps the name) are untouched.
 
 ## [0.15.0] — 2026-09-27
 
