@@ -28,6 +28,13 @@ _INLINE_LINK = re.compile(r"\]\(([^)\s]+)\)")
 _CONTENTS_ENTRY = re.compile(r"^- \[[^\]]+\]\(#([^)]+)\)$", re.MULTILINE)
 _HEADING = re.compile(r"^#{1,6} (.+)$", re.MULTILINE)
 
+# The canonical URL for a file in this repository. The README writes its
+# cross-references this way because the same file is also the PyPI long
+# description, where a relative link 404s rather than resolving -- so the
+# links have to be checked as URLs instead.
+_REPO_URL = "https://github.com/ctrondlp/pyguitest/"
+_ENV_VAR = re.compile(r"\bPYGUITEST_[A-Z0-9_]+\b")
+
 
 def heading_slug(heading):
     """The anchor a heading gets, insensitive to how a slugger trims.
@@ -247,6 +254,110 @@ class TestLinksAndAnchorsResolve(unittest.TestCase):
                         f"{page.name} lists #{anchor} in its contents with no "
                         "such heading",
                     )
+
+    def test_every_in_page_anchor_resolves(self):
+        """Not only the contents bullets -- prose links into a section too.
+
+        The link and the heading have to move together, and a renamed heading
+        breaks a prose link silently: the page still renders, the click just
+        scrolls nowhere. The contents bullets were covered above;
+        docs/validation.md's at-a-glance list is what prompted covering the
+        rest, since it is a page of links into its own long record.
+        """
+        anchor = re.compile(r"\]\(#([^)]+)\)")
+        seen = 0
+        for page in self.pages():
+            text = page.read_text(encoding="utf-8")
+            headings = {heading_slug(h) for h in _HEADING.findall(text)}
+            for target in anchor.findall(text):
+                seen += 1
+                with self.subTest(page=page.name, target=target):
+                    self.assertIn(
+                        heading_slug(target),
+                        headings,
+                        f"{page.name} links to #{target} with no such heading",
+                    )
+        self.assertGreater(seen, 20)
+
+    def test_absolute_links_into_this_repository_resolve(self):
+        """The README's cross-references are absolute, so check those instead.
+
+        They moved out of the relative check above and put the same question
+        on a different string: `blob/main/<path>` names a file and
+        `tree/main/<dir>` names a directory, and either is a 404 once what it
+        names is renamed or unshipped.
+        """
+        checked = 0
+        for page in self.pages():
+            for target in _INLINE_LINK.findall(page.read_text(encoding="utf-8")):
+                if not target.startswith(_REPO_URL):
+                    continue
+                rest = target[len(_REPO_URL) :].split("#", 1)[0]
+                kind, _, path = rest.partition("/main/")
+                if not path or kind not in ("blob", "tree"):
+                    continue
+                checked += 1
+                with self.subTest(page=page.name, target=target):
+                    linked = ROOT / path
+                    self.assertTrue(
+                        linked.exists(), f"{page.name} links to missing {path}"
+                    )
+                    if kind == "tree":
+                        self.assertTrue(
+                            (linked / "README.md").exists(),
+                            f"{page.name} links to the directory {path}, which "
+                            "has no README",
+                        )
+        self.assertGreater(checked, 10)
+
+    def test_the_readme_carries_no_relative_file_link(self):
+        """README.md is the PyPI long description, and PyPI serves it alone.
+
+        A relative link is not a redirect there, it is a 404: the front page
+        shipped to the index had every `docs/...` cross-reference in it
+        pointing at nothing for anyone reading it on PyPI rather than in a
+        checkout. In-page anchors are fine -- the headings come with the file.
+        """
+        for target in _INLINE_LINK.findall(README):
+            if target.startswith(("http://", "https://", "mailto:")):
+                continue
+            with self.subTest(target=target):
+                self.assertTrue(
+                    target.startswith("#"),
+                    f"README links to {target}; PyPI cannot serve that, so the "
+                    "link has to be an absolute URL",
+                )
+
+
+class TestEnvironmentVariablesAreDocumented(unittest.TestCase):
+    """A knob nobody can find is a knob that does not exist.
+
+    Read off the source rather than kept as a list here: both variables the
+    package honours were described only in the docstring of the call that
+    reads them, in the middle of a 3000-line module. The scan is what keeps
+    the third one honest.
+    """
+
+    def variables(self):
+        """Every `PYGUITEST_*` name the package's own source mentions."""
+        found = set()
+        for path in sorted((ROOT / "src").rglob("*.py")):
+            found.update(_ENV_VAR.findall(path.read_text(encoding="utf-8")))
+        return found
+
+    def test_the_scan_finds_the_variables(self):
+        # Guard against the glob silently matching nothing.
+        self.assertIn("PYGUITEST_SCREENSHOT_DIR", self.variables())
+
+    def test_every_variable_the_source_reads_is_documented(self):
+        for name in sorted(self.variables()):
+            with self.subTest(variable=name):
+                self.assertIn(
+                    name,
+                    DOCS,
+                    f"{name} is read by the source and named in no "
+                    "user-facing page (README, docs/install.md, docs/input.md)",
+                )
 
 
 if __name__ == "__main__":

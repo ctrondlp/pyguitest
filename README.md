@@ -32,18 +32,18 @@ Use it to:
 
 **Status:** every capability implemented across all backends, covering
 **every X11::GUITest export**. Much of it has been run against real GNOME,
-KDE, sway, Xfce, X11, GhostBSD and Windows 11 sessions; some of it has not, and
-[docs/validation.md](docs/validation.md) says exactly which is which, so
-nothing here has to be taken on trust.
+KDE, sway, Xfce, X11, GhostBSD, Windows 11 and macOS sessions; some of it has
+not, and [docs/validation.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/validation.md) says exactly which is which,
+so nothing here has to be taken on trust.
 
 Because desktops differ in what they permit, what a session can do is
 discovered at runtime rather than assumed — `gui.supports(...)` is how you
-ask, and [docs/developers/design.md](docs/developers/design.md) is why the
+ask, and [docs/developers/design.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/developers/design.md) is why the
 API is shaped that way instead of being a one-to-one port.
 
-**New here?** [docs/getting-started.md](docs/getting-started.md) is five
-minutes from nothing to a working script. [docs/recipes.md](docs/recipes.md)
-answers "how do I…", and [docs/troubleshooting.md](docs/troubleshooting.md)
+**New here?** [docs/getting-started.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/getting-started.md) is five
+minutes from nothing to a working script. [docs/recipes.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/recipes.md)
+answers "how do I…", and [docs/troubleshooting.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/troubleshooting.md)
 answers "why didn't that work".
 
 ## What pyguitest is for
@@ -112,7 +112,7 @@ pip install '.[macos]'      # macOS
 ```
 
 You do not need `-e`; that flag is for developing *this package*, and is
-covered in [CONTRIBUTING.md](CONTRIBUTING.md).
+covered in [CONTRIBUTING.md](https://github.com/ctrondlp/pyguitest/blob/main/CONTRIBUTING.md).
 
 **None are required.** The package imports and runs with nothing else
 installed. What you add depends on which backend has to serve your desktop
@@ -127,9 +127,9 @@ pyguitest doctor
 It prints the exact commands — naming your distribution's packages on Linux
 and the BSDs, and answering in Windows terms on Windows. For the whole
 picture — a per-backend requirements matrix, the distribution package table,
-and how capture chooses a path — see [docs/install.md](docs/install.md).
+and how capture chooses a path — see [docs/install.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/install.md).
 Injecting input has its own setup (`/dev/uinput` permissions, the `ydotool`
-daemon, libei, portal consent): [docs/input.md](docs/input.md).
+daemon, libei, portal consent): [docs/input.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/input.md).
 
 ## What works where
 
@@ -152,7 +152,7 @@ is what `connect()` reports, what `backend.providers()` lists, and what
 Two things the table cannot say. Whether an application publishes anything to
 AT-SPI is up to the application, and [testable-guis.md][testable-guis] is
 about that side of it. And which of these paths has actually been run against
-a real desktop is in [docs/validation.md](docs/validation.md) — that is the
+a real desktop is in [docs/validation.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/validation.md) — that is the
 file to read before trusting any row here, and it is written to be read that
 way. That file is where the Windows row above needs reading twice: `win32` and
 `uia` are registered and composed exactly like every backend above them, and
@@ -163,8 +163,8 @@ and `macos` are registered and composed like every backend above them, and
 both have driven a real macOS 26 machine over SSH — but on one machine, with one
 grant history, so here too the row says what is implemented and
 validation.md says what has been measured.
-[docs/developers/adr-003-windows.md](docs/developers/adr-003-windows.md) and
-[docs/developers/adr-004-macos.md](docs/developers/adr-004-macos.md) record
+[docs/developers/adr-003-windows.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/developers/adr-003-windows.md) and
+[docs/developers/adr-004-macos.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/developers/adr-004-macos.md) record
 each platform's design and the alternatives rejected along the way.
 
 ## Usage
@@ -267,7 +267,7 @@ trying to document.
 
 ## Examples
 
-Runnable scripts in [examples/](examples/), each degrading with an
+Runnable scripts in [examples/](https://github.com/ctrondlp/pyguitest/tree/main/examples), each degrading with an
 explanation when the desktop cannot do what it asks:
 
 ```sh
@@ -322,40 +322,40 @@ flags works unchanged.
 
 **Start here**
 
-- [docs/getting-started.md](docs/getting-started.md) — five minutes to a
+- [docs/getting-started.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/getting-started.md) — five minutes to a
   working script, which API to reach for, and what X11, Wayland and XWayland
   each change
-- [docs/recipes.md](docs/recipes.md) — task-shaped answers: waiting properly,
+- [docs/recipes.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/recipes.md) — task-shaped answers: waiting properly,
   forms, windows, screenshots, CI, and an X11::GUITest cheat sheet
-- [docs/troubleshooting.md](docs/troubleshooting.md) — symptom first: nothing
+- [docs/troubleshooting.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/troubleshooting.md) — symptom first: nothing
   found, nothing typed, nothing captured
 
 **Reference**
 
-- [docs/api.md](docs/api.md) — the full API reference: every public class,
+- [docs/api.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/api.md) — the full API reference: every public class,
   method and enum, with the capability each one needs
-- [docs/install.md](docs/install.md) — what each backend needs, per
+- [docs/install.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/install.md) — what each backend needs, per
   distribution, and how capture picks a path
-- [docs/input.md](docs/input.md) — injecting pointer and keyboard input:
+- [docs/input.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/input.md) — injecting pointer and keyboard input:
   permissions, daemons, keymap safety, libei and the portal
-- [docs/validation.md](docs/validation.md) — what has been run against a real
+- [docs/validation.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/validation.md) — what has been run against a real
   desktop, and what has not
-- [docs/ai-assistants.md](docs/ai-assistants.md) — rules for a coding
+- [docs/ai-assistants.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/ai-assistants.md) — rules for a coding
   assistant generating pyguitest code
 - [testable-guis.md][testable-guis] — how to build a GUI that can be tested
   at all: the accessibility work that lets a test name a button instead of
   clicking a coordinate. Written to be handed to application developers;
   lives in the [recorder][] repository
 
-**Design and internals** — [docs/developers/](docs/developers/): why the API
+**Design and internals** — [docs/developers/](https://github.com/ctrondlp/pyguitest/tree/main/docs/developers/): why the API
 is not a port, the audit of all 50 X11::GUITest exports it derives from, the
 two ADRs, the repository structure, and the protocol gaps worth taking
 upstream.
 
 ## Contributing
 
-Tests, lint, types, CI and the D-Bus suite: [CONTRIBUTING.md](CONTRIBUTING.md).
+Tests, lint, types, CI and the D-Bus suite: [CONTRIBUTING.md](https://github.com/ctrondlp/pyguitest/blob/main/CONTRIBUTING.md).
 
 ## License
 
-GPL-2.0-or-later. See [LICENSE](LICENSE).
+GPL-2.0-or-later. See [LICENSE](https://github.com/ctrondlp/pyguitest/blob/main/LICENSE).

@@ -46,6 +46,19 @@ rather than a comment because scripts/gen-api-docs.py reads it -- `TIERS` is
 public, and a dict has no `__doc__` of its own to hold one.
 """
 
+_TIER_SCALE = (
+    "T1-T6 are what each capability costs on Wayland, so on a session with a "
+    "native path -- X11, Windows, macOS -- a tier is a fact about the port "
+    "rather than a limit here. The [yes]/[ no] column is this session."
+)
+"""The caption CapabilitySet.report() opens with.
+
+The tier labels are a Wayland cost scale ("core Wayland protocol",
+"per-desktop backend") and the table is pasted into bug reports from all
+three platforms, where a `T6` beside a capability reads as a verdict on that
+desktop rather than a note about Wayland. Said once, above the table.
+"""
+
 
 class Capability(Enum):
     """An operation a backend may or may not support.
@@ -229,7 +242,7 @@ class CapabilitySet(frozenset):
 
     def report(self) -> str:
         """A user-readable support table, grouped by tier."""
-        lines = []
+        lines = [_TIER_SCALE, ""]
         for tier in Tier:
             caps = sorted(
                 (c for c in Capability if c.tier == tier), key=lambda c: c.name

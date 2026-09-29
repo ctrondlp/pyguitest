@@ -49,6 +49,21 @@ class TestCapabilitySet(unittest.TestCase):
         for cap in Capability:
             self.assertIn(cap.name, report)
 
+    def test_report_says_which_scale_its_tier_numbers_are_on(self):
+        """The table is pasted into bug reports from all three platforms.
+
+        The tiers are Wayland implementation costs ("core Wayland protocol",
+        "per-desktop backend"), and `pyguitest debug` prints this table on
+        Windows and macOS too, where "T6 deliberately prevented" beside a
+        capability reads as a verdict on that desktop. The caption is what
+        stops the numbers being read as one.
+        """
+        report = self.caps.report()
+        self.assertIn("costs on Wayland", report)
+        self.assertLess(
+            report.index("costs on Wayland"), report.index("PROCESS_LAUNCH")
+        )
+
     def test_set_operators_stay_a_capability_set(self):
         # Regression: frozenset's operators return a plain frozenset even
         # on a subclass instance, silently dropping .report() and .missing

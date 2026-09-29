@@ -58,6 +58,12 @@
 #
 # Exit status: 0 all passed (a SKIP is not a pass, but is not a failure
 # either), 1 one or more checks failed, 2 setup problem.
+#
+# Two environment variables pick the tools, for a machine whose defaults are
+# not the ones on PATH: PYTHON (default python3) and RUFF (default ruff).
+# PYTHON has to name an interpreter that can import pytest and mypy, since
+# the checks run it rather than a copy -- and on a system where `python3` is
+# not what a virtualenv installed into, naming it is the whole fix.
 
 set -uo pipefail
 
@@ -90,6 +96,7 @@ case $_python in
     *)
         if ! _dir="$(cd "$(dirname "$_python")" 2>/dev/null && pwd)"; then
             echo "pre-commit-test: no such interpreter: $PYTHON" >&2
+            echo "  set PYTHON to one that exists, e.g. PYTHON=/path/to/bin/python" >&2
             exit 2
         fi
         PYTHON="$_dir/$(basename "$_python")"
@@ -192,6 +199,8 @@ command -v "$RUFF" >/dev/null || missing+=("$RUFF")
 if ((${#missing[@]})); then
     printf '%spre-commit-test.sh: not installed:%s %s\n' "$RED" "$RESET" "${missing[*]}" >&2
     echo "install with: pip install --user pytest ruff mypy" >&2
+    echo "  (pytest and mypy have to be importable by $PYTHON; set PYTHON= to" >&2
+    echo "   point this at the interpreter they went into)" >&2
     exit 2
 fi
 

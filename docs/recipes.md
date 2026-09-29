@@ -339,10 +339,14 @@ path, so a port can be gated in CI; the full 50-export table lives in
 | `ClickWindow` | `Element.click` | Prefer `gui.button(...).click()` |
 | `GetRootWindow` / `GetChildWindows` / `GetParentWindow` | `root_element` / `Element.children` / `Element.parent` | The accessible tree, not the window tree |
 | `GetScreenRes` / `ScreenCount` | `Screen.size` / `len(gui.screens())` | |
-| `GetMousePos`, `IsKeyPressed`, `IsMouseButtonPressed`, `SetWindowName`, `LowerWindow`, `IsWindowCursor` | X11 and Microsoft Windows | Deliberately prevented on Wayland; `gui.pointer_position()` and friends exist but raise there |
+| `GetMousePos` | `pointer_position()` | X11, Windows and macOS; raises on Wayland |
+| `IsKeyPressed`, `IsMouseButtonPressed`, `SetWindowName`, `LowerWindow`, `IsWindowCursor` | X11 and Microsoft Windows | Deliberately prevented on Wayland, where they raise |
 
-The last row is the one that decides whether a port is possible at all. If a
+The second row is the one that decides whether a port is possible at all. If a
 script depends on reading global input state, it can be ported to X11,
 XWayland and Windows — where these are ordinary API calls — but not to
 Wayland, and no backend will ever change that, because preventing it is the
-point.
+point. The row above it is the exception inside that set: the pointer's
+position is readable on macOS too — a plain `CGEventGetLocation` read needing
+no grant — which is why `api.md`'s capability table lists three backends for
+`POINTER_QUERY` and two for the rest.

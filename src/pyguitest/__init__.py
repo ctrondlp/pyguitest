@@ -1642,15 +1642,18 @@ class Session:
         accepts; at least one is required.
 
         Delegates to the backend's own event-driven implementation where
-        Capability.WINDOW_EVENTS is available (sway today) and only `title`
-        was asked for -- real notification, not polling. Everywhere else,
-        including any call that names `app_id`, this polls find_windows
-        every `interval` seconds instead, so a script does not need to know
-        which case it is in, or hand-roll the poll loop itself: checking for
-        WINDOW_EVENTS and falling back to a fixed sleep was exactly the
-        mistake examples/04_drive_an_editor.py made before this existed.
-        `app_id` always polls, one id or several, because the event-driven
-        backends only ever learned to match a title.
+        Capability.WINDOW_EVENTS is available and only `title` was asked for
+        -- real notification, not polling. Those backends are `win32`, on
+        Windows, and GNOME Shell, KWin, sway and niri on their desktops;
+        macOS is not one of them, its AXObserver being a later phase, and
+        neither is any X11 session. Everywhere else -- both of those, and any
+        call that names `app_id`, one id or several, because the event-driven
+        backends only ever learned to match a title -- this polls
+        find_windows every `interval` seconds instead, so a script does not
+        need to know which case it is in, or hand-roll the poll loop itself:
+        checking for WINDOW_EVENTS and falling back to a fixed sleep was
+        exactly the mistake examples/04_drive_an_editor.py made before this
+        existed.
 
         `timeout` bounds the wait in seconds; None waits indefinitely.
         Returns the matched Window, or None if `timeout` elapses first --

@@ -96,6 +96,17 @@ def _report() -> int:
                     toolkit_accessibility=bridge,
                 )
             )
+        else:
+            # Nothing installable is missing -- which used to mean the output
+            # simply stopped after a table with [ no] in it, reading as "and
+            # nothing more to say". The report is complete there and the gaps
+            # are properties of the desktop, so name where the reader goes
+            # next instead of leaving the last line to imply a dead end.
+            print()
+            print(
+                "Nothing to install on this desktop. `pyguitest debug` adds "
+                "the diagnostics a bug report needs."
+            )
     return 0
 
 
@@ -564,7 +575,14 @@ def main(argv=None):
         return _record(argv[1:])
 
     parser = argparse.ArgumentParser(
-        prog="pyguitest", description=__doc__.split("\n")[0]
+        prog="pyguitest",
+        description=__doc__.split("\n")[0],
+        # The bare invocation is the one command the listing cannot show.
+        # Every other one is a subparser and argparse names it, while
+        # `pyguitest` with no arguments is the capability report -- which is
+        # what a reader reaching for --help is most often after, and the
+        # only way to find it otherwise is to run it and see.
+        epilog="With no subcommand, prints what this desktop can do.",
     )
     parser.add_argument("--version", action="version", version=__version__)
     sub = parser.add_subparsers(dest="command")

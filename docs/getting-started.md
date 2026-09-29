@@ -133,13 +133,25 @@ if gui.supports(Capability.WINDOW_GEOMETRY):
 ## Wait for state, never for time
 
 The single most common way to write a flaky GUI test is `time.sleep(2)`.
-Every wait in pyguitest is a wait for something *observable*:
+Almost every wait in pyguitest is a wait for something *observable*:
 
 ```python
 gui.wait_for_window("Save As", timeout=10)  # not sleep(2)
 gui.wait_for_element(name="Export complete", timeout=30)
 gui.wait_until(lambda: gui.get_clipboard() == "copied", timeout=5)
 ```
+
+The exceptions are the two that are not a wait for state: `wait(seconds)`,
+which is the sleep this section is telling you not to reach for, and
+`sync(timeout)`, which is a confirmation that the compositor consumed the
+input just sent — `libei` is the only backend that can answer it.
+
+`timeout` is in seconds everywhere, and `None` — which almost every one of
+these defaults to — means indefinitely rather than "take the default". Whether
+a window wait is answered by an event or by a poll depends on the platform:
+notified through `SetWinEventHook` on Windows and by the compositor on GNOME
+Shell, KWin, sway and niri, polling every `interval` on macOS and on every X11
+session. [api.md](api.md#waiting) has the table.
 
 The full list, and when each one is the right one, is in
 [recipes.md](recipes.md#waiting-instead-of-sleeping).

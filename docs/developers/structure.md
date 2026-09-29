@@ -41,6 +41,8 @@ pyguitest/
 │       ├── adr-002-transports.md   why sockets replaced CLI tools
 │       ├── adr-003-windows.md  the Windows split: ctypes, one comtypes extra,
 │       │                       two backends, no wrappers
+│       ├── adr-004-macos.md    the macOS split: PyObjC in one extra, three
+│       │                       backends, all of them behind a TCC grant
 │       └── structure.md        this file
 ├── src/pyguitest/
 │   ├── capabilities.py         the tier scale and capabilities
@@ -50,12 +52,12 @@ pyguitest/
 │   ├── py.typed                PEP 561 marker
 │   ├── compat.py               the X11::GUITest exports, as data
 │   ├── errors.py               typed failures
-│   ├── session.py              runtime environment detection
+│   ├── session.py              the Environment: which session this is
 │   ├── app.py                  a launched program, and stopping it again
 │   ├── tools.py                external CLI registry, ranked
 │   ├── ipc.py                  sway, Hyprland and niri socket protocols
 │   ├── png.py                  writing a PNG from raw pixels, stdlib only
-│   ├── __init__.py             public API: connect(), Session, send_keys()
+│   ├── __init__.py             public API: connect(), send_keys(), Session
 │   ├── __main__.py             the `pyguitest` command: report, doctor, debug, migrate
 │   └── backends/
 │       ├── base.py             the backend interface; send_keys()'s key tables

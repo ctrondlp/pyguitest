@@ -5,6 +5,45 @@ only against its own tests. This file records which parts, on what, and —
 more usefully — which parts have not, so nothing in the README has to be
 read as a claim you cannot check.
 
+## At a glance
+
+What follows is in the order it happened, which is the right order for
+reading how something was found and the wrong one for asking "has my desktop
+been tried at all". The same record sorted that way instead:
+
+- **GNOME Shell 50.4, Wayland** — [the first full
+  pass](#run-live-on-gnome-shell-504-wayland): the composite assembled live,
+  AT-SPI elements, window control through the Shell extension, `eiinput` over
+  libei, portal capture, and the XWayland side of all of it.
+- **GNOME Shell 51.beta and 51.rc, Wayland** — [the Mutter 51
+  round](#run-live-on-gnome-shell-51beta-wayland): a `WINDOW_CAPTURE`
+  regression, the last failing tier-2 capability, `INPUT_SYNC`, the clipboard
+  portal, and the same desktop [run unattended, headless, the way CI runs
+  it](#run-unattended-in-a-headless-gnome-session).
+- **KDE Plasma 6 / KWin, XWayland and genuinely native Wayland** —
+  [both](#run-live-on-kde-plasma-6--kwin-xwayland): `kdotool` windows,
+  `kwinevents`, uinput and libei input, spectacle capture, and the
+  `toolkit-accessibility` step KDE needs that no package provides.
+- **Ubuntu 24.04 LTS, GNOME Shell 46** — [the older-shell
+  pass](#run-live-on-ubuntu-2404-lts-gnome-shell-46-wayland), which is where
+  several "newer Mutter does this, older does not" answers come from.
+- **X11, properly** — [a real X11 session, Xfce under
+  xfwm4, and Xvfb against GTK3 and GTK4](#run-live-on-a-real-x11-session):
+  the whole API including tier 6, and the two caveats XWayland has that a
+  real X11 session does not.
+- **Windows 11, build 26200** — [the interactive-desktop
+  pass](#run-live-on-windows-11-build-26200): the control set, capture
+  through `PrintWindow`, `activate_window` against the real foreground lock,
+  and five further Windows sections below it.
+- **macOS 26 (Tahoe)** — [every grant denied, and then three of
+  four](#macos-run-live-on-one-mac-every-grant-denied-and-then-three-of-four-2026-09-26):
+  the AX read path, `macquartz` through a live event tap, the clipboard,
+  `screencapture -l`, and `locate_image` against a real desktop.
+- **sway (wlroots), headless and genuinely pure Wayland** — window control
+  and the IPC sockets, run with no display server to fall back on.
+- **[Not run live](#not-run-live)** is the half worth reading first: it is
+  what stops anything above being a promise about your desktop.
+
 ## Run live on GNOME Shell 50.4 (Wayland)
 
 - **`eiinput` after its negotiation moved into python-libei** (2026-09-01,

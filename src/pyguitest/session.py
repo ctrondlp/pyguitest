@@ -1431,7 +1431,17 @@ class Environment:
                 "windows      "
                 f"build {self.windows_build or 'unknown'}"
                 + (f", {self.windows_edition}" if self.windows_edition else "")
-                + f", dpi {self.dpi_awareness or 'unknown'}"
+                # Named in full, and "not reported" rather than "unknown" when
+                # the probe came back empty: this is the *process's* awareness
+                # mode, which decides whether the coordinates this process
+                # reads back and the pixels SendInput takes are the same
+                # space. A bare "dpi per-monitor" on a line of build and
+                # edition reads as a display property, and an empty one as
+                # the OS declining to answer, where in fact the mode is
+                # always defined on Windows and "" means the two probes
+                # (GetThreadDpiAwarenessContext, then GetProcessDpiAwareness)
+                # could not be asked.
+                + f", dpi awareness {self.dpi_awareness or 'not reported'}"
             )
         lines.extend(f"note         {n}" for n in self.notes)
         return "\n".join(lines)

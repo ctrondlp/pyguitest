@@ -53,14 +53,19 @@ class TestReportAdviceGating(unittest.TestCase):
                 _report()
             return output.getvalue()
 
-    def test_advice_is_suppressed_when_nothing_installable_is_missing(self):
-        # capabilities.missing is non-empty (tier 6 on Wayland), but
-        # hints_for() finds nothing installable missing.
+    def _complete_gui(self):
+        """A GNOME Wayland session with nothing installable missing.
+
+        `capabilities.missing` is non-empty here -- tier 6 is unreachable on
+        Wayland by design -- which is the case the gate below has to look
+        past; hints_for() is what actually reasons about installed
+        components.
+        """
+        import dataclasses
+
         environment = _linux_detect(
             {"WAYLAND_DISPLAY": "wayland-0", "XDG_CURRENT_DESKTOP": "GNOME"}
         )
-        import dataclasses
-
         complete = dataclasses.replace(
             environment,
             has_atspi=True,
@@ -77,11 +82,14 @@ class TestReportAdviceGating(unittest.TestCase):
         # WINDOW_PLACEMENT stands in for "the GNOME Shell extension is
         # active" -- compositor is MUTTER here (XDG_CURRENT_DESKTOP=GNOME),
         # and without it hints_for() would (correctly) report the extension
-        # as missing, which is not what this test is exercising.
+        # as missing, which is not what these tests are exercising.
         complete_capabilities = pyguitest.CapabilitySet(
             {pyguitest.Capability.WINDOW_PLACEMENT}
         )
-        text = self._run(_FakeGui(complete, capabilities=complete_capabilities))
+        return _FakeGui(complete, capabilities=complete_capabilities)
+
+    def test_advice_is_suppressed_when_nothing_installable_is_missing(self):
+        text = self._run(self._complete_gui())
         self.assertIn("fake report", text)
         self.assertNotIn("Nothing missing", text)
         self.assertNotIn("unlock more capabilities", text)
@@ -95,6 +103,21 @@ class TestReportAdviceGating(unittest.TestCase):
         incomplete = dataclasses.replace(environment, has_atspi=False)
         text = self._run(_FakeGui(incomplete))
         self.assertIn("unlock more capabilities", text)
+        # The footer is the other branch of the same if, so the two cannot
+        # both be right about this desktop.
+        self.assertNotIn("Nothing to install", text)
+
+    def test_the_report_names_the_next_step_when_nothing_is_installable(self):
+        """Suppressing the advice left the report ending in silence.
+
+        A table with [ no] in it and no closing line reads as "and nothing
+        more to say", when the truth is the opposite: the report is complete
+        and the gaps are properties of the desktop. One line naming where to
+        go next is what the reader about to paste this somewhere is after.
+        """
+        text = self._run(self._complete_gui())
+        self.assertIn("Nothing to install on this desktop", text)
+        self.assertIn("pyguitest debug", text)
 
 
 if __name__ == "__main__":
