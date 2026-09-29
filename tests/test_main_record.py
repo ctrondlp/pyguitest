@@ -131,6 +131,20 @@ class TestRecordCommand(unittest.TestCase):
                 main(["--help"])
         self.assertIn("record", stdout.getvalue())
 
+    def test_the_top_level_help_names_the_bare_invocation(self):
+        """`pyguitest` with no arguments is the report, and argparse is not.
+
+        Every other command is a subparser and gets a line in the listing by
+        itself; the bare one is the only behaviour `--help` has to describe
+        in prose, and without it the capability report is discovered by
+        running the command and seeing what happens.
+        """
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            with self.assertRaises(SystemExit):
+                main(["--help"])
+        self.assertIn("no subcommand", stdout.getvalue())
+
     def test_missing_recorder_defers_the_can_it_record_question(self):
         """The install line must not imply the recorder would work here.
 

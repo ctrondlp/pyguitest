@@ -22,11 +22,32 @@ class BackendUnavailable(PyGUITestError):
     """No backend could drive the current session."""
 
 
+# What every CapabilityUnsupported message ends with. It lives in the
+# exception rather than at the raise sites because it is the same sentence at
+# all of them, and the one that matters most is the plainest: a capability no
+# backend here serves. That message used to name what failed and nothing else,
+# so the commonest failure in the package read like a bug in it.
+_DOCTOR_HINT = ". Run `pyguitest doctor` to see what this desktop is missing."
+
+# PermissionRequired's version of the same tail. No install closes that one --
+# the capability is there and the grant is not -- so this names the action the
+# user has to take, and keeps the report for what is left after it.
+_GRANT_HINT = (
+    ". Grant it to the process running the test and retry; `pyguitest doctor` "
+    "names what is still missing."
+)
+
+
 class CapabilityUnsupported(PyGUITestError):
     """The active backend cannot perform this operation.
 
     Carries the capability and the reason so callers can skip rather than fail
     -- the intended pattern for test suites spanning several desktops.
+
+    The message also carries what to do about it. Raised from just over sixty
+    places, and before this tail existed the most common one was the only
+    failure in the package that said what went wrong without one word about
+    the fix.
     """
 
     def __init__(
@@ -34,14 +55,20 @@ class CapabilityUnsupported(PyGUITestError):
         capability: Capability,
         backend: str | None = None,
         reason: str | None = None,
+        hint: str | None = None,
     ) -> None:
-        """Record which capability failed, on which backend, and why."""
+        """Record which capability failed, on which backend, why, and the fix.
+
+        `hint` replaces the last sentence for a call site that knows something
+        more specific than "run doctor"; leaving it out is the ordinary case.
+        """
         self.capability = capability
         self.backend = backend
         self.reason = reason
+        self.hint = _DOCTOR_HINT if hint is None else hint
         where = f" on {backend}" if backend else ""
         why = f": {reason}" if reason else ""
-        super().__init__(f"{capability.name} is unsupported{where}{why}")
+        super().__init__(f"{capability.name} is unsupported{where}{why}{self.hint}")
 
 
 class PermissionRequired(CapabilityUnsupported):
@@ -50,6 +77,21 @@ class PermissionRequired(CapabilityUnsupported):
     Raised for a declined portal dialog or an inaccessible /dev/uinput -- both
     recoverable by user action, unlike CapabilityUnsupported generally.
     """
+
+    def __init__(
+        self,
+        capability: Capability,
+        backend: str | None = None,
+        reason: str | None = None,
+        hint: str | None = None,
+    ) -> None:
+        """Record the capability, and that this one is granted rather than installed."""
+        super().__init__(
+            capability,
+            backend=backend,
+            reason=reason,
+            hint=_GRANT_HINT if hint is None else hint,
+        )
 
 
 class PortalTimeout(PyGUITestError):

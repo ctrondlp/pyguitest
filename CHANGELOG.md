@@ -5,6 +5,133 @@ All notable changes to pyguitest are recorded here. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html) — with the usual
 0.x caveat that the API may still change between minor versions.
 
+## [Unreleased]
+
+### Fixed
+
+- **The front page's cross-references were dead on PyPI.** `README.md` is also the PyPI
+  long description, and PyPI renders it alone -- it serves no repository files beside it --
+  so all 23 relative links in it (`docs/install.md`, `CONTRIBUTING.md`, `LICENSE`,
+  `examples/`, the `docs/developers/` index, and every `docs/` page the Documentation list
+  names) were 404s for anyone reading the package page rather than the repository, which is
+  where most people meet the project. They are absolute URLs now, and `tests/test_docs.py`
+  holds two lines around them: the README may carry no relative file link at all, and every
+  absolute link into this repository has to name something that exists -- the question the
+  relative-link check asks of the pages under `docs/`, asked of the URL rather than the
+  path.
+
+- **Every `CapabilityUnsupported` message now says what to do about it.** The exception
+  carried the capability, the backend and the reason, and stopped there -- so the commonest
+  failure in the package, a capability this desktop cannot serve at all, read like a bug in
+  it rather than a property of the machine. The tail is appended in the exception itself,
+  because it is one sentence at all sixty-odd raise sites and a sentence repeated sixty
+  times is a sentence that drifts; `PermissionRequired` gets its own, since no install
+  closes a missing grant, so that one names the grant and keeps the report for what is left
+  after it. Call sites with something more specific to say can pass `hint=`.
+
+- **The capability table names the scale its tier numbers are on.** `T3 per-desktop
+  backend` and `T6 deliberately prevented` are Wayland implementation costs, and
+  `pyguitest debug` prints that table from Windows and macOS too, where they read as a
+  verdict on the desktop in front of you. One caption line now opens
+  `CapabilitySet.report()` and says which question the numbers answer; it lives in the
+  report rather than in each caller because the report is what gets pasted into a bug
+  report.
+
+- **`pyguitest --help` names the command that has no subcommand.** `pyguitest` on its own
+  prints the capability report -- the thing a reader reaching for `--help` is most often
+  after -- and it was the one behaviour the listing could not show, since every other
+  command is a subparser argparse names by itself. The report's own ending went the same
+  way: when `hints_for()` has nothing installable to suggest, the output used to stop after
+  a table with `[ no]` in it, which reads as "and nothing more to say" where the truth is
+  that the gaps are properties of the desktop rather than a missing package; it now says so
+  and names `pyguitest debug`.
+
+- **The two environment variables the package reads are written down.** `PYGUITEST_SCREENSHOT_DIR`
+  and `PYGUITEST_DOGTAIL_LOGS` were described only in the docstrings of the calls that read
+  them, one of which sits in the middle of a 3000-line module -- a knob nobody can find is a
+  knob that does not exist. `docs/install.md` documents both, including why dogtail's import
+  noise is swallowed and what turning it back on is for, and `tests/test_docs.py` now scans
+  `src/` for `PYGUITEST_*` and fails if a third one appears undocumented anywhere the user
+  reads.
+
+- **The Windows line in the environment summary says whose DPI awareness it reports.** It
+  read `dpi per-monitor`, after the build number and the edition, which reads as a property
+  of the display; it is the *process's* awareness mode, and it decides whether the
+  coordinates this process reads back and the pixels `SendInput` takes are in the same
+  space. An empty probe said `unknown`, which suggests the OS declined to answer, when the
+  mode is always defined on Windows and an empty string means both probes
+  (`GetThreadDpiAwarenessContext`, then `GetProcessDpiAwareness`) went unanswered; it says
+  `not reported` now.
+
+- **`docs/validation.md` opens with what has been run, sorted by desktop.** The file is
+  3600 lines of live runs in the order they happened -- the right order for reading how
+  something was found, the wrong one for asking whether your own desktop has been tried at
+  all. The list at the top is the same record grouped by platform (GNOME, KDE, Ubuntu, X11,
+  Windows, macOS, sway), with "not run live" reachable from it, since that is the half that
+  stops the rest being a promise. The in-page anchors it links through are checked now as
+  well, not only the top-of-page contents bullet lists.
+
+- **The contributor map named the wrong file for two of its entries.**
+  `docs/developers/structure.md` listed `adr-001` through `adr-003` and omitted
+  `adr-004-macos.md` altogether, and described `session.py` as "runtime environment
+  detection" while `Session` -- the class a contributor is usually looking for, and the
+  reason `session.py` is 3000 lines of `Environment` rather than of `Session` -- lives in
+  `__init__.py`. Both lines now say what is where.
+
+- **`docs/api.md` promised a "session default" timeout that no session has.** The Waiting
+  section's intro read "`timeout=None` uses the session default" — hand-written prose in
+  `scripts/gen-api-docs.py` rather than text pulled from a docstring, which is why the
+  generated-docs test had nothing to disagree with. No such default exists: `Session.__init__`
+  takes no timeout, `connect()` forwards none to it, and every `wait_*` here defaults it to
+  `None`, `sync` (1.0s) being the only exception — and `None` is not a shorter default, it is
+  no deadline at all, which is what `_poll_until` builds from it. So the one thing that
+  sentence invited a reader to do, drop the `timeout=` and take the default, was the one
+  thing that waits forever; the docstrings it sat above had said so all along
+  (`wait_for_window`: "None waits indefinitely"). Found from the recorder side, where
+  generated scripts now carry literal, unscaled seconds on every wait: that makes deleting a
+  number to take a default the obvious edit a reader makes, and the intro was wrong about
+  exactly that case. It now says what the docstrings say, and names `sync` as the exception it
+  is, and the other half of that sentence went the same way: "unless the backend can do better"
+  now says what better is — `SetWinEventHook` on Windows, a compositor event stream on GNOME
+  Shell, KWin, sway and niri — and that macOS, every X11 session and any wait naming `app_id`
+  polls every `interval` instead. `Session.wait_for_window`'s own docstring said "sway today",
+  which stopped being true when the KWin, GNOME Shell and win32 backends gained
+  `WINDOW_EVENTS`, so it names them too, and names macOS and X11 among the pollers.
+
+- **Three more pages were platform-blind: the ones that teach waiting and input.** Found by
+  asking, for each paragraph, which platforms it names and which it only looks like it does.
+  `docs/recipes.md`'s X11::GUITest cheat sheet put `GetMousePos` in one row with
+  `IsKeyPressed` and four others, and followed it with "it can be ported to X11, XWayland and
+  Windows" — true of the row, false of the pointer: `pointer_position()` is an ordinary call
+  on macOS, which `docs/api.md`'s generated table has said all along (`POINTER_QUERY` is
+  `MacosBackend`, `Win32Backend`, `X11Backend`; the other five are two backends). The row is
+  split so each case reads as itself, and the sentence after it gives macOS its half.
+  `docs/input.md` documented Windows' three injection routes, the Unicode one it picks, and
+  the two spellings that differ from X11's, and said nothing at all about a Mac's — where keys
+  are named after the legend printed on them (`Super_L` is `command`, `Alt_L` is `option`) and
+  `Delete`/`BackSpace` are a collision rather than a spelling difference. It has that section
+  now, with the PostEvent grant that stands in for a consent prompt, and its intro no longer
+  reads as though four Linux routes were all of them. `docs/getting-started.md` said "every
+  wait in pyguitest is a wait for something observable" with `wait(seconds)` and
+  `sync(timeout)` in the API beside it; it now names those two exceptions, says `timeout` is
+  in seconds with `None` meaning indefinitely, and says which platforms answer a window wait
+  with an event rather than a poll.
+
+- **The README's status line named the platforms it had been run against and left macOS out,
+  twenty lines above the paragraph saying macOS has driven a real Mac.** `docs/validation.md`
+  has carried eight macOS sections since 2026-09-26 — the `macos` backend through the AX read
+  path, `macquartz` through an event tap, a `Recorder` round trip, and `locate_image` against a
+  real desktop — more than Xfce and a plain X11 session have between them. The sentence's own
+  hedge already covers what is narrower about that evidence: "much of it has been run, some of
+  it has not" claims that a real session of that kind was driven, not how far each was taken,
+  and `validation.md` keeps the limits (one machine, one grant history, no event feed under
+  `wait_for_window` yet). The list reads "GNOME, KDE, sway, Xfce, X11, GhostBSD, Windows 11 and
+  macOS sessions" now, and lines up with the platform table twenty lines below it. Found by
+  asking that sentence which platforms it names and which it only looks like it does — the same
+  question the entry above came from. GhostBSD stays, though `validation.md` records no BSD
+  run: that claim is the recorder's own live GhostBSD session, and whether a list pointing at
+  `validation.md` should carry it is a separate question, not one this change settles.
+
 ## [0.15.0] — 2026-09-27
 
 ### Added

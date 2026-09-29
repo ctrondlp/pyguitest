@@ -323,6 +323,22 @@ XWayland included; being installed there does not make them usable, and
 Which input tool you get, and what it does to your typing, is
 [input.md](input.md).
 
+## Environment variables
+
+Two, both optional, both honoured on every platform. Nothing here changes
+which capability is available; they are the only two knobs the package reads
+from the environment.
+
+| Variable | What it does |
+|---|---|
+| `PYGUITEST_SCREENSHOT_DIR` | Where `screenshot()` writes its file when it is not given a `path`, and where `capture_on_failure()` writes its bundle when it is not given a `directory`. Falls back to the system temporary directory, which is why a failure bundle can be hard to find after a long run. |
+| `PYGUITEST_DOGTAIL_LOGS` | Set it to anything non-empty and the noise `dogtail` prints while it is imported is let through instead of swallowed. It is swallowed because it includes a multi-line complaint about `gnome-ponytail-daemon` that alarms a first-time reader; that complaint is worth reading when element geometry is what is failing, which is what this is for. |
+
+Neither is in the environment block `pyguitest debug` prints. That block lists
+the variables that decide *which session this is* (`XDG_SESSION_TYPE`,
+`WAYLAND_DISPLAY`, `DISPLAY`, `SWAYSOCK` and the rest); these two decide where
+output lands and how loud an import is.
+
 ## How capture picks a path
 
 **On GNOME under Wayland, per-window capture is prompt-free if you install

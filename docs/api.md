@@ -124,7 +124,7 @@ The recommended way to drive an application: match on what a widget is and what 
 
 ## Waiting
 
-Every `wait_*` call polls on an interval unless the backend can do better; `timeout=None` uses the session default.
+Every `wait_*` call polls on an interval unless the backend can do better: a window wait is answered by real notification — `SetWinEventHook` on Windows, a compositor event stream on GNOME Shell, KWin, sway or niri — but only when it matches a `title`. On macOS, which has no event feed here yet, on every X11 session, and on any wait that names `app_id`, that same call polls every `interval` seconds instead. `timeout` bounds the wait in seconds, and `timeout` left `None` — which every `wait_*` here defaults to, `sync` excepted — waits indefinitely; there is no session-level default to fall back on.
 
 | Call | Needs | | What it does |
 |------|-------|---|--------------|

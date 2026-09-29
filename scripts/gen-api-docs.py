@@ -139,7 +139,15 @@ GROUPS: list[tuple[str, str, list[str]]] = [
     (
         "Waiting",
         "Every `wait_*` call polls on an interval unless the backend can do "
-        "better; `timeout=None` uses the session default.",
+        "better: a window wait is answered by real notification — "
+        "`SetWinEventHook` on Windows, a compositor event stream on GNOME "
+        "Shell, KWin, sway or niri — but only when it matches a `title`. On "
+        "macOS, which has no event feed here yet, on every X11 session, and "
+        "on any wait that names `app_id`, that same call polls every "
+        "`interval` seconds instead. `timeout` bounds the wait in seconds, "
+        "and `timeout` left `None` — which every `wait_*` here defaults to, "
+        "`sync` excepted — waits indefinitely; there is no session-level "
+        "default to fall back on.",
         [
             "wait",
             "sync",
@@ -748,7 +756,14 @@ def render() -> str:
 
 def main() -> None:
     """Write docs/api.md."""
-    OUT.write_text(render(), encoding="utf-8")
+    # `newline="\n"` deliberately. The checked-in file is LF, and `write_text`
+    # otherwise translates to the platform's line ending: on Windows every run
+    # rewrote all of it as CRLF, so regenerating after a docstring change showed
+    # a whole-file diff, and the real change had to be found inside it. This is
+    # a formatter, and a formatter that churns the file it formats is not one.
+    # Nothing about the text changes -- `test_api_docs` reads it back with
+    # universal newlines either way -- only what the diff after a run shows.
+    OUT.write_text(render(), encoding="utf-8", newline="\n")
     print(f"wrote {OUT.relative_to(ROOT)}")
 
 

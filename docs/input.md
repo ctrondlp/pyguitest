@@ -8,6 +8,14 @@ order of preference: `eiinput` (keymap-safe, needs libei), the `wdotool` /
 XWayland -- but under XWayland it reaches only that session's X clients,
 never its native Wayland ones).
 
+None of those is a choice on Windows or macOS, where there is no uinput and no
+X server to type through: `win32` sends Unicode through `SendInput` and
+`macquartz` posts it through `CGEventKeyboardSetUnicodeString`, so both are
+keymap-safe by construction and neither needs a daemon or a group membership.
+[On Windows](#on-windows-virtual-keys-scan-codes-and-unicode) and
+[on macOS](#on-macos-key-legends-and-one-collision) are the details, including
+the key spellings that differ from X11's.
+
 What has and has not been exercised against a real desktop is recorded in
 [validation.md](validation.md).
 
@@ -176,6 +184,45 @@ table exists as data for the case that needs it rather than as a call here.
 
 The Windows trap is not keymaps but privilege: see
 [troubleshooting.md](troubleshooting.md#injected-input-vanishes-on-windows).
+
+### On macOS: key legends, and one collision
+
+None of the ranking above applies on a Mac either, and for the same reason it
+does not on Windows: `macquartz` types through
+`CGEventKeyboardSetUnicodeString`, so `type_text` never asks what layout is
+active, and `allow_keymap_unsafe` is accepted and ignored rather than refusing.
+
+Injection needs the **PostEvent** grant (`kTCCServicePostEvent`), not
+Accessibility — `CGEventPost` calls no AX API — though System Settings files
+the two under one pane, and that pane is where the grant is made by hand,
+against the application that launched the process. Over SSH there is no such
+application; the grant instead attaches to the session's own responsible
+identity (`sshd-keygen-wrapper`), and whether injection works depends on
+whether *that* identity has been granted Accessibility — not on the
+connection being SSH at all — which composes PostEvent along with it once it
+has been. Reading the pointer back needs no grant at all: `pointer_position()`
+is a single
+`CGEventGetLocation` read. `sync()` is the one call that is not there:
+`CGEventPost` reports nothing about what was consumed, so `INPUT_SYNC` is
+absent rather than answering True.
+
+Chords are the part that has to be rewritten, because a Mac names a key after
+the legend printed on it where X11 names the modifier:
+
+| X11 keysym | macOS key | Why |
+|---|---|---|
+| `Super_L` / `Super_R` | `command` / `rightcommand` | named after the legend on the key |
+| `Alt_L` / `Alt_R` | `option` / `rightoption` | as above |
+| `Control_L`, `Control_R`, `Shift_L`, `Shift_R` | `control`, `rightcontrol`, `shift`, `rightshift` | as above |
+| `Page_Up`, `Page_Down`, `bracketleft`, `bracketright`, `apostrophe` | `pageup`, `pagedown`, `leftbracket`, `rightbracket`, `quote` | spelling only |
+| `BackSpace` / `Delete` | `delete` / `forwarddelete` | a collision, not a spelling difference |
+
+The last row is the trap. Lower-cased, X11's `Delete` is this table's `delete`,
+which on a Mac is the key labelled **delete** — the one X11 calls `BackSpace`.
+Telling them apart is why the lookup is case-sensitive, so a chord written with
+the wrong spelling plays back the wrong key instead of failing loudly.
+Everything else is matched case-insensitively and needs no translation:
+`Return`, `Tab`, `Left`, `F5`.
 
 ## `eiinput`: keymap-safe input over libei
 
