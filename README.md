@@ -14,8 +14,7 @@ Automate and test Linux, BSD, Windows and macOS desktop applications from
 Python — even when the application has no automation API.
 
 Pyguitest provides one Python API for mouse, keyboard, window, screenshot, and
-accessible UI automation across Wayland, X11, XWayland, Windows and macOS. It
-is the Python successor to [X11::GUITest](https://metacpan.org/pod/X11::GUITest).
+accessible UI automation across Wayland, X11, XWayland, Windows and macOS.
 
 Use it to:
 
@@ -30,8 +29,8 @@ Use it to:
 - 🎬 Choreograph screen action for film, TV and stage — a character's typing
   and clicking, landing on cue
 
-**Status:** every capability implemented across all backends, covering
-**every X11::GUITest export**. Much of it has been run against real GNOME,
+**Status:** every capability in pyguitest's vocabulary implemented across all
+backends. Much of it has been run against real GNOME,
 KDE, sway, Xfce, X11, GhostBSD, Windows 11 and macOS sessions; some of it has
 not, and [docs/validation.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/validation.md) says exactly which is which,
 so nothing here has to be taken on trust.
@@ -303,9 +302,9 @@ writing a script first. `--window TITLE_REGEX` narrows it to one application;
 `--json` gives the same tree as machine-readable data, the same split
 `debug` uses.
 
-The migration scanner reports the tier of every X11::GUITest call in a source
-file and exits non-zero if any call has no Wayland path, so a port can be gated
-in CI.
+The migration scanner reports the tier of every call it recognizes in a Perl
+script and exits non-zero if any call has no Wayland path, so a port can be
+gated in CI.
 
 `pyguitest record` is an alias for [pyguitest-recorder][recorder], which
 records desktop activity and writes the pyguitest script for it. That tool is
@@ -326,7 +325,7 @@ flags works unchanged.
   working script, which API to reach for, and what X11, Wayland and XWayland
   each change
 - [docs/recipes.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/recipes.md) — task-shaped answers: waiting properly,
-  forms, windows, screenshots, CI, and an X11::GUITest cheat sheet
+  forms, windows, screenshots, CI, and a cheat sheet for porting a Perl script
 - [docs/troubleshooting.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/troubleshooting.md) — symptom first: nothing
   found, nothing typed, nothing captured
 
@@ -348,9 +347,8 @@ flags works unchanged.
   lives in the [recorder][] repository
 
 **Design and internals** — [docs/developers/](https://github.com/ctrondlp/pyguitest/tree/main/docs/developers/): why the API
-is not a port, the audit of all 50 X11::GUITest exports it derives from, the
-two ADRs, the repository structure, and the protocol gaps worth taking
-upstream.
+is not a port, the audit of the 50 exports it derives from, the two ADRs,
+the repository structure, and the protocol gaps worth taking upstream.
 
 ## Contributing
 
