@@ -145,8 +145,9 @@ All notable changes to pyguitest are recorded here. The format follows
   rather than the accessible tree and that proxy is not a real toplevel there; `window_element`
   now uses its `pid`, where one is available, to prefer the element that actually belongs
   to the window rather than merely sharing its title, and falls back to the previous
-  name-only match exactly where it always has -- no window in `find_windows`, or a backend
-  that fills no `pid` at all.
+  name-only match exactly where it always has -- no window in `find_windows`, a backend
+  that fills no `pid`, or a backend with ELEMENT_TREE but no WINDOW_LIST, which used to
+  raise `CapabilityUnsupported` out of the new lookup instead of falling back.
 
 ### Changed
 

@@ -51,7 +51,7 @@ The recommended way to drive an application: match on what a widget is and what 
 | `element(role: str \| None = None, name: str \| re.Pattern[str] \| None = None, within: Element \| None = None, enabled: bool \| None = None, visible: bool \| None = None, description: str \| re.Pattern[str] \| None = None, predicate: Callable[[Element], bool] \| None = None)` | `ELEMENT_TREE` |  | Return the first element matching every given filter. |
 | `elements(role: str \| None = None, name: str \| re.Pattern[str] \| None = None, within: Element \| None = None, enabled: bool \| None = None, visible: bool \| None = None, description: str \| re.Pattern[str] \| None = None, predicate: Callable[[Element], bool] \| None = None)` | `ELEMENT_TREE` |  | Return every accessible element matching every given filter. |
 | `root_element()` | `ELEMENT_TREE` |  | The accessible-tree root. The replacement for the X11 window tree. |
-| `window_element(title: str \| re.Pattern[str])` | `ELEMENT_TREE`, `WINDOW_LIST` |  | The accessible Element for the window matching `title`. |
+| `window_element(title: str \| re.Pattern[str])` | `ELEMENT_TREE` — uses `WINDOW_LIST` if present |  | The accessible Element for the window matching `title`. |
 | `focused()` | `ELEMENT_TREE` — uses `WINDOW_STATE` if present |  | The accessible element that currently has keyboard focus, or None. |
 | `focus_tracking_works()` | `ELEMENT_TREE` — uses `WINDOW_STATE` if present |  | Whether this desktop actually publishes per-widget keyboard focus. |
 

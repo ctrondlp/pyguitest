@@ -1633,8 +1633,13 @@ class Session:
 
         None on any failure -- no window manager list, no match, no pid filled
         in for the match found -- which is exactly when `window_element`
-        should fall back to matching by name alone, as it always has.
+        should fall back to matching by name alone, as it always has. Checked
+        explicitly rather than caught, because a backend with ELEMENT_TREE but
+        not WINDOW_LIST raises CapabilityUnsupported from `find_window`, not
+        WindowNotFound -- window_element must still work by name alone there.
         """
+        if not self.supports(Capability.WINDOW_LIST):
+            return None
         try:
             return self.find_window(title).pid
         except WindowNotFound:
