@@ -331,7 +331,7 @@ from the environment.
 
 | Variable | What it does |
 |---|---|
-| `PYGUITEST_SCREENSHOT_DIR` | Where `screenshot()` writes its file when it is not given a `directory`, and where `capture_failures()` writes its bundle. Falls back to the system temporary directory, which is why a failure bundle can be hard to find after a long run. |
+| `PYGUITEST_SCREENSHOT_DIR` | Where `screenshot()` writes its file when it is not given a `path`, and where `capture_on_failure()` writes its bundle when it is not given a `directory`. Falls back to the system temporary directory, which is why a failure bundle can be hard to find after a long run. |
 | `PYGUITEST_DOGTAIL_LOGS` | Set it to anything non-empty and the noise `dogtail` prints while it is imported is let through instead of swallowed. It is swallowed because it includes a multi-line complaint about `gnome-ponytail-daemon` that alarms a first-time reader; that complaint is worth reading when element geometry is what is failing, which is what this is for. |
 
 Neither is in the environment block `pyguitest debug` prints. That block lists

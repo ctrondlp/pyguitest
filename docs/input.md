@@ -195,9 +195,13 @@ active, and `allow_keymap_unsafe` is accepted and ignored rather than refusing.
 Injection needs the **PostEvent** grant (`kTCCServicePostEvent`), not
 Accessibility — `CGEventPost` calls no AX API — though System Settings files
 the two under one pane, and that pane is where the grant is made by hand,
-against the application that launched the process. Over SSH the answer is
-always no, because there is no such application to attribute it to. Reading
-the pointer back needs no grant at all: `pointer_position()` is a single
+against the application that launched the process. Over SSH there is no such
+application; the grant instead attaches to the session's own responsible
+identity (`sshd-keygen-wrapper`), and whether injection works depends on
+whether *that* identity has been granted Accessibility — not on the
+connection being SSH at all — which composes PostEvent along with it once it
+has been. Reading the pointer back needs no grant at all: `pointer_position()`
+is a single
 `CGEventGetLocation` read. `sync()` is the one call that is not there:
 `CGEventPost` reports nothing about what was consumed, so `INPUT_SYNC` is
 absent rather than answering True.
