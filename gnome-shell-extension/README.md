@@ -1,52 +1,30 @@
 # pyguitest-window-control
 
-A GNOME Shell extension with no UI of its own. It exists solely to give
-`pyguitest.backends.gnomeshell.GnomeShellBackend` a way to list, move,
-resize, activate and minimize windows on GNOME — the one thing nothing else
-in pyguitest can do on a pure Wayland session (no XWayland at all), since
-Mutter implements no foreign-toplevel protocol.
+A GNOME Shell extension with no UI of its own. It gives pyguitest's
+`GnomeShellBackend` a way to list, move, resize, activate and minimize
+windows on GNOME, which nothing else can do on a pure Wayland session (no
+XWayland), because Mutter implements no foreign-toplevel protocol. It also
+captures a single window's pixels without a consent prompt, and reports
+window open, close and title-change events.
 
-It also captures a window's pixels, which on GNOME under Wayland nothing
-else can do without a consent prompt — see **Window capture** below.
+It is optional: without it, pyguitest on GNOME still has elements, input,
+and whole-screen capture through the Screenshot portal, but less window
+control. Read
+[What installing this means](#what-installing-this-means) before enabling it.
 
-**Status: window control validated live on GNOME Shell 50.4** with
-`scripts/validate-gnome-extension.sh` (8 of 8 checks). That first live run
-found two real bugs written from the headers alone, both since fixed.
-**Window capture validated live on GNOME Shell 50.4** (2026-08-29): a real
-window was captured to a PNG through `Meta.WindowActor.get_image`, on a
-pure Wayland session where every other capture route is closed.
+**Requirements:** GNOME Shell 45 or newer (the `shell-version` list in
+`metadata.json`), and a copy of the pyguitest source tree — the extension is
+not included in the pip package.
 
-**Window capture also validated live on GNOME Shell 51.beta** (2026-09-02):
-Mutter 51 removed `get_image` with no drop-in replacement, which had made
-capture silently unavailable on any Shell ≥51 (the id-0 probe correctly
-reported it unsupported, but that is still "no capture"). The extension now
-uses `paint_to_content()` + `Shell.Screenshot.composite_to_stream()` on
-those shells instead — see **Window capture** below for the version fork,
-and `docs/validation.md`'s GNOME Shell 51.beta section for the shadow-margin
-crop bug that first live run found and fixed.
-
-**Window events validated live on GNOME Shell 50.4** (2026-08-30): all
-three -- `new`, `title`, `close` -- confirmed over the real `WindowEvent`
-D-Bus signal. `scripts/validate-gnome-extension.sh` spawns and kills a
-throwaway `gnome-text-editor`/`gedit`/`gnome-calculator` at step 6
-specifically to exercise `new`/`close` deterministically rather than
-depending on a person's timing, then asserts both arrived; a run doing
-exactly that passed all 9 checks clean, `new` included. Three real bugs
-surfaced getting here, all in the *script itself* rather than the
-extension or the backend, each fixed in turn: two stale-window crashes in
-the read-only checks after a window closed during the listen, and a race
-where killing the launched process happened only after that first
-listen's D-Bus subscription had already been torn down -- a `close`
-firing in that gap was lost with nothing to blame but timing. Fixed by
-using one continuous subscription across spawn, kill, and close instead
-of two separate ones. See **Window events** below for the shape of the
-signal.
-
-If the extension doesn't load, `journalctl -f /usr/bin/gnome-shell` (or
-`looking-glass`, `Alt+F2` then `lg`) is where GNOME Shell logs extension
-errors.
+**Status:** window control, window capture and window events have been
+validated live with `scripts/validate-gnome-extension.sh` on GNOME Shell 50.4,
+and window capture again on 51.beta, where the capture code path changed
+(see [Window capture](#window-capture)). [docs/validation.md](../docs/validation.md)
+has the runs.
 
 ## Install
+
+From the root of a pyguitest checkout:
 
 ```sh
 UUID=pyguitest-window-control@pyguitest.local
@@ -54,49 +32,46 @@ mkdir -p ~/.local/share/gnome-shell/extensions/$UUID
 cp gnome-shell-extension/$UUID/* ~/.local/share/gnome-shell/extensions/$UUID/
 ```
 
-On X11, restart the shell to load it: `Alt+F2`, type `r`, Enter. **On
-Wayland there is no equivalent — log out and back in.**
-
-Then enable it:
+GNOME Shell only picks up a new extension when it starts. On Wayland, log
+out and back in; on X11, `Alt+F2`, type `r`, Enter. Then enable it:
 
 ```sh
 gnome-extensions enable pyguitest-window-control@pyguitest.local
 ```
 
-Confirm it's running:
+Confirm it is running:
 
 ```sh
 gnome-extensions info pyguitest-window-control@pyguitest.local
 ```
 
-should report `State: ACTIVE`. If it reports `ERROR` instead, that's the
-debugging round trip mentioned above — check the log locations above for
-what GNOME Shell's JS engine rejected.
+It should report `State: ACTIVE`. If it reports `ERROR`, GNOME Shell's log
+says why: `journalctl -f /usr/bin/gnome-shell`, or Looking Glass
+(`Alt+F2`, then `lg`).
 
-**`ACTIVE` does not mean your copy is the one running.** On Wayland a
-shell keeps serving the code it loaded at login, so an extension you have
-just overwritten still reports `ACTIVE` while behaving like the old one.
-That is not a failure state, just an un-restarted session — and it
-presents as `UnknownMethod: No such method "CaptureWindow"` from
-pyguitest, which is why that error tells you to log out and back in.
+**After updating the extension, log out and back in again.** On Wayland the
+shell keeps running the code it loaded at login, so a copy you have just
+overwritten still reports `ACTIVE` while behaving like the old one. The usual
+symptom is `UnknownMethod: No such method "CaptureWindow"` from pyguitest,
+and that error suggests logging out for this reason. `metadata.json`'s
+`version-name` (currently `0.4.0-appid`) tells builds apart, but
+`gnome-extensions info` may report the installed copy rather than the loaded
+one.
 
-`metadata.json` carries a `version-name` (`0.3.0-events`) so you can at
-least tell the builds apart. Be careful how much you read into it, though:
-it is not confirmed whether `gnome-extensions info` reports metadata the
-shell cached at load time or re-reads it from disk. If it is the latter,
-the version tells you what is *installed*, not what is *loaded*, and the
-two differ for exactly as long as it takes you to log out.
-
-The one unambiguous check is to call the method. `pyguitest` does that at
-construction and says which of the two possible causes applies:
+To check from Python that pyguitest can reach it:
 
 ```sh
 python3 -c "
 import pyguitest
+from pyguitest import Capability
 gui = pyguitest.connect(backend='gnomeshell')
-print(gui.backend._can_capture, '|', gui.backend._capture_note)
+print('window capture:', gui.supports(Capability.WINDOW_CAPTURE))
 "
 ```
+
+`connect(backend="gnomeshell")` raises `BackendUnavailable` if the extension
+is not reachable; `WINDOW_CAPTURE` is `False` when the extension is running
+but cannot capture on this shell.
 
 ## Uninstall
 
@@ -154,7 +129,7 @@ prompts only once.
 
 ### What installing this means
 
-Worth being explicit, because it is the point of the feature. The Shell's
+The Shell's
 sender allowlist exists precisely so that an arbitrary application cannot
 screenshot your session without asking. This extension deliberately routes
 around that: while it is enabled, **anything that can talk to your session
@@ -187,11 +162,8 @@ a close signal reaches a subscriber the window is already gone from
 `ListWindows` -- there is nothing left to look its title up against by
 then, unlike geometry or viewability, which can always ask fresh.
 
-This closes GNOME's biggest remaining gap against sway/niri: without it,
-`wait_for_window`/`wait_window_close` on GNOME fell back to
-`Session`'s polling loop (a fixed interval, no compositor push) even
-though window control here was otherwise fully event-capable elsewhere in
-this package.
+Without the extension, `wait_for_window` and `wait_window_close` on GNOME
+fall back to polling every `interval` seconds.
 
 If `window-created`/`unmanaging`/`notify::title` ever fail to connect on
 some future Mutter (`startWatching()` in `extension.js`), the extension

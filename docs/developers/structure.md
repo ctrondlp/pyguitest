@@ -165,13 +165,19 @@ whatever answers. Priority decides who wins a contested capability.
 
 | Priority | Name | Serves |
 |---|---|---|
-| 95 | `windows` | window control; wins `WINDOW_GEOMETRY` over AT-SPI |
+| 95 | `windows` | window control on sway, Hyprland, niri and KWin; wins `WINDOW_GEOMETRY` over AT-SPI |
 | 93 | `gnomeshell` | window control on Mutter, prompt-free per-window capture, and output/scale reporting (the last straight from Mutter's own `DisplayConfig`), via the `pyguitest-window-control` extension |
 | 90 | `atspi` | elements, and window listing where Mutter offers nothing |
+| 90 | `uia` | elements on Windows, via UI Automation (the `windows` extra) |
+| 90 | `macos` | elements, windows and screens on macOS, via Accessibility and CoreGraphics (the `macos` extra) |
 | 80 | `portal` *(opt-in)* | keyboard and pointer buttons/scroll, via the RemoteDesktop portal; also the clipboard with `clipboard=True`, which is the only clipboard path on GNOME |
 | 80 | `eiinput` *(opt-in)* | absolute pointer move/buttons/scroll, plus keymap-safe keyboard where the compositor's keymap is readable, via libei over the same portal |
-| 70 | `input` | pointer and keyboard |
+| 80 | `inputcapture` *(opt-in)* | the pointer position at a screen-edge crossing, via the InputCapture portal |
+| 70 | `input` | pointer and keyboard through a CLI tool, or uinput |
+| 70 | `win32` | windows, window events, screens, input, capture and the clipboard on Windows, in plain `ctypes` |
+| 70 | `macquartz` *(opt-in)* | pointer and keyboard on macOS, via `CGEventPost` |
 | 60 | `capture` | screenshots |
+| 58 | `clipboard` | clipboard text through `wl-clipboard`, `xclip`, `xsel` or `pbcopy`/`pbpaste` |
 | 58 | `portalcapture` *(opt-in)* | screenshots via the Screenshot portal, needing no tool installed |
 | 57 | `kwinevents` | window events on KDE, via an ad hoc KWin script pushing to a D-Bus service this backend hosts; `kdotool` has no subscription mechanism of its own |
 | 55 | `imagesearch` | locating a template image, via ImageMagick's `compare` or its IM7 dispatcher `magick` |

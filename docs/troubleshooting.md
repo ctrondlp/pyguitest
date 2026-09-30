@@ -5,7 +5,9 @@ here, `pyguitest debug` collects everything a bug report needs — see
 [Which tool to reach for](#which-tool-to-reach-for) at the end.
 
 - [`gui.button("Save")` raises ElementNotFound](#guibuttonsave-raises-elementnotfound)
+- [No GTK3 or Qt application has any accessible elements](#no-gtk3-or-qt-application-has-any-accessible-elements)
 - [One application has no accessible elements at all](#one-application-has-no-accessible-elements-at-all)
+- [Nothing works on macOS: no elements, no input, black screenshots](#nothing-works-on-macos-no-elements-no-input-black-screenshots)
 - [Injected input does nothing](#injected-input-does-nothing)
 - [The wrong characters get typed](#the-wrong-characters-get-typed)
 - [Injected input vanishes on Windows](#injected-input-vanishes-on-windows)
@@ -13,6 +15,8 @@ here, `pyguitest debug` collects everything a bug report needs — see
 - [A window will not come to the front on Windows](#a-window-will-not-come-to-the-front-on-windows)
 - [CapabilityUnsupported on a window operation](#capabilityunsupported-on-a-window-operation)
 - [`geometry()` reports a position nowhere near the window](#geometry-reports-a-position-nowhere-near-the-window)
+- [An element's coordinates are nowhere near its window](#an-elements-coordinates-are-nowhere-near-its-window)
+- [`wait_for_window` hands back a window with no position yet](#wait_for_window-hands-back-a-window-with-no-position-yet)
 - [Pointer and key-state reads look stale](#pointer-and-key-state-reads-look-stale)
 - [Focus assertions never match anything](#focus-assertions-never-match-anything)
 - [The clipboard reads back empty](#the-clipboard-reads-back-empty)
@@ -44,8 +48,16 @@ dialog opens is not there when the line runs. That is what the waits are
 for:
 
 ```python
-gui.wait_for_element(name="Save", timeout=10).click()
+gui.expect_element(name="Save", timeout=10).click()
 ```
+
+`expect_element` raises `ElementNotFound` if nothing appears in time;
+`wait_for_element` returns `None` instead, so do not chain `.click()` onto
+it.
+
+**On macOS, check the Accessibility grant.** Without it every element query
+comes back empty — see
+[Nothing works on macOS](#nothing-works-on-macos-no-elements-no-input-black-screenshots).
 
 If nothing in the application is findable, the next entry is the one you
 want.
@@ -66,14 +78,16 @@ all. Nothing errors: the bus is healthy, `libatspi` is installed,
 queries come back empty. GTK4 ignores the variable, which makes the gap look
 selective rather than total and so much harder to recognise.
 
-Shells, containers, CI images and tool runners all export it to silence GTK's
-"couldn't connect to accessibility bus" warning, so it is often set by
-something other than you — found exactly that way on a session where `doctor`
-reported nothing missing. `pyguitest doctor` now names it in its notes. Unset
-it for whatever launches the application under test, not only for the test
-process:
+Shells, containers, CI images and tool runners often export it to silence
+GTK's "couldn't connect to accessibility bus" warning, so it may have been
+set by something other than you. `pyguitest doctor` mentions it in its notes.
+Unset it for whatever launches the application under test, not only for the
+test process:
 
 ```python
+import os
+import subprocess
+
 environment = {**os.environ}
 environment.pop("NO_AT_BRIDGE", None)
 subprocess.Popen(["gedit"], env=environment)
@@ -105,14 +119,34 @@ costs those applications real performance.
 [install.md](install.md#chromium-and-electron-apps-need-an-at-to-be-announced)
 has the exact commands.
 
+## Nothing works on macOS: no elements, no input, black screenshots
+
+On a Mac each capability sits behind its own privacy grant, and a missing
+grant usually fails quietly rather than raising. Run `pyguitest doctor`
+first: it names every grant this process lacks.
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| Element queries find nothing | the Accessibility grant | System Settings > Privacy & Security > Accessibility |
+| `move_mouse()`, `click()` or `type_text()` raise `CapabilityUnsupported` | `macquartz` is opt-in, so a plain `connect()` has no input | `connect(backend=["macquartz", "macos"])` |
+| Input calls return but nothing moves or types | the PostEvent grant | Privacy & Security > Accessibility — the same pane, a separate grant |
+| `PermissionRequired` naming Screen Recording | the Screen Recording grant | Privacy & Security > Screen Recording |
+
+A grant belongs to an application, not to you: usually the one that launched
+Python (Terminal, iTerm, an IDE), sometimes the Python interpreter itself. If
+a grant you switched on has no effect, look for a second row naming the other
+one, and quit and reopen the launching app. Over SSH the grants attach to the
+SSH session instead; see [input.md](input.md#on-macos-key-legends-and-one-collision).
+[install.md](install.md#on-macos) has the full setup.
+
 ## Injected input does nothing
 
 Work down this list; it is ordered by how often each one is the answer.
 
 1. **Is there an input path at all?** `pyguitest doctor` says what is missing
-   and how to install it. Injection needs either `/dev/uinput` permission, a
-   `ydotool` daemon, libei, or portal consent — none of which is present by
-   default on every desktop.
+   and how to install it. On Linux, injection needs `/dev/uinput`
+   permission, a `ydotool` daemon, libei, or portal consent, and no desktop
+   has all of these by default.
 2. **Did a consent dialog appear and get dismissed?** Portal-based input
    raises one, and a dismissed prompt looks exactly like injection silently
    failing.
@@ -128,8 +162,10 @@ Work down this list; it is ordered by how often each one is the answer.
    ```
 
 [input.md](input.md#when-injected-input-appears-to-do-nothing) is the full
-version of this list, with the per-backend detail behind each step. On Windows
-none of those steps is the answer — see the next entry instead.
+version of this list, with the per-backend detail behind each step. None of
+it applies on Windows or macOS: see
+[Injected input vanishes on Windows](#injected-input-vanishes-on-windows) or
+[Nothing works on macOS](#nothing-works-on-macos-no-elements-no-input-black-screenshots).
 
 ## The wrong characters get typed
 
@@ -144,14 +180,12 @@ detection when only keymap-unsafe ones are present. Prefer `wdotool`,
 through the server's own keymap. [input.md](input.md#keymap-safety) explains
 the ranking, and `pyguitest doctor` says which tools you have.
 
-A separate, narrower case, now fixed: characters that need a group switch
-(AltGr on many layouts) rather than Shift. `type_text()` holds the server's
-own group-switch key for those, not Shift, and raises `CapabilityUnsupported`
-for a character in a keyboard group the server has no switch key for at all,
-rather than typing the wrong (group-1) character silently. If a character
-still comes out wrong, check `gui._group_switch_keycode()` for `None` first —
-that means this X server has no `ISO_Level3_Shift` or `Mode_switch` key at
-all, which no workaround here can supply.
+On X11, characters that need a group switch (AltGr on many layouts) are
+typed by holding the server's own group-switch key. If the X server's keymap
+has no `ISO_Level3_Shift` or `Mode_switch` key at all, `type_text()` raises
+`CapabilityUnsupported` for those characters rather than typing the wrong
+ones; adding such a key to the keymap (for example with `setxkbmap`) is the
+fix.
 
 ## Injected input vanishes on Windows
 
@@ -352,9 +386,9 @@ gui.wait_until(lambda: gui.geometry(window) != (0, 0, 0, 0))
 
 ## Pointer and key-state reads look stale
 
-`pointer_position()`, `is_key_pressed()` and `is_button_pressed()` are X11
-only by design — no Wayland compositor allows reading global input state,
-because that is what a keylogger reads.
+`pointer_position()`, `is_key_pressed()` and `is_button_pressed()` work on
+X11 and Windows, and `pointer_position()` on macOS too. No Wayland compositor
+allows reading global input state, by design: it is what a keylogger reads.
 
 Under **XWayland** they exist and answer, but only for X's world, and where
 they cannot answer they return **the last value they had rather than an
@@ -376,20 +410,11 @@ applies. Detail in
 desktop publishing per-widget keyboard focus to the accessibility bus. Some
 do not.
 
-**On GNOME this used to be reported here as one of them, and that was our own
-bug** — corrected 2026-09-21 after measuring it again on GNOME Shell 51.rc.
-Two elements carry `FOCUSED` at any moment on that desktop: the shell's own
-`Main stage` window *and* the focused widget inside the active application.
-Both are published; a walk from the tree root simply reaches the shell's
-first, and `focused()` returned that one. It now searches the active
-window's application before broadening, and prefers a widget over a toplevel
-claiming the same state — so on GNOME it answers with the real widget, and
-`focus_tracking_works()` answers `True` where it used to answer `False`.
-Confirmed in both toolkits and both protocols: GTK3 through XWayland and
-GTK4 as a native Wayland client each published their focused text field.
-
-A desktop where genuinely nothing but a toplevel claims focus still reports
-`False`, which is what the probe is for. Probe before relying on them:
+GNOME does publish it: `focused()` searches the active window's application
+first, so it finds the focused widget rather than the shell's own window,
+which also claims focus (measured on GNOME Shell 51.rc with GTK3 and GTK4
+clients). A desktop where only a toplevel ever claims focus makes
+`focus_tracking_works()` return `False`. Probe before relying on them:
 
 ```python
 if gui.focus_tracking_works():
@@ -497,13 +522,10 @@ gui.move_mouse(match.x + match.width // 2, match.y + match.height // 2)
 gui.click()
 ```
 
-**A timeout used to be the outcome rather than slowness.** The subprocess
-budget was a flat 15 seconds, so the 1920×1080 timing above failed outright
-about 51 seconds in — on the platform with the slowest build, and past the
-point where `within=` could help, because the desktop really was what got
-searched. The budget is now derived from the area searched (`area × 40µs`,
-floored at 15s, capped at five minutes) and the error says which budget it
-used, so the message reads `timed out after 83s` rather than `timed out`.
+**The time limit scales with the search.** The subprocess budget is derived
+from the area searched (`area × 40µs`, at least 15s and at most five
+minutes), and a timeout error names the budget it used, e.g.
+`timed out after 83s`.
 
 **Why Windows is the slow one.** ImageMagick's fast path for a subimage search
 is its FFTW delegate, which a distro build or Homebrew's usually has and the
@@ -522,11 +544,13 @@ command line added. `pyguitest doctor` reports which of the two it found, and
 
 ## `connect()` raises BackendUnavailable
 
-`connect()` is deliberately hard to fail: a session with almost no
-capabilities is normal and returns a working object. `BackendUnavailable`
-means no backend at all could drive this session — typically no display
-server (a bare ssh session), or a container that cannot reach the host's
-buses and sockets.
+A plain `connect()` never raises it: when nothing can drive the session it
+returns a session with no capabilities, and `pyguitest` reports them all as
+missing. `BackendUnavailable` comes from naming a backend —
+`connect(backend="portal")`, say — that cannot be built here, and its message
+says why: a missing library, a refused consent dialog, no display server (a
+bare SSH session), or a container that cannot reach the host's buses and
+sockets.
 
 ```sh
 pyguitest debug     # says which of $DISPLAY, $WAYLAND_DISPLAY, the buses
@@ -565,5 +589,6 @@ covers the three arrangements that do work.
 | What is there for my script to match on? | `pyguitest inspect --window "..."` |
 | What would porting this Perl script involve? | `pyguitest migrate script.pl` |
 
-All of them also work as `python3 -m pyguitest …` from a checkout, without
-installing anything.
+All of them also work as `python3 -m pyguitest …`, for when the
+`pyguitest` script is not on `PATH`. From a source checkout, install it
+first (`pip install .`) or run with `PYTHONPATH=src`.

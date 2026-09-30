@@ -467,7 +467,8 @@ def _darwin_hints(
             "grant is held and the binding is installed, but `macquartz` is "
             "registered `opt_in`, so automatic composition never selects it "
             "and a plain `connect()` injects nothing at all -- no pointer, no "
-            'keys, no text. connect(backend="macquartz") is the whole fix',
+            "keys, no text. Name it alongside the element backend: "
+            'connect(backend=["macquartz", "macos"])',
             None,
             installable=False,
         )

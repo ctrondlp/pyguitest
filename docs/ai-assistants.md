@@ -45,10 +45,12 @@ rules below are one shape of that mistake.
    [api.md](api.md), which is generated from the source. If a plausible
    method is not there, it does not exist — say so rather than emitting it.
 
-6. **Window titles are regexes, not literals.** `find_window`,
-   `find_windows` and `wait_for_window` all match a regex. Titles carry
-   document names and modification markers, so anchor loosely and escape
-   anything literal.
+6. **A string title is a literal substring; a regex must be compiled.**
+   `find_window`, `find_windows`, `wait_for_window`, `expect_window` and
+   `window_element` match a plain string literally, as a substring, so
+   `"^Save"` matches only a title containing the characters `^Save`. For a
+   pattern, pass `re.compile(...)`. Prefer `app_id=` where it is known: it
+   survives a title that changes with the document.
 
 7. **Set text through the element, not the keyboard.**
    `gui.text_field("Name").set_text("Ada")` needs no focus and no keyboard
@@ -64,7 +66,11 @@ rules below are one shape of that mistake.
 9. **`scroll()` takes whole wheel detents, and `dy > 0` is up.** The same on
    every backend. Do not pass pixel deltas.
 
-10. **Capture failures with `capture_on_failure`, not a hand-written
+10. **Use `expect_*` when absence is a failure.** `wait_for_window` and
+    `wait_for_element` return `None` on timeout; `expect_window` and
+    `expect_element` raise. Never chain a method onto a `wait_for_*` result.
+
+11. **Capture failures with `capture_on_failure`, not a hand-written
     `except`.** By the time an `except` block runs the application is
     usually gone:
 
@@ -73,11 +79,11 @@ rules below are one shape of that mistake.
         ...
     ```
 
-11. **Close the session.** Use `with pyguitest.connect() as gui:` or call
+12. **Close the session.** Use `with pyguitest.connect() as gui:` or call
     `gui.close()`. Same for `gui.start_app(...)`, which returns an
     `Application` usable as a context manager.
 
-12. **Do not assume X11, and do not assume Windows is Linux with another
+13. **Do not assume X11, and do not assume Windows is Linux with another
     toolkit.** `pointer_position()`, `is_key_pressed()`,
     `is_button_pressed()`, `set_window_title()`, `lower_window()` and
     `is_window_cursor()` are the tier-6 capabilities: no Wayland compositor
@@ -89,17 +95,23 @@ rules below are one shape of that mistake.
     constrains the script to rather than emitting it silently, or check
     `gui.supports(...)` and skip.
 
-13. **Do not hardcode screen dimensions.** Ask: `gui.screens()`, and use
+14. **Do not hardcode screen dimensions.** Ask: `gui.screens()`, and use
     `Screen.size`. Multi-monitor layouts and fractional scaling make any
     literal wrong somewhere.
 
-14. **`send_keys()` has a grammar.** `^` Ctrl, `%` Alt, `+` Shift, `#` Meta,
+15. **`send_keys()` has a grammar.** `^` Ctrl, `%` Alt, `+` Shift, `#` Meta,
     `{TAB}` and friends. For text that contains those characters literally,
     use `quote_for_type()` or `type_text()`.
 
-15. **Prefer the accessibility layer over image matching.** `locate_image()`
+16. **Prefer the accessibility layer over image matching.** `locate_image()`
     is real and useful, but it breaks on theme, font and scaling changes.
     Reach for it only when there is nothing accessible to match.
+
+17. **On macOS, input is opt-in.** A plain `connect()` there has elements and
+    windows but no pointer or keyboard. A script that injects input on a Mac
+    connects with `pyguitest.connect(backend=["macquartz", "macos"])`, and
+    the user must grant Accessibility (and Screen Recording, for capture) in
+    System Settings — code cannot grant them.
 
 ## A correct script, end to end
 
@@ -124,7 +136,7 @@ class SaveTest(unittest.TestCase):
     def test_saves_the_document(self):
         gui = self.gui
         with gui.start_app(["gnome-text-editor"]) as app:
-            window = gui.wait_for_window(r"Text Editor", timeout=10)
+            window = gui.expect_window("Text Editor", timeout=10)
 
             with gui.capture_on_failure("artifacts"):
                 gui.text_field("Document").set_text("hello")
@@ -140,10 +152,10 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-Every rule above is visible in that file: no sleeps, named elements, a
-capability check at setup, a regex window title, a context-managed session
-and application, and failure evidence captured while the failure is still on
-screen.
+That file shows the core rules: no sleeps, named elements, a capability
+check at setup, a raising `expect_window` for a window that must exist, a
+context-managed application, and failure evidence captured while the failure
+is still on screen.
 
 ## What to tell the user when the desktop is the problem
 

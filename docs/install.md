@@ -9,11 +9,11 @@ Everything beyond that is opt-in, because no single set of packages spans
 GNOME, KDE, wlroots, X11, the BSDs and Windows. Which packages you want
 depends entirely on which backend has to serve you, so start from the matrix.
 
-**You do not need to read any of this.** `pyguitest doctor` reads
+**Most readers can skip this page.** `pyguitest doctor` reads
 `/etc/os-release`, works out which distribution you are on, and prints the
-exact command with the right package names already filled in — which is the
-only way a document can give install advice without knowing whose machine it
-is on. Everything here is for people who would rather look it up.
+exact command with the package names filled in; on Windows and macOS it
+answers in that platform's terms instead. This page is the same information
+as a reference, for when you would rather look it up.
 
 ## What each backend needs
 
@@ -36,17 +36,21 @@ rather than an error.
 | `capture` | screenshots | — | — | `grim`, `gnome-screenshot`, `spectacle`, `import` or `screencapture` |
 | `portalcapture` *(opt-in)* | screenshots via the Screenshot portal, no tool needed | — | PyGObject | — |
 | `imagesearch` | finding a control by a picture of it | — | — | `compare` or `magick` (ImageMagick) |
+| `clipboard` | clipboard text | — | — | `wl-copy`/`wl-paste`, `xclip` or `xsel` (`pbcopy`/`pbpaste` on macOS) |
+| `inputcapture` *(opt-in)* | reading the pointer position when it crosses a screen edge, via the InputCapture portal | `[eiinput]` | `libei` | — |
 | `x11` | everything, including tier-6, on X11 and XWayland | `[x11]` (python-xlib) | — | — |
 
-`[windows]` (comtypes), `[macos]` (PyObjC) and `[dev]` (pytest, ruff, mypy) are
-the extras that matrix does not carry; the first two are described under
-[On Windows](#on-windows) and [On macOS](#on-macos), and the third in
-[CONTRIBUTING.md](../CONTRIBUTING.md).
+The `windows` *backend* (compositor window control on Linux) is unrelated to
+the `[windows]` *extra* (UI Automation on Microsoft Windows); the names
+collide for historical reasons. Windows and macOS have backends of their own
+— `win32` and `uia`, `macos` and `macquartz` — described under
+[On Windows](#on-windows) and [On macOS](#on-macos). `[dev]` (pytest, ruff,
+mypy) is covered in [CONTRIBUTING.md](../CONTRIBUTING.md).
 
-Two rows are worth reading twice. `windows` on sway, Hyprland and niri needs
-**nothing at all** — window control speaks their unix sockets using only the
-standard library. And `x11` with python-xlib installed captures and encodes
-PNGs itself, so it needs no screenshot tool either.
+Two rows need less than they appear to. `windows` on sway, Hyprland and niri
+needs **nothing at all**: window control speaks their unix sockets using only
+the standard library. And `x11` with python-xlib installed captures and
+encodes PNGs itself, so it needs no screenshot tool either.
 
 ## By desktop, in practice
 
@@ -61,199 +65,108 @@ PNGs itself, so it needs no screenshot tool either.
 | Keymap-safe input over libei, deliberately | `pip install 'pyguitest[eiinput]'` + your distribution's `libei`, then `connect(backend="eiinput")` |
 | Screenshots with no tool installed at all, deliberately | `pip install 'pyguitest[atspi]'` for PyGObject, then `connect(backend="portalcapture")` — the only capture path that works inside a Flatpak sandbox |
 
-`pyguitest doctor` reports which of these you have and names what is missing
-— including the GNOME Shell extension, which it infers from the capabilities
-`connect()` actually assembled rather than by probing for it, since detecting
-it directly needs a D-Bus call session detection deliberately avoids (see
-`session.detect()`'s own docstring).
-
-The `portal` row is the exception: `doctor` says nothing about it, because it
-is opt-in and never autodetected — see
-[Backend registry](developers/structure.md#backend-registry) for why
-`connect()` never reaches it on its own.
+`pyguitest doctor` reports which of these you have and names what is missing,
+including the GNOME Shell extension. The opt-in rows are different:
+`connect()` never selects them on its own, and `doctor` names one only where
+it is the sole route (`portalcapture`, on a GNOME session with no other
+capture path) — see [Backend registry](developers/structure.md#backend-registry)
+for why they are opt-in.
 
 ## On Windows
 
-None of the Linux tables apply there: no `/etc/os-release` to read, no package
-manager to name, and no row of packages that pip cannot supply. What there is:
+No `/etc/os-release`, no package manager, and nothing pip cannot supply
+except ImageMagick:
 
 | | |
 |---|---|
-| `pip install pyguitest` | everything but the element tree |
-| `pip install "pyguitest[windows]"` | + UI Automation, through `comtypes` — double quotes because Command Prompt does not strip single ones |
-| ImageMagick | `winget install ImageMagick.ImageMagick`, for locating a control by a picture of it — the one thing here pip cannot supply. The install provides `magick` and no legacy commands, which is enough: this package drives `magick compare` and `magick identify` directly. An install that *did* add the legacy command line works through `compare` instead |
-| nothing, for the clipboard | `CLIPBOARD` is the Win32 clipboard itself — `CF_UNICODETEXT` read and written through `GetClipboardData`/`SetClipboardData` — so it asks for no package, no extra and no grant. There is no PRIMARY selection beside it to ask for either: `primary=True` raises rather than answering from the clipboard |
-| nothing on `PATH` | no CLI tool is adapted or recommended: every Windows mechanism is an API call, so there is no ydotool-shaped gap |
+| `pip install pyguitest` | windows, input, screenshots and the clipboard — everything but the element tree |
+| `pip install "pyguitest[windows]"` | + the element tree (UI Automation, through `comtypes`). Use double quotes: Command Prompt does not strip single ones |
+| ImageMagick | `winget install ImageMagick.ImageMagick`, only for locating a control by a picture of it. That install provides `magick` without the legacy commands, which is enough: pyguitest calls `magick compare` and `magick identify` directly |
 
-The `windows` extra carries an environment marker, so installing it on Linux or
-macOS is a no-op rather than an error — `pip install "pyguitest[windows]"`
-succeeds everywhere and only does something on Windows.
+Every Windows mechanism is an API call — `SendInput`, `EnumWindows`, GDI
+capture, the Win32 clipboard — so there is no CLI tool to install and no
+daemon or group membership to arrange. There is no PRIMARY selection, so
+`get_clipboard(primary=True)` raises.
+
+The `windows` extra carries an environment marker, so
+`pip install "pyguitest[windows]"` succeeds on every platform and only
+installs something on Windows.
+
+Two conditions stop a test without raising anything, and `pyguitest doctor`
+names both when it sees them:
+
+- **An elevated target window.** A process that is not elevated cannot inject
+  into one that is: Windows (UIPI) drops the events without an error or a
+  prompt.
+- **No interactive desktop.** A service, a scheduled task running in session 0,
+  or an SSH session cannot see the logged-in desktop, so `windows()` returns
+  nothing.
+
+`pyguitest debug` reports the rest of the environment the backends depend on:
+window station, integrity level, DPI awareness, Windows build, and whether
+`comtypes` is importable. [troubleshooting.md](troubleshooting.md#injected-input-vanishes-on-windows)
+has the symptoms and fixes.
 
 ## On macOS
 
-None of the Linux tables apply here either, for the same reason as Windows —
-what there is:
+As on Windows, there is nothing to install from a package manager except,
+optionally, ImageMagick:
 
 | | |
 |---|---|
-| `pip install pyguitest` | everything but the in-process half: `screencapture` needs no Python binding at all |
-| `pip install "pyguitest[macos]"` | + the Accessibility element and window tree (`macos`), and `CGEventPost` input injection (`macquartz`), through PyObjC's ApplicationServices and Quartz |
-| ImageMagick | `brew install imagemagick`, for locating a control by a picture of it — the same `compare` the Windows and Linux tables name, and the one thing here pip cannot supply. `magick compare` is driven too, so a build that provides only ImageMagick 7's entry point works. It needs a capture to search: with the bare install that is `screencapture`, which needs the Screen Recording grant |
-| nothing on `PATH` | `screencapture` ships with the OS, so the capture path asks for no installation — only the Screen Recording grant, which `pyguitest doctor` names |
-| nothing on `PATH`, no grant either | `pbcopy`/`pbpaste` ship with the OS too, so `CLIPBOARD` is the one macOS capability that asks for neither an install nor a TCC grant. It is not version-probed — every `pbcopy` run rewrites the pasteboard, so `doctor` reports the tool and leaves its version column blank rather than destroying what you had copied. A Mac has a single selection, so `get_clipboard(primary=True)` raises rather than answering from the clipboard |
+| `pip install pyguitest` | screenshots (`screencapture`) and the clipboard (`pbcopy`/`pbpaste`), both of which ship with macOS |
+| `pip install "pyguitest[macos]"` | + elements and windows through Accessibility (the `macos` backend), and input through `CGEventPost` (the `macquartz` backend), via PyObjC |
+| ImageMagick | `brew install imagemagick`, only for locating a control by a picture of it |
 
-The `macos` extra carries an environment marker on each requirement, so
-installing it on Linux or Windows resolves to two skipped requirements and
-succeeds. Its two backends gate on two separate grants: `macos` (elements,
-windows, screens) reads through Accessibility and is served wherever that
-grant is already on — nothing here asks for it — while `macquartz` (pointer,
-keys, text) is **opt-in**: constructing it asks for the PostEvent grant, so a
-plain `connect()` never asks on your behalf.
-`connect(backend="macquartz")` is you asking for it — and on macOS that request
-has been silent in the one place it has been measured (26.7, launched from
-Terminal.app: no dialog, `False` returned), so PostEvent is granted by hand
-under Privacy & Security > Accessibility. Which row to look for there is worth
-reading twice: TCC records the answer against the app that launched this
-process (Terminal, or an IDE) or against the signed interpreter it runs.
+The `macos` extra carries an environment marker on each requirement, so it
+installs cleanly, as a no-op, on Linux and Windows. A Mac has a single
+selection, so `get_clipboard(primary=True)` raises.
 
-Grants are recorded against a *binary* rather than against you, so a virtualenv
-rebuilt on a different Python can be a new client and be asked again — but the
-binary TCC names is the app responsible for the process or the signed
-interpreter, which is not necessarily the virtualenv path in `sys.executable`
-this package's messages print. That name is the open question
-`docs/validation.md` records. Grants also cannot travel: not in a repo, not in
-a container, and not across a `pip install --upgrade`. `tccutil reset
-Accessibility` withdraws one, which is the only way back if a prompt was
-dismissed or an answer has to be redone; nothing supported can grant it, and
-PostEvent is granted by hand in System Settings.
+### Permissions
 
-The backends are registered by the same registry every other backend uses, and
-the marker is a runtime import guard inside
-`src/pyguitest/backends/win32.py`, so on Linux the module imports and reports
-itself unsupported rather than failing at install time.
+macOS gates each capability behind a privacy grant (TCC). None can be granted
+from code; each is switched on by hand under **System Settings > Privacy &
+Security**, and `pyguitest doctor` lists whichever are missing.
 
-`pyguitest doctor` answers in Windows terms rather than with distribution
-package names, and `pyguitest debug` reports the environment the backends
-depend on: window station, integrity level, DPI awareness, build, and whether
-`comtypes` is importable. Two of those decide whether a test can run at all,
-so the backend names them as it hits them — a process that is not elevated
-cannot inject into an elevated window (UIPI drops the events with no error and
-no prompt), and a process that is not on the interactive window station (a
-service, a scheduled task, an ssh session) can enumerate no window at all.
-[validation.md](validation.md) has what was checked on hardware and how.
+| Grant | Pane | Needed for | Without it |
+|---|---|---|---|
+| Accessibility | Accessibility | elements, window control | element queries come back empty rather than raising |
+| Screen Recording | Screen Recording | screenshots, image search, window titles | `screencapture` writes a black image, so pyguitest raises `PermissionRequired` before calling it |
+| PostEvent | Accessibility (listed in the same pane) | injected pointer and keyboard input | posted events are dropped silently |
+
+A grant is recorded against an application, not against you: usually the app
+that launched Python (Terminal, iTerm, an IDE), sometimes the signed Python
+interpreter itself. If a grant seems to have no effect, look for both rows. A
+virtualenv built on a different Python can count as a new application and
+need granting again, and grants do not carry over to another machine or a
+container. `tccutil reset Accessibility` withdraws an earlier answer.
+
+`connect(backend="macos", backend_options={"request": True})` asks macOS to
+show the Accessibility prompt. The PostEvent request shows nothing in the
+cases measured so far (macOS 26.7), so grant that one by hand.
+
+### Connecting with input
+
+`macquartz` is **opt-in**: a plain `connect()` never composes it, so that no
+session requests the PostEvent grant unless you asked. A plain `connect()` on
+a Mac therefore gives elements, windows, screenshots and the clipboard, but no
+pointer or keyboard input. Name the backends to add it:
+
+```python
+gui = pyguitest.connect(backend=["macquartz", "macos"])
+```
+
+That pair is the combination validated on a real Mac. Naming backends
+composes exactly the ones named, so add `"capture"` and `"clipboard"` to that
+list if the script also takes screenshots or uses the clipboard, and
+`"imagesearch"` if it uses `locate_image` (which needs ImageMagick).
 
 ## Distribution packages (pip cannot supply these)
 
 The `atspi` extra is **not self-sufficient**: dogtail declares no
-dependencies, and PyGObject does not build from source cleanly. `pyatspi` is
-used by the AT-SPI backend but appears in no extra, for exactly the same
-reason.
-
-### AT-SPI also needs the bus to be running
-
-The packages are one half; a running accessibility bus is the other. Ask
-for it directly:
-
-```sh
-gdbus call --session --dest org.a11y.Bus --object-path /org/a11y/bus \
-    --method org.a11y.Bus.GetAddress
-```
-
-A desktop session starts `at-spi-bus-launcher` for you and this answers
-with an address. A container, a CI runner or a headless session often has
-neither the service nor a session bus to activate it on, and there the
-`atspi` backend declines with a message naming the address it went looking
-for rather than naming dogtail. `pyguitest debug` reports the same answer on
-its `a11y bus` line, with a third state for "could not ask" -- no `gdbus` --
-since that is not the same as an answer.
-
-On an **X11 session the address does not come from the session bus at all.**
-When `DISPLAY` is set and `WAYLAND_DISPLAY` is not, libatspi reads the
-`AT_SPI_BUS` property on the root window instead, and nothing clears that
-property when the bus it names goes away. `GetAddress` above answering
-happily is then the misleading result, because it is about a different bus:
-
-```sh
-xprop -root AT_SPI_BUS
-```
-
-Measured (2026-09-22) on a desktop with `DISPLAY=:0` and no
-`WAYLAND_DISPLAY`, where a harness had left a dead socket behind: this prints
-`AT_SPI_BUS(STRING) = "unix:path=/run/user/1000/at-spi/bus"` -- nothing
-listening on it -- while `GetAddress` answers `.../at-spi/bus_0`, which is
-alive. libatspi reads the property, dies on the connect, and the process with
-it. `$XDG_RUNTIME_DIR/at-spi/` collects one such socket per accessibility bus
-the machine has run; `bus` refused, `bus_0` connected and `bus_2`, `bus_3`
-and `bus_99` refused, on this desktop. pyguitest checks the property's
-address when libatspi would use it, so this is a declined backend rather than
-a core dump, and `pyguitest debug`'s `a11y bus` line is where the no shows
-up. Deleting the stale property -- `xprop -root -remove AT_SPI_BUS`, a change
-to the running X server rather than a read -- leaves libatspi to fall through
-to the session bus; that fall-through is libatspi's source, and the property
-was left in place here rather than cleared on somebody's live session.
-
-It is worth checking rather than assuming, because getting it wrong used to
-be spectacular: libatspi answers an unreachable bus by aborting the calling
-process, so `connect()` died with a core dump and no exception. pyguitest
-asks this question before it imports anything that would.
-
-### Chromium and Electron apps need an AT to be announced
-
-VS Code, Chrome, Slack and anything else built on Electron publish **no
-accessibility elements at all** until something says an assistive
-technology is running:
-
-```sh
-gdbus call --session --dest org.a11y.Bus --object-path /org/a11y/bus \
-    --method org.freedesktop.DBus.Properties.Get org.a11y.Status IsEnabled
-```
-
-`false` is the normal answer on a desktop with no screen reader, and the
-symptom is confusing rather than obvious: `windows()` lists the window
-(that comes from the compositor), while the application has no node in the
-accessibility tree whatsoever — not an empty one, none. So
-`window_element()` and every element query raise as though the application
-were not running.
-
-Launching the application with `--force-renderer-accessibility` is the
-better fix for a test that starts it. Setting the property true works
-across the board — for an application already running, not just ones a
-test launches itself — but costs those applications real performance for as
-long as it stays set, session-wide:
-
-```sh
-gdbus call --session --dest org.a11y.Bus --object-path /org/a11y/bus \
-    --method org.freedesktop.DBus.Properties.Set org.a11y.Status IsEnabled "<true>"
-```
-
-Verified live (2026-09-10): flips `IsEnabled` from `<false>` to `<true>`
-immediately, `Set` itself replying with nothing. There is no corresponding
-`Set ... "<false>"` shown here on purpose — pyguitest itself only ever reads
-this property (see `assistive_technology_enabled()`'s docstring), and
-turning it back off is the same call with `"<false>"` in place of `"<true>"`
-if the performance cost stops being worth it. `pyguitest debug` reports the
-value on its `chromium a11y` line either way.
-
-### On KDE, one more step that is not a package
-
-GTK applications load their AT-SPI bridge only when the GNOME setting
-`toolkit-accessibility` is on. A GNOME session has it on already; a KDE one
-does not, and **the symptom is not an error**. Everything reports healthy —
-the packages are installed, `doctor` lists AT-SPI as present, dogtail
-connects — and element queries simply come back empty, as though the
-application had no widgets. Confirmed live on KDE (2026-09-01), where the
-`eiinput` validation could not read back a single element until:
-
-```sh
-gsettings set org.gnome.desktop.interface toolkit-accessibility true
-```
-
-`doctor` now says so on KDE, and `debug` reports the raw value on every
-desktop. Both are scoped deliberately narrowly: the setting being off is
-*not* on its own evidence of a problem — a GNOME session measured the same
-day had it off with AT-SPI working perfectly — so the warning fires only
-where the failure was actually observed, rather than wherever the value
-looks wrong.
+dependencies, and PyGObject and pyatspi do not build cleanly from source, so
+both come from your distribution. `pyguitest doctor` prints the command for
+yours; the table is the same information.
 
 <!-- generated from pyguitest.hints._PACKAGES; tests/test_docs.py pins it -->
 
@@ -265,36 +178,116 @@ looks wrong.
 | Input injection | `ydotool python3-evdev` | `ydotool python3-evdev` | `ydotool python-evdev` | `ydotool python3-evdev` | `ydotool py312-evdev` |
 | Image search | `ImageMagick` | `imagemagick` | `imagemagick` | `ImageMagick` | `ImageMagick7` |
 
+**A virtualenv needs `--system-site-packages`** to see these, since they are
+installed into the system Python:
+
+```sh
+python3 -m venv --system-site-packages .venv
+```
+
 An unrecognised distribution still gets the component names from `doctor`,
-just without a command — the package names are the only part that cannot be
-guessed.
+just without a command.
 
-FreeBSD's `py312-` prefix tracks the ports tree's default Python rather than
-the interpreter you happen to run: ports build these modules for one version
-only, so on a system whose `python3` is something else — GhostBSD 26.1 ships
-3.11 against a 3.12 ports default — the package installs and the import still
-fails. `pyguitest doctor` reports what it can actually load, which is the
-reason to prefer it over this table.
+FreeBSD's `py312-` prefix follows the ports tree's default Python, not the
+interpreter you run: ports build these modules for one Python version, so on
+a system whose `python3` is another version (GhostBSD 26.1 ships 3.11 against
+a 3.12 ports default) the package installs and the import still fails.
+`pyguitest doctor` reports what it can actually load.
 
-`libei` for the `eiinput` backend is not in that table because it is not
-part of any automatic path; see [input.md](input.md#eiinput-keymap-safe-input-over-libei).
+`libei`, for the opt-in `eiinput` backend, is not in the table; see
+[input.md](input.md#eiinput-keymap-safe-input-over-libei).
 
-A virtualenv needs `--system-site-packages` to see any of these.
+### AT-SPI also needs the bus to be running
+
+The packages are one half; a running accessibility bus is the other. Ask
+for it directly:
+
+```sh
+gdbus call --session --dest org.a11y.Bus --object-path /org/a11y/bus     --method org.a11y.Bus.GetAddress
+```
+
+A desktop session starts `at-spi-bus-launcher` for you and this answers
+with an address. A container, a CI runner or a headless session often has
+neither the service nor a session bus to start it on; there the `atspi`
+backend declines with a message naming the address it looked for.
+`pyguitest debug` reports the same answer on its `a11y bus` line, or "could
+not ask" when `gdbus` is missing.
+
+On an **X11 session the address comes from the root window, not the session
+bus.** When `DISPLAY` is set and `WAYLAND_DISPLAY` is not, libatspi reads the
+`AT_SPI_BUS` property on the root window, and nothing clears that property
+when the bus it names goes away — a crashed session or test harness can leave
+it pointing at a dead socket while `GetAddress` above answers for a live one.
+Check the property itself:
+
+```sh
+xprop -root AT_SPI_BUS
+```
+
+libatspi aborts the whole process when it cannot reach the bus, so pyguitest
+checks this address before loading it: a stale property shows up as a
+declined `atspi` backend and on `debug`'s `a11y bus` line, not as a crash.
+`xprop -root -remove AT_SPI_BUS` deletes the stale property from the running X
+server, after which libatspi should fall back to the session bus.
+
+### Chromium and Electron apps need an AT to be announced
+
+VS Code, Chrome, Slack and anything else built on Chromium or Electron
+publish **no accessibility elements at all** until something says an
+assistive technology is running:
+
+```sh
+gdbus call --session --dest org.a11y.Bus --object-path /org/a11y/bus     --method org.freedesktop.DBus.Properties.Get org.a11y.Status IsEnabled
+```
+
+`false` is the normal answer on a desktop with no screen reader. The symptom
+is that `windows()` lists the window (that comes from the compositor) while
+the application has no node in the accessibility tree at all, so
+`window_element()` and every element query behave as though it were not
+running.
+
+For a test that launches the application itself, start it with
+`--force-renderer-accessibility`. For an application that is already
+running, set the property to true. That covers every application in the
+session, and they run slower for as long as it stays set:
+
+```sh
+gdbus call --session --dest org.a11y.Bus --object-path /org/a11y/bus     --method org.freedesktop.DBus.Properties.Set org.a11y.Status IsEnabled "<true>"
+```
+
+The same call with `"<false>"` turns it back off. pyguitest itself only reads
+this property; `pyguitest debug` reports it on its `chromium a11y` line.
+
+### On KDE, one more step that is not a package
+
+GTK applications load their AT-SPI bridge only when the GNOME setting
+`toolkit-accessibility` is on. A GNOME session has it on; a KDE session
+usually does not, and **the symptom is not an error**: the packages are
+installed, `doctor` lists AT-SPI as present, and element queries simply come
+back empty. Turn it on:
+
+```sh
+gsettings set org.gnome.desktop.interface toolkit-accessibility true
+```
+
+`doctor` warns about this on KDE, and `debug` reports the value on every
+desktop. The warning is limited to KDE because the setting being off is not a
+problem everywhere: a GNOME session has been seen with it off and AT-SPI
+working normally.
 
 ## Building from source, on an older build environment
 
-Installing from a wheel needs nothing special, and this is the only section
-here about the *build* rather than the runtime. Both this package and
-pyguitest-recorder declare their license as an SPDX string (PEP 639), which is
-`license = "MIT"` in `pyproject.toml` rather than the older
-`license = {text = "MIT"}`. That form needs **setuptools 77 or newer**; an
-older one either fails the build or silently drops the license metadata from
-the wheel, and the error names the metadata rather than anything this package
-does. `pip` into a fresh virtualenv gets a new enough setuptools on its own —
-the failure belongs to a system Python with an old setuptools pinned, or to a
-build environment that has one. `pip list | grep -i setuptools` answers it, and
-`pip install -U setuptools` (or `python -m build` in a fresh virtualenv) fixes
-it.
+Installing from a wheel needs nothing special; this section is only about
+building from source. Both this package and pyguitest-recorder declare their
+license as an SPDX string (PEP 639) — `license = "GPL-2.0-or-later"` in
+`pyproject.toml`, rather than the older `license = {text = "..."}` table.
+That form needs **setuptools 77 or newer**. An older one either fails the
+build or silently drops the license metadata from the wheel, and its error
+names the metadata rather than anything in this package. `pip` in a fresh
+virtualenv gets a new enough setuptools on its own; the failure comes from a
+system Python or build environment that pins an old one.
+`pip install -U setuptools`, or `python -m build` in a fresh virtualenv,
+fixes it.
 
 ## External tools (never installed by pip)
 
@@ -374,21 +367,18 @@ in its interface at all.
 connection inside a Wayland session works perfectly well for input, window
 control and everything else — but native Wayland surfaces are never
 composited into the X root window, so a root-window grab cannot return the
-desktop. On GNOME 50 it errors outright; the more dangerous outcome would
-have been succeeding, since an empty X root is a perfectly valid image of
-entirely the wrong thing. This is the same trap the tool registry already
-encodes as *X11 only*. Per-window capture is unaffected: an XWayland-backed
-X11 client has its own drawable with its own content. On a true X11 session
-nothing changes.
+desktop. On GNOME 50 the grab fails outright; had it succeeded, it would
+have returned an image of the wrong thing. Per-window capture is unaffected:
+an XWayland-backed X11 client has its own drawable with its own content. On a
+real X11 session nothing changes.
 
-**A tool that is installed but does not work no longer takes capture down
-with it.** This is a recurring condition, not an accident: `import` is broken
-on Fedora 43 (below), and `gnome-screenshot` cannot capture at all on GNOME
-42+ Wayland. When the selected backend fails, the next capable one is tried,
-the broken one is skipped for the rest of the session rather than costing
-another timeout, and a `CaptureFallbackWarning` says which tool failed and
-why — silently rescuing the call would hide a real problem that `pyguitest
-doctor` cannot see, since the tool *is* installed.
+**A tool that is installed but broken does not take capture down with
+it.** This happens in practice: `import` is broken on Fedora 43 (below), and
+`gnome-screenshot` cannot capture at all on GNOME 42+ Wayland. When the
+selected backend fails, the next capable one is tried, the broken one is
+skipped for the rest of the session, and a `CaptureFallbackWarning` says
+which tool failed and why — `pyguitest doctor` cannot see that problem,
+since the tool *is* installed.
 
 ImageMagick also does the cropping whenever a region is asked of a tool that
 has no exact-rectangle mode, so `gnome-screenshot` or `spectacle` alone
@@ -400,17 +390,15 @@ It does the template matching for the same reason. `IMAGE_LOCATE` is served by
 `magick` (`magick compare` and `magick identify` under IM7's dispatcher, which
 is the only entry point a `winget` install lays down) — see
 [troubleshooting.md](troubleshooting.md#template-matching-is-slow-or-times-out).
-Cost scales with the area searched and not with the template, so the same
-search inside one window is a second or two where a full 1080p desktop is
-about a minute on a build without the FFT delegate: `locate_image(within=...)`
-is worth passing for the speed as much as for the accuracy.
+Cost scales with the area searched, not with the template: on a build
+without ImageMagick's FFT delegate, one small window takes a few seconds and
+a full 1080p desktop about a minute, so `locate_image(within=...)` is worth
+passing for speed as well as accuracy.
 
-`import` (ImageMagick) is a capture tool on a real X11 session only. Where it
-*is* selected, on Fedora 43 it is currently broken outright: `import -window
-root` fails with `import: missing an image filename` regardless of
-arguments, an
-[upstream ImageMagick bug](https://github.com/ImageMagick/ImageMagick/issues/8459),
-not a pyguitest one. On such a session, installing `gnome-screenshot`
+`import` (ImageMagick) is a capture tool on a real X11 session only. On
+Fedora 43 it is currently broken: `import -window root` fails with
+`import: missing an image filename` whatever the arguments
+([ImageMagick issue 8459](https://github.com/ImageMagick/ImageMagick/issues/8459)). On such a session, installing `gnome-screenshot`
 sidesteps it — it outranks `import` in tool selection — and installing
 `python-xlib` sidesteps both, since `X11Backend` then captures with no tool
 at all.

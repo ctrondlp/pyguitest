@@ -9,8 +9,8 @@ Requires Python 3.10 or newer — 3.9 reached end-of-life in October 2025.
 
 ## Filing a bug
 
-Run `pyguitest debug` (or `python3 -m pyguitest debug` from a checkout) and
-paste its output into the issue. It reports the package and Python versions,
+Run `pyguitest debug` (or, from a checkout, `PYTHONPATH=src python3 -m
+pyguitest debug`) and paste its output into the issue. It reports the package and Python versions,
 every environment probe, each detected tool's own `--version`, and whether
 the process is running inside a Flatpak, toolbox, or other container --
 which changes what every other line in that output actually describes.
@@ -85,8 +85,8 @@ PYTHONPATH=src python3 -m unittest discover -s tests \
 # 0 means it skipped (or failed to load), not passed
 ```
 
-That distinction is not pedantry: a permanently-skipped test in this repo
-went on hiding a constructor signature that no longer existed.
+A permanently skipped test once hid a constructor signature that no longer
+existed, so it is worth checking.
 
 ## The headless GNOME session
 
@@ -175,10 +175,11 @@ them, and why, is [ADR 004](docs/developers/adr-004-macos.md).
 pip install -e '.[dev,macos]'
 ```
 
-Two things about that install. Both PyObjC backends are `opt_in`, so a plain
-`connect()` on a Mac composes the capture tool and whatever needs no grant
-without the extra at all — name the backend when you want the AX tree or
-injection. And the grants do not travel: not in a repo, not in a container,
+Two things about that install. `macquartz` (input) is `opt_in`, so a plain
+`connect()` on a Mac composes `macos` (elements and windows, where the
+Accessibility grant is on), the capture tool and the clipboard, but no
+injection — name it with `connect(backend=["macquartz", "macos"])`. And the
+grants do not travel: not in a repo, not in a container,
 not in a tarball, and not reliably across a recreated virtualenv, since TCC
 records consent against a binary. That is also why a missing grant usually
 looks like a withheld capability rather than an exception — no Accessibility
@@ -215,9 +216,9 @@ over the *staged* files, and it rewrites them (`--fix`); the script above
 checks the whole tree read-only and adds the two the hook has no entry for,
 the test suite and `mypy`. It needs the dev extra from
 [Setting up](#setting-up) in the interpreter it points at, which is `python3`
-unless `PYTHON=...` says otherwise. The tree is currently clean under all of
-them, and the package ships `py.typed` (PEP 561), so annotations are visible
-to your editor and type checker.
+unless `PYTHON=...` says otherwise; `RUFF=...` does the same for ruff. The
+package ships `py.typed` (PEP 561), so annotations are visible to your editor
+and type checker.
 
 ## Continuous integration
 
@@ -227,24 +228,21 @@ Almost nothing in this package can be exercised against the real thing
 automatically — there is no compositor, no session bus, no X server, no
 consent dialog anyone can click — so the tests drive stand-ins for
 python-xlib, Gio and the portal, and running them everywhere is the cheapest
-guard against those stand-ins drifting from what they imitate. The one
-exception is the portal job, which installs `python3-dbusmock` and
-`dbus-daemon` and negotiates against a real private session bus; it fails if
-those tests *skip*, since a green job that proved nothing is worse than a
-red one.
+guard against those stand-ins drifting from what they imitate. Two jobs go further:
 
-"No compositor" is no longer true. A `compositor` job runs the GNOME Shell
-extension validation inside `headless-session.sh` — the whole COMPOSITOR
-tier, window control, capture and events, with nobody watching. It runs on
-pushes to main, on a nightly schedule and on demand, but not on pull
-requests, where five minutes of `apt` would not earn its keep.
+- The **portal** job installs `python3-dbusmock` and `dbus-daemon` and
+  negotiates against a real private session bus. It fails if those tests
+  *skip*, since a green job that proved nothing is worse than a red one.
+- The **compositor** job runs the GNOME Shell extension validation inside
+  `headless-session.sh`: window control, capture and events against a real
+  headless GNOME Shell. It runs on pushes to main, nightly and on demand, but
+  not on pull requests, where its package install would cost minutes.
 
-Worth knowing when you read a result: **the runner is GNOME Shell 46 and a
-Fedora desktop is 51**, and the extension's two capture paths are split by
-exactly that version — `_captureLegacy` uses an API Mutter 51 removed. So
-CI and your desktop execute *different code*, and neither can run the
-other's. That is how the legacy path's uncropped capture was found after
-months as an unconfirmed comment.
+When reading a compositor result, note that **the runner's GNOME Shell (46)
+is older than a current desktop's (51)**, and the extension's two capture
+paths are split at exactly that version: `_captureLegacy` uses an API
+Mutter 51 removed. CI and a current desktop therefore exercise different
+code, and each can only check its own.
 
 ## Documentation is tested too
 

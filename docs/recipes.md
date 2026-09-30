@@ -57,18 +57,23 @@ gui.wait_for_file("/tmp/export.csv", timeout=30)  # the observable outcome
 
 ## Finding and driving a window
 
-`find_window` takes a **regex**, not a literal — window titles carry
-document names, modification markers and application suffixes that change
-under you.
+A plain string title matches as a **literal substring**, so a title copied
+from `Window.title` always finds itself, parentheses and all. Pass a
+compiled regex when you need a pattern — titles carry document names,
+modification markers and application suffixes that change under you:
 
 ```python
 import re
 
-editor = gui.wait_for_window(r"Untitled Document", timeout=10)
+editor = gui.expect_window("Untitled Document", timeout=10)
+editor = gui.expect_window(re.compile(r"^\*?notes\.txt"), timeout=10)
 gui.activate_window(editor)
 
 print(editor.title, editor.app_id, editor.pid)
 ```
+
+An `app_id` survives title changes altogether:
+`gui.find_window(app_id="org.gnome.TextEditor")`.
 
 A `Window` is a snapshot. It stays comparable by identity (`==` and `hash`
 are by handle and backend, never by title), but its *title* is whatever it
@@ -181,9 +186,12 @@ gui.assert_clipboard("hello")  # raises ClipboardMismatch, with detail
 gui.get_clipboard(primary=True)  # the X11 PRIMARY selection
 ```
 
-Clipboard access is `Capability.CLIPBOARD` and is served by a portal or by a
-CLI tool, depending on the desktop. On Wayland, reading a selection your own
-process owns is the case most likely to surprise you — see
+Clipboard access is `Capability.CLIPBOARD`: the Win32 clipboard on Windows,
+`pbcopy`/`pbpaste` on macOS, and on Linux a CLI tool or, on GNOME, the
+`portal` backend. `primary=True` exists only where there is a PRIMARY
+selection (X11 and most Wayland desktops) and raises on Windows and macOS.
+On Wayland, reading a selection your own process owns is the case most likely
+to surprise you — see
 [troubleshooting.md](troubleshooting.md#the-clipboard-reads-back-empty).
 
 ## Keyboard, focus and tab order
@@ -292,8 +300,8 @@ say which at setup time rather than discovering it mid-assertion:
 
 ## Running in CI
 
-The honest summary is that most of a GUI test suite needs a display server,
-and CI usually has none. Three workable arrangements:
+Most of a GUI test suite needs a display server, and a CI runner usually
+has none. Three arrangements work:
 
 - **Xvfb** — a private X server. Everything works, including the tier-6
   readback operations, because it is a real X11 session.
@@ -328,7 +336,7 @@ path, so a port can be gated in CI; the full 50-export table lives in
 | `PressKey` / `ReleaseKey` / `PressReleaseKey` | `press_key` / `release_key` / `tap_key` | |
 | `MoveMouseAbs` | `move_mouse` | |
 | `ClickMouseButton` | `click` | Buttons 4/5 are now `scroll()` |
-| `FindWindowLike` | `find_windows` | Toplevels only, no recursive descent |
+| `FindWindowLike` | `find_windows` | Toplevels only, no recursive descent. A string is a literal substring; wrap a Perl regex in `re.compile()` |
 | `WaitWindowLike` / `WaitWindowClose` | `wait_for_window` / `wait_window_close` | Event-driven where the compositor allows |
 | `GetWindowName` | `Window.title` | |
 | `GetWindowPos` | `geometry` | |
