@@ -39,6 +39,12 @@ been tried at all". The same record sorted that way instead:
   four](#macos-run-live-on-one-mac-every-grant-denied-and-then-three-of-four-2026-09-26):
   the AX read path, `macquartz` through a live event tap, the clipboard,
   `screencapture -l`, and `locate_image` against a real desktop.
+- **Windows 11, macOS 26 and GNOME Shell 51, a bug review's findings** —
+  [confirmed live and re-run
+  fixed](#windows-11-and-macos-26-a-bug-reviews-findings-confirmed-live-and-re-run-fixed-2026-09-30):
+  capture speed, regex flags, key scan codes, the clipboard terminator,
+  `locate_image` coordinates and overhanging matches, and macOS window order,
+  double-click, drag and tooltips.
 - **sway (wlroots), headless and genuinely pure Wayland** — window control
   and the IPC sockets, run with no display server to fall back on.
 - **[Not run live](#not-run-live)** is the half worth reading first: it is
@@ -3656,3 +3662,97 @@ and a Windows live run had all been happy. The failure mode is also why this
 needed a live run and not a better fake: every mocked test in
 `tests/test_imagesearch.py` would still pass with the wrong location, because the
 command line was fine and the parsing was fine. What was wrong was the answer.
+
+## Windows 11 and macOS 26: a bug review's findings, confirmed live and re-run fixed (2026-09-30)
+
+A code review turned up six defects that only a real desktop could confirm or
+rule out, so each was measured before it was changed and measured again after.
+Every window under test belonged to a separate process -- a Tk probe window
+carrying its own `WH_KEYBOARD_LL` hook on Windows, and on macOS two overlapping
+Tk windows plus TextEdit -- so nothing here asked a process about its own input.
+
+**Windows 11, build 26200**, one 1920x1080 monitor at 125%:
+
+| | before | after |
+| --- | --- | --- |
+| full-desktop `screenshot()` | 3.37s, 2.65s of it in `_dib_rows` | 0.19s |
+| `wait_for_window(re.compile("pyguitestprobe", re.I), timeout=3)` | `None` after 3.0s, while `find_windows` with the same pattern found the window | the window, after 0.01s |
+| injected End / Home / Shift / Right Control, as a low-level hook sees them | scan code 0, extended bit clear, on all four | scans `0x4F`/`0x47`/`0x2A`/`0x1D`; extended set on End, Home and Right Control, clear on Shift |
+| End, Shift+Home in a Tk entry | selects the text, NumLock off | selects the text, NumLock off *and* on |
+| `get_clipboard()` over a block holding `abc\0left behind\0` | not run before the fix | `'abc'` |
+
+The regex half is not Windows-specific, and was run again where it is not: on
+**Fedora 45, GNOME Shell 51.0 (Wayland)**, with the window-control extension
+serving `WINDOW_EVENTS`, the same call against a zenity dialog in its own process
+answered `None` after 3.03s on 0.15.0 while `find_windows` found the dialog, and
+the dialog after 0.01s with the fix.
+
+The capture cost was `ctypes`' `.raw`, which copies the whole buffer on every
+access and was being read once per row. The regex flags were lost where
+`Session.wait_for_window` handed an event-driven backend the pattern's `.pattern`
+string. The key events had never been given the scan code or the extended bit
+that `_EXTENDED_VK` existed to supply; Windows fills in neither.
+
+**macOS 26 (Tahoe)**, a live session with Accessibility, Screen Recording and
+PostEvent granted, through `connect(backend=["macquartz", "macos"])`:
+
+| | before | after |
+| --- | --- | --- |
+| `find_window("PGProbe")` with Beta in front, then Alpha | Alpha, then Beta -- the window *behind*, both times | Beta, then Alpha |
+| `double_click()` on "bravo" in TextEdit, selection read through AX | `''` | `'bravo'` |
+| `drag()` across a Tk canvas | a press and a release, no motion between, released where it pressed | 44 drag events, released at the end point |
+
+`windows()` had returned the window server's front-to-back order where every
+other backend returns bottom-to-top, and `find_window` takes the last match as
+the topmost. `double_click` stamped no click count on its events, and AppKit
+reads a double-click from that count rather than from timing -- Tk measures
+timing itself and reported a double-click throughout, which is why the
+before/after is taken from a Cocoa text view instead. And a move under a held
+button went out as `kCGEventMouseMoved`, which is not delivered as a drag.
+
+**Found on the way, and fixed the same day.** `locate_image` took a capture's
+pixel (0, 0) to be screen (0, 0) at one pixel per unit; it now maps both the
+`within` rectangle and the match through `desktop_region()`, with the scale read
+off the image. Re-measured on the same
+Windows desktop against a seeded-noise Tk window, so any crop of it is unique:
+a 120x40 template cut at `(587, 505)` was found at exactly `(587, 505)`, score
+0, both with `within` (9.7s) and across the whole desktop (71.4s). The first
+attempt at that check used a template cut from a plain window background, and
+it exposed a second defect: ImageMagick 7.1.2 also scores placements that
+overhang the image, so the whole-desktop search answered a 40-row match at
+y=1079 of a 1080-row screen. A synthetic 200x100 image reproduced it -- a
+10-row template placed at row 97, on Windows (7.1.2-31) and on Fedora 45
+(7.1.2-32) alike -- and such a placement is now refused with an error rather
+than returned. Filling the off-image pixels with a flat colour
+(`-virtual-pixel background`) was tried first: on Windows it made the same
+search answer `(0, 90)`, the best placement that fits, and on Fedora it broke
+exact matching outright -- four of the real-ImageMagick tests failed, all
+passing again once the flag was taken out -- so the refusal is the whole fix. The Retina and second-monitor halves of the `locate_image` fix are covered
+by tests only: neither machine here has either.
+
+On the same Mac, a tooltip was found to report as `help tag`: hovering
+TextEdit's Bold checkbox (AXHelp "Bold text") added one `AXHelpTag` to the
+application's tree. With the mapping, `gui.elements(role="tool tip")` found it,
+as it would on Linux or Windows.
+
+**A second pass, the same day: `window_element`'s cost, and the recorder's live
+check run end to end.** pyguitest-recorder's `scripts/win32-live-capture-check.py`
+(record, generate, replay, read the replay back) failed on `main`, and not on an
+assertion: the drive it runs took ten seconds a step, and its 90-second watchdog
+stopped the recording before the script had been driven. The step cost was
+`window_element`, which walked the whole desktop once per window role:
+
+| desktop | before | after | same element |
+| --- | --- | --- | --- |
+| Windows 11 (the recorder's probe window) | 4.24s | 0.11s | yes |
+| macOS 26.7 (a TextEdit document) | 4.55s | 0.62s | yes, same pid |
+| GNOME Shell 51, Wayland (a zenity dialog) | 7.72s | 0.07s | yes, same pid |
+
+With that, the check drove every step, and exposed one recorder defect behind it
+(an injected click on a Win32 menu item recorded as the control under the menu --
+pyguitest-recorder's changelog has it). Fixed, the whole check passes: every
+click, the menu action, the ListView selection, both radio groups and the nested
+tree item land on replay. The macOS record-and-replay check reproduced the same
+recorded actions on replay, differing only in timing, and the full suites passed
+on each platform: Windows (pyguitest's gate), macOS 26.7 (2045 passed, 49 skipped,
+the live-grant tests included) and Fedora 45 (2109 passed).

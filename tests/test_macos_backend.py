@@ -503,10 +503,23 @@ class TestTheRoleTable(unittest.TestCase):
             for name, value in vars(Role).items()
             if not name.startswith("_") and isinstance(value, str)
         }
-        nameless = {"application", "split pane", "menu bar", "thumb", "unknown"}
+        nameless = {
+            "application",
+            "split pane",
+            "menu bar",
+            "thumb",
+            "tool tip",
+            "unknown",
+        }
         for ax_name, reported in macos._AX_ROLES.items():
             self.assertTrue(ax_name.startswith("AX"), ax_name)
             self.assertIn(reported, constants | nameless, f"{ax_name} -> {reported}")
+
+    def test_a_tooltip_is_a_tool_tip_as_on_every_other_platform(self):
+        # AX calls it AXHelpTag, and the camel-case fallback made that `help
+        # tag`; at-spi and UIA both say `tool tip`. Measured on macOS 26.7: a
+        # hovered control's tooltip is one AXHelpTag in the application's tree.
+        self.assertEqual(macos._ax_role("AXHelpTag"), "tool tip")
 
     def test_a_role_the_table_does_not_know_is_spelled_out(self):
         # The honest answer for a role this package has never heard of: AX
@@ -681,7 +694,7 @@ class TestWhatTheGrantBuys(BackendTestCase):
         windows = backend.windows()
         self.assertEqual(len(windows), 5)
         self.assertEqual([w.title for w in windows], [""] * 5)
-        self.assertEqual([w.app_id for w in windows[1:]], ["TextEdit"] * 4)
+        self.assertEqual([w.app_id for w in windows[:-1]], ["TextEdit"] * 4)
 
 
 class TestConstructionAndRegistration(BackendTestCase):
@@ -778,15 +791,16 @@ class TestTheWindowJoin(BackendTestCase):
         # The measurement the filter comes from: the live all-windows list names 50
         # windows with 36 at layer 0, and only 15 carry the on-screen key. The *pair* is
         # exact, and each field alone over-reports -- a layer-0 helper strip is not on
-        # screen, and the Dock is on screen at layer 20.
+        # screen, and the Dock is on screen at layer 20. Bottommost first, the
+        # reverse of the on-screen list: see the order test below.
         self.assertEqual(
             [w.title for w in self.backend.windows()],
             [
-                "pyguitest - caffeinate",
-                "live_doc4.txt",
-                "live_doc3.txt",
-                "live_doc2.txt",
                 "live_doc.txt",
+                "live_doc2.txt",
+                "live_doc3.txt",
+                "live_doc4.txt",
+                "pyguitest - caffeinate",
             ],
         )
 
@@ -848,8 +862,12 @@ class TestTheWindowJoin(BackendTestCase):
     def test_the_windows_are_in_the_servers_own_order(self):
         # The on-screen list is front to back and the full enumeration is not: measured,
         # the same Terminal window was in front of TextEdit's four on screen and behind
-        # them in the all-windows one. `active_window` is the first entry of this list.
+        # them in the all-windows one. `windows()` reverses it into the package's
+        # bottom-to-top order, because Session.find_window takes the *last* match as
+        # the topmost: in the server's own order it named the rearmost of two
+        # same-titled windows, measured on macOS 26.7. `active_window` is the last.
         self.assertEqual(self.backend.active_window().handle, 48)
+        self.assertEqual(self.backend.windows()[-1].handle, 48)
 
     def test_active_window_does_not_ask_which_application_has_focus(self):
         # `kAXFocusedApplicationAttribute` measured flaky -- err=0 with Terminal's pid
@@ -1223,7 +1241,7 @@ class TestWindowCapture(BackendTestCase):
 
     def test_a_window_is_captured_by_the_number_it_carries(self):
         backend, calls = self.make_capturing(onscreen=self.onscreen_windows())
-        window = backend.windows()[0]  # Terminal, whose number is 48.
+        window = backend.windows()[-1]  # Terminal, whose number is 48.
         path = self.destination()
         self.assertEqual(backend.capture(window=window, path=path), path)
         self.assertEqual(calls, [["screencapture", "-x", "-o", "-l", "48", path]])
@@ -1244,7 +1262,7 @@ class TestWindowCapture(BackendTestCase):
         )
         path = self.destination()
         with self.assertRaises(PermissionRequired) as raised:
-            backend.capture(window=backend.windows()[0], path=path)
+            backend.capture(window=backend.windows()[-1], path=path)
         self.assertIn("Screen Recording", str(raised.exception))
         self.assertEqual(calls, [])
         self.assertEqual(os.path.getsize(path), 0)
@@ -1267,7 +1285,7 @@ class TestWindowCapture(BackendTestCase):
         patched.start()
         self.addCleanup(patched.stop)
         with self.assertRaises(PyGUITestError) as raised:
-            backend.capture(window=backend.windows()[0], path=path)
+            backend.capture(window=backend.windows()[-1], path=path)
         self.assertIn("exited successfully but left", str(raised.exception))
 
     def test_whole_screen_capture_names_the_backend_that_serves_it(self):
@@ -1285,7 +1303,7 @@ class TestWindowCapture(BackendTestCase):
         backend, calls = self.make_capturing(onscreen=self.onscreen_windows())
         with self.assertRaises(ValueError):
             backend.capture(
-                window=backend.windows()[0],
+                window=backend.windows()[-1],
                 region=(0, 0, 5, 5),
                 path=self.destination(),
             )
@@ -1305,7 +1323,7 @@ class TestWindowCapture(BackendTestCase):
         )
         path = self.destination()
         self.assertEqual(
-            composite.capture(window=backend.windows()[0], path=path), path
+            composite.capture(window=backend.windows()[-1], path=path), path
         )
         self.assertEqual(calls, [["screencapture", "-x", "-o", "-l", "48", path]])
         self.assertEqual(cropped, [])

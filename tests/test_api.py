@@ -30,6 +30,7 @@ from pyguitest import (
     Role,
     WindowNotFound,
 )
+from pyguitest import png as _png
 from pyguitest.backends.base import GUIBackend, Window
 from pyguitest.capabilities import CapabilitySet
 
@@ -564,7 +565,58 @@ class TestWaitForWindow(unittest.TestCase):
 
         gui = pyguitest.Session(EventBackend(), pyguitest.detect())
         window = gui.wait_for_window("Editor", timeout=5)
-        self.assertEqual(gui.backend.asked, ("Editor", 5))
+        # In slices, so a window that appears between the backend's check and
+        # its subscription costs one slice rather than the whole wait.
+        self.assertEqual(gui.backend.asked, ("Editor", pyguitest._EVENT_SLICE))
+        self.assertEqual(window.title, "Document - Editor")
+
+    def test_a_window_the_subscription_missed_is_found_by_the_next_slice(self):
+        class EventBackend(FakeBackend):
+            def __init__(self):
+                super().__init__()
+                self.slices = 0
+
+            @property
+            def capabilities(self):
+                return CapabilitySet(
+                    set(FakeBackend.capabilities.fget(self))
+                    | {Capability.WINDOW_EVENTS}
+                )
+
+            def wait_for_window(self, title, timeout):
+                # The first slice checks, subscribes, and sees no event -- the
+                # window opened in the gap between. The second slice's check
+                # finds it.
+                self.slices += 1
+                if self.slices == 1:
+                    return None
+                return self.windows()[0]
+
+        gui = pyguitest.Session(EventBackend(), pyguitest.detect())
+        with mock.patch.object(pyguitest, "_EVENT_SLICE", 0.01):
+            window = gui.wait_for_window("Editor", timeout=None)
+        self.assertIsNotNone(window)
+        self.assertEqual(gui.backend.slices, 2)
+
+    def test_a_compiled_title_reaches_the_backend_with_its_flags(self):
+        # Its `.pattern` string would drop re.IGNORECASE: found live on
+        # Windows, where find_windows matched and this path timed out.
+        class EventBackend(FakeBackend):
+            @property
+            def capabilities(self):
+                return CapabilitySet(
+                    set(FakeBackend.capabilities.fget(self))
+                    | {Capability.WINDOW_EVENTS}
+                )
+
+            def wait_for_window(self, title, timeout):
+                pattern = re.compile(title)
+                found = [w for w in self.windows() if pattern.search(w.title)]
+                return found[-1] if found else None
+
+        gui = pyguitest.Session(EventBackend(), pyguitest.detect())
+        window = gui.wait_for_window(re.compile("editor", re.I), timeout=1)
+        self.assertIsNotNone(window)
         self.assertEqual(window.title, "Document - Editor")
 
     def test_app_id_always_polls_even_when_window_events_is_supported(self):
@@ -798,6 +850,32 @@ class TestWaitWindowClose(unittest.TestCase):
         target = gui.find_window("Editor")
         self.assertTrue(gui.wait_window_close(target, timeout=1))
 
+    def test_a_close_the_subscription_missed_does_not_hang(self):
+        # The window closes after the open check and before the subscription
+        # exists, so no close event ever arrives. With timeout=None this used
+        # to block for good.
+        class EventBackend(FakeBackend):
+            @property
+            def capabilities(self):
+                return CapabilitySet(
+                    set(FakeBackend.capabilities.fget(self))
+                    | {Capability.WINDOW_EVENTS}
+                )
+
+            def window_events(self, timeout=None):
+                # A real subscription asked for no timeout never ends when the
+                # event it waits for has already happened.
+                if timeout is None:
+                    raise AssertionError("an unbounded subscription blocks forever")
+                self._windows = []  # closed, silently
+                time.sleep(timeout)
+                return iter(())
+
+        gui = pyguitest.Session(EventBackend(), pyguitest.detect())
+        target = gui.find_window("Editor")
+        with mock.patch.object(pyguitest, "_EVENT_SLICE", 0.01):
+            self.assertTrue(gui.wait_window_close(target, timeout=None))
+
 
 class TestPollUntil(unittest.TestCase):
     """The private primitive every wait_* method below is now built on."""
@@ -978,19 +1056,33 @@ class TestWaitUntilGone(unittest.TestCase):
 class FakeImageBackend(GUIBackend):
     name = "fake-image"
 
-    def __init__(self, match=None, geometry_result=(10, 20, 100, 50)):
+    def __init__(
+        self,
+        match=None,
+        geometry_result=(10, 20, 100, 50),
+        image_size=None,
+        desktop=None,
+    ):
         self.captured_paths = []
         self.capture_calls = []
         self.geometry_calls = []
         self.locate_calls = []
         self._match = match
         self._geometry_result = geometry_result
+        # A real PNG of this size is written where one is asked for, so the
+        # scale locate_image reads off the image has something to read.
+        self._image_size = image_size
+        self._desktop = desktop
+
+    def desktop_region(self):
+        return self._desktop
 
     @property
     def capabilities(self):
         return CapabilitySet(
             {
                 Capability.SCREEN_CAPTURE,
+                Capability.SCREEN_INFO,
                 Capability.WINDOW_GEOMETRY,
                 Capability.IMAGE_LOCATE,
             }
@@ -1002,6 +1094,9 @@ class FakeImageBackend(GUIBackend):
             os.close(descriptor)
         else:
             open(path, "wb").close()
+        if self._image_size is not None:
+            width, height = self._image_size
+            _png.write_rgb(path, width, height, [bytes(width * 3)] * height)
         self.captured_paths.append(path)
         self.capture_calls.append({"window": window, "region": region})
         return path
@@ -2304,9 +2399,64 @@ class TestLocateImage(unittest.TestCase):
         )
         gui = pyguitest.Session(backend, pyguitest.detect())
         window = Window("h", backend, title="Some Window")
-        gui.locate_image("/tmp/button.png", within=window)
+        found = gui.locate_image("/tmp/button.png", within=window)
         self.assertEqual(backend.geometry_calls, [window])
+        # The whole desktop is captured and the search restricted to the
+        # window -- with no desktop_region, image pixels are screen pixels.
+        self.assertIsNone(backend.capture_calls[0]["region"])
         self.assertEqual(backend.locate_calls[0][2], (5, 6, 7, 8))
+        self.assertEqual(found[:4], (0, 0, 1, 1))
+
+    def test_a_retina_capture_is_scaled_both_ways(self):
+        # A 50x40-point desktop captured at two device pixels per point: the
+        # window's rectangle goes into image pixels, and the match comes back.
+        backend = FakeImageBackend(
+            match=ImageMatch(14, 18, 4, 4, 0.0),
+            geometry_result=(5, 6, 7, 8),
+            image_size=(100, 80),
+            desktop=(0, 0, 50, 40),
+        )
+        gui = pyguitest.Session(backend, pyguitest.detect())
+        found = gui.locate_image("/tmp/button.png", within=Window("h", backend))
+        self.assertEqual(backend.locate_calls[0][2], (10, 12, 14, 16))
+        self.assertEqual(found[:4], (7, 9, 2, 2))
+
+    def test_a_desktop_that_starts_left_of_zero_is_offset(self):
+        # Windows with a monitor left of the primary: the virtual desktop, and
+        # so a whole-desktop capture's pixel (0, 0), is at x=-1920.
+        backend = FakeImageBackend(
+            match=ImageMatch(2000, 10, 5, 5, 0.0),
+            desktop=(-1920, 0, 3840, 1080),
+            image_size=(3840, 1080),
+            geometry_result=(-100, 0, 400, 300),
+        )
+        gui = pyguitest.Session(backend, pyguitest.detect())
+        self.assertEqual(gui.locate_image("/tmp/button.png")[:4], (80, 10, 5, 5))
+        gui.locate_image("/tmp/button.png", within=Window("h", backend))
+        self.assertEqual(backend.locate_calls[-1][2], (1820, 0, 400, 300))
+
+    def test_a_window_hanging_off_the_desktop_is_clipped_to_it(self):
+        backend = FakeImageBackend(
+            match=ImageMatch(0, 0, 1, 1, 0.0),
+            geometry_result=(-50, 900, 400, 300),
+            image_size=(1920, 1080),
+            desktop=(0, 0, 1920, 1080),
+        )
+        gui = pyguitest.Session(backend, pyguitest.detect())
+        gui.locate_image("/tmp/button.png", within=Window("h", backend))
+        self.assertEqual(backend.locate_calls[0][2], (0, 900, 350, 180))
+
+    def test_a_window_entirely_off_the_desktop_finds_nothing(self):
+        backend = FakeImageBackend(
+            match=ImageMatch(0, 0, 1, 1, 0.0),
+            geometry_result=(3000, 0, 400, 300),
+            image_size=(1920, 1080),
+            desktop=(0, 0, 1920, 1080),
+        )
+        gui = pyguitest.Session(backend, pyguitest.detect())
+        with self.assertRaises(ImageNotFound):
+            gui.locate_image("/tmp/button.png", within=Window("h", backend))
+        self.assertEqual(backend.locate_calls, [])
 
     def test_no_geometry_lookup_when_within_is_omitted(self):
         backend = FakeImageBackend(match=ImageMatch(0, 0, 1, 1, 0.0))
@@ -2479,6 +2629,76 @@ class TestWindowElementPrefersTheRealWindowByProcess(unittest.TestCase):
         gui = pyguitest.Session(backend, pyguitest.detect())
         element = gui.window_element("Probe")
         self.assertIs(element, backend.decoration)
+
+
+class TestWindowElementSearchesNearTheRootFirst(unittest.TestCase):
+    """The window's element is near the root; the whole tree is the fallback.
+
+    The full search walked the entire desktop once per window role -- 4.24s
+    for one call on a Windows 11 desktop, paid by every step that scoped a
+    search with it.
+    """
+
+    class _Backend:
+        def __init__(self, tree_windows, pid=None):
+            self.root = FakeElement("desktop frame", "", children=tree_windows)
+            self.full_searches = 0
+            self.everything = list(tree_windows)
+            self._windows = [Window("w", self, title="Probe", pid=pid)] if pid else []
+
+        @property
+        def capabilities(self):
+            caps = {Capability.ELEMENT_TREE, Capability.ELEMENT_ACTION}
+            if self._windows:
+                caps.add(Capability.WINDOW_LIST)
+            return CapabilitySet(caps)
+
+        def root_element(self):
+            return self.root
+
+        def find_elements(self, role=None, name=None, within=None, **_kwargs):
+            self.full_searches += 1
+            return [e for e in self.everything if role is None or e.role == role]
+
+        def windows(self):
+            return self._windows
+
+    def test_a_top_level_window_is_found_without_a_full_search(self):
+        window = FakeElement(Role.FRAME, "Probe")
+        backend = self._Backend([FakeElement(Role.FRAME, "Other"), window])
+        gui = pyguitest.Session(backend, pyguitest.detect())
+        self.assertIs(gui.window_element("Probe"), window)
+        self.assertEqual(backend.full_searches, 0)
+
+    def test_an_applications_window_one_level_down_is_found_too(self):
+        # AT-SPI and macOS: the root's children are applications.
+        window = FakeElement(Role.FRAME, "Probe")
+        app = FakeElement("application", "editor", children=[window])
+        backend = self._Backend([app])
+        gui = pyguitest.Session(backend, pyguitest.detect())
+        self.assertIs(gui.window_element("Probe"), window)
+        self.assertEqual(backend.full_searches, 0)
+
+    def test_a_frame_still_outranks_a_dialog_sharing_the_title(self):
+        # The full search looked for frames first; the shallow one keeps that,
+        # so a title a dialog also contains still names the main window.
+        dialog = FakeElement(Role.DIALOG, "Editor Preferences")
+        main = FakeElement(Role.FRAME, "Document - Editor")
+        backend = self._Backend([dialog, main])
+        gui = pyguitest.Session(backend, pyguitest.detect())
+        self.assertIs(gui.window_element("Editor"), main)
+
+    def test_the_real_process_still_wins_when_only_a_proxy_is_near_the_root(self):
+        # The decoration proxy is shallow and the real window is not: the
+        # full search runs, because `find_window` named a process the
+        # shallow levels do not have.
+        proxy = FakeElement(Role.FRAME, "Probe", pid=111)
+        real = FakeElement(Role.FRAME, "Probe", pid=222)
+        backend = self._Backend([proxy], pid=222)
+        backend.everything = [proxy, real]
+        gui = pyguitest.Session(backend, pyguitest.detect())
+        self.assertIs(gui.window_element("Probe"), real)
+        self.assertGreater(backend.full_searches, 0)
 
 
 class TestWindowElementWithoutWindowList(unittest.TestCase):

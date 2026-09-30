@@ -80,6 +80,9 @@ class FakeQuartz:
     def CGEventSetFlags(self, event, flags):
         return self._record("CGEventSetFlags", event, flags)
 
+    def CGEventSetIntegerValueField(self, event, field, value):
+        return self._record("CGEventSetIntegerValueField", event, field, value)
+
     def CGEventPost(self, tap, event):
         self.posted.append((tap, event))
 
@@ -400,6 +403,63 @@ class TestMacquartz(unittest.TestCase):
         self.assertEqual(kind, self.quartz.kCGEventMouseMoved)
         with self.assertRaises(CapabilityUnsupported):
             backend.move_mouse(1, 2, screen=1)
+
+    def click_counts(self):
+        """The click count stamped on each button event, in order."""
+        return [
+            args[2]
+            for name, args in self.quartz.calls
+            if name == "CGEventSetIntegerValueField"
+            and args[1] == self.quartz.kCGMouseEventClickState
+        ]
+
+    def test_a_second_press_in_time_is_the_second_click_of_a_double(self):
+        # AppKit reads a double-click from the event's click count, not from
+        # timing: measured on macOS 26.7, two presses that all said 1 left a
+        # double-clicked word in TextEdit unselected.
+        backend = self.build()
+        for _ in range(2):
+            backend.press_button(1)
+            backend.release_button(1)
+        self.assertEqual(self.click_counts(), [1, 1, 2, 2])
+
+    def test_a_late_or_different_press_starts_counting_again(self):
+        backend = self.build()
+        backend.press_button(1)
+        backend.release_button(1)
+        backend.press_button(3)
+        backend.release_button(3)
+        with mock.patch(
+            "pyguitest.backends.macquartz._double_click_seconds",
+            lambda _quartz: 0.0,
+        ):
+            backend.press_button(3)
+            backend.release_button(3)
+        self.assertEqual(self.click_counts(), [1, 1, 1, 1, 1, 1])
+
+    def test_a_move_with_a_button_held_is_a_drag(self):
+        # A move posted under a held button is not delivered as a drag: measured
+        # on macOS 26.7, a canvas saw the press and the release and nothing in
+        # between.
+        backend = self.build()
+        backend.press_button(1)
+        backend.move_mouse(30, 40)
+        backend.release_button(1)
+        backend.move_mouse(50, 60)
+        kinds = [
+            args[0]
+            for name, args in self.quartz.calls
+            if name == "CGEventCreateMouseEvent"
+        ]
+        self.assertEqual(
+            kinds,
+            [
+                self.quartz.kCGEventLeftMouseDown,
+                self.quartz.kCGEventLeftMouseDragged,
+                self.quartz.kCGEventLeftMouseUp,
+                self.quartz.kCGEventMouseMoved,
+            ],
+        )
 
     def test_scroll_sends_both_axes_in_this_packages_sign_convention(self):
         self.build().scroll(dx=2, dy=-3)

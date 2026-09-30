@@ -1535,6 +1535,27 @@ class TestInput(Win32TestCase):
         self.assertEqual(event.type, _winapi.INPUT_KEYBOARD)
         self.assertEqual(event.ki.dwFlags, _winapi.KEYEVENTF_KEYUP)
 
+    def test_a_key_carries_its_scan_code_and_extended_bit(self):
+        # Windows fills in neither for an injected virtual key: measured live,
+        # End, Home, Shift and Right Control all arrived with scan code 0 and
+        # the extended bit clear.
+        scans = {VK["VK_LEFT"]: 0x4B, VK["VK_RCONTROL"]: 0x1D, VK["VK_A"]: 0x1E}
+        self.user32._behaviour["MapVirtualKeyW"] = lambda vk, mode: scans.get(vk, 0)
+        cases = {
+            "Left": (0x4B, True),
+            "Control_R": (0x1D, True),
+            "a": (0x1E, False),
+        }
+        for name, (scan, extended) in cases.items():
+            with self.subTest(name=name):
+                self.gui.press_key(name)
+                event = self.sent_one()
+                self.assertEqual(event.ki.wScan, scan)
+                self.assertEqual(
+                    bool(event.ki.dwFlags & _winapi.KEYEVENTF_EXTENDEDKEY), extended
+                )
+                self.assertFalse(event.ki.dwFlags & _winapi.KEYEVENTF_SCANCODE)
+
     def test_an_unknown_key_name_is_a_value_error(self):
         with self.assertRaises(ValueError):
             self.gui.press_key("NoSuchKey")
@@ -2063,6 +2084,14 @@ class TestClipboard(Win32TestCase):
         # encoding and the terminating NUL are both exercised.
         self.gui.set_clipboard("hello — wörld")
         self.assertEqual(self.gui.get_clipboard(), "hello — wörld")
+
+    def test_text_ends_at_the_first_terminator(self):
+        # CF_UNICODETEXT ends at its NUL. The block can hold more than that --
+        # GlobalSize rounds up, and an owner may leave bytes behind -- and none
+        # of it is text. Written here as a NUL inside the string, which puts
+        # exactly that shape in the fake global heap.
+        self.gui.set_clipboard("abc\0left behind")
+        self.assertEqual(self.gui.get_clipboard(), "abc")
 
     def test_a_second_write_replaces_the_first(self):
         self.gui.set_clipboard("first")

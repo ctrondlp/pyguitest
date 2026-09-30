@@ -832,9 +832,13 @@ class GUIBackend(ABC):
         raise NotImplementedError
 
     def wait_for_window(
-        self, title: str, timeout: float | None = None
+        self, title: str | re.Pattern[str], timeout: float | None = None
     ) -> Window | None:
         """Block until a window matching `title` (regex) appears, or None.
+
+        `title` is regex source or an already-compiled pattern; an
+        implementation passes it through `re.compile`, which returns a
+        compiled one unchanged, flags and all.
 
         Session.wait_for_window is the capability-agnostic entry point --
         it calls this only where Capability.WINDOW_EVENTS is available
@@ -922,6 +926,21 @@ class GUIBackend(ABC):
             else Capability.SCREEN_CAPTURE
         )
         raise NotImplementedError
+
+    def desktop_region(self) -> tuple[int, int, int, int] | None:
+        """The screen rectangle a whole-desktop `capture()` covers, or None.
+
+        `(x, y, width, height)` in the coordinates `geometry()` uses. What
+        `Session.locate_image` maps a match back through: image pixel (0, 0)
+        is this rectangle's corner, and the image's own size against its
+        width and height is the capture's scale. None -- the default, and the
+        answer wherever a capture starts at screen (0, 0) at one pixel per
+        unit -- keeps that identity reading. Windows answers its virtual
+        desktop, whose origin is negative with a monitor left of or above the
+        primary, and macOS the main display in points, which a Retina capture
+        covers at two pixels each.
+        """
+        return None
 
     # -- tier 6: no path anywhere but X11 ----------------------------------
     #
