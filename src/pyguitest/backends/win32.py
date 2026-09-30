@@ -353,7 +353,13 @@ that, which is one reason a backend needing the distinction injects scan
 codes instead. Print Screen and Pause are absent for a different reason:
 theirs are the two irregular sequences in the whole table (0xE0 2A 0xE0 37
 and 0xE1 1D 45), and neither is a single prefix on a scan code.
+
+`Win32Backend._key_event` reads it through `_EXTENDED_VK_CODES`, to set
+`KEYEVENTF_EXTENDEDKEY` on exactly these keys.
 """
+
+_EXTENDED_VK_CODES = frozenset(VK[name] for name in _EXTENDED_VK)
+"""`_EXTENDED_VK` by code, which is what an event being built has in hand."""
 
 _SENDKEYS_LONG_NAMES = {
     "BACKSPACE": "BAC",
@@ -1088,6 +1094,15 @@ class Win32Backend(GUIBackend):
             lib.GetSystemMetrics(_winapi.SM_CYVIRTUALSCREEN),
         )
 
+    def desktop_region(self):
+        """The virtual desktop, which is exactly what a whole-desktop capture blits.
+
+        See `GUIBackend.desktop_region`. Its origin is negative on a machine
+        with a monitor left of or above the primary, and a capture's pixel
+        (0, 0) is that corner, not screen (0, 0).
+        """
+        return self._virtual_screen()
+
     # -- input (T4) --------------------------------------------------------
     #
     # One `SendInput` call per operation, built from INPUT structures. The
@@ -1144,17 +1159,33 @@ class Win32Backend(GUIBackend):
         return event
 
     def _key_event(self, vk, up=False):
-        """One keyboard `INPUT` for virtual key `vk`.
+        """One keyboard `INPUT` for virtual key `vk`, shaped like a real key's.
 
-        No `KEYEVENTF_SCANCODE` and no `KEYEVENTF_EXTENDEDKEY`: with a virtual
-        key Windows resolves the scan code itself, extended set included, which
-        is why `press_key` sends virtual keys rather than scan codes. The module
-        docstring has the three vocabularies and what each of them costs.
+        The key is still named by its virtual key -- no `KEYEVENTF_SCANCODE`, so
+        the virtual key is what Windows acts on -- but the event also carries
+        the scan code the active layout gives that key, and
+        `KEYEVENTF_EXTENDEDKEY` where the key is one of `_EXTENDED_VK`. Windows
+        fills in neither: measured on Windows 11 through a separate process's
+        `WH_KEYBOARD_LL` hook, an injected End, Home, Shift or Right Control
+        arrived with scan code 0 and the extended bit clear. That is a key no
+        keyboard sends, and anything reading the scan code or the extended bit
+        -- the right-hand modifiers and the navigation cluster are told from
+        their duplicates by nothing else, and a browser's `KeyboardEvent.code`
+        is built from them -- saw the wrong key or none. The module docstring
+        has the three vocabularies and what each of them costs.
+
+        `vk` zero is the Unicode route's placeholder (`_unicode_events`), which
+        writes its own `wScan` and flags, so nothing is looked up for it.
         """
         event = _winapi.INPUT()
         event.type = _winapi.INPUT_KEYBOARD
         event.ki.wVk = vk
-        event.ki.dwFlags = _winapi.KEYEVENTF_KEYUP if up else 0
+        flags = _winapi.KEYEVENTF_KEYUP if up else 0
+        if vk:
+            event.ki.wScan = self._lib().MapVirtualKeyW(vk, _winapi.MAPVK_VK_TO_VSC)
+            if vk in _EXTENDED_VK_CODES:
+                flags |= _winapi.KEYEVENTF_EXTENDEDKEY
+        event.ki.dwFlags = flags
         return event
 
     def _unicode_events(self, text):
@@ -2261,9 +2292,11 @@ class Win32Backend(GUIBackend):
 
         Decoded from the bytes `GlobalSize` reports rather than through
         `wstring_at`, so the length is the block's own -- a `wstring_at` without
-        one reads past the end of a malformed owner's block. The terminating NUL
-        is stripped, because the format guarantees one and a caller comparing
-        `get_clipboard()` with what they set would otherwise never match.
+        one reads past the end of a malformed owner's block. The text ends at
+        the first NUL, because that is where `CF_UNICODETEXT` says it ends:
+        `GlobalSize` may report more than was allocated, and an owner is free
+        to leave bytes after the terminator, so stripping only *trailing* NULs
+        handed back whatever followed the first one as part of the text.
         """
         memory = _winapi.kernel32()
         pointer = memory.GlobalLock(handle)
@@ -2273,7 +2306,7 @@ class Win32Backend(GUIBackend):
             raw = ctypes.string_at(pointer, memory.GlobalSize(handle))
         finally:
             memory.GlobalUnlock(handle)
-        return raw.decode("utf-16-le", errors="replace").rstrip("\0")
+        return raw.decode("utf-16-le", errors="replace").split("\0", 1)[0]
 
     # -- capture (T2/T5) ---------------------------------------------------
 
@@ -2537,6 +2570,12 @@ class Win32Backend(GUIBackend):
         `bitmap` must already have been deselected from `memory_dc`, which is
         `GetDIBits`' own documented precondition and what `_memory_dc` does on
         the way out -- for the blit and the per-window print alike.
+
+        The buffer is read into `bytes` once, before the loop. `.raw` on a
+        ctypes array is not a view -- every access copies the whole buffer --
+        so reading it per row made a capture quadratic in its height: a
+        1920x1080 desktop copied its 8 MB buffer 1080 times, and measured on
+        Windows 11 that was 2.65s of a 2.77s screenshot.
         """
         header = _winapi.BITMAPINFOHEADER()
         header.biSize = ctypes.sizeof(_winapi.BITMAPINFOHEADER)
@@ -2558,9 +2597,10 @@ class Win32Backend(GUIBackend):
         )
         if copied != height:
             raise PyGUITestError(f"GetDIBits returned {copied} of {height} scanlines")
+        raw = buffer.raw
         rows = []
         for row in range(height - 1, -1, -1):
-            source = buffer.raw[row * stride : (row + 1) * stride]
+            source = raw[row * stride : (row + 1) * stride]
             pixels = bytearray(width * 3)
             pixels[0::3] = source[2::4]
             pixels[1::3] = source[1::4]

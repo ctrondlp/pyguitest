@@ -251,25 +251,26 @@ class ToolImageSearchBackend(GUIBackend):
         width, height = result.stdout.split()
         return int(width), int(height)
 
-    def _search_pixels(self, haystack, region):
-        """How much of the haystack the search will cover, for `_search_timeout`.
+    def _searched_size(self, haystack, region):
+        """(width, height) of what the search will cover, or None if unmeasurable.
 
-        A region answers this without asking anything: the crop that restricts
-        the search is exactly the area the budget is for. Without one, the
-        haystack has to be measured, which costs an `identify` call.
+        Two readers: `_search_timeout`, which budgets by the area, and the
+        bounds check on the match, which needs the edges. A region answers this
+        without asking anything: the crop that restricts the search is exactly
+        that rectangle. Without one, the haystack has to be measured, which
+        costs an `identify` call.
 
         Nothing here is allowed to raise. A haystack that cannot be measured is
-        compare's own error to report, with compare's own message, and a budget
-        is the wrong place to raise it from -- so an unreadable answer is 0,
-        which is the floor.
+        compare's own error to report, with compare's own message -- so an
+        unreadable answer is None, which budgets at the floor and skips the
+        bounds check.
         """
         if region is not None:
-            return region[2] * region[3]
+            return region[2], region[3]
         try:
-            width, height = self._image_size(haystack)
+            return self._image_size(haystack)
         except (PyGUITestError, ValueError, IndexError):
-            return 0
-        return width * height
+            return None
 
     def locate(self, haystack, template, region=None, metric="RMSE", threshold=None):
         """Find `template` in `haystack`, or None if nothing clears `threshold`.
@@ -320,7 +321,8 @@ class ToolImageSearchBackend(GUIBackend):
         # ImageMagick that cannot answer `identify`, should say so in
         # milliseconds instead of after however long compare spent searching
         # for a result this call could not have returned anyway.
-        search_timeout = _search_timeout(self._search_pixels(haystack, region))
+        searched = self._searched_size(haystack, region)
+        search_timeout = _search_timeout(searched[0] * searched[1] if searched else 0)
         try:
             if region is not None:
                 offset_x, offset_y, width, height = region
@@ -366,6 +368,24 @@ class ToolImageSearchBackend(GUIBackend):
                 return None
 
             width, height = self._image_size(template)
+            # ImageMagick 7.1.2 also scores placements that overhang the
+            # image, against virtual pixels repeated outward from the border:
+            # measured, a flat dark template "matched" a dark bottom edge 3 rows
+            # from the end of a 100-row image, and on a real 1080-row desktop a
+            # 40-row match came back at y=1079. That is not a match, and handing
+            # it back would send a click off the screen. The virtual pixels are
+            # not changed instead: `-virtual-pixel background` fixed it on one
+            # 7.1.2 build and stopped another finding exact matches at all.
+            if searched is not None and (
+                rel_x + width > searched[0] or rel_y + height > searched[1]
+            ):
+                raise PyGUITestError(
+                    f"compare placed a {width}x{height} template at {rel_x},{rel_y}, "
+                    f"which overhangs the {searched[0]}x{searched[1]} image searched "
+                    "-- not a real match. ImageMagick scores placements past the "
+                    "edge against virtual pixels; a template that is itself mostly "
+                    "one flat colour is what this usually means"
+                )
             return ImageMatch(
                 x=offset_x + rel_x,
                 y=offset_y + rel_y,

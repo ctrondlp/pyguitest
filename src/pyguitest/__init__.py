@@ -34,8 +34,8 @@ import subprocess
 import tempfile
 import time
 from collections import Counter
-from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING, Any, Literal, TypeVar
+from collections.abc import Callable, Iterable, Sequence
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypeVar
 
 from . import backends, compat, inspect
 from .app import Application
@@ -79,7 +79,7 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T")
 
-__version__ = "0.15.1"
+__version__ = "0.16.0"
 
 __all__ = [
     "connect",
@@ -182,6 +182,10 @@ needs `compare` on PATH, so unlike these two it is not always available and
 stays backend-provided.
 """
 
+
+_EVENT_SLICE = 1.0
+"""Longest single event subscription an event-driven wait makes before it
+checks the current state again. See `Session._in_event_slices`."""
 
 _PS_TIMEOUT = 5
 """Seconds to allow `ps`. Bounded because it backs a polling loop."""
@@ -1615,18 +1619,85 @@ class Session:
         """
         pattern = _title_pattern(title)
         pid = self._owning_pid(title)
-        fallback: Element | None = None
-        for role in Role.WINDOW_ROLES:
-            for candidate in self.elements(role=role):
-                if not pattern.search(candidate.name or ""):
-                    continue
-                if pid is not None and getattr(candidate, "pid", None) == pid:
-                    return candidate
-                if fallback is None:
-                    fallback = candidate
-        if fallback is not None:
-            return fallback
+        # The window's own element sits near the root on every backend -- a
+        # top-level child of it on UI Automation, an application's direct child
+        # on AT-SPI and macOS -- so those two levels are searched first. The
+        # full search below walked the *whole* desktop once per window role:
+        # measured on Windows 11, 4.24s for one call against a desktop with a
+        # few applications open, paid again by every script step that scoped a
+        # search with it. It is kept as the fallback, and still decides when a
+        # known process has no window up there, so the decoration-proxy rule
+        # below holds whichever path answers.
+        shallow = self._pick_window(self._shallow_windows(pattern), pid)
+        if shallow is not None and (pid is None or shallow[1]):
+            return shallow[0]
+        found = self._pick_window(
+            (
+                candidate
+                for role in Role.WINDOW_ROLES
+                for candidate in self.elements(role=role)
+                if pattern.search(candidate.name or "")
+            ),
+            pid,
+        )
+        if found is not None:
+            return found[0]
+        if shallow is not None:
+            return shallow[0]
         raise WindowNotFound(f"no window with a title matching {title!r}")
+
+    @staticmethod
+    def _pick_window(
+        candidates: Iterable[Element], pid: int | None
+    ) -> tuple[Element, bool] | None:
+        """The candidate from process `pid`, else the first, and whether it matched.
+
+        None when there are no candidates at all. The flag is what lets
+        `window_element` tell "found the real window" from "found something
+        with the right name" -- the second is not good enough while a
+        search that could still find the first remains.
+        """
+        first: Element | None = None
+        for candidate in candidates:
+            if pid is not None and getattr(candidate, "pid", None) == pid:
+                return candidate, True
+            if first is None:
+                first = candidate
+        return (first, False) if first is not None else None
+
+    def _shallow_windows(self, pattern: re.Pattern[str]) -> list[Element]:
+        """Window-role elements matching `pattern`, from the tree's top two levels.
+
+        In `Role.WINDOW_ROLES` order -- every `frame` before any `window`,
+        before any `dialog` -- and in tree order within a role, which is the
+        precedence the full search has always had: a title that a main window
+        and one of its dialogs both contain names the main window.
+
+        Empty where the tree cannot be walked from its root -- a backend
+        without `root_element`, or one whose root refuses -- which leaves
+        `window_element` to the full search, as it always had. A node that
+        dies part-way through the walk is skipped, the same rule
+        `_focus_scope` applies to the same hazard.
+        """
+        ranked: list[tuple[int, Element]] = []
+        try:
+            level = list(self.root_element().children)
+        except Exception:  # noqa: BLE001 - any failure means "use the full search"
+            return []
+        for depth in (1, 2):
+            below: list[Element] = []
+            for node in level:
+                try:
+                    role = node.role
+                    if role in Role.WINDOW_ROLES and pattern.search(node.name or ""):
+                        ranked.append((Role.WINDOW_ROLES.index(role), node))
+                    if depth == 1:
+                        below.extend(node.children)
+                except Exception:  # noqa: BLE001 - a node that died mid-walk
+                    continue
+            level = below
+        ranked.sort(key=lambda pair: pair[0])
+        return [node for _, node in ranked]
 
     def _owning_pid(self, title: str | re.Pattern[str]) -> int | None:
         """The process of the real toplevel matching `title`, if `find_window` knows it.
@@ -1670,6 +1741,39 @@ class Session:
             if deadline is not None and time.monotonic() >= deadline:
                 return None
             time.sleep(interval)
+
+    def _in_event_slices(
+        self, attempt: Callable[[float], _T | None], timeout: float | None
+    ) -> _T | None:
+        """Run an event-driven wait in slices of at most `_EVENT_SLICE` seconds.
+
+        An event subscription only sees what happens after it exists, and every
+        event wait here checks the current state first and subscribes second.
+        Whatever changes in between is in neither: a window that closes after
+        `wait_window_close` found it open but before its subscription came up
+        produced no close event the subscription could see, and with
+        `timeout=None` the call then blocked for good -- the ordinary sequence
+        of clicking Close and waiting for the window to go. Slicing bounds that
+        gap at one slice: each `attempt` checks the state again before
+        subscribing again, so a missed event costs at most a second rather than
+        the whole wait, and an event that does arrive still ends the wait the
+        moment it does. `attempt` gets the slice's length and returns the
+        answer, or None to keep waiting; one attempt is always made, so
+        `timeout=0` still asks once.
+        """
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            remaining = None if deadline is None else deadline - time.monotonic()
+            seconds = (
+                _EVENT_SLICE
+                if remaining is None
+                else max(0.0, min(_EVENT_SLICE, remaining))
+            )
+            found = attempt(seconds)
+            if found:
+                return found
+            if deadline is not None and time.monotonic() >= deadline:
+                return None
 
     def wait_for_window(
         self,
@@ -1715,12 +1819,19 @@ class Session:
             raise ValueError("wait_for_window needs title, app_id, or both")
         if app_id is None and self.supports(Capability.WINDOW_EVENTS):
             assert title is not None  # guarded above: app_id is None here
-            # Backends take a plain str and compile it as a regex themselves
-            # (see e.g. KWinEventsBackend.wait_for_window) -- pass the
-            # escaped-if-literal source rather than the raw title, so this
-            # path matches find_windows' behavior for a title containing
-            # regex metacharacters instead of silently diverging from it.
-            return self.backend.wait_for_window(_title_pattern(title).pattern, timeout)
+            # Backends compile what they are given with `re.compile` (see e.g.
+            # KWinEventsBackend.wait_for_window). A plain string goes over as
+            # its escaped source, so a title containing regex metacharacters
+            # matches the way find_windows matches it. A compiled pattern goes
+            # over *as itself*: `re.compile` hands one back unchanged, flags
+            # included, where its `.pattern` string would drop them -- found
+            # live on Windows, where `re.compile("probe", re.I)` found the
+            # window through find_windows and timed out here.
+            pattern = _title_pattern(title)
+            wanted = pattern if isinstance(title, re.Pattern) else pattern.pattern
+            return self._in_event_slices(
+                lambda seconds: self.backend.wait_for_window(wanted, seconds), timeout
+            )
 
         def topmost_match() -> Window | None:
             """The last of the matching windows, which is the topmost one."""
@@ -1854,10 +1965,15 @@ class Session:
         if not self.is_window_open(window):
             return True
         if self.supports(Capability.WINDOW_EVENTS):
-            for event in self.backend.window_events(timeout=timeout):
-                if event.change == "close" and event.window == window:
-                    return True
-            return not self.is_window_open(window)
+
+            def closed_within(seconds: float) -> bool | None:
+                """True on a close event for `window`, or if it is gone by now."""
+                for event in self.backend.window_events(timeout=seconds):
+                    if event.change == "close" and event.window == window:
+                        return True
+                return True if not self.is_window_open(window) else None
+
+            return bool(self._in_event_slices(closed_within, timeout))
 
         def closed() -> bool | None:
             """True once the window is gone, None while it is still there."""
@@ -2239,15 +2355,24 @@ class Session:
     ) -> ImageMatch:
         """Find `template_path` on screen, restricted to `within` if given.
 
-        Captures the whole desktop -- there is no per-window capture path
-        this can lean on, since ToolCaptureBackend itself refuses a window
-        argument -- looks up `within`'s rectangle via WINDOW_GEOMETRY when a
-        Window is given, and hands both to the backend's own template
-        matcher, which restricts its search to that rectangle. Because the
-        search always runs against the same full-screen image whether or not
-        `within` is given, the match's (x, y) comes back screen-absolute
-        either way -- callers never need to add the window's own offset back
-        on.
+        Captures the whole desktop and, with `within`, restricts the search
+        to that window's rectangle, looked up via WINDOW_GEOMETRY. Either way
+        the match's (x, y, width, height) comes back in screen coordinates --
+        callers never add a window's offset back on. That takes two
+        corrections the image itself does not carry: where the capture
+        starts, which on Windows is the virtual desktop's corner (negative
+        where a monitor sits left of or above the primary); and its scale,
+        which on a Retina display is two device pixels per point. The origin
+        comes from `GUIBackend.desktop_region`, and the scale from the
+        captured image's own size against that rectangle. A backend with no
+        answer keeps image pixel (0, 0) as screen (0, 0) at one pixel per
+        unit, which is right on any single-monitor, non-HiDPI desktop.
+
+        The whole desktop is captured even for `within`, rather than only the
+        window's rectangle: a capture tool handed a rectangle hanging off the
+        screen may refuse it or quietly return less, and a smaller image than
+        asked for would read as a different scale. Searching costs the same
+        either way, since the search is cropped to the window first.
 
         Raises ImageNotFound if no match clears `threshold`. With no
         `threshold`, the single best match is always returned, however poor.
@@ -2265,11 +2390,18 @@ class Session:
         The same search inside one window is usually a second or two, and it
         cannot match the same control in a different window.
         """
-        region = None
-        if within is not None:
-            region = self.backend.geometry(within)
+        desktop = self._desktop_region()
         haystack = self.backend.capture()
         try:
+            frame = _Frame.of(desktop, _png_size(haystack))
+            region = None
+            if within is not None:
+                region = frame.to_image(self.backend.geometry(within))
+                if region is None:
+                    raise ImageNotFound(
+                        f"{template_path!r} not found on screen: {within!r} "
+                        "covers no part of the captured desktop"
+                    )
             match = self.backend.locate(
                 haystack,
                 template_path,
@@ -2285,7 +2417,24 @@ class Session:
                 f"{template_path!r} not found on screen"
                 + (f" within {within!r}" if within is not None else "")
             )
-        return match
+        return frame.to_screen(match)
+
+    def _desktop_region(self) -> tuple[int, int, int, int] | None:
+        """The screen rectangle a whole-desktop capture covers, if known.
+
+        See `GUIBackend.desktop_region`. None -- a backend with no answer, or a
+        composite whose SCREEN_INFO member does not implement it -- keeps the
+        old reading, image pixel (0, 0) as screen (0, 0) at scale 1, which is
+        right on every single-monitor, non-HiDPI desktop. Guarded by
+        `supports()` rather than only attempted, so the API docs read
+        SCREEN_INFO as the refinement it is rather than a requirement.
+        """
+        if not self.supports(Capability.SCREEN_INFO):
+            return None
+        try:
+            return self.backend.desktop_region()
+        except (CapabilityUnsupported, NotImplementedError):
+            return None
 
     def _bind(self, element: Element) -> Element:
         """Give `element` a way back to this session, where it wants one.
@@ -3186,6 +3335,87 @@ class Session:
             f"<Session backend={self.backend.name!r} "
             f"session={self.environment.session_type.value} "
             f"caps={len(self.capabilities)}/{len(list(Capability))}>"
+        )
+
+
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+def _png_size(path: str) -> tuple[int, int] | None:
+    """A PNG's (width, height) from its IHDR chunk, or None if it is not one.
+
+    Eight bytes of signature, then IHDR is always the first chunk: its length
+    and type take bytes 8-16, and width and height are the next two big-endian
+    words. No decoder is needed for that, and this package has none.
+    """
+    try:
+        with open(path, "rb") as handle:
+            head = handle.read(24)
+    except OSError:
+        return None
+    if len(head) < 24 or head[:8] != _PNG_SIGNATURE or head[12:16] != b"IHDR":
+        return None
+    return int.from_bytes(head[16:20], "big"), int.from_bytes(head[20:24], "big")
+
+
+class _Frame(NamedTuple):
+    """How a capture's pixels relate to screen coordinates.
+
+    `left`/`top` is the screen point the image's pixel (0, 0) shows, and
+    `scale_x`/`scale_y` the image pixels per screen unit. They differ from the
+    identity wherever a capture does not start at screen (0, 0) -- a Windows
+    virtual desktop with a monitor left of or above the primary -- and wherever
+    it is in device pixels while geometry is in points, which is every capture
+    on a Retina display. The scale is read off the image rather than asked of
+    the display, so it is whatever the capture tool actually wrote.
+    """
+
+    left: int
+    top: int
+    scale_x: float
+    scale_y: float
+    image: tuple[int, int] | None
+
+    @classmethod
+    def of(
+        cls,
+        desktop: tuple[int, int, int, int] | None,
+        image: tuple[int, int] | None,
+    ) -> _Frame:
+        """The frame for a capture of `desktop` that came back `image` in size."""
+        if desktop is None:
+            return cls(0, 0, 1.0, 1.0, image)
+        left, top, width, height = desktop
+        scale_x = image[0] / width if image and width else 1.0
+        scale_y = image[1] / height if image and height else 1.0
+        return cls(left, top, scale_x, scale_y, image)
+
+    def to_image(
+        self, rect: tuple[int, int, int, int]
+    ) -> tuple[int, int, int, int] | None:
+        """A screen rectangle in image pixels, clipped to the image; None if off it."""
+        x, y, width, height = rect
+        x0 = round((x - self.left) * self.scale_x)
+        y0 = round((y - self.top) * self.scale_y)
+        x1 = x0 + round(width * self.scale_x)
+        y1 = y0 + round(height * self.scale_y)
+        if self.image is not None:
+            x0, y0 = max(0, x0), max(0, y0)
+            x1, y1 = min(self.image[0], x1), min(self.image[1], y1)
+        if x1 <= x0 or y1 <= y0:
+            return None
+        return (x0, y0, x1 - x0, y1 - y0)
+
+    def to_screen(self, match: ImageMatch) -> ImageMatch:
+        """A match in image pixels, moved into screen coordinates."""
+        if (self.left, self.top, self.scale_x, self.scale_y) == (0, 0, 1.0, 1.0):
+            return match
+        return ImageMatch(
+            x=self.left + round(match.x / self.scale_x),
+            y=self.top + round(match.y / self.scale_y),
+            width=round(match.width / self.scale_x),
+            height=round(match.height / self.scale_y),
+            score=match.score,
         )
 
 

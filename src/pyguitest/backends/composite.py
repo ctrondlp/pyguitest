@@ -65,6 +65,7 @@ class CaptureFallbackWarning(UserWarning):
 # Which capability each operation needs, so dispatch can find its provider.
 _DISPATCH = {
     "screens": Capability.SCREEN_INFO,
+    "desktop_region": Capability.SCREEN_INFO,
     "move_mouse": Capability.POINTER_MOVE,
     "press_button": Capability.POINTER_BUTTON,
     "release_button": Capability.POINTER_BUTTON,

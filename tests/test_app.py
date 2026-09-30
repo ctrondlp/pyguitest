@@ -182,6 +182,22 @@ class TestRestart(unittest.TestCase):
             self.assertEqual(app.command, echoing("hello"))
         finally:
             app.stop()
+            app.stdout.close()
+
+    def test_restart_closes_the_old_process_pipes(self):
+        # Nothing can reach them once `.process` is replaced; left open, each
+        # was reclaimed by the GC with a ResourceWarning under -X dev.
+        gui = session()
+        app = gui.start_app(echoing("hello"), stdout=subprocess.PIPE, text=True)
+        try:
+            old = app.process
+            app.restart()
+            self.assertTrue(old.stdout.closed)
+            self.assertIsNot(app.process, old)
+            self.assertFalse(app.stdout.closed)
+        finally:
+            app.stop()
+            app.stdout.close()
 
     def test_restarting_an_already_exited_program_starts_it_again(self):
         gui = session()

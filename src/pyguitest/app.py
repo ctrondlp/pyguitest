@@ -106,8 +106,21 @@ class Application:
 
         Returns self, so `app.restart().pid` reads. The new process replaces
         `.process`; the old one is stopped first by the rules above.
+
+        **The old process's captured output is discarded.** Its pipes -- the
+        `stdin`/`stdout`/`stderr` a `start_app(..., stdout=PIPE)` gave it -- are
+        closed here, because nothing can reach them once `.process` is replaced;
+        left open, each was only reclaimed by the garbage collector, with a
+        `ResourceWarning` apiece under `-X dev`. Closed rather than drained with
+        `communicate()`: a program started through the shell can leave a
+        grandchild holding the pipe, and a drain would then block on it. Read
+        `app.stdout` before calling this if the old output matters.
         """
         self.stop(timeout)
+        old = self.process
+        for stream in (old.stdin, old.stdout, old.stderr):
+            if stream is not None:
+                stream.close()
         self.process = self._launch()
         return self
 

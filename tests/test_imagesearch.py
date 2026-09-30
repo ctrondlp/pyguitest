@@ -77,6 +77,21 @@ class TestImageSearch(unittest.TestCase):
         with self.assertRaises(PyGUITestError):
             ToolImageSearchBackend(fake)
 
+    def test_a_placement_overhanging_the_image_is_refused(self):
+        # ImageMagick 7.1.2 scores placements past the edge: a 30x10 template
+        # came back at y=97 of a 100-row image, measured. That is not a match,
+        # and returning it would put a click off the bottom of the screen.
+        gui = self._backend(
+            results=[
+                SimpleNamespace(stdout="200 100\n", stderr="", returncode=0),
+                SimpleNamespace(stdout="", stderr="514 (0.0078) @ 0,97", returncode=1),
+                SimpleNamespace(stdout="30 10\n", stderr="", returncode=0),
+            ]
+        )
+        with self.assertRaises(PyGUITestError) as raised:
+            gui.locate("/tmp/screen.png", "/tmp/btn.png")
+        self.assertIn("overhangs", str(raised.exception))
+
     def test_argv_shape_with_no_region(self):
         # identify comes first, and that ordering is deliberate: the search's
         # budget is derived from the haystack's area, so the haystack gets
@@ -144,7 +159,7 @@ class TestImageSearch(unittest.TestCase):
         crop_path = convert_call[5]
 
         compare_call = self.runner.calls[1]
-        self.assertEqual(compare_call[6], crop_path)
+        self.assertEqual(compare_call[-3], crop_path)
         self.assertNotEqual(crop_path, "/tmp/screen.png")
 
         # Region offset (10, 20) added back onto compare's own (5, 6).
@@ -361,7 +376,7 @@ class TestMagickEntryPoint(unittest.TestCase):
                 SimpleNamespace(stdout="40 24\n", stderr="", returncode=0),
             ]
         )
-        gui.locate("/tmp/screen.png", "/tmp/btn.png", region=(0, 0, 10, 10))
+        gui.locate("/tmp/screen.png", "/tmp/btn.png", region=(0, 0, 100, 50))
         self.assertEqual(
             self.runner.calls[2],
             ["magick", "identify", "-format", "%w %h", "/tmp/btn.png"],

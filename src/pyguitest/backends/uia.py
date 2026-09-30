@@ -836,7 +836,7 @@ class Element:
         """
         pattern = self._pattern("toggle")
         if pattern is None:
-            return None
+            return self._radio_selected()
         state = _current(pattern, "CurrentToggleState", ToggleState_Indeterminate)
         if state == ToggleState_Indeterminate:
             return None
@@ -845,7 +845,23 @@ class Element:
     @property
     def checkable(self):
         """Whether the element has a check box, radio button, or toggle."""
-        return self._pattern("toggle") is not None
+        return self._pattern("toggle") is not None or self._radio_selected() is not None
+
+    def _radio_selected(self):
+        """A radio button's state, which UI Automation publishes as a selection.
+
+        A radio button has no Toggle pattern under UI Automation -- it is a
+        SelectionItem, selected or not -- so `checked` answered None for one
+        that was plainly set, and `checkable` False. AT-SPI reports the same
+        button CHECKED, and macOS its value as 1, so `expect_checked(role=
+        Role.RADIO_BUTTON, ...)` passed on Linux and failed on Windows against
+        a radio button that was selected -- measured on the recorder's probe
+        window, where the `High` button read `checked=None, selected=True`.
+        None for anything that is not a radio button with a selection state.
+        """
+        if self.role != Role.RADIO_BUTTON:
+            return None
+        return self.selected
 
     @property
     def selected(self):

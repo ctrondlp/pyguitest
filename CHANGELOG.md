@@ -5,6 +5,137 @@ All notable changes to pyguitest are recorded here. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html) — with the usual
 0.x caveat that the API may still change between minor versions.
 
+## [0.16.0] — 2026-09-30
+
+### Fixed
+
+- **A full-desktop screenshot on Windows took over three seconds.** `_dib_rows`
+  read the capture buffer through ctypes' `.raw` once per row, and `.raw` copies
+  the whole buffer every time it is touched -- so a 1920x1080 capture copied 8 MB
+  1080 times, 2.65s of a 2.77s screenshot when profiled. The buffer is read once
+  now: 3.37s became 0.19s on the same desktop. Every `locate_image` call, which
+  captures the whole desktop first, got the same saving.
+
+- **`wait_for_window` dropped a compiled pattern's flags wherever window events
+  exist.** On `win32`, GNOME Shell, KWin, sway and niri, Session handed the backend
+  `pattern.pattern` -- the source string -- so `re.compile("editor", re.I)`
+  arrived as a case-sensitive `"editor"`. Found live on Windows:
+  `find_windows` with that pattern found the window, and `wait_for_window` with the
+  same one timed out, and the same again on GNOME Shell 51. A compiled pattern now
+  reaches the backend as itself, which `re.compile` hands back unchanged; a plain
+  string still goes over escaped. Re-measured on both: found in 0.01s.
+
+- **Keys injected on Windows carried no scan code and no extended bit.** The
+  docstring said Windows fills both in from the virtual key; measured through a
+  separate process's low-level keyboard hook, it fills in neither -- End, Home,
+  Shift and Right Control all arrived with scan code 0 and the extended bit clear,
+  a key no keyboard sends. `_EXTENDED_VK`, the table that exists to set that bit,
+  was never read. Each key event now carries the scan code the active layout gives
+  its key and `KEYEVENTF_EXTENDEDKEY` for the navigation cluster and the right-hand
+  modifiers, re-measured live with NumLock off and on.
+
+- **`get_clipboard()` on Windows could return text from past the terminator.**
+  `CF_UNICODETEXT` ends at its first NUL, but only *trailing* NULs were stripped,
+  so bytes an owner left after the terminator came back as part of the text. The
+  text now ends at the first NUL.
+
+- **On macOS, `find_window` picked the rearmost of two windows sharing a title.**
+  `MacosBackend.windows()` returned the window server's front-to-back order, where
+  every other backend returns bottom-to-top and `find_window`/`wait_for_window`
+  take the last match as the topmost. Measured with two overlapping windows: it
+  named the one behind, whichever that was. `windows()` is bottom-to-top now and
+  `active_window` reads its last entry.
+
+- **`double_click()` on macOS was two single clicks to any Cocoa application.**
+  AppKit reads a double-click from the event's click count, and `macquartz` never
+  set one, so both presses said 1: double-clicking a word in TextEdit selected
+  nothing. Presses of the same button inside the user's double-click interval and a
+  few points apart now count up, as the window server counts hardware clicks, and
+  the word is selected.
+
+- **`drag()` on macOS dragged nothing.** A move posted while a button is held has
+  to be a `...MouseDragged` event; `macquartz` posted `kCGEventMouseMoved`, which is
+  not delivered as a drag -- a canvas saw the press and the release and no motion
+  between them, and the release landed where the press had. Moves under a held
+  button are drag events now, and the same drag delivers 44 motion events and ends
+  where it was aimed.
+
+- **`locate_image` answered in capture pixels where it promised screen
+  coordinates.** It captured the whole desktop and took the image's pixel (0, 0)
+  to be screen (0, 0) at one pixel per unit -- wrong on a Windows desktop with a
+  monitor left of or above the primary, whose virtual desktop starts at a
+  negative coordinate, and on a Retina display, where a capture is two device
+  pixels per point. The new optional `GUIBackend.desktop_region()` says where a
+  whole-desktop capture starts -- `win32` answers its virtual desktop, `macos` the
+  main display in points -- and the scale is read off the captured image's own
+  size against it. `within`'s rectangle goes into image pixels the same way, and
+  is clipped to the image, so a window hanging off the screen searches the part
+  that is on it and one entirely off it finds nothing rather than handing
+  ImageMagick a negative crop. A backend with no answer keeps the old reading,
+  which is right on any single-monitor, non-HiDPI desktop. Re-measured live on
+  Windows against a known rectangle: found exactly, with and without `within`.
+  Neither a second monitor nor a Retina display was available, so those two cases
+  are covered by tests rather than a live run.
+
+- **An image search could return a match that did not fit on the screen.**
+  ImageMagick 7.1.2 scores placements that overhang the image, filling the overhang
+  from its default "edge" virtual pixels -- so a dark, flat template "matched" a dark
+  bottom edge: a 10-row match at row 97 of a 100-row image, measured, and on a real
+  desktop a 40-row match at y=1079 of 1080 -- on Windows and on Fedora's build
+  alike. A placement that overhangs the image searched is now refused with an
+  error naming the cause rather than handed back as coordinates to click.
+  Changing the virtual pixels instead was tried and rejected: `-virtual-pixel
+  background` cured it on the Windows build and stopped Fedora's 7.1.2-32 finding
+  exact matches at all.
+
+- **A selected radio button read `checked=None` on Windows.** UI Automation
+  publishes a radio button as a SelectionItem rather than a Toggle, and `checked`
+  only asked the Toggle pattern -- so a set radio button answered None and
+  `checkable` False, where AT-SPI reports the same button CHECKED and macOS its
+  value as 1. `expect_checked(role=Role.RADIO_BUTTON, ..., checked=True)` passed
+  on Linux and failed on Windows against a button that was plainly selected,
+  measured on pyguitest-recorder's probe window. A radio button's `checked` is
+  now its selection state there, and it is `checkable`.
+
+- **`window_element()` took seconds per call.** It searched the whole desktop's
+  accessibility tree once for each of its three window roles, and every search
+  scoped `within=` it paid that again: 4.24s per call measured on Windows 11,
+  4.55s on macOS 26.7 and 7.72s on GNOME Shell 51. It was enough to push
+  pyguitest-recorder's own live Windows check past its 90-second watchdog, which
+  stopped the recording part-way through the script it was driving. A window's
+  element sits near the root on every backend -- a top-level child on UI
+  Automation, an application's direct child on AT-SPI and macOS -- so those two
+  levels are searched first, and the full search is kept as the fallback. The
+  decoration-proxy rule from 0.15.1 holds either way: where `find_window` names a
+  process and the shallow levels have no window from it, the full search still
+  decides. The same element comes back on all three desktops, now in 0.11s, 0.62s
+  and 0.07s.
+
+- **`wait_window_close(window)` could block forever on a window that had just
+  closed.** Where window events exist it checked that the window was still open
+  and *then* subscribed -- and a window that closed in between, which is the
+  ordinary sequence of clicking Close and waiting for the window to go, produced
+  no close event the subscription could ever see. With `timeout=None` the call
+  never returned; with a timeout it sat out the whole of it before answering.
+  `wait_for_window` had the same gap for a window opening in between. Both now
+  wait on events in slices of at most a second and check the current state again
+  between them, so a missed event costs at most one slice, while an event that
+  does arrive still ends the wait at once -- measured on Windows 11, a window
+  opening 2.5s in was found at 2.75s and one closed by another process 1.5s in
+  was reported closed at 1.58s.
+
+- **`Application.restart()` left the old process's pipes to the garbage
+  collector.** Each came back as a `ResourceWarning` under `-X dev`, twice per
+  restart of a program started with `stdout=PIPE`. They are closed now -- not
+  drained, since a grandchild holding a pipe would make a drain block -- and the
+  docstring says the old process's captured output is discarded.
+
+- **macOS reported a tooltip as `help tag`.** That is AX's private word, spelled
+  out by the camel-case fallback; at-spi and UIA both say `tool tip`, so a script
+  written against either found nothing on a Mac. Measured on macOS 26.7: hovering
+  a TextEdit control adds exactly one `AXHelpTag` to the application's tree, and
+  `gui.elements(role="tool tip")` now finds it.
+
 ## [0.15.1] — 2026-09-29
 
 ### Fixed

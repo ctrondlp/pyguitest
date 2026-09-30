@@ -106,7 +106,7 @@ The recommended way to drive an application: match on what a widget is and what 
 | `screenshot(path: str \| None = None, window: Window \| None = None, region: tuple[int, int, int, int] \| None = None)` | `SCREEN_CAPTURE` |  | Write a screenshot and return the path it was written to. |
 | `capture_on_failure(directory: str \| None = None, name: str \| None = None, window: Window \| None = None)` |  |  | Capture a failure bundle if the wrapped block raises. |
 | `locate(haystack: str, template: str, region: Sequence[float] \| None = None, metric: str = RMSE, threshold: float \| None = None)` | `IMAGE_LOCATE` |  | Find `template` within the already-captured image `haystack`. |
-| `locate_image(template_path: str, within: Window \| None = None, threshold: float \| None = None, metric: str = RMSE)` | `IMAGE_LOCATE`, `SCREEN_CAPTURE`, `WINDOW_GEOMETRY` |  | Find `template_path` on screen, restricted to `within` if given. |
+| `locate_image(template_path: str, within: Window \| None = None, threshold: float \| None = None, metric: str = RMSE)` | `IMAGE_LOCATE`, `SCREEN_CAPTURE`, `WINDOW_GEOMETRY` — uses `SCREEN_INFO` if present |  | Find `template_path` on screen, restricted to `within` if given. |
 
 ## Clipboard
 
@@ -188,6 +188,7 @@ prevents by design lives here — on a Wayland session they raise
 
 | Call | Needs | | What it does |
 |------|-------|---|--------------|
+| `desktop_region()` | `SCREEN_INFO` |  | The screen rectangle a whole-desktop `capture()` covers, or None. |
 | `find_elements(role: str \| None = None, name: str \| re.Pattern \| None = None, within: Element \| None = None, enabled: bool \| None = None, visible: bool \| None = None, description: str \| re.Pattern \| None = None, predicate: Callable[[Element], bool] \| None = None)` | `ELEMENT_TREE` |  | Search the accessible tree. |
 | `find_element(role: str \| None = None, name: str \| re.Pattern \| None = None, within: Element \| None = None, enabled: bool \| None = None, visible: bool \| None = None, description: str \| re.Pattern \| None = None, predicate: Callable[[Element], bool] \| None = None)` | `ELEMENT_TREE` |  | The first accessible element matching, or None. |
 

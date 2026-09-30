@@ -67,6 +67,7 @@ _NEEDED = (
     "CGEventGetLocation",
     "CGEventPost",
     "CGEventSetFlags",
+    "CGEventSetIntegerValueField",
     "CGEventSourceCreate",
     "CGEventKeyboardSetUnicodeString",
     "CGRequestPostEventAccess",
@@ -422,6 +423,36 @@ _CG_BUTTONS = {
 }
 
 
+_DOUBLE_CLICK_SECONDS = 0.5
+"""How close two presses have to be to count as one multi-click, where the
+user's preference is unset or unreadable. macOS's own default, and what
+`NSEvent.doubleClickInterval()` answers on a machine where the setting has not
+been moved -- measured, 0.5 on the live machine."""
+
+_DOUBLE_CLICK_SLOP = 4
+"""How far apart, in points, two presses may land and still be one multi-click.
+A person's second click is never on exactly the first one's pixel."""
+
+
+def _double_click_seconds(quartz) -> float:
+    """The user's double-click interval, or the macOS default where unset.
+
+    Read from the global preference AppKit's `NSEvent.doubleClickInterval`
+    reports, through the Quartz module this backend already holds rather than
+    by importing AppKit: that import loaded PyObjC's core outside the module
+    the tests fake, and on a Mac the live tests later in the same run then
+    failed with "Reload of objc._objc detected". Unset -- the ordinary case --
+    reads None, which is the default.
+    """
+    try:
+        value = quartz.CFPreferencesCopyAppValue(
+            "com.apple.mouse.doubleClickThreshold", quartz.kCFPreferencesAnyApplication
+        )
+        return float(value) if value else _DOUBLE_CLICK_SECONDS
+    except Exception:  # noqa: BLE001 - no answer is the default
+        return _DOUBLE_CLICK_SECONDS
+
+
 def _button_events(button: int) -> tuple[str, str, str]:
     """(down name, up name, CG button name) for an X11 button number.
 
@@ -552,6 +583,12 @@ class MacquartzBackend(GUIBackend):
             self._q.kCGEventSourceStateHIDSystemState
         )
         self._held: set[str] = set()
+        # Buttons this backend has pressed and not released, in press order:
+        # what makes a move a drag. See `move_mouse`.
+        self._buttons: list[int] = []
+        # (button, when, x, y, count) of the last press, for the click count a
+        # Cocoa application reads a double-click from. See `_click_count`.
+        self._last_press: tuple[int, float, int, int, int] | None = None
         request_post_event()
 
     @property
@@ -611,6 +648,16 @@ class MacquartzBackend(GUIBackend):
         space has one origin for the whole desktop -- so there is nothing for
         a screen index to select, and ignoring one would let a caller believe
         they had addressed a second display.
+
+        **With a button held, the move is a drag event, not a move.** macOS
+        has a separate event type for motion under a pressed button
+        (`kCGEventLeftMouseDragged` and its right and other siblings), and a
+        `kCGEventMouseMoved` posted in its place is not delivered as a drag at
+        all: measured on macOS 26.7, `Session.drag` across a Tk canvas posted
+        its whole glide as moves, the canvas saw a press and a release and not
+        one motion event between them, and the release landed where the press
+        had -- nothing was dragged. The button the drag event names is the
+        first one still held, which is the one a drag is conventionally about.
         """
         self.require(Capability.POINTER_MOVE)
         if screen:
@@ -620,12 +667,18 @@ class MacquartzBackend(GUIBackend):
                 "coordinates on macOS are already desktop-global, so there is "
                 "no screen to address; pass screen=0 or leave it out",
             )
+        if self._buttons:
+            held = self._buttons[0]
+            kind = f"kCGEvent{_BUTTONS[held]}MouseDragged"
+            button = _CG_BUTTONS[held]
+        else:
+            kind, button = "kCGEventMouseMoved", "kCGMouseButtonLeft"
         self._post(
             self._q.CGEventCreateMouseEvent(
                 self._source,
-                self._q.kCGEventMouseMoved,
+                getattr(self._q, kind),
                 (x, y),
-                self._q.kCGMouseButtonLeft,
+                getattr(self._q, button),
             )
         )
 
@@ -640,28 +693,62 @@ class MacquartzBackend(GUIBackend):
         self.require(Capability.POINTER_BUTTON)
         down, _up, cg_button = _button_events(button)
         x, y = pointer_position(self._q)
-        self._post(
-            self._q.CGEventCreateMouseEvent(
-                self._source,
-                getattr(self._q, down),
-                (x, y),
-                getattr(self._q, cg_button),
-            )
-        )
+        count = self._click_count(button, x, y)
+        self._post(self._button_event(down, (x, y), cg_button, count))
+        if button not in self._buttons:
+            self._buttons.append(button)
 
     def release_button(self, button):
-        """Release a mouse button, wherever the pointer already is."""
+        """Release a mouse button, wherever the pointer already is.
+
+        The release carries the click count of the press it ends, as a
+        hardware release does.
+        """
         self.require(Capability.POINTER_BUTTON)
         _down, up, cg_button = _button_events(button)
         x, y = pointer_position(self._q)
-        self._post(
-            self._q.CGEventCreateMouseEvent(
-                self._source,
-                getattr(self._q, up),
-                (x, y),
-                getattr(self._q, cg_button),
-            )
+        last = self._last_press
+        count = last[4] if last is not None and last[0] == button else 1
+        if button in self._buttons:
+            self._buttons.remove(button)
+        self._post(self._button_event(up, (x, y), cg_button, count))
+
+    def _button_event(self, kind, point, cg_button, count):
+        """One button event, stamped with its click count."""
+        event = self._q.CGEventCreateMouseEvent(
+            self._source, getattr(self._q, kind), point, getattr(self._q, cg_button)
         )
+        self._q.CGEventSetIntegerValueField(
+            event, self._q.kCGMouseEventClickState, count
+        )
+        return event
+
+    def _click_count(self, button, x, y):
+        """1 for a lone press, 2 for the second of a double-click, and so on.
+
+        A Cocoa application does not time presses itself: it reads
+        `NSEvent.clickCount`, which comes from the event's
+        `kCGMouseEventClickState` field, and CGEventCreateMouseEvent leaves that
+        at 1. So two presses posted inside the double-click interval were still
+        two single clicks to AppKit -- measured on macOS 26.7, where
+        `Session.double_click` on a word in TextEdit selected nothing. The
+        count is kept here the way the window server keeps it for hardware:
+        the same button again, within the user's double-click interval and a
+        few points of the last press, counts up; anything else starts over.
+        """
+        now = time.monotonic()
+        last = self._last_press
+        count = 1
+        if (
+            last is not None
+            and last[0] == button
+            and now - last[1] <= _double_click_seconds(self._q)
+            and abs(x - last[2]) <= _DOUBLE_CLICK_SLOP
+            and abs(y - last[3]) <= _DOUBLE_CLICK_SLOP
+        ):
+            count = last[4] + 1
+        self._last_press = (button, now, x, y, count)
+        return count
 
     def scroll(self, dx=0, dy=0):
         """Scroll by wheel steps, on whichever axes are non-zero.

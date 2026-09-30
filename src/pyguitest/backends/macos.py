@@ -388,6 +388,12 @@ _AX_ROLES = {
     # bar on a Mac and one on Linux. Measured: Terminal's scroll area walks as
     # AXScrollArea -> AXScrollBar and AXValueIndicator, one each.
     "AXValueIndicator": "thumb",
+    # A tooltip. `help tag` is AX's private word for it, and what the fallback
+    # below spelled it; at-spi and UIA both say `tool tip`, so a script written
+    # against either found nothing here. Measured on macOS 26.7: hovering
+    # TextEdit's Bold checkbox, whose AXHelp is "Bold text", added exactly one
+    # element to the application's tree, an AXHelpTag.
+    "AXHelpTag": "tool tip",
     "AXProgressIndicator": Role.PROGRESS_BAR,
     "AXSeparator": Role.SEPARATOR,
     "AXSplitter": Role.SEPARATOR,
@@ -1679,6 +1685,30 @@ class MacosBackend(GUIBackend):
             )
         return screens
 
+    def desktop_region(self):
+        """The main display in points: what `screencapture` with no region writes.
+
+        See `GUIBackend.desktop_region`. The tool captures the main display
+        only, in *device pixels* -- two per point on a Retina panel -- so its
+        image is this rectangle at whatever scale the display runs. None where
+        no display answers, which leaves the identity reading in place.
+        """
+        err, displays, count = self._quartz.CGGetActiveDisplayList(
+            _MAX_ACTIVE_DISPLAYS, None, None
+        )
+        if err or not count:
+            return None
+        for display in list(displays)[:count]:
+            if self._quartz.CGDisplayIsMain(display):
+                bounds = self._quartz.CGDisplayBounds(display)
+                return (
+                    int(round(bounds.origin.x)),
+                    int(round(bounds.origin.y)),
+                    int(round(bounds.size.width)),
+                    int(round(bounds.size.height)),
+                )
+        return None
+
     def pointer_position(self):
         """The pointer's location in global display space, which needs no grant.
 
@@ -1893,7 +1923,15 @@ class MacosBackend(GUIBackend):
         return titles
 
     def windows(self):
-        """The windows a person can see, in the window server's own order.
+        """The windows a person can see, **bottommost first**.
+
+        The package's cross-platform order, and the reverse of the window
+        server's: `_onscreen` is front to back, and `Session.find_window` and
+        `wait_for_window` take the *last* match as the topmost, as they do on
+        X11 and Windows. Returned in the server's own order, both picked the
+        rearmost of two windows sharing a title -- measured on macOS 26.7 with
+        two overlapping Tk windows, where `find_window` named whichever was
+        behind, both ways round.
 
         CoreGraphics is the source of truth and Accessibility is the enrichment,
         which is the join ADR 004 describes and what a live run fixes the shape of.
@@ -1918,7 +1956,7 @@ class MacosBackend(GUIBackend):
         titles = self._titles()
         return [
             self._window_from(entry, titles)
-            for entry in self._onscreen()
+            for entry in reversed(self._onscreen())
             if self._visible_entry(entry)
         ]
 
@@ -1931,12 +1969,13 @@ class MacosBackend(GUIBackend):
         with Terminal's pid on one run and `-25204` (`kAXErrorCannotComplete`) on the
         next, from the same shell against the same desktop. A flaky answer behind
         "which window is in front" makes every activation test flake with it, so the
-        ordering comes from CoreGraphics -- `_onscreen`'s list is front to back --
-        and AX supplies only the titles.
+        ordering comes from CoreGraphics -- `_onscreen`'s list is front to back,
+        and `windows()` reverses it into the package's bottom-to-top order, so the
+        front-most window is its last entry -- and AX supplies only the titles.
         """
         self.require(Capability.WINDOW_STATE)
         windows = self.windows()
-        return windows[0] if windows else None
+        return windows[-1] if windows else None
 
     def window_at(self, x, y, screen=0):
         """The front-most window containing a point, or None.

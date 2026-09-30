@@ -1024,6 +1024,25 @@ class TestElementState(UiaTestCase):
         self.assertIsNone(element.checked)
         self.assertFalse(element.checkable)
 
+    def test_a_radio_buttons_checked_is_its_selection(self):
+        # UI Automation publishes a radio button as a SelectionItem, not a
+        # Toggle; reporting None for a selected one made expect_checked fail on
+        # Windows where AT-SPI and macOS report the same button checked.
+        for selected in (True, False):
+            with self.subTest(selected=selected):
+                node = self.node(control_type=50013)  # RadioButton
+                node.add_pattern("selection item", FakePattern(selected=selected))
+                element = self.element(node)
+                self.assertIs(element.checked, selected)
+                self.assertTrue(element.checkable)
+
+    def test_a_selectable_non_radio_is_still_not_checkable(self):
+        node = self.node(control_type=50007)  # ListItem
+        node.add_pattern("selection item", FakePattern(selected=True))
+        element = self.element(node)
+        self.assertIsNone(element.checked)
+        self.assertFalse(element.checkable)
+
     def test_selected_follows_the_selection_item_pattern(self):
         node = self.node()
         node.add_pattern("selection item", FakePattern(selected=True))

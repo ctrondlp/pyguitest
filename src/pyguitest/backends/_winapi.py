@@ -161,6 +161,10 @@ KEYEVENTF_SCANCODE = 0x0008
 unit goes in `wScan` and the system synthesises a keystroke from it, so the
 active layout is never consulted."""
 
+MAPVK_VK_TO_VSC = 0
+"""`MapVirtualKeyW`'s virtual-key-to-scan-code mode. The scan code comes back
+without the 0xE0 prefix; `KEYEVENTF_EXTENDEDKEY` is what carries that."""
+
 CF_UNICODETEXT = 13
 """The clipboard format this package reads and writes: UTF-16, NUL-
 terminated."""
@@ -615,6 +619,8 @@ def _declare_user32(lib):
     lib.LoadCursorW.restype = wintypes.HANDLE
     lib.SendInput.argtypes = (wintypes.UINT, LPINPUT, ctypes.c_int)
     lib.SendInput.restype = wintypes.UINT
+    lib.MapVirtualKeyW.argtypes = (wintypes.UINT, wintypes.UINT)
+    lib.MapVirtualKeyW.restype = wintypes.UINT
     # c_ssize_t rather than a handle type: the context is a *negative*
     # pseudo-handle, and an unsigned pointer type turns -4 into a huge value
     # that no longer means what the constant says.
