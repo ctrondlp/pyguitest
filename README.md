@@ -29,11 +29,10 @@ Use it to:
 - 🎬 Choreograph screen action for film, TV and stage — a character's typing
   and clicking, landing on cue
 
-**Status:** every capability in pyguitest's vocabulary implemented across all
-backends. Much of it has been run against real GNOME,
-KDE, sway, Xfce, X11, GhostBSD, Windows 11 and macOS sessions; some of it has
-not, and [docs/validation.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/validation.md) says exactly which is which,
-so nothing here has to be taken on trust.
+**Status:** beta. Every capability is implemented on every backend that can
+support it. Much of it has been run against real GNOME, KDE, sway, Xfce, X11,
+GhostBSD, Windows 11 and macOS sessions, and some of it has not yet;
+[docs/validation.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/validation.md) records which.
 
 Because desktops differ in what they permit, what a session can do is
 discovered at runtime rather than assumed — `gui.supports(...)` is how you
@@ -85,6 +84,9 @@ pip install pyguitest              # core; no dependencies
 pip install 'pyguitest[atspi]'     # + element automation
 ```
 
+The AT-SPI libraries come from your distribution (`pyguitest doctor` names
+them), so a virtualenv needs `--system-site-packages` to see them.
+
 **Windows**
 
 ```sh
@@ -95,9 +97,13 @@ pip install "pyguitest[windows]"   # + element automation, through comtypes
 **macOS**
 
 ```sh
-pip install pyguitest              # core; screenshots only, through screencapture
+pip install pyguitest              # core; screenshots and the clipboard
 pip install "pyguitest[macos]"     # + elements, windows and input, through PyObjC
 ```
+
+macOS asks for privacy grants (Accessibility, Screen Recording) in System
+Settings, and input is opt-in — see
+[On macOS](https://github.com/ctrondlp/pyguitest/blob/main/docs/install.md#on-macos).
 
 Or from a checkout, if you are working from the source tree:
 
@@ -149,26 +155,22 @@ is what `connect()` reports, what `backend.providers()` lists, and what
 | macOS | `macquartz`, via the `macos` extra (`CGEventPost`) — opt-in, and the PostEvent grant is made by hand in System Settings | `macos`, via the `macos` extra (the Accessibility tree) — the Accessibility grant is made by hand in System Settings | `macos`, joined to CoreGraphics for the on-screen list; titles need the Screen Recording grant | `screencapture`, which ships with the OS, and `-l` for one window un-occluded |
 
 Two things the table cannot say. Whether an application publishes anything to
-AT-SPI is up to the application, and [testable-guis.md][testable-guis] is
-about that side of it. And which of these paths has actually been run against
-a real desktop is in [docs/validation.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/validation.md) — that is the
-file to read before trusting any row here, and it is written to be read that
-way. That file is where the Windows row above needs reading twice: `win32` and
-`uia` are registered and composed exactly like every backend above them, and
-both have driven a real Windows 11 desktop — but on one machine, with one
-layout and one monitor, so the row says what is implemented and validation.md
-says what has been measured. The macOS row needs the same reading: `macquartz`
-and `macos` are registered and composed like every backend above them, and
-both have driven a real macOS 26 machine over SSH — but on one machine, with one
-grant history, so here too the row says what is implemented and
-validation.md says what has been measured.
-[docs/developers/adr-003-windows.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/developers/adr-003-windows.md) and
-[docs/developers/adr-004-macos.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/developers/adr-004-macos.md) record
-each platform's design and the alternatives rejected along the way.
+its accessibility layer is up to the application; [testable-guis.md][testable-guis]
+is written for its developers. And which of these paths has been run against a
+real desktop, on which versions, is recorded in
+[docs/validation.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/validation.md).
+The Windows and macOS rows in particular have each been exercised on one
+machine so far — one Windows 11 desktop, one macOS 26 machine — so read the
+table as what is implemented and validation.md as what has been measured.
+[ADR 003](https://github.com/ctrondlp/pyguitest/blob/main/docs/developers/adr-003-windows.md) and
+[ADR 004](https://github.com/ctrondlp/pyguitest/blob/main/docs/developers/adr-004-macos.md)
+record each platform's design.
 
 ## Usage
 
 ```python
+import re
+
 import pyguitest
 
 gui = pyguitest.connect()
@@ -178,8 +180,9 @@ gui.button("OK").click()
 gui.text_field("Name").set_text("Ada Lovelace")
 gui.dropdown("Country").choose("Norway")
 
-# Windows by title -- a plain string, or a compiled regex -- and by app id,
-# which is what survives a title that changes with the document.
+# Windows by title -- a plain string matches as a literal substring, a
+# compiled regex as a pattern -- and by app id, which survives a title that
+# changes with the document.
 window = gui.find_window("Editor")
 editor = gui.find_window(app_id="org.gnome.TextEditor")
 
@@ -217,7 +220,8 @@ if gui.supports(Capability.WINDOW_GEOMETRY):
 ```
 
 `connect()` never raises on a limited desktop — a session with few capabilities
-is the normal case, and `supports()` is how you find out.
+is the normal case, and `supports()` is how you find out. On macOS, pointer and
+keyboard input is opt-in: `pyguitest.connect(backend=["macquartz", "macos"])`.
 
 A session is usually several backends at once: elements from AT-SPI, injection
 from a CLI adapter, capture from another. `CompositeBackend` merges their
@@ -286,7 +290,8 @@ pyguitest migrate script.pl   # what porting a Perl script involves
 pyguitest record              # hand off to pyguitest-recorder, if installed
 ```
 
-All six also work as `python -m pyguitest …` without installing.
+Each also works as `python -m pyguitest …`, for when the `pyguitest` script
+is not on `PATH`.
 
 `pyguitest debug` is what to paste into a bug report: package and Python
 versions, every environment probe (not only the ones that came back true),
@@ -347,7 +352,7 @@ flags works unchanged.
   lives in the [recorder][] repository
 
 **Design and internals** — [docs/developers/](https://github.com/ctrondlp/pyguitest/tree/main/docs/developers/): why the API
-is not a port, the audit of the 50 exports it derives from, the two ADRs,
+is not a port, the audit of the 50 exports it derives from, the four ADRs,
 the repository structure, and the protocol gaps worth taking upstream.
 
 ## Contributing

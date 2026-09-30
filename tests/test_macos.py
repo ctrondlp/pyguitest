@@ -267,7 +267,7 @@ class TestHints(unittest.TestCase):
         environment = darwin_environment(image_tools=("compare",))
         found = list(hints.hints_for(environment, capabilities=CapabilitySet()))
         self.assertEqual([hint.component for hint in found], ["macquartz"])
-        self.assertIn('connect(backend="macquartz")', found[0].why)
+        self.assertIn('connect(backend=["macquartz", "macos"])', found[0].why)
         self.assertFalse(found[0].installable)
         self.assertIsNone(found[0].command)
 

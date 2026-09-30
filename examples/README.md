@@ -1,76 +1,73 @@
 # Examples
 
-Run them from the project root, with the package importable:
+Run them from the project root with the package installed:
 
 ```sh
-pip install -e .                     # or: export PYTHONPATH=src
+pip install .                        # or, without installing: export PYTHONPATH=src
 python3 examples/01_what_can_i_do.py
 ```
 
+Use `python` instead of `python3` on Windows. Install the extra for your
+platform too (`.[atspi]`, `.[windows]` or `.[macos]`) for the examples that
+work with elements, and run `pyguitest doctor` for anything else your desktop
+needs.
+
 | | |
 |---|---|
-| `01_what_can_i_do.py` | **Start here.** What this desktop supports. |
+| `01_what_can_i_do.py` | **Start here.** What this desktop supports, and what to install for more. |
 | `02_find_windows.py` | List and match windows by title. |
 | `03_widgets.py` | Buttons, text boxes, dropdowns — the recommended approach. |
 | `04_drive_an_editor.py` | Launch an app, wait for it, type into it. |
 | `05_screenshot.py` | Capture the screen, a window, or a rectangle. |
 | `06_a_real_test.py` | **The one to copy.** pyguitest inside a `unittest` suite: skip on a missing capability, screenshot the failure while it is still on screen, wait on conditions instead of sleeping. |
-| `07_keys_and_pointer.py` | `send_keys` in X11::GUITest's own notation, escaping with `quote_for_type`, and the raw pointer calls. |
-| `08_find_by_image.py` | Find a control by a picture of it, for anything AT-SPI cannot see. `--demo` generates a synthetic pair into `images/` and searches one for the other -- no screenshot, desktop or window needed, so it is the quickest check that template matching works here at all. |
-| `09_gui_spy.py` | Point at a screen coordinate (or `--find` a picture of a control), get back the `role=`/`name=` to script against — an element inspector. `--tree` lists every element at that point instead of just the closest match; `--json` gives machine-readable output. |
-| `10_natural_mouse.py` | Walk the pointer around the whole screen through 50 waypoints, alternating between an outer ring and an inner one, using `move_mouse_naturally` — the arch, the minimum-jerk speed ramp, the seeded drift and the overshoot-and-correct, all visible at once. **Moves your real pointer** for about ten seconds; `--dry-run` prints the waypoints and moves nothing, `--duration`/`--latency`/`--pause` set the speed and the two delays, `--arc`/`--wobble`/`--overshoot` shape the path (`--arc 0 --wobble 0` is a straight line), and the default seed is derived from the move so the same tour replays identically. |
-| `_x11_validate.py` | Not numbered: a live-validation script for `X11Backend`'s window control (move/resize/minimize/hit-test/lower/title-set), forced rather than composited. Candidate for removal or promotion to a real numbered example. |
-| `_kdotool_validate.py` | Not numbered: a live-validation script for `KdotoolBackend`'s window control (list/geometry/activate/move/resize/hit-test/minimize, and the documented `is_window_viewable` refusal) on real KWin, forced rather than composited. Candidate for removal or promotion to a real numbered example. |
-| `_eiinput_validate.py` | Not numbered: a live-validation script for `LibeiBackend` (`eiinput`) -- pointer move, click, scroll, and typed text -- forced rather than composited, paired with a separately forced `windows` session for window discovery. Raises a real consent dialog on connect; click Allow. Candidate for removal or promotion to a real numbered example. |
-| `_eiinput_portal_validate.py` | Not numbered: the live re-validation of `eiinput` after its RemoteDesktop negotiation moved into python-libei's `libei.portal` -- one consent dialog, then typed text read back through AT-SPI to prove injection reached a native Wayland client, then a second negotiation presenting the `restore_token` that must raise **no** dialog. `--preflight` checks the cutover with no D-Bus traffic at all; `--rehearse` runs the window/typing half through the default session, so the dialog is only spent once the rest is known to work. Candidate for removal or promotion to a real numbered example. |
-| `_clipboard_validate.py` | Not numbered: a live-validation script for `Capability.CLIPBOARD` -- round trip, persistence, and that a second write replaces rather than appends -- forced rather than composited. Candidate for removal or promotion to a real numbered example. |
-| `_portal_clipboard_validate.py` | Not numbered: a live-validation script for the *other* clipboard path -- `org.freedesktop.portal.Clipboard` on the RemoteDesktop session `portal` negotiates, which is the only clipboard GNOME has, since Mutter implements no wlr-data-control for `wl-copy` to use. The point is the write half: `SetSelection` only declares ownership and a GLib loop on a daemon thread has to answer each `SelectionTransfer`, so this proves it by having a *separate process* paste what was written, counts the transfers the portal actually asked for, and checks the documented lifetime -- the selection dies with the session, unlike the forking CLI tools. Raises a real consent dialog on connect; click Allow. Candidate for removal or promotion to a real numbered example. |
-| `_sync_under_load_validate.py` | Not numbered: measures what `Capability.INPUT_SYNC` is worth on a *busy* machine. `sync()` was validated at 2.2ms idle, which shows only that it is cheaper than the 0.3s sleep it replaced; the direction that matters is a sleep being too *short* under load, which is flakiness rather than waste and had never been measured. Compares round-trip latency idle against every core saturated, and reports how often the round trip beat the sleep it replaced. Raises a real consent dialog on connect; click Allow. Candidate for removal or promotion to a real numbered example. |
-| `_inputcapture_validate.py` | Not numbered: the live check for `Capability.INPUT_CAPTURE`/`Session.wait_for_pointer_activation()`, which reached `ACTIVATED` on 2026-09-12 and printed a `cursor_position` the compositor supplied (see `docs/validation.md`). **Read its own docstring before running** -- unlike every other script here, *approving* the consent dialog exclusively diverts your own pointer away from your desktop for as long as the capture stays active, so this is not something to run unattended or from an agent session. Reports the zones and pointer barriers computed, then waits for you to move your pointer to a screen edge and prints the position and timing the compositor handed back. Kept now that it has run rather than removed: re-checking the barrier arithmetic on a different compositor is what it is for next, and a run still needs a person who will divert their own pointer at a screen edge, so it cannot join the automatic set. Candidate for promotion to a real numbered example. |
-| `_cursor_validate.py` | Not numbered: a live-validation script for `X11Backend.is_window_cursor()` (`WINDOW_CURSOR_QUERY`, the fifth tier-6 capability), forced rather than composited. Needs `python-xlib`. Candidate for removal or promotion to a real numbered example. |
-| `_xtest_input_validate.py` | Not numbered: a live-validation script for `X11Backend`'s *input* half -- `move_mouse`, buttons, keys, `type_text` (including its shift path) and `send_keys` modifier notation, all driven through XTest against its own X11 probe window. On a real X11 session it works as designed; on GNOME/Mutter under XWayland it fails by design, because giving the probe X-level focus does not give it the compositor-level focus Mutter actually routes XTest by -- see `docs/validation.md` for what that run showed instead. Really moves your pointer and injects real keys; `--dry-run` verifies the setup without touching either. Needs `python-xlib`. Candidate for removal or promotion to a real numbered example. |
-| `_kwin_events_validate.py` | Not numbered: a live-validation script for `KWinEventsBackend` (`Capability.WINDOW_EVENTS` on KDE, via an ad hoc KWin script -- `kdotool` has no event-subscription mechanism of its own) -- an existing-window match through `wait_for_window`'s `kdotool search` fallback, then `new`/`title`/`close` events on a freshly spawned window, forced rather than composited. Candidate for removal or promotion to a real numbered example. |
-| `_sway_validate.py` | Not numbered: a live-validation script for `SwayBackend` -- list/geometry/move/resize/activate/minimize/`window_at`/`window_events`, forced rather than composited. Run it via `scripts/headless-sway-session.sh` for a private compositor; needs no real desktop. Candidate for removal or promotion to a real numbered example. |
-| `_natural_motion_validate.py` | Not numbered: a live-validation script for `Session.move_mouse_naturally()` — the one method `docs/validation.md` records as having no live evidence. Counts the motion events a real display server actually delivers, measures how far the shaped path sits off the straight line where a `glide()` over the same endpoints sits on it, reads the speed ramp out of the server's own event timestamps, and drives an X11 probe window shrunk to half the screen so a region that reacts only while the pointer is over it must see Enter, then motion, then Leave. Forces the `x11` backend, since XTest needs no permissions and no daemon; run it under `scripts/headless-session.sh` for a private compositor. Candidate for removal or promotion to a real numbered example. |
-
-`06_a_real_test.py` is a `unittest` file rather than a top-to-bottom script,
-because that is how the library is actually used. Run it directly:
-
-```sh
-PYTHONPATH=src python3 examples/06_a_real_test.py -v
-```
-
-`unittest discover` cannot import it — discovery turns the filename into a
-module name, and `06_a_real_test` starts with a digit, so it is not a valid
-identifier. Discovery reports "NO TESTS RAN" rather than an error. That is
-a quirk of the numbering used here; your own test files will not have it.
+| `07_keys_and_pointer.py` | `send_keys` in X11::GUITest's notation, escaping with `quote_for_type`, and the raw pointer calls. |
+| `08_find_by_image.py` | Find a control by a picture of it, for anything the accessibility tree cannot see. `--demo` generates a synthetic pair into `images/` and searches one for the other — no desktop needed, so it is the quickest check that template matching works at all. |
+| `09_gui_spy.py` | Point at a screen coordinate (or `--find` a picture of a control) and get back the `role=`/`name=` to script against. `--tree` lists every element at that point; `--json` gives machine-readable output. |
+| `10_natural_mouse.py` | Tour the screen with `move_mouse_naturally`, showing the arc, speed ramp, drift and overshoot. **Moves your real pointer** for about ten seconds; `--dry-run` prints the waypoints instead. `--duration`, `--latency`, `--pause`, `--arc`, `--wobble` and `--overshoot` shape the motion (`--arc 0 --wobble 0` is a straight line), and the default seed makes each tour repeatable. |
 
 Every script checks `gui.supports(...)` before it acts and exits with an
-explanation if the desktop cannot do it. That is the intended pattern: what is
-available differs by compositor, and a script should say so rather than fail
-obscurely.
+explanation if the desktop cannot do it. That is the intended pattern: what
+is available differs by desktop, and a script should say so rather than fail
+obscurely. On macOS, the examples that inject input need `macquartz`, which a
+plain `connect()` does not select — see
+[install.md](../docs/install.md#connecting-with-input).
 
-## What works where
+`06_a_real_test.py` is a `unittest` file rather than a top-to-bottom script,
+because that is how the library is normally used. Run it directly:
 
-| | GNOME (Mutter) | KDE (KWin) | sway / Hyprland | X11 |
-|---|---|---|---|---|
-| Windows | via AT-SPI | `kdotool` | built in | built in |
-| Widgets | AT-SPI | AT-SPI | AT-SPI | AT-SPI |
-| Input | portal tool | portal tool | built in | built in |
-| Geometry | — | `kdotool` | built in | built in |
+```sh
+python3 examples/06_a_real_test.py -v
+```
 
-Two setup steps are easy to miss, and `pyguitest doctor` will name whichever
-you need:
+`unittest discover` cannot import it: its filename starts with a digit, so
+it is not a valid module name, and discovery reports "NO TESTS RAN" rather
+than an error. Your own test files will not have this problem.
 
-- **Elements** need `pip install '.[atspi]'` plus the distribution's
-  `python3-gobject python3-pyatspi at-spi2-core`.
-- **Input** needs `python3-evdev` (or `ydotool`) *and* membership of the
-  `input` group — `/dev/uinput` is root-only by default:
+What each desktop supports is summarised in the project
+[README](../README.md#what-works-where); setup for elements, input and
+capture is in [install.md](../docs/install.md) and
+[input.md](../docs/input.md).
 
-  ```sh
-  sudo usermod -aG input $USER   # then log out and back in
-  ```
+## Live-validation scripts
 
-Note `wtype` works only on sway and Hyprland; Mutter and KWin lack the protocol
-it needs, so it installs, runs, and silently types nothing. pyguitest will not
-select it on those desktops.
+The scripts whose names start with `_` are for maintainers checking a
+backend against a real desktop, and are recorded in
+[validation.md](../docs/validation.md). Most move the real pointer, type real
+keys, or raise a consent dialog; read each script's docstring before running
+it.
+
+| | |
+|---|---|
+| `_x11_validate.py` | `X11Backend` window control: move, resize, minimize, hit-test, lower, set title. |
+| `_xtest_input_validate.py` | `X11Backend` input through XTest: pointer, buttons, keys, `type_text` and `send_keys`. Works on a real X11 session; under GNOME's XWayland it fails by design (see validation.md). `--dry-run` checks the setup without injecting. Needs `python-xlib`. |
+| `_cursor_validate.py` | `X11Backend.is_window_cursor()` (`WINDOW_CURSOR_QUERY`). Needs `python-xlib`. |
+| `_kdotool_validate.py` | `KdotoolBackend` window control on KWin, including the documented `is_window_viewable` refusal. |
+| `_kwin_events_validate.py` | `KWinEventsBackend`: `new`, `title` and `close` window events on KDE. |
+| `_sway_validate.py` | `SwayBackend` window control and events. Run it under `scripts/headless-sway-session.sh`; needs no real desktop. |
+| `_eiinput_validate.py` | `LibeiBackend` (`eiinput`): pointer, click, scroll and typed text. Raises a consent dialog. |
+| `_eiinput_portal_validate.py` | `eiinput` through python-libei's `libei.portal`: one consent dialog, typed text read back through AT-SPI, then a restore-token reconnection that must raise **no** dialog. `--preflight` checks without any D-Bus traffic; `--rehearse` runs the rest first. |
+| `_clipboard_validate.py` | `Capability.CLIPBOARD`: round trip, persistence, and replacement on a second write. |
+| `_portal_clipboard_validate.py` | The portal clipboard (the only clipboard path on GNOME): a separate process pastes what was written, and the selection's lifetime is checked. Raises a consent dialog. |
+| `_sync_under_load_validate.py` | What `Capability.INPUT_SYNC` is worth on a busy machine: round-trip latency idle versus with every core saturated. Raises a consent dialog. |
+| `_inputcapture_validate.py` | `Capability.INPUT_CAPTURE` / `wait_for_pointer_activation()`. **Approving its dialog diverts your own pointer** until the capture ends, so run it yourself, attended, never unattended or from an agent session. |
+| `_natural_motion_validate.py` | `move_mouse_naturally()` against a real display server: motion event counts, path shape, speed ramp, and Enter/motion/Leave on a probe window. Forces `x11`; run it under `scripts/headless-session.sh`. |

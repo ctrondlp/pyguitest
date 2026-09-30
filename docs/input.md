@@ -156,31 +156,27 @@ to inject a keystroke where Linux has the one this ranking is about:
 | virtual key | a `VK_*` code | yes |
 | scan code | a physical position, `KEYEVENTF_EXTENDEDKEY` where it is one | yes |
 
-The backend for this is written — `Win32Backend`, `ctypes` and `SendInput`, no
-comtypes and no daemon ([adr-003-windows.md](developers/adr-003-windows.md) is
-the split, and `tools.py`'s ranking above is untouched by it) — and which route
-it uses is the decision that a Windows `type_text` means: **the Unicode route**.
-That is keymap-safe by construction — it never asks what layout is active — so
-Windows gets the property that this page's whole ranking exists to approximate,
-with no daemon, no group membership and no consent prompt, because `SendInput`
-is an ordinary API call. A consequence worth stating rather than discovering:
-there is nothing for `doctor` to warn about on Windows, and
-`allow_keymap_unsafe` is accepted and ignored there rather than refusing.
+`Win32Backend` injects through `SendInput` in plain `ctypes`, with no
+comtypes and no daemon ([adr-003-windows.md](developers/adr-003-windows.md)
+has the design). `type_text` uses **the Unicode route**, which is keymap-safe
+by construction because it never consults the active layout — and needs no
+daemon, group membership or consent prompt. There is nothing for `doctor` to
+warn about here, and `allow_keymap_unsafe` is accepted and ignored.
 
-Two names differ from their X11 spelling, and both are easy to get wrong in
-a suite written on Linux. `#` — Meta in `send_keys()` — is the **Windows key**.
+Two keys behave differently from X11, which is easy to miss in a suite
+written on Linux. `#` — Meta in `send_keys()` — is the **Windows key**.
 And `&` is **not a key of its own**: Windows generates AltGr from Ctrl plus the
 right Alt key, so an `&(...)` group has to expand to both of those rather than
 press one key that does not exist. One spelling that deliberately does *not*
 change: `type_text("~")` types a tilde, though Windows' own SendKeys dialect
 reads `~` as Enter.
 
-Scan codes are the route left for one case — two keys that share a virtual key,
-such as the two Enters — and that is why the virtual-key table marks which keys
-are extended rather than treating "the right-hand cluster" as one thing.
-Nothing sends a scan code today: `press_key` sends a virtual key and lets
-Windows resolve the scan code itself, extended set included, which is why that
-table exists as data for the case that needs it rather than as a call here.
+`press_key` and `send_keys` name a key by its virtual key, and each event
+also carries the scan code the active layout gives that key, with
+`KEYEVENTF_EXTENDEDKEY` set for the extended keys (the right-hand modifiers,
+the navigation cluster, keypad Enter). Windows fills in neither on its own,
+and applications that read them — a browser's `KeyboardEvent.code`, for one —
+would otherwise see the wrong key or none.
 
 The Windows trap is not keymaps but privilege: see
 [troubleshooting.md](troubleshooting.md#injected-input-vanishes-on-windows).
@@ -192,19 +188,23 @@ does not on Windows: `macquartz` types through
 `CGEventKeyboardSetUnicodeString`, so `type_text` never asks what layout is
 active, and `allow_keymap_unsafe` is accepted and ignored rather than refusing.
 
+`macquartz` is **opt-in**, so a plain `connect()` has no pointer or keyboard
+input on a Mac. Name it alongside the element and window backend:
+
+```python
+gui = pyguitest.connect(backend=["macquartz", "macos"])
+```
+
 Injection needs the **PostEvent** grant (`kTCCServicePostEvent`), not
-Accessibility — `CGEventPost` calls no AX API — though System Settings files
-the two under one pane, and that pane is where the grant is made by hand,
-against the application that launched the process. Over SSH there is no such
-application; the grant instead attaches to the session's own responsible
-identity (`sshd-keygen-wrapper`), and whether injection works depends on
-whether *that* identity has been granted Accessibility — not on the
-connection being SSH at all — which composes PostEvent along with it once it
-has been. Reading the pointer back needs no grant at all: `pointer_position()`
-is a single
-`CGEventGetLocation` read. `sync()` is the one call that is not there:
-`CGEventPost` reports nothing about what was consumed, so `INPUT_SYNC` is
-absent rather than answering True.
+Accessibility, although System Settings lists it in the same pane, Privacy &
+Security > Accessibility. It is granted by hand, against the application that
+launched the process. Over SSH there is no such application; the grant then
+attaches to the SSH session's own identity (`sshd-keygen-wrapper`), and
+injection works once that entry has been granted Accessibility.
+
+Reading the pointer back needs no grant: `pointer_position()` is a single
+`CGEventGetLocation` read. `sync()` is not available: `CGEventPost` reports
+nothing about what was consumed, so `INPUT_SYNC` is absent.
 
 Chords are the part that has to be rewritten, because a Mac names a key after
 the legend printed on it where X11 names the modifier:
@@ -244,26 +244,14 @@ on Debian/Ubuntu, `libei` on Arch), then the bindings:
 pip install 'pyguitest[eiinput]'   # or: pip install 'python-libei[portal]'
 ```
 
-The two halves are separate on purpose — `python-libei` is pure ctypes and
+The two halves are separate on purpose: `python-libei` is pure ctypes and
 its wheel carries no `.so`, so pip installs the bindings and the
-distribution supplies the library they `dlopen`. `liboeffis` is not needed
-and is not used: the RemoteDesktop session is negotiated over D-Bus by
-python-libei's own `libei.portal` module, because `oeffis_create_session()`
-takes only a device-type bitmask and so cannot express `persist_mode` or
-`restore_token` (see `backends/eiinput.py`'s module docstring, and
-upstream's own note that liboeffis is "intentionally kept simple"). That
-negotiation lived in this package until it was upstreamed in python-libei
-0.3.0; 0.4.0 is where a negotiation that fails part-way stopped leaving its
-portal session open behind it, and where the timeout below came to bound
-every leg of a round trip rather than only the wait for the portal's
-reply. The `eiinput` extra requires **0.5.2**, two further bumps, for
-`InputCaptureSession` -- the read direction the opt-in `inputcapture`
-backend uses, described further down. 0.5.0 is where that class arrived;
-0.5.2 is where it started receiving its own signals, having subscribed to
-`Activated` on the wrong D-Bus object until then, so every wait ran to its
-timeout and the capability could not work at all. The extra also pulls in PyGObject,
-which that module needs. `libeis` is only needed to run
-`tests/test_eiinput_libei.py`, not at runtime.
+distribution supplies the library they load. `liboeffis` is not needed; the
+RemoteDesktop session is negotiated over D-Bus by python-libei's
+`libei.portal` module, which (unlike `oeffis_create_session()`) can pass
+`persist_mode` and `restore_token`. The extra requires python-libei 0.5.2 or
+newer and pulls in PyGObject, which that module needs. `libeis` is only
+needed to run `tests/test_eiinput_libei.py`, not at runtime.
 
 This is the only backend here that is **keymap-safe by construction**.
 `Device.keyboard_key()` takes a raw Linux keycode and the compositor
@@ -277,18 +265,12 @@ something approximate.
 
 ### The two-pointer trap
 
-Worth knowing about, since it cost a long debugging session: **one seat
-resumes two pointer devices**, `virtual pointer` (relative) and `shared
-virtual absolute pointer` (absolute, with a region), as separate
-`DEVICE_RESUMED` events — the relative one first, every time observed.
-Taking the first device to resume, which is the obvious implementation,
-yields a device whose `pointer_motion_absolute()` logs a libei-internal
-warning and silently does nothing: no exception, no movement. That presented
-as maddening flakiness — byte-identical code working, then not — and was
-initially misdiagnosed as a missing ScreenCast/PipeWire linkage, with a
-whole combined-session negotiation built on the misreading before a `busctl
---user monitor` comparison caught the reference script failing the same way.
-`_wait_for_device` now waits for the device it actually needs.
+Relevant if you write libei code of your own: **one seat resumes two
+pointer devices**, `virtual pointer` (relative) and `shared virtual absolute
+pointer` (absolute, with a region), as separate `DEVICE_RESUMED` events, the
+relative one first in every run observed. Taking the first device to resume
+yields one whose `pointer_motion_absolute()` logs a libei warning and does
+nothing, with no exception. pyguitest waits for the absolute device.
 
 ## `portal`: input through xdg-desktop-portal
 

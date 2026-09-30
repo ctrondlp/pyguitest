@@ -13,7 +13,7 @@ itself.
 | [adr-001-dependencies.md](adr-001-dependencies.md) | Why these libraries, and why so few |
 | [adr-002-transports.md](adr-002-transports.md) | Why sockets replaced CLI tools for the compositor IPC backends |
 | [adr-003-windows.md](adr-003-windows.md) | The Windows split: `ctypes` for everything in-process, one `comtypes` extra for UI Automation, two backends, no wrappers — and the two places it disagrees with [ADR 004](adr-004-macos.md) |
-| [adr-004-macos.md](adr-004-macos.md) | The macOS position: PyObjC in one extra, three backends, both of the PyObjC ones opt-in — and why TCC makes that the opposite of the Windows answer |
+| [adr-004-macos.md](adr-004-macos.md) | The macOS position: PyObjC in one extra, three backends, and why TCC makes the input backend opt-in where Windows has no opt-in backend (amended: the element backend is no longer opt-in) |
 | [upstream.md](upstream.md) | The two Wayland protocol gaps worth filing upstream, written as issue text |
 
 Reach for the ADRs when a design choice looks arbitrary and you want the

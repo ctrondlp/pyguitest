@@ -5,6 +5,53 @@ All notable changes to pyguitest are recorded here. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html) — with the usual
 0.x caveat that the API may still change between minor versions.
 
+## [Unreleased]
+
+### Fixed
+
+- **The documentation said window titles were regexes; a plain string is
+  matched literally.** `docs/recipes.md` and `docs/ai-assistants.md` both
+  said `find_window` and its siblings match a regex, so `find_window("^Save")`
+  looked right and matched nothing. A plain string is escaped and matched
+  as a substring, and only a compiled `re.Pattern` is a pattern, as the code
+  has always done. Found in a docs review read as a new user would read
+  them, which also turned up the rest of this entry.
+
+- **`pyguitest doctor` on a Mac told you to connect with `macquartz` alone.**
+  That session injects input but has no elements or windows. The hint now
+  names `connect(backend=["macquartz", "macos"])`, the combination validated
+  on a real Mac.
+
+- **Setup and troubleshooting docs corrected against the code.** A clean
+  virtualenv showed `python -m pyguitest` does not work from a source checkout
+  without installing, which two pages claimed. `troubleshooting.md` chained
+  `.click()` onto `wait_for_element`, which returns `None` on timeout (now
+  `expect_element`), called a private X11 method through the session, blamed
+  `BackendUnavailable` on a plain `connect()` (which never raises it), and
+  called pointer and key-state reads X11-only. `input.md` still said Windows
+  key events carried no scan code, which 0.16.0 changed. CONTRIBUTING.md,
+  the developers index and ADR 004 still described the `macos` backend as
+  opt-in; only `macquartz` is. `install.md` had two Windows paragraphs inside
+  its macOS section and gave the SPDX license example as MIT. The examples
+  README's platform table predated the GNOME extension and the Windows and
+  macOS backends, and the extension README quoted a stale `version-name`.
+
+### Documentation
+
+- **macOS setup in one place.** `install.md` now has a permissions table
+  (Accessibility, Screen Recording, PostEvent: what each is for and what its
+  absence looks like) and shows how to connect with input. `getting-started.md`
+  gains a macOS install line and short per-platform notes, and
+  `troubleshooting.md` a macOS entry.
+- **The virtualenv note moved up.** A virtualenv needs
+  `--system-site-packages` to see the distribution's AT-SPI packages, which
+  was the last line of a table section; it is now in the README, in
+  getting-started and at the top of that section.
+- **Tone and length.** Project history and debugging stories on user-facing
+  pages were cut down to the behaviour they explain, which CHANGELOG.md and
+  validation.md already record. `troubleshooting.md`'s table of contents now
+  lists every entry, and `structure.md`'s registry table every backend.
+
 ## [0.16.0] — 2026-09-30
 
 ### Fixed

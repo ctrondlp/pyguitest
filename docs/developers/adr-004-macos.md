@@ -3,6 +3,14 @@
 Status: accepted · 2026-09-22 · follows [ADR 001](adr-001-dependencies.md),
 [ADR 002](adr-002-transports.md) and [ADR 003](adr-003-windows.md)
 
+> **Amended since:** only `macquartz` is `opt_in` now. The `macos` backend
+> joins automatic composition: it preflights with `AXIsProcessTrusted`, which
+> shows nothing, and asks for the Accessibility grant only when a caller
+> passes `backend_options={"request": True}` — so a plain `connect()` on a
+> Mac gets elements without anything appearing on screen. `_macos_factory`'s
+> docstring in `backends/__init__.py` has the reasoning. §3 and the
+> consequences below record the original decision.
+
 ## Context
 
 macOS is the fourth desktop this package is being taught, and the third to need
