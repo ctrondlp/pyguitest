@@ -429,9 +429,20 @@ class TestMacquartz(unittest.TestCase):
         backend.release_button(1)
         backend.press_button(3)
         backend.release_button(3)
+        # Late means later than the interval, on the clock this backend
+        # actually reads, and zeroing the interval out does not say that: a
+        # press landing in the same clock tick as the press before it measures
+        # exactly 0.0 apart, and 0.0 is within a 0.0 interval. CI's Windows
+        # runner is coarse enough to hand both presses one time.monotonic()
+        # value -- the count stayed at 2 there, [1, 1, 1, 1, 2, 2] against the
+        # [1, 1, 1, 1, 1, 1] a developer's finer clock gives -- so a green run
+        # on this machine proved nothing about it. Moving the clock past the
+        # interval says "late" whatever the platform's timer can resolve.
+        interval = self.macquartz._double_click_seconds(self.quartz)
+        later = time.monotonic() + interval + 1.0
         with mock.patch(
-            "pyguitest.backends.macquartz._double_click_seconds",
-            lambda _quartz: 0.0,
+            "pyguitest.backends.macquartz.time",
+            mock.Mock(monotonic=lambda: later),
         ):
             backend.press_button(3)
             backend.release_button(3)
