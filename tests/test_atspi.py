@@ -1155,6 +1155,40 @@ class TestElements(AtspiTestCase):
         self.assertEqual(node.actions_performed, ["Press"])
         self.assertFalse(node.clicked)
 
+    def test_click_acts_through_toggle_on_an_element_that_offers_nothing_else(self):
+        # A GtkSwitch publishes `toggle` alone. Measured live on GNOME: the
+        # recorder called it clickable (UIA's click() accepts toggle), this
+        # backend did not, and the replay fell to a coordinate click that needs
+        # the ponytail daemon.
+        node = FakeNode(
+            name="Notifications",
+            role="toggle button",
+            actions={"toggle": {}},
+            click_raises=Exception("coordinates were used"),
+        )
+        self.atspi.Element(node).click()
+        self.assertEqual(node.actions_performed, ["toggle"])
+        self.assertFalse(node.clicked)
+
+    def test_click_prefers_click_or_press_to_toggle_whatever_the_order(self):
+        for actions, expected in (
+            ({"toggle": {}, "click": {}}, "click"),
+            ({"toggle": {}, "press": {}}, "press"),
+            ({"press": {}, "toggle": {}}, "press"),
+        ):
+            with self.subTest(actions=list(actions)):
+                node = FakeNode(name="X", role="toggle button", actions=actions)
+                self.atspi.Element(node).click()
+                self.assertEqual(node.actions_performed, [expected])
+
+    def test_an_activate_only_element_still_clicks_by_coordinate(self):
+        # `activate` on a text entry means focus it, not click it: only the
+        # three click-like verbs are acted through.
+        node = FakeNode(name="Name", role="text", actions={"activate": {}})
+        self.atspi.Element(node).click()
+        self.assertEqual(node.actions_performed, [])
+        self.assertTrue(node.clicked)
+
     def test_click_matches_an_action_name_case_insensitively(self):
         node = FakeNode(name="Gamma", role="menu item", actions={"CLICK": {}})
         self.atspi.Element(node).click()

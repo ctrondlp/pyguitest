@@ -7,7 +7,82 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.16.1] — 2026-10-01
+
+### Changed
+
+- **The package metadata links its two siblings.** `[project.urls]` gains
+  `recorder` (pyguitest-recorder, which `pyguitest record` hands off to) and
+  `python-libei` (the `eiinput` backend's library), so the PyPI sidebar leads from
+  a GUI-automation search to the recorder and to the Wayland input library. The
+  description, keywords and classifiers were checked against what is shipped and
+  left as they were.
+
+### Documentation
+
+- **`geometry()` means a different rectangle depending on which backend answers.**
+  On GNOME with the extension, a plain `connect()` reports the window's visible
+  frame and the X11 backend reports its client area: 37 pixels apart for a GTK3
+  window under XWayland on GNOME Shell 51.0. `docs/troubleshooting.md` records the
+  measurement, what it broke (pyguitest-recorder's window-relative coordinate
+  clicks, which replayed 37 pixels too high), and the pinned session that avoids
+  it. The mismatch itself is not fixed: which rectangle `geometry()` means is a
+  design decision across backends.
+
+- **On GNOME, XTest injection raises a consent prompt, and `connect()`'s list order
+  decides whether it is the injector.** Naming `x11` ahead of the input backend
+  made every pointer and keyboard call raise `xdg-desktop-portal-gnome`'s "Allow
+  Remote Interaction" dialog on GNOME Shell 51, with the script carrying on behind
+  it. `docs/input.md` now says so, with the measured versions, the ordering that
+  avoids it, and what was not established. Found when a replay harness pinned its
+  backends in the wrong order.
+
 ### Fixed
+
+- **`Element.click()` on a GTK switch raised `ElementNotActionable` on GNOME, though
+  the switch publishes an action.** AT-SPI's `click()` acted only through an action
+  named `click` or `press`; a `GtkSwitch` publishes `toggle` alone, so the click fell
+  to a coordinate click, which on GNOME needs the ponytail daemon. UI Automation's
+  `click()` already acts through `toggle`, and pyguitest-recorder counts `toggle` as
+  a click action on every platform, so a recorded click on a switch was rendered as
+  `.click()` and failed on replay. Found replaying a recorded session against a live
+  GNOME Wayland desktop. `click` and `press` still win where an element has them.
+
+- **Every uinput pointer move landed one pixel short, and the last row and column
+  could not be reached.** The virtual device declared its absolute axes as
+  `0..width`, but libinput maps a value onto the screen as
+  `(v - min) * size / (max - min + 1)`, so that spreads `width + 1` values over
+  `width` pixels. Measured on a real 1920x974 GNOME Wayland session with a
+  fullscreen probe window logging true root coordinates: a move to (523, 220)
+  arrived at (522, 219), (1919, 0) at (1918, 0), and 198 of 200 targets were
+  off by a pixel. The axes are now declared `0..size-1`; the same 200 targets
+  landed exactly, 199 of 199 that produced a motion. A one-pixel error is
+  invisible on a button and decisive on a scroll bar, a window border or a
+  1px-wide splitter. Found while validating recorded-and-replayed GUI sessions
+  against a live desktop.
+
+- **Without `xrandr` and without a recognised compositor, uinput was sized for
+  1920x1080 and said nothing.** On a 1920x974 display every `move_mouse()` then
+  landed about a tenth of the screen too high -- a click meant for a text field
+  pressed a toolbar button. The environment that triggers it is ordinary: Fedora
+  ships no `xrandr`, and a shell with no `XDG_CURRENT_DESKTOP` (an SSH session
+  into a running desktop, `sudo`, a service, a container) gives no compositor to
+  ask. `_screen_size` now reads the X root window's size over python-xlib as its
+  last X11/XWayland source, which is the number `xrandr` would have printed since
+  XWayland sizes the root to the compositor's layout. It says nothing, as before,
+  where python-xlib or a reachable display is missing.
+
+- **A screenshot region that hangs off the screen came back as a smaller or
+  empty image.** On GNOME and KDE the capture tools have no rectangle mode, so
+  the whole screen is captured and cropped with ImageMagick, which does not
+  refuse a rectangle outside the image: `50x50+-10+5` of a 200x100 screenshot
+  is 40x50, and `50x50+300+5` is a 1x1 image with a warning and exit 0 -- a
+  plausible picture of the wrong thing, the outcome `check_region` exists to
+  prevent. Found by working through an external audit's region-handling
+  questions against the code. The crop path now raises `ValueError` naming the
+  screenshot's size when the region has a negative origin or is not wholly
+  inside it. The PNG size reader moved to `pyguitest.png.png_size` so the
+  backends can share it.
 
 - **The documentation said window titles were regexes; a plain string is
   matched literally.** `docs/recipes.md` and `docs/ai-assistants.md` both

@@ -202,9 +202,17 @@ class UinputBackend(GUIBackend):
         e, AbsInfo = self._ecodes, self._AbsInfo
         width, height = self.screen_size
 
-        def axis(maximum):
-            """Describe one absolute axis spanning 0 to `maximum`."""
-            return AbsInfo(value=0, min=0, max=maximum, fuzz=0, flat=0, resolution=0)
+        def axis(pixels):
+            """Describe one absolute axis that addresses `pixels` positions.
+
+            The maximum is `pixels - 1`, not `pixels`: libinput maps a value
+            onto the screen as `(v - min) * size / (max - min + 1)`, so an
+            axis declared 0..1920 spreads 1921 values over 1920 pixels and
+            lands `move_mouse(523, 220)` on (522, 219) -- one pixel short,
+            growing toward the far edge, and unable to reach the last
+            column or row at all. Declared 0..1919 the map is exact.
+            """
+            return AbsInfo(value=0, min=0, max=pixels - 1, fuzz=0, flat=0, resolution=0)
 
         capabilities = {
             e.EV_KEY: (

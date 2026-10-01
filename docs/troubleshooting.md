@@ -15,6 +15,7 @@ here, `pyguitest debug` collects everything a bug report needs — see
 - [A window will not come to the front on Windows](#a-window-will-not-come-to-the-front-on-windows)
 - [CapabilityUnsupported on a window operation](#capabilityunsupported-on-a-window-operation)
 - [`geometry()` reports a position nowhere near the window](#geometry-reports-a-position-nowhere-near-the-window)
+- [`geometry()` is a few dozen pixels off between two sessions on GNOME](#geometry-is-a-few-dozen-pixels-off-between-two-sessions-on-gnome)
 - [An element's coordinates are nowhere near its window](#an-elements-coordinates-are-nowhere-near-its-window)
 - [`wait_for_window` hands back a window with no position yet](#wait_for_window-hands-back-a-window-with-no-position-yet)
 - [Pointer and key-state reads look stale](#pointer-and-key-state-reads-look-stale)
@@ -333,6 +334,42 @@ Practical advice: treat `geometry()` results as suspect on GNOME's XWayland,
 and do not build a test on reading a position back after setting it. Under a
 native X11 session and on other compositors this does not apply. Full write-up
 in [validation.md](validation.md#known-caveat-geometry-on-gnomes-xwayland).
+
+## `geometry()` is a few dozen pixels off between two sessions on GNOME
+
+With the pyguitest GNOME Shell extension enabled, a plain `connect()` answers
+`geometry()` from the extension, which reports the window's **visible frame**
+(Mutter's `get_frame_rect()`). The `x11` backend answers for the same window with
+the **client** window in root coordinates. The two differ by the server-side
+title bar on an X11 application, and by the invisible drop-shadow margin on a
+client-side-decorated GTK3 or libadwaita one.
+
+Measured on GNOME Shell 51.0 with a GTK3 window under XWayland (2026-09-30):
+
+| session | `geometry()` of the same window |
+|---|---|
+| `connect()` | `(470, 135, 980, 737)` |
+| `connect(backend=["x11", "atspi"])` | `(470, 172, 980, 700)` |
+
+The window is not moving: 37 pixels is the title bar. Anything that measures a
+window-relative offset in one session and applies it in the other lands that far
+off. pyguitest-recorder is the case that found it: it records through the X11
+provider, and a generated script's bare `connect()` replays through the
+extension's, so every coordinate click came out 37 pixels too high — and, on
+that window, onto the tab strip instead of the field.
+
+Until the two answer alike, pin the session that measured: name the providers
+explicitly, input backend first (see
+[the XTest consent note](input.md#xtest-on-gnome-asks-for-consent-and-list-order-decides-who-injects)).
+
+```python
+gui = pyguitest.connect(backend=["input", "x11", "atspi"])
+```
+
+With that, recorded sessions replayed here reproduced the original exactly: the
+application's own event log and final state were identical. Which rectangle
+`geometry()` means is a property of the backend answering, and it is not yet the
+same across them.
 
 ## An element's coordinates are nowhere near its window
 

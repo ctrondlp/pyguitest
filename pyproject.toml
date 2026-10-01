@@ -234,6 +234,8 @@ repository = "https://github.com/ctrondlp/pyguitest"
 issues = "https://github.com/ctrondlp/pyguitest/issues"
 documentation = "https://github.com/ctrondlp/pyguitest/tree/main/docs"
 changelog = "https://github.com/ctrondlp/pyguitest/blob/main/CHANGELOG.md"
+recorder = "https://github.com/ctrondlp/pyguitest-recorder"
+python-libei = "https://github.com/ctrondlp/python-libei"
 
 [tool.setuptools.dynamic]
 version = {attr = "pyguitest.__version__"}

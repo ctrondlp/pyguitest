@@ -356,6 +356,39 @@ def _xrandr_size():
     return (int(match.group(1)), int(match.group(2))) if match else None
 
 
+def _xlib_size():
+    """The X root window's size, read over the X connection, or None.
+
+    What is left when `xrandr` is not installed -- Fedora does not ship it by
+    default -- and the compositor is not one `_screen_size` can ask directly,
+    which is what an environment without `XDG_CURRENT_DESKTOP` looks like (a
+    service, `sudo`, a container, an SSH shell into a running desktop). Before
+    this the answer was the 1920x1080 constant, silently: on a 1920x974
+    display every `move_mouse()` then landed a tenth of the screen high. The
+    X root is the same number `xrandr` would report, because XWayland sizes it
+    to the compositor's own layout. Needs python-xlib (the `x11` extra), and
+    says nothing -- None -- without it or without a reachable display.
+    """
+    import contextlib
+
+    try:
+        from Xlib import display
+    except ImportError:
+        return None
+    try:
+        connection = display.Display()
+    except Exception:  # noqa: BLE001 - no display, a refused connection, bad auth
+        return None
+    try:
+        geometry = connection.screen().root.get_geometry()
+        return (int(geometry.width), int(geometry.height))
+    except Exception:  # noqa: BLE001
+        return None
+    finally:
+        with contextlib.suppress(Exception):
+            connection.close()
+
+
 def _wlroots_size():
     """The output layout's bounding box on sway or Hyprland, or None."""
     import json
@@ -468,6 +501,7 @@ def _screen_size(environment):
         sources.append(_kscreen_size)
     if environment.session_type in (SessionType.X11, SessionType.XWAYLAND):
         sources.append(_xrandr_size)
+        sources.append(_xlib_size)
 
     for source in sources:
         try:

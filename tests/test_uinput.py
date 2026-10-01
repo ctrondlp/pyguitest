@@ -96,6 +96,67 @@ class UinputTestCase(unittest.TestCase):
         self.gui = uinput.UinputBackend(screen_size=(1920, 1080), device=self.device)
 
 
+class TestDeclaredAbsoluteRange(unittest.TestCase):
+    """The axes must address exactly the screen's pixels.
+
+    Measured live on a 1920x974 GNOME session: `move_mouse(523, 220)` arrived
+    at (522, 219), `(817, 691)` at (816, 690) -- always one short. libinput
+    transforms an absolute value as `(v - min) * size / (max - min + 1)`, so an
+    axis declared 0..size spreads size+1 values over size pixels.
+    """
+
+    @staticmethod
+    def _libinput_transform(value, maximum, size, minimum=0):
+        # evdev_device_transform_x() in libinput, integer arithmetic as there.
+        return (value - minimum) * size // (maximum - minimum + 1)
+
+    def _declared(self, screen_size):
+        captured = {}
+        patcher = fake_evdev()
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        module = sys.modules["evdev"]
+        # _create_device() reads two codes the shared fake does not carry.
+        module.ecodes.KEY_COMPOSE = 127
+        module.ecodes.REL_HWHEEL = 6
+
+        def make(capabilities, **_kw):
+            captured.update(capabilities)
+            return FakeDevice()
+
+        module.UInput = make
+        from pyguitest.backends import uinput
+
+        with mock.patch("os.path.exists", return_value=False):
+            with mock.patch("time.sleep"):
+                uinput.UinputBackend(screen_size=screen_size)
+        return dict(captured[module.ecodes.EV_ABS]), module.ecodes
+
+    def test_each_axis_ends_at_the_last_pixel_not_one_past_it(self):
+        axes, e = self._declared((1920, 974))
+        self.assertEqual(axes[e.ABS_X]["min"], 0)
+        self.assertEqual(axes[e.ABS_X]["max"], 1919)
+        self.assertEqual(axes[e.ABS_Y]["max"], 973)
+
+    def test_every_pixel_maps_to_itself_through_libinputs_transform(self):
+        for size in ((1920, 974), (1920, 1080), (3840, 2160), (800, 600)):
+            axes, e = self._declared(size)
+            for axis, pixels in ((e.ABS_X, size[0]), (e.ABS_Y, size[1])):
+                top = axes[axis]["max"]
+                wrong = [
+                    p
+                    for p in range(pixels)
+                    if self._libinput_transform(p, top, pixels) != p
+                ]
+                self.assertEqual(wrong, [], f"{size} axis {axis}")
+
+    def test_the_old_declaration_really_was_off_by_one(self):
+        # What the live measurement showed, reproduced arithmetically: declared
+        # 0..1920, pixel 523 lands on 522, and the last pixel is unreachable.
+        self.assertEqual(self._libinput_transform(523, 1920, 1920), 522)
+        self.assertEqual(self._libinput_transform(1919, 1920, 1920), 1918)
+
+
 class TestPointer(UinputTestCase):
     def test_absolute_motion_writes_both_axes_then_syncs(self):
         self.gui.move_mouse(100, 200)
