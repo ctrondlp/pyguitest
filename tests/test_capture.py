@@ -24,6 +24,7 @@ from pyguitest.backends.capture import (
 )
 from pyguitest.capabilities import Capability
 from pyguitest.errors import CapabilityUnsupported, PermissionRequired, PyGUITestError
+from pyguitest.png import write_rgb
 
 BY_NAME = {t.name: t for t in tools.CAPTURE_TOOLS}
 
@@ -259,6 +260,64 @@ class TestCropFallback(unittest.TestCase):
             gui.capture(path=SHOT, region=REGION)
         intermediate = seen[0][2]
         self.assertFalse(os.path.exists(intermediate))
+
+
+class TestCropRefusesARegionTheScreenshotDoesNotContain(unittest.TestCase):
+    """ImageMagick answers an overhanging crop with a smaller image.
+
+    Measured on 7.1.2: `-crop 50x50+150+5` of a 200x100 image is 50x50, but
+    `+-10+5` is 40x50 and `+300+5` is a 1x1 image with a warning and exit 0.
+    Each is a plausible picture of the wrong thing, so the crop path refuses
+    them first, naming the screenshot's size.
+    """
+
+    SCREEN = (200, 100)
+
+    def _backend(self):
+        self.calls = []
+
+        def runner(argv):
+            self.calls.append(argv)
+            if argv[0] == "gnome-screenshot":
+                write_rgb(
+                    argv[2], *self.SCREEN, (bytes(3 * self.SCREEN[0]),) * self.SCREEN[1]
+                )
+            else:
+                _write_fake_image(argv)
+            return argv
+
+        return ToolCaptureBackend(BY_NAME["gnome-screenshot"], runner=runner)
+
+    def _refused(self, region):
+        gui = self._backend()
+        with self.assertRaises(ValueError) as caught:
+            gui.capture(path=SHOT, region=region)
+        self.assertIn("200x100", str(caught.exception))
+        self.assertEqual(len(self.calls), 1, "the crop must not have run")
+
+    def test_a_region_hanging_off_the_right_edge_is_refused(self):
+        self._refused((160, 10, 50, 50))
+
+    def test_a_region_hanging_off_the_bottom_is_refused(self):
+        self._refused((10, 60, 50, 50))
+
+    def test_a_region_wholly_outside_is_refused(self):
+        self._refused((300, 5, 50, 50))
+
+    def test_a_negative_origin_is_refused(self):
+        self._refused((-10, 5, 50, 50))
+        self._refused((5, -10, 50, 50))
+
+    def test_a_region_filling_the_screenshot_exactly_is_cropped(self):
+        gui = self._backend()
+        gui.capture(path=SHOT, region=(0, 0, 200, 100))
+        self.assertEqual(len(self.calls), 2)
+
+    def test_the_intermediate_is_cleaned_up_after_a_refusal(self):
+        gui = self._backend()
+        with self.assertRaises(ValueError):
+            gui.capture(path=SHOT, region=(300, 5, 50, 50))
+        self.assertFalse(os.path.exists(self.calls[0][2]))
 
 
 class TestFailuresAreActionable(unittest.TestCase):

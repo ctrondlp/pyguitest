@@ -19,6 +19,37 @@ the key spellings that differ from X11's.
 What has and has not been exercised against a real desktop is recorded in
 [validation.md](validation.md).
 
+## XTest on GNOME asks for consent, and list order decides who injects
+
+Measured on GNOME Shell 51.0 (Mutter 51.0, `xdg-desktop-portal-gnome` 51.0,
+Xwayland 24.1.13) on Fedora 45, 2026-09-30. With the `x11` backend named
+*before* the input backend --
+
+```python
+# x11 first: XTest injects
+pyguitest.connect(backend=["x11", "atspi", "input"])
+```
+
+-- every `move_mouse()`, `click()`, `type_text()` and `tap_key()` made
+`xdg-desktop-portal-gnome` raise a **Remote Desktop** dialog, "Allow Remote
+Interaction", with *Cancel* and *Share*. The script did not stop: it carried on
+with focus held by a dialog, so anything it typed next was not going to the
+application. Listing the input backend first, or using a plain `connect()`, raised
+none, because there uinput ranks above `x11` and does the injecting:
+
+```python
+# uinput injects; x11 answers for windows
+pyguitest.connect(backend=["input", "x11", "atspi"])
+```
+
+In an explicit list the earlier name wins a capability both can provide, and
+`x11` can provide input as well as windows, which is easy to forget when it was
+named for its window list. If you name `x11` to get window geometry, name the
+input backend ahead of it. The prompt is the compositor's, not pyguitest's, and
+the answer to give an unexpected one is *Cancel*: nothing here needs the remote
+interaction it grants. What was not established is whether an event is delivered
+before the prompt is answered; the runs that raised it were stopped.
+
 ## uinput: `/dev/uinput` permissions
 
 Injection through uinput needs one more step than the rest, because

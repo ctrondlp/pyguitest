@@ -55,6 +55,7 @@ from .errors import (
     PyGUITestError,
     WindowNotFound,
 )
+from .png import png_size as _png_size
 from .roles import Role
 from .sendkeys import KeySender
 from .session import (
@@ -79,7 +80,7 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T")
 
-__version__ = "0.16.0"
+__version__ = "0.16.1"
 
 __all__ = [
     "connect",
@@ -3336,26 +3337,6 @@ class Session:
             f"session={self.environment.session_type.value} "
             f"caps={len(self.capabilities)}/{len(list(Capability))}>"
         )
-
-
-_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
-
-
-def _png_size(path: str) -> tuple[int, int] | None:
-    """A PNG's (width, height) from its IHDR chunk, or None if it is not one.
-
-    Eight bytes of signature, then IHDR is always the first chunk: its length
-    and type take bytes 8-16, and width and height are the next two big-endian
-    words. No decoder is needed for that, and this package has none.
-    """
-    try:
-        with open(path, "rb") as handle:
-            head = handle.read(24)
-    except OSError:
-        return None
-    if len(head) < 24 or head[:8] != _PNG_SIGNATURE or head[12:16] != b"IHDR":
-        return None
-    return int.from_bytes(head[16:20], "big"), int.from_bytes(head[20:24], "big")
 
 
 class _Frame(NamedTuple):

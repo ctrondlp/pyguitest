@@ -679,7 +679,21 @@ class Element:
         is clicked by coordinate.
         """
         actions = self.node.actions or {}
-        name = next((a for a in actions if a.lower() in ("click", "press")), None)
+        # `toggle` last: GTK publishes it alone on a switch (a GtkSwitch has no
+        # `click`), and UI Automation's click() already acts through its own
+        # `toggle`. Without it a recorded click on a switch replayed as a
+        # coordinate click, which on GNOME needs the ponytail daemon and
+        # otherwise raised ElementNotActionable -- on an element with a
+        # perfectly good action. `click` and `press` still win where present.
+        name = next(
+            (
+                a
+                for wanted in ("click", "press", "toggle")
+                for a in actions
+                if a.lower() == wanted
+            ),
+            None,
+        )
         if name is not None:
             self.node.doActionNamed(name)
             return

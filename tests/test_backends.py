@@ -8,6 +8,7 @@ what they raise when nothing in the session can serve them.
 import dataclasses
 import json
 import sys
+import types
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -799,6 +800,14 @@ class TestScreenSize(unittest.TestCase):
     test pass for the wrong reason before this note was added.
     """
 
+    def setUp(self):
+        # Hermetic: the X-connection source would otherwise reach whatever real
+        # display the test machine has, and answer in place of the fallback
+        # these tests are about. Its own tests below put it back.
+        patcher = mock.patch.object(backends, "_xlib_size", return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_it_falls_back_rather_than_raising_when_nothing_answers(self):
         with mock.patch("shutil.which", return_value=None):
             size = backends._screen_size(
@@ -813,6 +822,42 @@ class TestScreenSize(unittest.TestCase):
                     _env(session_type=SessionType.X11, compositor=Compositor.NONE)
                 )
         self.assertEqual(size, backends._FALLBACK_SCREEN_SIZE)
+
+    def test_the_x_root_answers_when_xrandr_is_not_installed(self):
+        # The case found live: Fedora ships no xrandr, and a shell with no
+        # XDG_CURRENT_DESKTOP gives no compositor to ask, so this used to fall
+        # through to 1920x1080 on a 1920x974 display -- every move_mouse then
+        # landed a tenth of the screen too high, with nothing said.
+        with mock.patch("shutil.which", return_value=None):
+            with mock.patch.object(backends, "_xlib_size", return_value=(1920, 974)):
+                size = backends._screen_size(
+                    _env(session_type=SessionType.XWAYLAND, compositor=Compositor.NONE)
+                )
+        self.assertEqual(size, (1920, 974))
+
+    def test_xrandr_still_outranks_the_x_root(self):
+        with mock.patch("shutil.which", return_value="/usr/bin/xrandr"):
+            with mock.patch(
+                "subprocess.run",
+                return_value=SimpleNamespace(stdout="Screen 0: current 3840 x 2160"),
+            ):
+                with mock.patch.object(
+                    backends, "_xlib_size", return_value=(1920, 974)
+                ) as root:
+                    size = backends._screen_size(
+                        _env(session_type=SessionType.X11, compositor=Compositor.NONE)
+                    )
+        self.assertEqual(size, (3840, 2160))
+        root.assert_not_called()
+
+    def test_the_x_root_is_not_asked_outside_an_x_session(self):
+        with mock.patch("shutil.which", return_value=None):
+            with mock.patch.object(backends, "_xlib_size") as root:
+                size = backends._screen_size(
+                    _env(session_type=SessionType.WAYLAND, compositor=Compositor.NONE)
+                )
+        self.assertEqual(size, backends._FALLBACK_SCREEN_SIZE)
+        root.assert_not_called()
 
     def test_xrandr_output_is_parsed_when_it_works(self):
         with mock.patch("shutil.which", return_value="/usr/bin/xrandr"):
@@ -946,3 +991,57 @@ class TestScreenSize(unittest.TestCase):
                         )
                     )
         self.assertEqual(size, (1920, 1080))
+
+
+class TestXlibSize(unittest.TestCase):
+    """`_xlib_size` reads the X root over python-xlib, and says nothing if it cannot."""
+
+    @staticmethod
+    def _xlib(display):
+        xlib = types.ModuleType("Xlib")
+        module = types.ModuleType("Xlib.display")
+        module.Display = display
+        xlib.display = module
+        return mock.patch.dict(sys.modules, {"Xlib": xlib, "Xlib.display": module})
+
+    def test_it_reports_the_root_windows_size_and_closes_the_connection(self):
+        closed = []
+
+        class Display:
+            def screen(self):
+                root = SimpleNamespace(
+                    get_geometry=lambda: SimpleNamespace(width=1920, height=974)
+                )
+                return SimpleNamespace(root=root)
+
+            def close(self):
+                closed.append(True)
+
+        with self._xlib(Display):
+            self.assertEqual(backends._xlib_size(), (1920, 974))
+        self.assertEqual(closed, [True])
+
+    def test_no_reachable_display_is_none_not_an_error(self):
+        def refuse():
+            raise OSError("cannot connect to X server")
+
+        with self._xlib(refuse):
+            self.assertIsNone(backends._xlib_size())
+
+    def test_a_connection_that_fails_after_opening_is_still_closed(self):
+        closed = []
+
+        class Display:
+            def screen(self):
+                raise RuntimeError("gone")
+
+            def close(self):
+                closed.append(True)
+
+        with self._xlib(Display):
+            self.assertIsNone(backends._xlib_size())
+        self.assertEqual(closed, [True])
+
+    def test_python_xlib_not_installed_is_none(self):
+        with mock.patch.dict(sys.modules, {"Xlib": None, "Xlib.display": None}):
+            self.assertIsNone(backends._xlib_size())

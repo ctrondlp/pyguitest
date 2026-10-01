@@ -29,6 +29,7 @@ import tempfile
 
 from ..capabilities import Capability, CapabilitySet
 from ..errors import CapabilityUnsupported, PermissionRequired, PyGUITestError
+from ..png import png_size
 from . import _macapi
 from . import crop as _crop
 from .base import GUIBackend, check_region
@@ -246,6 +247,28 @@ def _check_written(path, tool_name):
         )
 
 
+def _check_inside(full, region, tool):
+    """Refuse a region the whole-screen capture does not contain.
+
+    ImageMagick does not: a rectangle hanging over an edge comes back as a
+    smaller image, and one wholly outside as a 1x1 image with a warning and a
+    zero exit -- a plausible-looking picture of the wrong thing, the outcome
+    `check_region` exists to prevent. A capture that is not a PNG this can
+    read is left to the crop, as before.
+    """
+    size = png_size(full)
+    if size is None:
+        return
+    x, y, width, height = region
+    if x < 0 or y < 0 or x + width > size[0] or y + height > size[1]:
+        raise ValueError(
+            f"region {width}x{height} at ({x}, {y}) is not inside the "
+            f"{size[0]}x{size[1]} screenshot {tool} took: cropping it would "
+            "return a smaller or "
+            "empty image instead of the rectangle asked for"
+        )
+
+
 class ToolCaptureBackend(GUIBackend):
     """Capture through whichever screenshot tool is installed."""
 
@@ -347,6 +370,7 @@ class ToolCaptureBackend(GUIBackend):
         try:
             self._runner(self._build(full, None))
             _check_written(full, self.tool.name)
+            _check_inside(full, region, self.tool.name)
             _crop.crop(full, region, path, runner=self._runner)
             _check_written(path, self.tool.name)
         finally:

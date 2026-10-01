@@ -21,7 +21,7 @@ each prefixed with a filter byte, IEND terminates.
 import struct
 import zlib
 
-__all__ = ["write_rgb", "encode_rgb"]
+__all__ = ["write_rgb", "encode_rgb", "png_size"]
 
 _SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
@@ -102,3 +102,20 @@ def write_rgb(path, width, height, rows, compresslevel=6):
     with open(path, "wb") as handle:
         handle.write(data)
     return path
+
+
+def png_size(path):
+    """A PNG's (width, height) from its IHDR chunk, or None if it is not one.
+
+    Eight bytes of signature, then IHDR is always the first chunk: its length
+    and type take bytes 8-16, and width and height are the next two big-endian
+    words. No decoder is needed for that, and this package has none.
+    """
+    try:
+        with open(path, "rb") as handle:
+            head = handle.read(24)
+    except OSError:
+        return None
+    if len(head) < 24 or head[:8] != _SIGNATURE or head[12:16] != b"IHDR":
+        return None
+    return int.from_bytes(head[16:20], "big"), int.from_bytes(head[20:24], "big")
