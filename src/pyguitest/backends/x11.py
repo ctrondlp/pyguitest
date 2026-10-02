@@ -490,14 +490,21 @@ class X11Backend(GUIBackend):
 
         Prefers _NET_CLIENT_LIST_STACKING; falls back to a full tree walk only for a
         window manager that does not maintain it, which is also the only
-        path where one application can appear more than once.
+        path where one application can appear more than once. The walk is
+        filtered to the windows a window manager would have managed -- see
+        `_managed` -- so the two paths answer alike.
         """
         self.require(Capability.WINDOW_LIST)
         found = []
         for screen_number in range(self._display.screen_count()):
             root = self._display.screen(screen_number).root
             clients = self._client_list(root)
-            candidates = clients if clients is not None else self._walk(root)
+            if clients is not None:
+                candidates = clients
+            else:
+                candidates = [
+                    child for child in self._walk(root) if self._managed(child)
+                ]
             for child in candidates:
                 title = self._title(child)
                 if title:
@@ -511,6 +518,39 @@ class X11Backend(GUIBackend):
                         )
                     )
         return found
+
+    def _managed(self, window):
+        """Whether a window manager would have managed this window.
+
+        The tree walk exists to stand in for `_NET_CLIENT_LIST_STACKING` on a
+        desktop whose window manager does not maintain it, so it has to
+        answer the same set that property holds: the windows a window manager
+        has taken on. It takes on a window only after a `MapRequest` -- so a
+        window that is not mapped is not one -- and never an override-redirect
+        one, which is exactly what that flag opts a window out of.
+
+        Measured live on a display with no window manager, walking the raw
+        tree without this: GTK's own combo-box drop-down appeared as a titled
+        toplevel sharing its application's pid, sitting over the widget the
+        pointer was asked about, so `window_at` named the popup where an EWMH
+        client list names the application's window. The accessibility bridge's
+        hidden 10x10 toplevel -- unmapped, and titled after the program like
+        the popups are -- was listed the same way, giving one application
+        several windows that can never be under the pointer.
+
+        Deliberately not applied to the `_NET_CLIENT_LIST_STACKING` path: that
+        list is the window manager's own answer, and a minimized window on it
+        is mapped-but-unviewable by design (the manager unmaps the client), so
+        filtering there would hide windows a caller can still restore. A read
+        that fails keeps the window, as the rest of this backend does.
+        """
+        try:
+            attributes = window.get_attributes()
+        except Exception:
+            return True
+        if getattr(attributes, "override_redirect", False):
+            return False
+        return attributes.map_state != self._X.IsUnmapped
 
     def _app_id(self, window):
         """A window's application identity from WM_CLASS, or empty.

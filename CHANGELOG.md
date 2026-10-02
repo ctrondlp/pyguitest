@@ -7,6 +7,33 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **`windows()` listed windows a window manager would never manage, so it
+  answered differently depending on whether one was running.** The fallback for
+  a desktop whose window manager maintains no `_NET_CLIENT_LIST_STACKING` walks
+  the raw X tree, and that walk was unfiltered: on a display with no window
+  manager it listed GTK's override-redirect popups -- a combo box's drop-down, a
+  menu -- and the accessibility bridge's own hidden 10x10 toplevel, each titled
+  after the program and sharing its application's pid. An EWMH client list holds
+  none of them, because a window manager takes a window on only after a
+  `MapRequest` and never takes on an override-redirect one.
+
+  The visible cost was `window_at`: measured live, a combo box's drop-down
+  landed over the widget the pointer was asked about, so `window_at` named the
+  popup where a window manager's own list names the application's window --
+  deterministically, 40 asks out of 40, for every point the drop-down covered.
+  Anything matching on pid then saw one application as several windows, which
+  is exactly what a recorder resolving a click through both the accessibility
+  tree and the window list depends on not happening: it refused the element it
+  had resolved correctly, and the click came out as a bare coordinate.
+
+  The tree walk now stands in for the set a window manager maintains: mapped,
+  and not override-redirect. `_NET_CLIENT_LIST_STACKING` is left exactly as the
+  window manager reports it, minimized windows on it included -- it unmaps those
+  clients by design, so filtering there would hide windows a caller can still
+  restore.
+
 ## [0.16.1] — 2026-10-01
 
 ### Changed
