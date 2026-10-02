@@ -78,6 +78,10 @@ class FakeWindow:
         self.configured = {}
         self.focused = False
         self.mapped = True
+        # Override-redirect, as a GTK popup sets it: the window manager never
+        # manages one, so a WM-maintained client list never holds one. A test
+        # sets this to model a combo box's drop-down or a menu.
+        self.override_redirect = False
         # GetImage bookkeeping, so a test can assert the rectangle actually
         # asked for and simulate a window that has gone away.
         self.image_requests = []
@@ -149,7 +153,10 @@ class FakeWindow:
         # 2 == Xlib.X.IsViewable, 0 == IsUnmapped -- matches the real
         # values so a test could compare against the fake X module's
         # constants directly instead of the magic numbers.
-        return types.SimpleNamespace(map_state=2 if self.mapped else 0)
+        return types.SimpleNamespace(
+            map_state=2 if self.mapped else 0,
+            override_redirect=self.override_redirect,
+        )
 
     def get_image(self, x, y, width, height, format, plane_mask):
         """Stand in for GetImage: 32bpp BGRX, the usual x86 TrueColor case.
@@ -537,6 +544,44 @@ class TestWindows(X11TestCase):
         self.assertEqual(self.gui.window_at(50, 50).title, "Editor")
         self.assertEqual(self.gui.window_at(900, 50).title, "Browser")
         self.assertIsNone(self.gui.window_at(5000, 5000))
+
+    def test_a_popup_a_window_manager_would_not_manage_is_not_a_window(self):
+        # Measured live on a display with no window manager: GTK's combo-box
+        # drop-down is a titled toplevel sharing its application's pid, so the
+        # raw tree walk listed it and window_at then named the popup over the
+        # widget underneath it. An EWMH client list never holds one -- a window
+        # manager does not manage an override-redirect window -- so windows()
+        # answered differently depending on whether a window manager was
+        # running, and the recorder's window/element agreement broke on one of
+        # the two answers.
+        popup = FakeWindow("App", geom=(100, 350, 300, 95), wm_class=("app", "App"))
+        popup.override_redirect = True
+        self.gui._display.root._children.append(popup)
+        self.assertEqual([w.title for w in self.gui.windows()], ["Editor", "Browser"])
+        self.assertEqual(self.gui.window_at(150, 400).title, "Editor")
+
+    def test_an_unmapped_window_is_not_a_window(self):
+        # The accessibility bridge's own hidden toplevel: unmapped, 10x10, and
+        # titled after the program, so it listed as a second window of the same
+        # application that can never be under the pointer. A window manager
+        # learns of a window through a MapRequest, so this is not one either.
+        hidden = FakeWindow("App", geom=(10, 10, 10, 10))
+        hidden.unmap()
+        self.gui._display.root._children.append(hidden)
+        self.assertEqual([w.title for w in self.gui.windows()], ["Editor", "Browser"])
+
+    def test_the_window_managers_own_list_is_taken_as_it_stands(self):
+        # A minimized window is mapped-but-unviewable by design -- the manager
+        # unmaps the client -- so applying the tree-walk filter to the EWMH
+        # list would hide a window a caller can still restore.
+        minimized = FakeWindow("Minimized", geom=(0, 0, 300, 200))
+        minimized.unmap()
+        self.gui._display._by_id[102] = minimized
+        self.gui._display.root.client_list_ids = [100, 101, 102]
+        self.assertEqual(
+            [w.title for w in self.gui.windows()],
+            ["Editor", "Browser", "Minimized"],
+        )
 
     def test_a_window_closing_between_the_listing_and_the_geometry_read_is_skipped(
         self,
