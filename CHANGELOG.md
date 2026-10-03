@@ -7,6 +7,8 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.16.2] — 2026-10-03
+
 ### Fixed
 
 - **`Element.text` and `Element.value` reported the value from before the write
