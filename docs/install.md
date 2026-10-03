@@ -52,6 +52,30 @@ needs **nothing at all**: window control speaks their unix sockets using only
 the standard library. And `x11` with python-xlib installed captures and
 encodes PNGs itself, so it needs no screenshot tool either.
 
+### The extras, all of them
+
+The pip extras, what each adds, and where it applies. None is required: the
+package runs with none of them and reports what is missing.
+
+| Extra | Adds | Platform |
+|---|---|---|
+| `atspi` | the element tree (dogtail) | Linux, the BSDs |
+| `x11` | the X11 backend — windows, input, native capture and the tier-6 reads, on X11 and XWayland | Linux, the BSDs |
+| `uinput` | in-process pointer and keyboard through `/dev/uinput` (evdev) | Linux, the BSDs |
+| `eiinput` | keymap-safe input over libei, and the InputCapture portal | Linux, the BSDs |
+| `windows` | the element tree (UI Automation, via comtypes) | Windows |
+| `macos` | elements, windows and input (PyObjC) | macOS |
+| `dev` | pytest, ruff, mypy and dbusmock, for working on pyguitest itself | any |
+
+Extras combine: `pip install "pyguitest[atspi,uinput]"` is the common Linux
+line. `windows` and `macos` carry environment markers on each requirement, so
+installing them on another platform is a no-op rather than an error. `atspi`
+pulls only dogtail — PyGObject and pyatspi come from your distribution (below)
+— and the rest are pure-Python wheels. Several capabilities need no extra at
+all: the uinput and libei *backends* need theirs, but the CLI-tool input,
+capture, image-search and clipboard paths need only a binary on `PATH`, and
+the Screenshot and Clipboard portals need only PyGObject.
+
 ## By desktop, in practice
 
 | Desktop | What you install |
@@ -297,7 +321,7 @@ raises.
 | Group | Tools |
 |---|---|
 | Input | `wdotool`, `wtype` *(wlroots only)*, `ydotool` *(keymap-unsafe)*, `xdotool` *(X11 only)* |
-| Capture | `grim`, `gnome-screenshot` *(real X11 only)*, `spectacle`, `import` *(X11 only, and real X11 only)*, `screencapture` *(macOS only)* |
+| Capture | `grim` *(wlroots only)*, `gnome-screenshot` *(real X11 only)*, `spectacle` *(KDE only)*, `import` *(X11 only, and real X11 only)*, `screencapture` *(macOS only)* |
 | Clipboard | `wl-copy`/`wl-paste` (wl-clipboard — not on GNOME, where the `portal` row above is the only clipboard path), `xclip`, `xsel` *(X11 only)*, `pbcopy`/`pbpaste` *(macOS only)* |
 | Windows | `swaymsg`, `hyprctl`, `niri msg`, `kdotool` |
 | Image search | `compare` or `magick` (ImageMagick) |

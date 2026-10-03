@@ -766,6 +766,9 @@ class TestCaptureSurvivesABrokenBackend(unittest.TestCase):
         message = str(caught.exception)
         self.assertIn("SCREEN_CAPTURE", message)
         self.assertIn('backend="portalcapture"', message)
+        # The reason is followed by the shared ". Run `pyguitest doctor`..."
+        # tail; a reason ending in its own period read "remembers.. Run".
+        self.assertNotIn("..", message)
 
     def test_the_same_advice_appears_for_a_window_capture(self):
         # Two code paths report this; they must not drift apart.

@@ -6,6 +6,39 @@ All notable changes to pyguitest are recorded here. The format follows
 0.x caveat that the API may still change between minor versions.
 
 ## [Unreleased]
+### Fixed
+
+- **`connect()` advertised `SCREEN_CAPTURE` on GNOME Wayland and then refused
+  every whole-screen capture.** On a Mutter session with `spectacle` installed,
+  the capture factory selected it as the only capture member, so the capability
+  report read `[yes] SCREEN_CAPTURE` -- and `screenshot()`,
+  `screenshot(region=...)` and `locate_image()` all failed. Spectacle is KDE's
+  screenshot tool: it captures through KWin and exits non-zero everywhere else,
+  printing *"Spectacle requires KDE Plasma's KWin compositor"*. Found torturing
+  a live Fedora 44 / GNOME Shell 50.0 Wayland session, where a plain `connect()`
+  composed `atspi+uinput+capture:spectacle+imagesearch:compare+x11`, declared
+  the capability, and then the first `screenshot()` raised spectacle's own
+  error. `hints.py` already knew the honest answer -- no screenshot tool can
+  work on GNOME, and the Screenshot portal can, via
+  `connect(backend="portalcapture")` -- but the branch that prints it was
+  unreachable while `capture_tools` was non-empty.
+
+  `spectacle` now carries `mutter_incompatible`, and `grim` -- which reads
+  frames over wlr-screencopy, a protocol Mutter and KWin alike do not
+  implement -- carries `wlroots_only`. The capture factory and
+  `Environment.capture_tools` gate each on the session's compositor, the same
+  way input tools already did. On GNOME Wayland a plain `connect()` now reports
+  `SCREEN_CAPTURE` as unsupported, with a `CapabilityUnsupported` that names
+  the opt-in portal, and `pyguitest doctor` prints the screenshot hint it
+  always intended to. Window capture (an X11/XWayland client's own drawable) is
+  unaffected.
+
+- **A capture failure on GNOME read `...the desktop then remembers.. Run
+  \`pyguitest doctor\``.** The shared reason string ended in its own period and
+  the error appends a `. Run ...` tail, so the stop doubled; the reason no
+  longer ends with one.
+
+
 
 ## [0.16.2] — 2026-10-03
 

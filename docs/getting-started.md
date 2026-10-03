@@ -9,16 +9,20 @@ already know what you want and just need the signature, go to
 Python 3.10 or newer. Pick the line for your platform:
 
 ```sh
-pip install "pyguitest[atspi]"     # Linux and the BSDs
+pip install "pyguitest[atspi]"     # Linux and the BSDs — elements, and input
+pip install "pyguitest[x11]"       # X11 or XWayland — tier-6 reads, native capture
 pip install "pyguitest[windows]"   # Windows
 pip install "pyguitest[macos]"     # macOS
 ```
 
-Each extra adds the element tree for that platform — AT-SPI, UI Automation
-or macOS Accessibility — which is what lets a test say
-`gui.button("Save").click()` instead of clicking a coordinate. Double quotes
-work in every shell, including Command Prompt, which does not strip single
-ones.
+`atspi`, `windows` and `macos` add the element tree for their platform —
+AT-SPI, UI Automation or macOS Accessibility — which is what lets a test say
+`gui.button("Save").click()` instead of clicking a coordinate. `x11` adds the
+X11 backend; on GNOME or KDE you can also add `"pyguitest[uinput]"` (input
+through `/dev/uinput`) or `"pyguitest[eiinput]"` (keymap-safe input over
+libei). The full set, and which platforms each one is for, is in
+[install.md](install.md#the-extras-all-of-them). Double quotes work in every
+shell, including Command Prompt, which does not strip single ones.
 
 Then ask the machine what else it needs:
 

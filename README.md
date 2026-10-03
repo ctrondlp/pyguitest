@@ -82,6 +82,7 @@ Requires Python 3.10 or newer.
 ```sh
 pip install pyguitest              # core; no dependencies
 pip install 'pyguitest[atspi]'     # + element automation
+pip install 'pyguitest[x11]'       # + the X11/XWayland backend (tier-6 reads, native capture)
 ```
 
 The AT-SPI libraries come from your distribution (`pyguitest doctor` names
@@ -145,8 +146,8 @@ is what `connect()` reports, what `backend.providers()` lists, and what
 
 | Session | Pointer and keys | Elements | Windows | Screenshots |
 |---|---|---|---|---|
-| X11, XWayland | `x11` (python-xlib), or a CLI tool | AT-SPI via `atspi` | X11 itself | `x11` encodes the PNG itself, so no tool is needed |
-| GNOME | a CLI tool, `uinput`, or libei (`eiinput`) | AT-SPI via `atspi` | `gnomeshell` with the extension, otherwise AT-SPI | `gnome-screenshot`, the Screenshot portal, or the extension |
+| X11, XWayland | `x11` (python-xlib), or a CLI tool | AT-SPI via `atspi` | X11 itself | `x11` encodes the PNG itself — the whole screen on X11, one window at a time under XWayland |
+| GNOME | a CLI tool, `uinput`, or libei (`eiinput`) | AT-SPI via `atspi` | `gnomeshell` with the extension, otherwise AT-SPI | the Screenshot portal (`connect(backend="portalcapture")` — a plain `connect()` has no path on Mutter), or the extension |
 | KDE Plasma | a CLI tool, `uinput`, or libei (`eiinput`) | AT-SPI via `atspi`, once toolkit accessibility is switched on | `kdotool` | `spectacle` |
 | sway, Hyprland, niri | a CLI tool, `uinput`, or libei (`eiinput`) | AT-SPI via `atspi` | their own sockets, standard library only | `grim` |
 | Any desktop with a portal | the RemoteDesktop portal (`portal`) | — | — | the Screenshot portal (`portalcapture`) |

@@ -591,9 +591,20 @@ def _window_factory(environment):
 
 
 def _capture_factory(environment):
-    """Build a capture backend from the first usable screenshot tool."""
+    """Build a capture backend from the first usable screenshot tool.
+
+    A tool being installed is not a tool being usable, and on Wayland that is
+    decided by the compositor: `grim` reads frames over wlr-screencopy and
+    `spectacle` captures through KWin, so each is offered only where its
+    compositor is actually running. Without the two gates below a GNOME
+    session with spectacle installed reported SCREEN_CAPTURE and then failed
+    on every whole-screen capture -- `screenshot()`, a region, and
+    `locate_image()` alike -- while the honest answer (no tool can capture
+    here; use the Screenshot portal, `connect(backend="portalcapture")`) was
+    already wired into `hints.py` but never reached.
+    """
     from .. import tools
-    from ..session import SessionType
+    from ..session import Compositor, SessionType
 
     x11 = environment.session_type in (SessionType.X11, SessionType.XWAYLAND)
     usable = tools.discover(
@@ -606,6 +617,8 @@ def _capture_factory(environment):
         # absorb. The fallback stays as the safety net for a tool that is
         # broken for some reason this cannot predict.
         allow_x_root_only=environment.session_type is SessionType.X11,
+        allow_wlroots_only=environment.compositor is Compositor.WLROOTS,
+        allow_mutter_incompatible=environment.compositor is not Compositor.MUTTER,
     )
     for tool in usable:
         try:
