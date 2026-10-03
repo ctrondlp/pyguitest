@@ -45,6 +45,10 @@ been tried at all". The same record sorted that way instead:
   capture speed, regex flags, key scan codes, the clipboard terminator,
   `locate_image` coordinates and overhanging matches, and macOS window order,
   double-click, drag and tooltips.
+- **macOS 26 (Tahoe)** — [`Element.text` and `value` read fresh after a
+  write](#macos-elementtext-and-value-read-fresh-after-a-write-2026-10-02):
+  `set_text` on a field answered `''` on read-back until the memoized read was
+  swapped for a fresh one.
 - **sway (wlroots), headless and genuinely pure Wayland** — window control
   and the IPC sockets, run with no display server to fall back on.
 - **[Not run live](#not-run-live)** is the half worth reading first: it is
@@ -3756,3 +3760,39 @@ tree item land on replay. The macOS record-and-replay check reproduced the same
 recorded actions on replay, differing only in timing, and the full suites passed
 on each platform: Windows (pyguitest's gate), macOS 26.7 (2045 passed, 49 skipped,
 the live-grant tests included) and Fedora 45 (2109 passed).
+
+## macOS: `Element.text` and `value` read fresh after a write (2026-10-02)
+
+**The `macos` backend remembered a control's value the way it remembers a role
+or a title, and a value is not one of those.** `_read` memoizes an attribute on
+the element because every read is a cross-process round trip (1.83 ms measured
+over SSH) and an attribute that *identifies* an element cannot change while the
+element is the same element. `kAXValueAttribute` is state: the application
+changes it under a held element -- a field the user types into, a window whose
+document loads -- and `set_text` changes it too.
+
+Found on the same macOS 26.7 (build 25G229) x86_64 Mac the sections above use,
+reached over SSH with Accessibility granted against the session's
+`sshd-keygen-wrapper`: a probe read an empty text field's `text`, wrote a string
+through `set_text`, and read `text` back from the same `Element` -- and got the
+empty string, which reads exactly like a `set_text` that silently did nothing.
+
+| | before | after |
+| --- | --- | --- |
+| `field.text` after `field.set_text("pyguitest wrote this over ssh")` | `''` | `'pyguitest wrote this over ssh'` |
+
+`checked` reads that same attribute and had always read it fresh, as do
+`selected`, `expanded`, `focused`, `selectable` and `expandable`; `text` and
+`value` were the two properties that reported it as *content* through the
+remembering read. Both now go through `_state`, which never remembers -- so a
+field the application changes under a held element reads the new text, and a
+slider a script has just dragged reads its new position.
+
+The suite agreed with the bug until this run, because the macOS fake recorded a
+value write without applying it, where a real element answers what it was just
+told to hold. The fake now applies the write, and four tests in
+`tests/test_macos_backend.py` pin the read-backs: the two properties read the
+attribute on every call (the count of reads is the assertion), a field the
+application changed under a held element reads the new text, a slider moved
+under one reads the new position, and a field written through `set_text` reads
+back the string it was given.

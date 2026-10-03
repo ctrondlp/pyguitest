@@ -7,7 +7,38 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.16.2] — 2026-10-03
+
 ### Fixed
+
+- **`Element.text` and `Element.value` reported the value from before the write
+  that changed it.** Both read `kAXValueAttribute` through the memoizing
+  `_read`, which exists for a measured reason: a read is a cross-process round
+  trip (1.83 ms over SSH), and an attribute that *identifies* an element cannot
+  change while the element is the same element. A value can. The application
+  changes it under a held element -- a field the user types into, a window whose
+  document loads -- and `set_text` changes it too, so a script that wrote a field
+  and read it back was told what the field held *first*. Measured on a live Mac
+  as `''` from a field that had just been given a string, which reads exactly
+  like a `set_text` that silently did nothing, and sent a live probe chasing the
+  wrong end of the write.
+
+  `checked` reads that same attribute and had always read it fresh, as do
+  `selected`, `expanded`, `focused`, `selectable` and `expandable`; `text` and
+  `value` were the two properties that remembered a value the caller had just
+  written. Both now read through `_state`, which never remembers.
+
+  The suite agreed with the bug until now, because the macOS fake recorded a
+  value write without applying it -- a real element answers what it was just told
+  to hold -- so the fake applies the write, and four tests pin the read-backs:
+  the two properties read the attribute on every call (the count of reads is the
+  assertion), a field the application changed under a held element reads the new
+  text, a slider moved under one reads the new position, and a field written
+  through `set_text` reads back the string it was given.
+
+  Re-running the same probe against this fix on the live Mac is what closes it:
+  the field answers `'pyguitest wrote this over ssh'` where it had answered
+  `''`, from the same `Element` that performed the write.
 
 - **`windows()` listed windows a window manager would never manage, so it
   answered differently depending on whether one was running.** The fallback for

@@ -775,8 +775,18 @@ class Element:
         at-spi label's `text` is None -- `base.Element.text`'s own docstring asks
         for "text boxes and labels", and on a Mac the label's string is in the
         one attribute that holds text.
+
+        Read through `_state` rather than `_read`, because the value is state: it
+        changes under the element while the element stays the same one. The
+        application changes it (a field the user types into, a window whose
+        document loads), and so does `set_text` -- which is the case that found
+        this. Measured on a live Mac: a probe read an empty field's text, wrote
+        it, read it back and got the empty string, because the memoized read was
+        describing the world before the write. `checked` reads the *same*
+        attribute and had always read it fresh; only the two properties that
+        report it as content, this one and `value`, were remembering it.
         """
-        value = self._read(self._ax.kAXValueAttribute, None)
+        value = self._state(self._ax.kAXValueAttribute, None)
         return value if isinstance(value, str) else None
 
     @property
@@ -789,8 +799,12 @@ class Element:
         published. A bool is excluded even though Python counts it as an int --
         a check box's 0/1 is `checked`'s answer, not a number to compare against
         a slider's.
+
+        Fresh for `text`'s reason, and it is the sharper case of the two: a
+        slider is a control a script drags and then reads, so a remembered
+        number would report the position from before the drag.
         """
-        raw = self._read(self._ax.kAXValueAttribute, None)
+        raw = self._state(self._ax.kAXValueAttribute, None)
         if isinstance(raw, (bool, str)):
             return None
         try:
