@@ -529,8 +529,21 @@ if __name__ == "__main__":
 
 
 def _env(**overrides):
-    """A detected Environment with fields overridden."""
-    base = detect({"WAYLAND_DISPLAY": "wayland-0", "XDG_CURRENT_DESKTOP": "GNOME"})
+    """A detected Environment with fields overridden.
+
+    `_platform` is pinned to Linux first, because `_classify` asks it before it
+    reads a single variable -- on Windows and macOS it asks nothing else, since
+    several of those variables can be set there by something that is not the
+    OS. Without the pin the GNOME/Wayland fixture below was a WIN32/DWM one on
+    Windows and a DARWIN/Quartz one on macOS, so
+    `TestCaptureFactory.test_spectacle_is_not_offered_on_mutter` -- whose whole
+    subject is the Mutter half of "a GNOME Wayland session" -- was asserting
+    the compositor gate against a session with no Mutter in it, and failed on
+    both of those runners while passing on Linux. `test_session.py`,
+    `test_hints.py` and `test_cli_report.py` all carry this same pin.
+    """
+    with mock.patch("pyguitest.session._platform", return_value="linux"):
+        base = detect({"WAYLAND_DISPLAY": "wayland-0", "XDG_CURRENT_DESKTOP": "GNOME"})
     return dataclasses.replace(base, **overrides)
 
 
