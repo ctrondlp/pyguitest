@@ -192,11 +192,15 @@ class FakeApplicationServices:
         return self.action_error
 
     def AXUIElementSetAttributeValue(self, element, attribute, value):
-        # Applied as well as recorded, because a real element answers what it was
-        # just told to hold: a fake that only records the write makes a read-back
-        # after a write untestable, which is exactly where `text` was wrong.
+        # Recorded always, applied only where AX accepted it: a real element
+        # answers what it was just told to hold, but a refused write leaves what
+        # it held -- so a fake that applied a rejected write would hand a later
+        # read the string the write never took, and quietly turn a failure-path
+        # read-back into a passing one. Recording the attempt is what lets a test
+        # say what was tried even when the attribute did not change.
         element.written.append((attribute.name, value))
-        element.attrs[attribute.name] = value
+        if not self.set_error:
+            element.attrs[attribute.name] = value
         return self.set_error
 
     def AXUIElementGetPid(self, element, _out):
@@ -1690,6 +1694,17 @@ class TestActionsAndClicks(BackendTestCase):
         self.assertIn("replace the text of", str(caught.exception))
         self.assertIn("-25205", str(caught.exception))
 
+    def test_a_refused_write_leaves_what_the_field_held(self):
+        # The fake applies a write only where AX accepted it, so a refusal cannot
+        # be mistaken for one that landed: `set_text` raises and the field still
+        # reads back what it held, rather than the string the write was refused.
+        self.ax.set_error = -25205
+        field = self.element(role="AXTextField", attrs={"kAXValueAttribute": "before"})
+        with self.assertRaises(CapabilityUnsupported):
+            field.set_text("hello")
+        self.assertEqual(field.node.written, [("kAXValueAttribute", "hello")])
+        self.assertEqual(field.text, "before")
+
     def test_focus_writes_the_focused_attribute(self):
         field = self.element(role="AXTextField")
         field.focus()
@@ -1707,10 +1722,9 @@ class TestActionsAndClicks(BackendTestCase):
     def test_expanding_is_a_no_op_where_it_is_already_open(self):
         # AX's disclosure state is written rather than toggled, so this is about the two
         # backends agreeing on the idempotence rather than about a write that would
-        # flip.
-        # Note the fake does not reflect a write, which is deliberate: the check has to
-        # be
-        # on the state *read back*, not on the write having happened.
+        # flip. The check is on the state *read back*: an element already in the
+        # requested state is left alone, so nothing is written and the fake has
+        # nothing to apply.
         already_open = self.element(
             role="AXDisclosureTriangle", attrs={"kAXExpandedAttribute": True}
         )
