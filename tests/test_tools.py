@@ -388,6 +388,24 @@ class TestMutterIncompatibleTools(unittest.TestCase):
         self.assertFalse(by_name["wl-copy"].wlroots_only)
         self.assertFalse(by_name["xclip"].mutter_incompatible)
 
+    def test_spectacle_is_flagged_mutter_incompatible(self):
+        # Confirmed live on Fedora 44 / GNOME Shell 50.0: spectacle captures
+        # only through KWin and refuses to run without it ("Spectacle
+        # requires KDE Plasma's KWin compositor"), so it must not be offered
+        # on Mutter -- offering it there advertised SCREEN_CAPTURE and then
+        # failed every whole-screen capture.
+        by_name = {t.name: t for t in tools.CAPTURE_TOOLS}
+        self.assertTrue(by_name["spectacle"].mutter_incompatible)
+        self.assertFalse(by_name["spectacle"].wlroots_only)
+
+    def test_grim_is_flagged_wlroots_only(self):
+        # grim reads frames over wlr-screencopy, which Mutter does not
+        # implement -- the same shape of silent failure as wtype, one
+        # capability over.
+        by_name = {t.name: t for t in tools.CAPTURE_TOOLS}
+        self.assertTrue(by_name["grim"].wlroots_only)
+        self.assertFalse(by_name["grim"].mutter_incompatible)
+
     def test_discover_excludes_it_only_via_its_own_flag(self):
         fake = tools.ExternalTool(REAL_BINARY, frozenset(), mutter_incompatible=True)
         self.assertEqual(

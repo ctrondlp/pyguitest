@@ -1877,6 +1877,12 @@ def detect(env: Mapping[str, str] | None = None) -> Environment:
                 # A real X server, not merely a reachable X display: the
                 # root-reading tools cannot capture under XWayland at all.
                 allow_x_root_only=session_type is SessionType.X11,
+                # Same compositor gate as _capture_factory, so this list --
+                # which is what `doctor` prints and `hints.py` reads -- names
+                # only tools that can actually capture here. grim needs
+                # wlr-screencopy and spectacle needs KWin.
+                allow_wlroots_only=wlroots,
+                allow_mutter_incompatible=compositor is not Compositor.MUTTER,
             )
         ),
         window_tools=tuple(t.name for t in _tools.discover(_tools.WINDOW_TOOLS)),

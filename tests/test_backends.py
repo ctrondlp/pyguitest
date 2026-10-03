@@ -568,6 +568,42 @@ class TestCaptureFactory(unittest.TestCase):
         with mock.patch.object(tools.ExternalTool, "present", False):
             self.assertIsNone(self._factory(_env(session_type=SessionType.X11)))
 
+    def _only(self, *names):
+        """Pretend exactly `names` is installed, whatever the host has."""
+        return mock.patch.object(
+            tools.ExternalTool, "present", property(lambda self: self.name in names)
+        )
+
+    def test_spectacle_is_not_offered_on_mutter(self):
+        # Live regression, Fedora 44 / GNOME Shell 50.0: connect() picked
+        # capture:spectacle and declared SCREEN_CAPTURE, then screenshot(),
+        # a region capture and locate_image() all failed -- spectacle refuses
+        # to run without KWin. On Mutter there is no tool to offer here, and
+        # the Screenshot portal is the path (hints.py says so once this list
+        # stops lying).
+        with self._only("spectacle"):
+            self.assertIsNone(self._factory(_env(session_type=SessionType.WAYLAND)))
+
+    def test_spectacle_is_offered_on_kwin(self):
+        with self._only("spectacle"):
+            backend = self._factory(
+                _env(session_type=SessionType.WAYLAND, compositor=Compositor.KWIN)
+            )
+        self.assertIsNotNone(backend)
+        self.assertEqual(backend.tool.name, "spectacle")
+
+    def test_grim_is_not_offered_off_wlroots(self):
+        with self._only("grim"):
+            self.assertIsNone(self._factory(_env(session_type=SessionType.WAYLAND)))
+
+    def test_grim_is_offered_on_wlroots(self):
+        with self._only("grim"):
+            backend = self._factory(
+                _env(session_type=SessionType.WAYLAND, compositor=Compositor.WLROOTS)
+            )
+        self.assertIsNotNone(backend)
+        self.assertEqual(backend.tool.name, "grim")
+
 
 class TestInputFactoryRanking(unittest.TestCase):
     """Input transports are ranked by correctness before convenience.

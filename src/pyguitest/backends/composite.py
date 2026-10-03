@@ -40,7 +40,7 @@ _NO_CAPTURE_MEMBER = (
     "interface and is not selected, and XWayland refuses to read the X root, "
     'so nothing is composed automatically. connect(backend="portalcapture") '
     "captures there with no tool installed -- it is opt-in only because its "
-    "first use prompts for consent, which the desktop then remembers."
+    "first use prompts for consent, which the desktop then remembers"
 )
 """Why a composite may have no way to capture, and what to do about it.
 

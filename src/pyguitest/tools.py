@@ -73,7 +73,9 @@ class ExternalTool:
     wlroots_only: bool = False
     """True if the tool needs a wlroots-only protocol. wtype needs
     zwp_virtual_keyboard_manager_v1, which Mutter does not implement -- it
-    installs and runs there, and silently does nothing."""
+    installs and runs there, and silently does nothing. `grim` needs
+    wlr-screencopy for the same shape of failure, which is why the flag is
+    about the protocol and not about typing."""
 
     x11_only: bool = False
     """True if the tool talks to an X server and so cannot see native Wayland
@@ -97,13 +99,22 @@ class ExternalTool:
     """
 
     mutter_incompatible: bool = False
-    """True if the tool needs a Wayland clipboard protocol Mutter does not
-    implement (wlr-data-control-unstable-v1). Distinct from wlroots_only: KWin
-    is not a wlroots compositor but does implement this protocol -- confirmed
-    live on KDE Plasma 6, where wl-copy/wl-paste round-tripped correctly and
-    wl-copy forked into the background to keep serving the selection, the
-    same way it does on a wlroots compositor. wlroots_only would incorrectly
-    exclude KWin here."""
+    """True if the tool cannot work on Mutter at all, whatever the session type.
+
+    Two very different mechanisms land here, which is why the flag is named
+    for the compositor it fails on rather than for either protocol.
+    `wl-copy` needs wlr-data-control-unstable-v1, which Mutter does not
+    implement. That is distinct from wlroots_only: KWin is not a wlroots
+    compositor but does implement this protocol -- confirmed live on KDE
+    Plasma 6, where wl-copy/wl-paste round-tripped correctly and wl-copy
+    forked into the background to keep serving the selection, so
+    wlroots_only would incorrectly exclude KWin. `spectacle` reaches the
+    screen only through KWin's own screenshot API and exits non-zero
+    everywhere else -- measured on Fedora 44 / GNOME Shell 50.0, where
+    `spectacle -b -n -f -o out.png` prints "Spectacle requires KDE Plasma's
+    KWin compositor" and writes nothing. Left unflagged it advertised
+    SCREEN_CAPTURE on a session where no whole-screen capture could
+    succeed."""
 
     also_needs: str = ""
     """A second binary this tool's own operations need, checked by `present`
@@ -215,7 +226,14 @@ INPUT_TOOLS = (
 )
 
 CAPTURE_TOOLS = (
-    ExternalTool("grim", frozenset({Capability.SCREEN_CAPTURE}), "wlroots"),
+    ExternalTool(
+        "grim",
+        frozenset({Capability.SCREEN_CAPTURE}),
+        "wlroots; reads frames over wlr-screencopy, a protocol Mutter and "
+        "KWin do not implement -- installed and run there it captures "
+        "nothing",
+        wlroots_only=True,
+    ),
     ExternalTool(
         "gnome-screenshot",
         frozenset({Capability.SCREEN_CAPTURE}),
@@ -224,7 +242,15 @@ CAPTURE_TOOLS = (
         "to reading the X root, which is empty under Wayland",
         x_root_only=True,
     ),
-    ExternalTool("spectacle", frozenset({Capability.SCREEN_CAPTURE}), "KDE Plasma"),
+    ExternalTool(
+        "spectacle",
+        frozenset({Capability.SCREEN_CAPTURE}),
+        "KDE Plasma; it captures through KWin and refuses to start without "
+        "it, exiting non-zero with \"Spectacle requires KDE Plasma's KWin "
+        'compositor" -- so on GNOME it advertises a capture that can never '
+        "succeed",
+        mutter_incompatible=True,
+    ),
     ExternalTool(
         "import",
         frozenset({Capability.SCREEN_CAPTURE}),
@@ -385,10 +411,11 @@ def discover(
         unreadable there, and the tools do not fail quickly -- one hangs for
         the whole subprocess timeout first.
     allow_mutter_incompatible=False
-        drops tools needing a Wayland protocol Mutter does not implement.
-        Distinct from allow_wlroots_only: KWin needs this flag rather than
-        that one, since it is not a wlroots compositor but does carry the
-        protocol wl-clipboard needs.
+        drops tools that cannot work on Mutter at all -- wl-clipboard, which
+        needs a protocol Mutter lacks, and spectacle, which needs KWin's own
+        screenshot API. Distinct from allow_wlroots_only: KWin needs this
+        flag rather than that one, being neither a wlroots compositor nor a
+        Mutter one.
     """
     return tuple(
         t
