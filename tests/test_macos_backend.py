@@ -192,7 +192,11 @@ class FakeApplicationServices:
         return self.action_error
 
     def AXUIElementSetAttributeValue(self, element, attribute, value):
+        # Applied as well as recorded, because a real element answers what it was
+        # just told to hold: a fake that only records the write makes a read-back
+        # after a write untestable, which is exactly where `text` was wrong.
         element.written.append((attribute.name, value))
+        element.attrs[attribute.name] = value
         return self.set_error
 
     def AXUIElementGetPid(self, element, _out):
@@ -941,7 +945,15 @@ class TestWindowWrites(BackendTestCase):
         # `kAXValueCGPointType` for a position and `kAXValueCGSizeType` for a size:
         # measured, a mismatched type raises rather than answering, so this is not
         # cosmetic.
+        #
+        # The window server's rectangle is moved with the AX side, because the fake
+        # answers a value write the way a real element does and the join that finds
+        # the AX window compares the two. A live machine needs a settle between
+        # them, which is the point of the tolerance test below.
         self.backend.move_window(self.terminal, 1, 2)
+        for entry in self.quartz.onscreen + self.quartz.everything:
+            if entry["kCGWindowNumber"] == 48:
+                entry["kCGWindowBounds"].update({"X": 1.0, "Y": 2.0})
         self.backend.resize_window(self.terminal, 3, 4)
         created = [args[0] for name, args in self.ax.calls if name == "AXValueCreate"]
         self.assertEqual(created, ["kAXValueCGPointType", "kAXValueCGSizeType"])
@@ -1504,6 +1516,35 @@ class TestElementReading(BackendTestCase):
         self.assertEqual(reads.count("kAXTitleAttribute"), 1)
         self.assertEqual(reads.count("kAXValueAttribute"), 2)
 
+    def test_the_value_a_control_holds_is_read_every_time(self):
+        # The half of the split above that was wrong: kAXValueAttribute is state,
+        # whichever property reports it. `checked` had always read it fresh, while
+        # `text` and `value` memorized it -- so a field reported its contents from
+        # before the application changed them, and a field a script had just
+        # written through set_text read back the string from before its own write.
+        field = self.element(role="AXTextField", attrs={"kAXValueAttribute": ""})
+        slider = self.element(role="AXSlider", attrs={"kAXValueAttribute": 0.25})
+        reads = []
+        original = self.ax.AXUIElementCopyAttributeValue
+        self.ax.AXUIElementCopyAttributeValue = counting(original, reads)
+        self.assertEqual((field.text, field.value), ("", None))
+        self.assertEqual((slider.text, slider.value), (None, 0.25))
+        self.assertEqual(reads.count("kAXValueAttribute"), 4)
+
+    def test_a_field_reports_text_the_application_changed_under_it(self):
+        # Not only a write this package made: a field the user types into, or a
+        # window whose document finishes loading, changes under a held element.
+        field = self.element(role="AXTextField", attrs={"kAXValueAttribute": "before"})
+        self.assertEqual(field.text, "before")
+        field.node.attrs["kAXValueAttribute"] = "after"
+        self.assertEqual(field.text, "after")
+
+    def test_a_slider_reports_the_position_it_holds_now(self):
+        slider = self.element(role="AXSlider", attrs={"kAXValueAttribute": 0.25})
+        self.assertEqual(slider.value, 0.25)
+        slider.node.attrs["kAXValueAttribute"] = 0.75
+        self.assertEqual(slider.value, 0.75)
+
     def test_the_backend_is_reachable_for_what_the_interface_does_not_cover(self):
         # `node` stays public, as `atspi.Element`'s dogtail Node and `uia.Element`'s COM
         # pointer do: the interface is a subset, and the escape hatch is the reason.
@@ -1628,6 +1669,18 @@ class TestActionsAndClicks(BackendTestCase):
         field = self.element(role="AXTextField")
         field.set_text("hello")
         self.assertEqual(field.node.written, [("kAXValueAttribute", "hello")])
+
+    def test_a_field_reads_back_the_text_set_text_wrote(self):
+        # The failure the first live run of this backend found: `text` was read
+        # through the memoizing `_read`, so a field given a string answered with
+        # the string from before the write -- measured as "" for a field that had
+        # just been written. A script checking its own work got the wrong answer,
+        # and this suite agreed with it, because the fake recorded writes without
+        # applying them.
+        field = self.element(role="AXTextField")
+        self.assertIsNone(field.text)
+        field.set_text("hello")
+        self.assertEqual(field.text, "hello")
 
     def test_a_refused_write_says_what_was_attempted(self):
         self.ax.set_error = -25205
