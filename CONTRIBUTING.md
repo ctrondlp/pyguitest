@@ -7,6 +7,81 @@ beside it.
 
 Requires Python 3.10 or newer — 3.9 reached end-of-life in October 2025.
 
+## Ways to contribute
+
+Testers, users and developers are all welcome, and on a package like this the
+first two shade into the third: running it against a desktop nobody here has
+tried is itself a contribution, and so is writing down what it did.
+
+- **Reporting a bug** — a `pyguitest debug` dump is worth more than a
+  description of one; see [Filing a bug](#filing-a-bug).
+- **Improving documentation** — `docs/`, this file, and the docstrings
+  [docs/api.md](docs/api.md) is generated from. `tests/test_docs.py` keeps a
+  new extra or a newly discovered tool from reaching main undocumented, so a
+  docs change is a tested change.
+- **Adding tests** — the suite needs nothing installed and no display, which
+  makes a test that pins a behaviour the cheapest contribution here.
+- **Fixing a bug** — a fix with a regression test beside it is the easiest
+  thing to review.
+- **Adding or improving a backend** — a platform, a compositor, or an
+  accessibility path; see
+  [what adding a backend involves](docs/developers/structure.md#adding-a-backend).
+- **Reviewing a pull request** — a second pair of eyes from someone who runs
+  the desktop in question is worth a great deal, because CI cannot drive a
+  real one.
+
+## Before you start
+
+- **Search the issues first, closed ones included.** Much of what reads as a
+  bug is a property of the desktop rather than the code, and
+  [docs/troubleshooting.md](docs/troubleshooting.md) is symptom-first for
+  exactly that reason.
+- **Open an issue before a substantial change.** A new public method, a new
+  capability, a new backend, or a new dependency is a design decision rather
+  than an implementation detail — and [docs/developers/](docs/developers/) is
+  where those decisions, and the ADRs behind them, are argued.
+- **Separate the desktop from the package.** `pyguitest doctor` and the
+  capability report a bare `pyguitest` prints tell "this package cannot"
+  apart from "this session will not", and the two have different fixes.
+
+## Platform and domain contributions
+
+What a session can do is discovered at runtime rather than assumed, so the
+most useful report is often one from a desktop this project has not been run
+on: [docs/validation.md](docs/validation.md) records what has, and its
+[Not run live](docs/validation.md#not-run-live) section is the list of what
+has not.
+
+- **Linux / X11** — the whole API, tier-6 windows included.
+- **Linux / Wayland** — GNOME, KDE and the wlroots compositors differ enough
+  to be separate targets.
+- **The BSDs** — the suite runs on FreeBSD and GhostBSD; the live record is
+  the thin part.
+- **Windows** — one desktop so far: the UIA element tree, `win32` input, and
+  `PrintWindow` capture.
+- **macOS** — one machine so far: the Accessibility tree, `macquartz`, and
+  `screencapture`.
+
+Every platform backend sits behind an extra and a grant or consent model of
+its own, so a change to one needs a live run on that platform before it ships
+— [ADR 003](docs/developers/adr-003-windows.md) and
+[ADR 004](docs/developers/adr-004-macos.md) record those designs.
+
+## Roadmap
+
+Four areas where help is most wanted. They are not in difficulty order.
+
+| Area | What it is |
+|------|------------|
+| Visual fallback | Finding and asserting on a control when an application publishes little or nothing to its accessibility layer — the case a toolkit's own API cannot reach |
+| Test-runner integration | Running a pyguitest test under a test runner, with the session as a fixture and the artifacts kept on failure |
+| Failure diagnostics | The bundle a GUI failure needs — screenshot, accessibility tree, window list and action log — captured while the failure is still propagating |
+| Platform parity | Closing the [Not run live](docs/validation.md#not-run-live) gaps, macOS and Windows first among them |
+
+`good first issue` marks the small, self-contained ones and `help wanted`
+marks the ones nobody has claimed. If one of these is why you are here, say
+so in the issue; a contribution aimed at the roadmap is the easiest to land.
+
 ## Filing a bug
 
 Run `pyguitest debug` (or, from a checkout, `PYTHONPATH=src python3 -m

@@ -1,5 +1,6 @@
 # pyguitest
 
+[![Contributing](https://img.shields.io/badge/contributions-welcome-brightgreen.svg)](https://github.com/ctrondlp/pyguitest/blob/main/CONTRIBUTING.md)
 [![CI](https://github.com/ctrondlp/pyguitest/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ctrondlp/pyguitest/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/pyguitest)](https://pypi.org/project/pyguitest/)
 [![License](https://img.shields.io/pypi/l/pyguitest)](https://github.com/ctrondlp/pyguitest/blob/main/LICENSE)
