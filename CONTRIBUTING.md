@@ -62,9 +62,12 @@ has not.
 - **macOS** — one machine so far: the Accessibility tree, `macquartz`, and
   `screencapture`.
 
-Every platform backend sits behind an extra and a grant or consent model of
-its own, so a change to one needs a live run on that platform before it ships
-— [ADR 003](docs/developers/adr-003-windows.md) and
+Requirements differ by backend, and not every one is an extra plus a grant:
+`win32` is `ctypes` and needs nothing past the core install, and Windows
+raises no consent dialog at all — consent appears on the portal-gated paths,
+once per session. The acceptance rule does not vary: a change to one needs a
+live run on that platform before it ships —
+[ADR 003](docs/developers/adr-003-windows.md) and
 [ADR 004](docs/developers/adr-004-macos.md) record those designs.
 
 ## Roadmap
