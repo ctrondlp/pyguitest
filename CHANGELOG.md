@@ -6,6 +6,16 @@ All notable changes to pyguitest are recorded here. The format follows
 0.x caveat that the API may still change between minor versions.
 
 ## [Unreleased]
+
+## [0.16.3] — 2026-10-05
+
+### Documentation
+
+- **The front-page demo GIF was updated.** The animated demo shown in the
+  README and on PyPI was adjusted; it ships with this release because PyPI
+  renders the README from the release's own files rather than from the live
+  repository.
+
 ### Fixed
 
 - **`connect()` advertised `SCREEN_CAPTURE` on GNOME Wayland and then refused
