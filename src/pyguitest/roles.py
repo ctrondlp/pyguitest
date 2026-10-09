@@ -51,9 +51,11 @@ class Role:
     WINDOW = "window"
     DIALOG = "dialog"
     PANEL = "panel"
+    LAYERED_PANE = "layered pane"
     TOOL_BAR = "tool bar"
     STATUS_BAR = "status bar"
     SCROLL_PANE = "scroll pane"
+    SPLIT_PANE = "split pane"
     VIEWPORT = "viewport"
     TABLE = "table"
     TABLE_CELL = "table cell"
@@ -62,6 +64,7 @@ class Role:
     TREE = "tree"
     TREE_ITEM = "tree item"
     DOCUMENT_FRAME = "document frame"
+    FILLER = "filler"
 
     # -- things you only read ----------------------------------------------
     LABEL = "label"
@@ -71,6 +74,7 @@ class Role:
     ICON = "icon"
     PROGRESS_BAR = "progress bar"
     SLIDER = "slider"
+    DIAL = "dial"
     SCROLL_BAR = "scroll bar"
     SEPARATOR = "separator"
 

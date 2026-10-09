@@ -513,7 +513,6 @@ class TestTheRoleTable(unittest.TestCase):
         }
         nameless = {
             "application",
-            "split pane",
             "menu bar",
             "thumb",
             "tool tip",

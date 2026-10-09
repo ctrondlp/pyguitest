@@ -92,6 +92,8 @@ class FakeNode:
         state_set=(),
     ):
         self.name = name
+        self.text = None
+        self._combovalue = None
         self.roleName = role
         self.children = list(children)
         self.position = position
@@ -136,6 +138,15 @@ class FakeNode:
 
     def doActionNamed(self, name):
         self.actions_performed.append(name)
+
+    @property
+    def combovalue(self):
+        """Stands in for dogtail's combovalue: the last value written to it."""
+        return self._combovalue
+
+    @combovalue.setter
+    def combovalue(self, value):
+        self._combovalue = value
 
     def grabFocus(self):
         self.focused = True
@@ -1181,6 +1192,21 @@ class TestElements(AtspiTestCase):
                 self.atspi.Element(node).click()
                 self.assertEqual(node.actions_performed, [expected])
 
+    def test_click_opens_a_submenu_via_its_show_menu_action(self):
+        # A submenu entry's click is "open this menu": Qt publishes `Show Menu`
+        # alone on its submenu items, and without it menu_item("Tools").click()
+        # found no clickable verb and fell to the coordinate path, which hangs
+        # where there is no pointer (a headless session).
+        node = FakeNode(
+            name="Tools",
+            role="menu item",
+            actions={"Show Menu": {}},
+            click_raises=Exception("coordinates were used"),
+        )
+        self.atspi.Element(node).click()
+        self.assertEqual(node.actions_performed, ["Show Menu"])
+        self.assertFalse(node.clicked)
+
     def test_an_activate_only_element_still_clicks_by_coordinate(self):
         # `activate` on a text entry means focus it, not click it: only the
         # three click-like verbs are acted through.
@@ -1357,6 +1383,25 @@ class TestElements(AtspiTestCase):
         # Not merely marked dead -- gone from the bus entirely, so even
         # asking raises. That still has to answer False, not propagate.
         self.assertFalse(self.atspi.Element(_RaisesOnDead()).alive)
+
+    def test_choose_sets_the_text_child_on_an_editable_combo_box(self):
+        # Qt publishes an editable combo's entry as a `text` child, and that
+        # is the only selection path: the popup items expose no `click`
+        # action and the box implements neither Selection nor Value, so the
+        # combovalue fallback has nothing to click. Writing the entry is what
+        # a person does, and it lands the same way.
+        entry = FakeNode(role="text")
+        combo = FakeNode(role="combo box", children=[FakeNode(role="list"), entry])
+        self.atspi.Element(combo).choose("Sweden")
+        self.assertEqual(entry.text, "Sweden")
+
+    def test_choose_falls_back_to_combovalue_without_a_text_child(self):
+        # A non-editable combo has no entry, so dogtail's combovalue -- which
+        # finds the menu item and clicks it -- is the path that still works
+        # where the toolkit publishes menu items with a `click` action.
+        combo = FakeNode(role="combo box", children=[FakeNode(role="list")])
+        self.atspi.Element(combo).choose("Pro")
+        self.assertEqual(combo.combovalue, "Pro")
 
 
 class TestElementExpandCollapse(AtspiTestCase):

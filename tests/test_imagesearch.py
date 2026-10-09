@@ -648,6 +648,10 @@ def _pattern(width, height, x0=0, y0=0):
     and (shutil.which("magick") or shutil.which("convert")),
     "ImageMagick is not installed",
 )
+@unittest.skipUnless(
+    tools.best(tools.IMAGE_TOOLS) is not None,
+    "ImageMagick not installed (compare or magick)",
+)
 class TestAgainstRealImageMagick(unittest.TestCase):
     """The crop/compare/offset round trip, run for real.
 
