@@ -7,6 +7,42 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`Role.DIAL`, `Role.SPLIT_PANE`, `Role.LAYERED_PANE` and `Role.FILLER`.**
+  Four at-spi role names a caller could reach before only by hardcoding the
+  raw string, now named beside the other constants. Found torturing a Qt
+  kitchen-sink application: a `QDial` publishes `dial`, and
+  `gui.element(role=Role.DIAL, ...)` raised `AttributeError` because no such
+  constant existed; a `QSplitter` publishes `split pane` (which `macos.py`
+  already mapped from `AXSplitGroup` by the literal string, with a comment
+  noting the missing constant); `QToolBox` publishes `layered pane`; and
+  `QStackedWidget`, `QGraphicsView`, `QTabWidget` and `QKeySequenceEdit` all
+  publish `filler`.
+
+### Fixed
+
+- **`Element.choose()` on an editable Qt combo box.** The docstring claimed
+  it used "the combo box's own value setter", but the implementation was
+  dogtail's `combovalue`, which finds the chosen item and calls
+  `doActionNamed("click")` on it. Qt's combo-box items publish no `click`
+  action (only `toggle`), and the box implements neither the Selection nor
+  the Value interface, so the call raised `ActionNotSupported` on every
+  editable `QComboBox` — which is exactly the shape of the README's own
+  `gui.dropdown(...).choose(...)` example. `choose()` now writes the combo's
+  `text` child, the entry Qt publishes for an editable box, and falls back
+  to `combovalue` only where no such child exists, which keeps GTK's
+  menu-item combos working.
+
+- **`Element.click()` on a submenu entry.** A submenu's own "click" is "open
+  this menu", and Qt publishes `Show Menu` alone on its submenu items -- so
+  `menu_item("Tools").click()` found no clickable verb and fell to the
+  coordinate path, which hangs where there is no pointer (a headless
+  session) and answers for the wrong thing where there is. `click()` now
+  acts through a `show menu` action as a last resort, after `click`/`press`/
+  `toggle`, so a recorded click on a submenu replays as opening that menu
+  rather than a pointer move.
+
 ## [0.16.3] — 2026-10-05
 
 ### Documentation

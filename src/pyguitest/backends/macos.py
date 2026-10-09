@@ -337,9 +337,7 @@ _AX_ROLES = {
     "AXSystemDialog": Role.DIALOG,
     "AXDrawer": Role.PANEL,
     "AXGroup": Role.PANEL,
-    # at-spi has `split pane` and `roles.py` names no constant for it, the
-    # same situation uia.py's "_ATSPI_NAMES_WITHOUT_CONSTANTS" describes.
-    "AXSplitGroup": "split pane",
+    "AXSplitGroup": Role.SPLIT_PANE,
     "AXScrollArea": Role.SCROLL_PANE,
     "AXToolbar": Role.TOOL_BAR,
     "AXTabGroup": Role.PAGE_TAB_LIST,

@@ -685,10 +685,16 @@ class Element:
         # coordinate click, which on GNOME needs the ponytail daemon and
         # otherwise raised ElementNotActionable -- on an element with a
         # perfectly good action. `click` and `press` still win where present.
+        # `show menu` comes after those three because a submenu entry's own
+        # click is "open this menu": Qt publishes `Show Menu` alone on its
+        # submenu items, so without it `menu_item("Tools").click()` found no
+        # clickable action and fell to the coordinate path, which hangs where
+        # there is no pointer (a headless session) and misses the point where
+        # there is one.
         name = next(
             (
                 a
-                for wanted in ("click", "press", "toggle")
+                for wanted in ("click", "press", "toggle", "show menu")
                 for a in actions
                 if a.lower() == wanted
             ),
@@ -807,10 +813,19 @@ class Element:
     def choose(self, option):
         """Pick `option` from this dropdown by its visible text.
 
-        Uses the combo box's own value setter where the toolkit provides one,
-        which is more reliable than clicking the popup open and hunting for
-        the item.
+        An editable combo box publishes its entry as a `text` child, and that
+        is the only reliable selection path for it: Qt's popup items expose no
+        `click` action and the box implements neither the Selection nor the
+        Value interface, so dogtail's `combovalue` -- which finds the item and
+        clicks it -- has nothing to click. Writing the entry's text is what a
+        person would do, and it lands the same way. Non-editable boxes have no
+        `text` child and fall back to `combovalue`, which works where the
+        toolkit publishes menu items with a `click` action (GTK).
         """
+        for child in self.node.children:
+            if child.roleName == Role.TEXT:
+                child.text = option
+                return
         self.node.combovalue = option
 
     def options(self):
