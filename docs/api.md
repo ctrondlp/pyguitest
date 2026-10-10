@@ -24,7 +24,7 @@ gui = pyguitest.connect()
 
 Open an automation session.
 
-`connect(backend: str \| Sequence[str] \| None = None, environment: Environment \| None = None, backend_options: dict \| None = None, **kwargs: float) -> Session`
+`connect(backend: str \| Sequence[str] \| None = None, environment: Environment \| None = None, backend_options: dict \| None = None, **kwargs: Any) -> Session`
 
 ## Session control
 
@@ -48,8 +48,8 @@ The recommended way to drive an application: match on what a widget is and what 
 | `checkbox(name: str, within: Element \| None = None)` | `ELEMENT_TREE` |  | Return the check box named `name`. |
 | `link(name: str, within: Element \| None = None)` | `ELEMENT_TREE` |  | Return the link named `name`. |
 | `menu_item(name: str, within: Element \| None = None)` | `ELEMENT_TREE` |  | Return the menu item named `name`. |
-| `element(role: str \| None = None, name: str \| re.Pattern[str] \| None = None, within: Element \| None = None, enabled: bool \| None = None, visible: bool \| None = None, description: str \| re.Pattern[str] \| None = None, predicate: Callable[[Element], bool] \| None = None)` | `ELEMENT_TREE` |  | Return the first element matching every given filter. |
-| `elements(role: str \| None = None, name: str \| re.Pattern[str] \| None = None, within: Element \| None = None, enabled: bool \| None = None, visible: bool \| None = None, description: str \| re.Pattern[str] \| None = None, predicate: Callable[[Element], bool] \| None = None)` | `ELEMENT_TREE` |  | Return every accessible element matching every given filter. |
+| `element(role: str \| Sequence[str] \| None = None, name: str \| re.Pattern[str] \| None = None, within: Element \| None = None, enabled: bool \| None = None, visible: bool \| None = None, description: str \| re.Pattern[str] \| None = None, predicate: Callable[[Element], bool] \| None = None)` | `ELEMENT_TREE` |  | Return the first element matching every given filter. |
+| `elements(role: str \| Sequence[str] \| None = None, name: str \| re.Pattern[str] \| None = None, within: Element \| None = None, enabled: bool \| None = None, visible: bool \| None = None, description: str \| re.Pattern[str] \| None = None, predicate: Callable[[Element], bool] \| None = None)` | `ELEMENT_TREE` |  | Return every accessible element matching every given filter. |
 | `root_element()` | `ELEMENT_TREE` |  | The accessible-tree root. The replacement for the X11 window tree. |
 | `window_element(title: str \| re.Pattern[str])` | `ELEMENT_TREE` — uses `WINDOW_LIST` if present |  | The accessible Element for the window matching `title`. |
 | `focused()` | `ELEMENT_TREE` — uses `WINDOW_STATE` if present |  | The accessible element that currently has keyboard focus, or None. |
@@ -189,8 +189,8 @@ prevents by design lives here — on a Wayland session they raise
 | Call | Needs | | What it does |
 |------|-------|---|--------------|
 | `desktop_region()` | `SCREEN_INFO` |  | The screen rectangle a whole-desktop `capture()` covers, or None. |
-| `find_elements(role: str \| None = None, name: str \| re.Pattern \| None = None, within: Element \| None = None, enabled: bool \| None = None, visible: bool \| None = None, description: str \| re.Pattern \| None = None, predicate: Callable[[Element], bool] \| None = None)` | `ELEMENT_TREE` |  | Search the accessible tree. |
-| `find_element(role: str \| None = None, name: str \| re.Pattern \| None = None, within: Element \| None = None, enabled: bool \| None = None, visible: bool \| None = None, description: str \| re.Pattern \| None = None, predicate: Callable[[Element], bool] \| None = None)` | `ELEMENT_TREE` |  | The first accessible element matching, or None. |
+| `find_elements(role: str \| Sequence[str] \| None = None, name: str \| re.Pattern \| None = None, within: Element \| None = None, enabled: bool \| None = None, visible: bool \| None = None, description: str \| re.Pattern \| None = None, predicate: Callable[[Element], bool] \| None = None)` | `ELEMENT_TREE` |  | Search the accessible tree. |
+| `find_element(role: str \| Sequence[str] \| None = None, name: str \| re.Pattern \| None = None, within: Element \| None = None, enabled: bool \| None = None, visible: bool \| None = None, description: str \| re.Pattern \| None = None, predicate: Callable[[Element], bool] \| None = None)` | `ELEMENT_TREE` |  | The first accessible element matching, or None. |
 
 ## Types
 
@@ -207,11 +207,11 @@ One node of the accessible tree, as every backend agrees to expose it.
 | `child(role: str \| None = None, name: str \| None = None)` | Return the first descendant matching role and/or name, or None. |
 | `children` | The elements directly inside this one. |
 | `choose(option: str)` | Pick `option` from this dropdown by its visible text. |
-| `click()` | Act on the element: the accessible action where there is one. |
+| `click(via: str \| None = None)` | Act on the element: the accessible action where there is one. |
 | `collapse()` | Close a tree item or similar disclosure control. See `expand`. |
 | `description` | The element's longer accessible description, often a tooltip. |
 | `do_action(name: str)` | Perform a named accessible action, such as "click" or "activate". |
-| `double_click()` | Double-click the element: locate it, then inject the gesture. |
+| `double_click(via: str \| None = None)` | Double-click the element: locate it, then inject the gesture. |
 | `enabled` | Whether the element accepts input, rather than being greyed out. |
 | `expand()` | Open a tree item or similar disclosure control. |
 | `expandable` | Whether the element can be expanded or collapsed, like a tree item. |

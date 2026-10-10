@@ -128,6 +128,8 @@ class FakeApplicationServices:
         self.constants = {}
         self.system_wide = FakeElement(role="AXSystemWide")
         self.at_position = None
+        self.position_by_element = {}
+        self.hit_tests = []
         self.prompted = []
         self.action_error = 0
         self.set_error = 0
@@ -183,6 +185,9 @@ class FakeApplicationServices:
         return (0, list(element.actions))
 
     def AXUIElementCopyElementAtPosition(self, element, x, y, _out):
+        self.hit_tests.append(element)
+        if element in self.position_by_element:
+            return self.position_by_element[element]
         if self.at_position is None:
             return (-25204, None)
         return (0, self.at_position)
@@ -1616,7 +1621,7 @@ class TestActionsAndClicks(BackendTestCase):
         # or a table cell, and the element stays the locator while the gesture
         # falls back to the session's pointer.
         label = self.element(role="AXStaticText")
-        session = mock.Mock()
+        session = mock.Mock(click_via="auto")
         label._bind_session(session)
         label.click()
         session.click_element.assert_called_once_with(label)
@@ -1625,7 +1630,7 @@ class TestActionsAndClicks(BackendTestCase):
         # With a rectangle there is somewhere to aim; without one the typed
         # refusal is the honest answer rather than a click somewhere arbitrary.
         label = self.element(role="AXStaticText")
-        session = mock.Mock()
+        session = mock.Mock(click_via="auto")
         session.extents.return_value = None
         label._bind_session(session)
         with self.assertRaises(ElementNotActionable) as caught:
@@ -1639,11 +1644,42 @@ class TestActionsAndClicks(BackendTestCase):
         # success.
         self.ax.action_error = -25204
         button = self.element(role="AXButton", actions=("AXPress",))
-        session = mock.Mock()
+        session = mock.Mock(click_via="auto")
         button._bind_session(session)
         with self.assertRaises(PyGUITestError):
             button.click()
         session.click_element.assert_not_called()
+
+    def test_click_via_action_only_uses_the_press(self):
+        button = self.element(role="AXButton", actions=("AXPress",))
+        button.click(via="action")
+        self.assertEqual(button.node.performed, ["AXPress"])
+
+    def test_click_via_action_with_no_action_is_a_typed_refusal(self):
+        # via="action" forbids the pointer fallback, so an actionless element
+        # raises instead of being clicked by coordinate.
+        label = self.element(role="AXStaticText")
+        with self.assertRaises(ElementNotActionable) as caught:
+            label.click(via="action")
+        self.assertIn("forbids the pointer", str(caught.exception))
+
+    def test_click_via_pointer_skips_the_published_press(self):
+        # via="pointer" is the user pathway only: even an element that
+        # publishes a press is clicked by coordinate instead.
+        button = self.element(role="AXButton", actions=("AXPress",))
+        session = mock.Mock(click_via="auto")
+        button._bind_session(session)
+        button.click(via="pointer")
+        session.click_element.assert_called_once_with(button)
+        self.assertEqual(button.node.performed, [])
+
+    def test_double_click_via_action_is_a_refusal(self):
+        # No toolkit publishes a double-click action, so via="action" is an
+        # honest refusal instead of the silent pointer click that the default
+        # performs.
+        button = self.element(role="AXButton")
+        with self.assertRaises(ElementNotActionable):
+            button.double_click(via="action")
 
     def test_do_action_accepts_the_spellings_the_other_desktops_use(self):
         button = self.element(role="AXButton", actions=("AXPress",))
@@ -1765,7 +1801,7 @@ class TestActionsAndClicks(BackendTestCase):
 
     def test_double_click_delegates_to_the_session_holding_the_pointer(self):
         element = self.element(role="AXButton")
-        session = mock.Mock()
+        session = mock.Mock(click_via="auto")
         element._bind_session(session)
         element.double_click()
         session.double_click_element.assert_called_once_with(element)
@@ -1857,6 +1893,14 @@ class TestSearch(BackendTestCase):
 
     def test_the_atspi_spelling_of_a_role_matches_too(self):
         self.assertEqual(len(self.backend.find_elements(role="button")), 3)
+
+    def test_role_accepts_several_roles_at_once(self):
+        # role=(...) matches any of them in one search -- see roles.spellings,
+        # which _ax_roles resolves through for exactly this reason.
+        found = self.backend.find_elements(role=(Role.PUSH_BUTTON, Role.ENTRY))
+        self.assertEqual(
+            {element.name for element in found}, {"Save", "Gone", "Hidden", "Name"}
+        )
 
     def test_a_name_matches_exactly_or_as_a_regular_expression(self):
         exact = self.backend.find_elements(name="Save")
@@ -2145,6 +2189,24 @@ class TestGeometryAndHitTesting(BackendTestCase):
         self.assertEqual(
             (element.role, element.name, element.pid), (Role.TEXT, "shell", 690)
         )
+
+    def test_a_hit_test_prefers_the_frontmost_window(self):
+        # Terminal (pid 690) is the front-most window at (640, 400); TextEdit
+        # (pid 2829) is stacked underneath it. The system-wide hit test carries
+        # no stacking order and answers with the underneath window's element, so
+        # element_at must hit-test within the front-most window instead.
+        backend = self.make(
+            onscreen=self.onscreen_windows(),
+            applications=BackendTestCase.applications(),
+        )
+        underneath = FakeElement(role="AXTextArea", pid=2829)
+        front = FakeElement(role="AXButton", pid=690)
+        backend._ax.position_by_element = {
+            backend._ax.system_wide: (0, underneath),
+            backend._ax.applications[690].windows[0]: (0, front),
+        }
+        element = backend.element_at(640, 400)
+        self.assertEqual((element.role, element.pid), (Role.PUSH_BUTTON, 690))
 
     def test_a_hit_test_where_ax_declines_answers_none(self):
         backend = self.make()

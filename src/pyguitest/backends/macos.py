@@ -115,6 +115,7 @@ import contextlib
 import importlib
 import re
 import time
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from ..capabilities import Capability, CapabilitySet
@@ -128,7 +129,15 @@ from ..errors import (
 )
 from ..roles import Role, spellings
 from . import _macapi
-from .base import GUIBackend, Screen, Window, check_region, click_by_pointer
+from .base import (
+    GUIBackend,
+    Screen,
+    Window,
+    check_region,
+    click_by_pointer,
+    require_click_route,
+    resolve_click_route,
+)
 from .capture import capture_window_id
 
 if TYPE_CHECKING:
@@ -526,7 +535,7 @@ def _text_of(value) -> str:
     return value if isinstance(value, str) else ""
 
 
-def _ax_roles(role: str | None):
+def _ax_roles(role: str | Sequence[str] | None):
     """Every AX role name this package reports as `role`, or None for no filter.
 
     The comparison is against `spellings(role)` rather than against `role`,
@@ -535,18 +544,22 @@ def _ax_roles(role: str | None):
     button`, exactly as it matches an at-spi2 that renamed the role.
 
     A raw AX name is accepted as itself, so a caller who read `AXTextField`
-    off a live tree can search for it. Where nothing maps, `{role}` is
-    returned rather than an empty set: an empty set would silently match
-    nothing, and a search for a role this backend never produces should come
-    back empty because no element has it, not because the filter was dropped.
+    off a live tree can search for it -- checked per role when `role` names
+    several at once, since `str.startswith` has no sequence form. Where
+    nothing maps, the role strings asked for are returned as themselves
+    rather than an empty set: an empty set would silently match nothing, and
+    a search for a role this backend never produces should come back empty
+    because no element has it, not because the filter was dropped.
     """
     if role is None:
         return None
+    names = (role,) if isinstance(role, str) else tuple(role)
     wanted = spellings(role)
     named = {name for name, reported in _AX_ROLES.items() if reported in wanted}
-    if role.startswith("AX"):
-        named.add(role)
-    return named or {role}
+    for one in names:
+        if one.startswith("AX"):
+            named.add(one)
+    return named or set(names)
 
 
 _MAX_DEPTH = 24
@@ -977,7 +990,7 @@ class Element:
                 f"could not {what}: AX answered {err}",
             )
 
-    def click(self):
+    def click(self, via=None):
         """Act on the element directly -- no coordinates, no injection.
 
         Three routes, in the order AX offers them: `AXPress`, which is a
@@ -1006,6 +1019,13 @@ class Element:
         raises `ElementNotActionable`, the same typed answer the other two
         backends give, with this platform's reason in it rather than theirs.
         """
+        route = resolve_click_route(self, via)
+        if route == "pointer":
+            require_click_route(self, "pointer")
+            click_by_pointer(self, "clicked through the pointer (via='pointer')")
+            return
+        if route == "action":
+            require_click_route(self, "action")
         if self._press():
             return
         if self.checkable:
@@ -1016,13 +1036,21 @@ class Element:
         if self.selectable:
             self.select()
             return
+        if route == "action":
+            raise ElementNotActionable(
+                self.role,
+                self.name,
+                "Accessibility offers it no press action and it publishes "
+                "nothing to toggle or select, and via='action' forbids the "
+                "pointer fallback",
+            )
         click_by_pointer(
             self,
             "Accessibility offers it no press action and it publishes nothing "
             "to toggle or select, so there is no accessible action to perform",
         )
 
-    def double_click(self):
+    def double_click(self, via=None):
         """Double-click the element: locate it, then inject the gesture.
 
         There is no accessible action to name here, the way `click` names one: a
@@ -1038,6 +1066,16 @@ class Element:
         pointer capabilities on top of that -- which come from `macquartz` on
         this platform, not from this backend.
         """
+        route = resolve_click_route(self, via)
+        if route == "action":
+            raise ElementNotActionable(
+                self.role,
+                self.name,
+                "no toolkit publishes a double-click action, so via='action' "
+                "has nothing to perform",
+            )
+        if route == "pointer":
+            require_click_route(self, "pointer")
         if self._session is None:
             raise PyGUITestError(
                 f"{self.name!r} carries no session to double-click through -- "
@@ -2360,18 +2398,58 @@ class MacosBackend(GUIBackend):
     def element_at(self, x, y):
         """The deepest accessible element at a screen coordinate, or None.
 
-        `AXUIElementCopyElementAtPosition` on the system-wide element -- the one
-        thing that element is for, measured: it answered with the text area under
-        (640, 400), its pid, and that element's own geometry. None where AX declines,
-        which it does for a point inside no window's own tree.
+        Hit-tested within the front-most window when there is one, because the
+        system-wide `AXUIElementCopyElementAtPosition` carries no stacking order
+        and answers with a window stacked *underneath* the front-most one --
+        measured live, recording a click over the front window named a widget in
+        the window behind it. Menus, the Dock and surfaces that are not layer-0
+        windows fall through to the system-wide hit test.
+
+        None where AX declines, which it does for a point inside no window's
+        own tree.
         """
         self.require(Capability.ELEMENT_GEOMETRY)
+        try:
+            window = self.window_at(x, y)
+        except Exception:  # noqa: BLE001 - WINDOW_AT_POINT can be missing
+            window = None
+        if window is not None:
+            ax_window = self._ax_window_for(window)
+            if ax_window is not None:
+                err, element = self._ax.AXUIElementCopyElementAtPosition(
+                    ax_window, int(x), int(y), None
+                )
+                if not err and element is not None:
+                    return Element(element, self)
         err, element = self._ax.AXUIElementCopyElementAtPosition(
             self._ax.AXUIElementCreateSystemWide(), int(x), int(y), None
         )
         if err or element is None:
             return None
         return Element(element, self)
+
+    def _ax_window_for(self, window):
+        """The AX window element backing `window`, or None.
+
+        The join is by frame: AX and CoreGraphics report identical window
+        rectangles (see `_titles`), so the AX window whose frame equals the
+        window server's entry is the one to hit-test within.
+        """
+        if window.pid is None:
+            return None
+        err, windows = self._copy(
+            self._ax.AXUIElementCreateApplication(window.pid),
+            self._ax.kAXWindowsAttribute,
+        )
+        if err or not windows:
+            return None
+        target = self._bounds(self._entry_for(window.handle))
+        if target is None:
+            return None
+        for ax_window in windows:
+            if self._frame(ax_window) == target:
+                return ax_window
+        return None
 
     def _applications(self):
         """The applications the tree is searched through, as `Element`s.

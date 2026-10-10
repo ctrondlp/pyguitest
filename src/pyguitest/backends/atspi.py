@@ -31,9 +31,9 @@ from ..errors import (
     ElementNotActionable,
     PyGUITestError,
 )
-from ..roles import Role, spellings
+from ..roles import Role, canonical_role, spellings
 from ..session import SessionType
-from .base import GUIBackend, Window
+from .base import GUIBackend, Window, require_click_route, resolve_click_route
 
 __all__ = [
     "AtspiBackend",
@@ -104,9 +104,63 @@ bottomed out by here is malformed, and the node reached is still a truthful
 answer, just not the deepest one."""
 
 
+def _gi_component():
+    """`Atspi.Component`, the class a Component-interface call is cast through.
+
+    Used when `queryComponent` -- a camelCase alias PyGObject adds on some
+    builds, not a GI-native method -- does not exist. See `_extents` for
+    where this was found and confirmed live (PyGObject/at-spi2 2.56, Debian
+    13).
+    """
+    from gi.repository import Atspi  # noqa: PLC0415 - optional dep, see _pyatspi
+
+    return Atspi.Component
+
+
+def _gi_screen_coords():
+    """`Atspi.CoordType.SCREEN`'s int value, the same constant `pyatspi` names.
+
+    Specifically the one `pyatspi.DESKTOP_COORDS` names, from the same
+    underlying C enum, for when `pyatspi` itself is what is unavailable (see
+    `_pyatspi`), not just `queryComponent`.
+    """
+    from gi.repository import Atspi  # noqa: PLC0415 - optional dep, see _pyatspi
+
+    return Atspi.CoordType.SCREEN
+
+
 def _at_point(pyatspi, node, x, y):
     """The child of `node` at a screen point, or None."""
-    return node.queryComponent().getAccessibleAtPoint(x, y, pyatspi.DESKTOP_COORDS)
+    try:
+        return node.queryComponent().getAccessibleAtPoint(x, y, pyatspi.DESKTOP_COORDS)
+    except AttributeError:
+        return _gi_component().get_accessible_at_point(
+            node, x, y, pyatspi.DESKTOP_COORDS
+        )
+
+
+def _frame_pid(frame):
+    """A toplevel frame's process id, or None.
+
+    The same read `Element.pid` does, duplicated here because `windows()`
+    builds `base.Window` objects straight from a raw dogtail node, not an
+    `Element`.
+
+    `Window.pid` defaulted to `None` on every window this backend ever
+    built, confirmed live (Debian 13, GNOME Wayland, no gnomeshell
+    extension): a driver matching `find_windows(title=...)` results against
+    a known pid got `None` back every time, so `next((w for w in ... if
+    w.pid == app.pid), None)` always missed, and every element search
+    scoped `within=` the window that *should* have been found instead fell
+    back to searching the whole desktop tree -- find_windows and
+    activate_window were never the problem; nothing had ever populated the
+    one field that makes matching a window to its process possible at all.
+    """
+    try:
+        pid = int(frame.get_process_id())
+    except Exception:  # noqa: BLE001 - an unanswered pid is not an error
+        return None
+    return pid or None
 
 
 def a11y_bus_reachable():
@@ -472,8 +526,25 @@ class Element:
 
     @property
     def role(self):
-        """The element's accessible role, such as 'push button'."""
-        return self.node.roleName
+        """The element's accessible role, such as 'push button'.
+
+        Reported as `entry` rather than the raw `text` on an at-spi2 that
+        has no role of its own for a single-line field (2.56, Debian 13,
+        confirmed live) -- see `_is_entry_reported_as_text` for why an
+        EDITABLE-and-not-MULTI_LINE state check, not a plain alias, is what
+        tells the two apart there.
+
+        Otherwise normalized through `canonical_role`, so a push button
+        reads back as `Role.PUSH_BUTTON` on every at-spi2 version, not
+        whichever raw spelling (`"button"` on 2.61.1, `"push button"` on
+        2.56) this one happens to use -- the same version difference
+        `find_elements(role=...)` already hides on the way in, now hidden
+        on the way back out too.
+        """
+        raw = self.node.roleName
+        if _is_entry_reported_as_text(self.node, (Role.ENTRY,)):
+            return Role.ENTRY
+        return canonical_role(raw)
 
     @property
     def parent(self):
@@ -573,19 +644,10 @@ class Element:
     def _state_names(self):
         """This node's AT-SPI states, by name -- `{"EXPANDABLE", ...}`.
 
-        `state_set` is a GI enum list already; `.name` reads each member's
-        own name without this module ever importing the enum type that
-        defines it.
-
-        A node that died since it was found answers with no states rather
-        than raising: `tree_items()` reads this off every row it walks, and
-        one row closing mid-walk should read as a leaf, not end the walk.
+        Delegates to `_node_state_names`; see there for why `.name` alone is
+        not enough.
         """
-        try:
-            states = self.node.state_set or []
-            return {getattr(state, "name", str(state)) for state in states}
-        except Exception:  # noqa: BLE001 - a reaped node has no states to read
-            return set()
+        return _node_state_names(self.node)
 
     @property
     def focused(self):
@@ -631,7 +693,7 @@ class Element:
         except Exception:  # noqa: BLE001 - a dead node can fail several ways
             return False
 
-    def click(self):
+    def click(self, via=None):
         """Act on the element directly -- no coordinates, no injection.
 
         Tries AT-SPI's own action interface first, where the element offers
@@ -678,6 +740,13 @@ class Element:
         publishes an action is clicked through it, and one that publishes none
         is clicked by coordinate.
         """
+        route = resolve_click_route(self, via)
+        if route == "pointer":
+            require_click_route(self, "pointer")
+            self._click_by_coordinate()
+            return
+        if route == "action":
+            require_click_route(self, "action")
         actions = self.node.actions or {}
         # `toggle` last: GTK publishes it alone on a switch (a GtkSwitch has no
         # `click`), and UI Automation's click() already acts through its own
@@ -703,6 +772,23 @@ class Element:
         if name is not None:
             self.node.doActionNamed(name)
             return
+        if route == "action":
+            raise ElementNotActionable(
+                self.role,
+                self.name,
+                "it publishes no click, press, toggle or show-menu action, and "
+                "via='action' forbids the pointer fallback",
+            )
+        self._click_by_coordinate()
+
+    def _click_by_coordinate(self):
+        """The pointer route: dogtail's own coordinate click.
+
+        The step `click(via="auto")` falls to when the element offers no
+        Action interface, and the whole of `click(via="pointer")`. Its two
+        known failures -- needing GNOME's absent ponytail daemon, and AT-SPI's
+        INT_MIN "not showing" sentinel -- become `ElementNotActionable`.
+        """
         try:
             self.node.click()
         except (RuntimeError, ValueError) as error:
@@ -714,7 +800,7 @@ class Element:
                 raise
             raise ElementNotActionable(self.role, self.name) from error
 
-    def double_click(self):
+    def double_click(self, via=None):
         """Double-click the element: locate it, then inject the gesture.
 
         There is no accessible action to name here, the way `click` names
@@ -735,6 +821,16 @@ class Element:
         which is what double_click_element raises, and where there is no
         session to delegate to at all.
         """
+        route = resolve_click_route(self, via)
+        if route == "action":
+            raise ElementNotActionable(
+                self.role,
+                self.name,
+                "no toolkit publishes a double-click action, so via='action' "
+                "has nothing to perform",
+            )
+        if route == "pointer":
+            require_click_route(self, "pointer")
         if self._session is None:
             raise PyGUITestError(
                 f"{self.name!r} carries no session to double-click through -- "
@@ -885,6 +981,68 @@ def _matches_text(value, wanted):
     return value == wanted
 
 
+def _node_state_names(node):
+    """A raw dogtail node's AT-SPI states, by name -- `{"EXPANDABLE", ...}`.
+
+    `state_set` is a GI enum-flag list; `.name` reads each member's own name
+    on PyGObject builds where that attribute exists, without this module
+    ever importing the enum type that defines it. It does not exist on
+    every build, though -- confirmed live on PyGObject/at-spi2 2.56 (Debian
+    13): each member there is a plain `int`-derived flag whose `dir()` has
+    no `name`, only `value_name` ("ATSPI_STATE_EDITABLE", prefixed) -- so
+    `getattr(state, "name", str(state))` silently falls through to the
+    `str()` branch and returns the unusable `"<enum ATSPI_STATE_EDITABLE of
+    type Atspi.StateType>"` repr instead, which contains the real name but
+    not as its own token. Fedora 45's PyGObject does have `.name`, so this
+    tries that first and only strips `value_name`'s prefix when it has to.
+
+    A node that died since it was found answers with no states rather than
+    raising: `tree_items()` reads this off every row it walks, and one row
+    closing mid-walk should read as a leaf, not end the walk.
+    """
+    try:
+        states = node.state_set or []
+    except Exception:  # noqa: BLE001 - a reaped node has no states to read
+        return set()
+    names = set()
+    for state in states:
+        name = getattr(state, "name", None)
+        if name is None:
+            value_name = getattr(state, "value_name", "")
+            name = value_name.removeprefix("ATSPI_STATE_") or str(state)
+        names.add(name)
+    return names
+
+
+def _is_entry_reported_as_text(node, wanted):
+    """Whether `node` is really an `entry` that this at-spi2 reports as `text`.
+
+    Unlike the push-button/button case in roles.py's `_ALIASES`, this is not
+    a renamed role with a stable integer underneath: at-spi2 2.56 (Debian 13,
+    confirmed live) simply has no role for a single-line editable field --
+    QLineEdit and QTextEdit both report `ATSPI_ROLE_TEXT`, where 2.61.1
+    (Fedora 45) assigns QLineEdit its own `ATSPI_ROLE_ENTRY`. A context-free
+    alias would be wrong here: it would make every `role="text"` search also
+    match single-line fields, and vice versa. The one state at-spi2 keeps
+    accurate regardless -- confirmed live on the same 2.56 desktop -- is
+    MULTI_LINE, present on a QTextEdit and absent on a QLineEdit, which is
+    exactly the distinction `entry` vs `text` is meant to carry. So this
+    accepts a `text`-roled node for an `entry` search only when it lacks
+    MULTI_LINE, and never does the reverse: a `text` search is left matching
+    every editable field on this at-spi2 version, which is at least no
+    narrower than what the desktop can actually tell apart.
+    """
+    if Role.ENTRY not in wanted or node.roleName != Role.TEXT:
+        return False
+    names = _node_state_names(node)
+    # EDITABLE as well as not MULTI_LINE: a read-only text display (e.g. a
+    # label built on the Text interface rather than a real label role) is
+    # also single-line and unreported by this at-spi2, but it is not an
+    # entry either -- nothing to type into, so nothing a caller asking for
+    # `entry` would want back.
+    return "EDITABLE" in names and "MULTI_LINE" not in names
+
+
 def _build_predicate(role, name, enabled, visible, description, predicate):
     """A `node -> bool` function for `Node.findChildren`.
 
@@ -901,7 +1059,11 @@ def _build_predicate(role, name, enabled, visible, description, predicate):
         # Compared against every spelling of the role, not just the one asked
         # for: at-spi2 renamed push button to button without changing the
         # integer, so the string a desktop reports depends on its version.
-        if wanted is not None and node.roleName not in wanted:
+        if (
+            wanted is not None
+            and node.roleName not in wanted
+            and not _is_entry_reported_as_text(node, wanted)
+        ):
             return False
         if name is not None and not _matches_text(node.name, name):
             return False
@@ -1179,9 +1341,40 @@ class AtspiBackend(GUIBackend):
         answers in screen coordinates or not at all; ELEMENT_GEOMETRY is
         withheld in the session where they would be meaningless.
         """
-        pyatspi = self._pyatspi(Capability.ELEMENT_GEOMETRY)
         try:
-            rect = node.queryComponent().getExtents(pyatspi.DESKTOP_COORDS)
+            pyatspi = self._pyatspi(Capability.ELEMENT_GEOMETRY)
+            coords = pyatspi.DESKTOP_COORDS
+        except CapabilityUnsupported:
+            # python3-pyatspi 2.46.1 against a newer PyGObject (Debian 13,
+            # confirmed live) fails inside its own `import pyatspi` -- see
+            # `_pyatspi` -- which would make ELEMENT_GEOMETRY entirely
+            # unavailable there if this method actually needed the module.
+            # It only ever wanted one integer constant from it, and
+            # `Atspi.CoordType.SCREEN` is the same value from the same
+            # underlying C enum, so there is no real dependency on the
+            # broken import to route around.
+            pyatspi = None
+            coords = _gi_screen_coords()
+        try:
+            rect = node.queryComponent().getExtents(coords)
+        except AttributeError:
+            # `queryComponent` is a camelCase alias PyGObject adds to
+            # `Atspi.Accessible` on some builds, not a GI-native method --
+            # confirmed live on PyGObject/at-spi2 2.56 (Debian 13), where it
+            # does not exist at all ("'Accessible' object has no attribute
+            # 'queryComponent'. Did you mean: 'get_component'?"), and
+            # `get_component()` is itself deprecated there in favor of the
+            # interface-cast call below. `node.get_extents()` looked like
+            # the fix -- dogtail wraps it down to zero arguments and it does
+            # return a rectangle -- but that wrapper cannot take an explicit
+            # coord_type, which is the entire reason this method does not
+            # just use it (see the class docstring above). Falling to the
+            # GI-native interface call keeps that coordinate guarantee on
+            # every PyGObject build instead of only the ones with the alias.
+            try:
+                rect = _gi_component().get_extents(node, coords)
+            except Exception:  # noqa: BLE001 - no Component interface, or a dead node
+                return None
         except Exception:  # noqa: BLE001 - no Component interface, or a dead node
             return None
         if rect is None or rect.width <= 0 or rect.height <= 0:
@@ -1232,6 +1425,7 @@ class AtspiBackend(GUIBackend):
                             backend=self,
                             title=frame.name or "",
                             app_id=app.name or "",
+                            pid=_frame_pid(frame),
                         )
                     )
         return found
@@ -1270,15 +1464,25 @@ class AtspiBackend(GUIBackend):
         would otherwise get a bare ImportError here, on a backend that
         looked fully constructed. Routed through the same typed-error
         pattern as every other unsupported operation instead.
+
+        Catches more than `ImportError`: confirmed live on python3-pyatspi
+        2.46.1 against a newer PyGObject (Debian 13) -- the package is
+        present and `import pyatspi` reaches its own top-level code, which
+        does `del Atspi.Accessible.children` to clear a default GI property
+        it means to replace with its own; that attribute does not exist on
+        this PyGObject, so the `del` itself raises `AttributeError`, not
+        anything import-shaped, and reaches here wrapped in nothing. A
+        caller only wanting to know "do I have the real pyatspi module"
+        should not need to know its init code can fail this way too.
         """
         try:
             import pyatspi
-        except ImportError as exc:
+        except Exception as exc:  # noqa: BLE001 - a broken distro package can fail besides ImportError; see above
             raise CapabilityUnsupported(
                 capability,
                 self.name,
-                "pyatspi is not installed; install it via your distribution "
-                "(see README)",
+                "pyatspi is not installed, or failed to import; install it "
+                "via your distribution (see README)",
             ) from exc
         return pyatspi
 
