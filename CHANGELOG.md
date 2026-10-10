@@ -50,6 +50,24 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ### Fixed
 
+- **`ELEMENT_GEOMETRY` on pure Wayland can now be restored by a sibling
+  backend.** AT-SPI's own screen coordinates there are not garbage, just
+  mislabeled: confirmed live (Debian 13, GNOME/Mutter) a toplevel frame's
+  own extents report `(0, 0, ...)` and a child inside it reports its true
+  offset *within* that frame -- window-relative, presented as if it were
+  screen-absolute, because a pure Wayland client is genuinely never told
+  where it sits. `atspi.py` used to withhold `ELEMENT_GEOMETRY` outright
+  there, unconditionally, with no way back in. A sibling backend that
+  really is told its window positions -- the `gnomeshell` extension's
+  `ListWindows`, the only one checked so far -- now gets wired in
+  automatically (`backends/__init__.py::_combine`, new
+  `AtspiBackend.set_window_geometry_source`) whenever both are present in
+  the same session, and `extents()` adds that real offset to its own
+  rectangle. `element_at()` is not part of this yet -- it compares a
+  caller's screen-absolute point directly against each candidate's own,
+  still-relative rectangle, which needs the point corrected per-window
+  mid-walk, not a single offset; it still refuses outright on Wayland.
+
 - **`atspi.py`'s `windows()` never set `Window.pid`.** The constructor call
   building each `Window` from a toplevel frame passed `handle`/`title`/
   `app_id` and nothing else, leaving `pid` at `base.Window`'s own default

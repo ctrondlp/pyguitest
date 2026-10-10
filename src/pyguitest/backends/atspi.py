@@ -1118,6 +1118,18 @@ class AtspiBackend(GUIBackend):
             )
         self._tree, self._predicate = modules
         self.environment = environment
+        self._window_geometry_source = None
+
+    def set_window_geometry_source(self, backend):
+        """Let `backend` correct this one's element coordinates on Wayland.
+
+        Wired by `backends/__init__.py::_combine` when a sibling backend in
+        the same session (gnomeshell, say) provides `Capability.
+        WINDOW_GEOMETRY` -- never by a caller directly. `backend` needs
+        `windows()` and `geometry(window)`; see `_window_offset` for how
+        they get used.
+        """
+        self._window_geometry_source = backend
 
     @property
     def _screen_coords_trustworthy(self):
@@ -1128,6 +1140,26 @@ class AtspiBackend(GUIBackend):
         return (
             self.environment is None
             or self.environment.session_type is not SessionType.WAYLAND
+        )
+
+    @property
+    def _element_coords_trustworthy(self):
+        """Whether ELEMENT_GEOMETRY specifically can be trusted.
+
+        Everything `_screen_coords_trustworthy` already covers, plus one
+        more case: a pure Wayland client's AT-SPI rectangle is not garbage,
+        it is *window-relative* reported as if it were screen-absolute
+        (confirmed live, Debian 13 GNOME/Mutter: the toplevel frame's own
+        extents come back `(0, 0, ...)`, and a child inside it comes back at
+        its true offset *within* that frame). Add a window's real screen
+        position -- known accurately only through something that is *told*
+        it, like the gnomeshell extension's `ListWindows` -- and the
+        element rectangle becomes correct. `set_window_geometry_source`
+        is how one gets wired in; `_window_offset` does the lookup and the
+        add.
+        """
+        return (
+            self._screen_coords_trustworthy or self._window_geometry_source is not None
         )
 
     @property
@@ -1142,8 +1174,52 @@ class AtspiBackend(GUIBackend):
         }
         if self._screen_coords_trustworthy:
             caps.add(Capability.WINDOW_GEOMETRY)
+        if self._element_coords_trustworthy:
             caps.add(Capability.ELEMENT_GEOMETRY)
         return CapabilitySet(caps)
+
+    def _window_offset(self, node):
+        """The (x, y) to add to `node`'s own rectangle to make it absolute.
+
+        Via `_window_geometry_source`, or None. Walks up to the nearest
+        ancestor with a window role, reads *its* pid (`_frame_pid`, the
+        same read `windows()` uses), and matches that against the
+        geometry source's own window list -- the two backends' Window
+        objects are never the same object, so pid is the only identity
+        they share.
+        """
+        if self._window_geometry_source is None:
+            return None
+        frame = node
+        depth = 0
+        while frame is not None and frame.roleName not in Role.WINDOW_ROLES:
+            try:
+                frame = frame.parent
+            except Exception:  # noqa: BLE001 - a reaped node has no parent to read
+                return None
+            depth += 1
+            if depth > _MAX_DEPTH:
+                return None
+        if frame is None:
+            return None
+        pid = _frame_pid(frame)
+        if pid is None:
+            return None
+        try:
+            windows = self._window_geometry_source.windows()
+        except Exception:  # noqa: BLE001 - a sibling backend's own failure is not ours
+            return None
+        for window in windows:
+            if getattr(window, "pid", None) != pid:
+                continue
+            try:
+                geom = self._window_geometry_source.geometry(window)
+            except Exception:  # noqa: BLE001 - ditto
+                return None
+            if geom is None:
+                return None
+            return (geom[0], geom[1])
+        return None
 
     # -- elements ----------------------------------------------------------
 
@@ -1234,8 +1310,21 @@ class AtspiBackend(GUIBackend):
         an application that exits mid-walk is ordinary, and taking the hit
         test down with it would make this fail for reasons having nothing
         to do with the point asked about.
+
+        Requires genuinely trustworthy coordinates, not merely
+        `Capability.ELEMENT_GEOMETRY` -- `_element_coords_trustworthy` can
+        be true from a window-geometry source correcting `extents()`, but
+        `x`/`y` here are screen-absolute from the caller, compared directly
+        against every node's own, still window-relative rectangle; adding
+        a per-window offset to the point *and* to each candidate node
+        (which is in a different window every iteration) is a real piece
+        of work this has not been given. Left to `extents()`'s own fix
+        for now, since this driver's own work never calls `element_at`.
         """
-        self.require(Capability.ELEMENT_GEOMETRY, _WAYLAND_COORDS)
+        if not self._screen_coords_trustworthy:
+            raise CapabilityUnsupported(
+                Capability.ELEMENT_GEOMETRY, self.name, _WAYLAND_COORDS
+            )
         pyatspi = self._pyatspi(Capability.ELEMENT_GEOMETRY)
         best = None
         best_area = None
@@ -1393,7 +1482,19 @@ class AtspiBackend(GUIBackend):
         # Shell 51.rc; see docs/validation.md.
         if rect.x <= _UNPLACED or rect.y <= _UNPLACED:
             return None
-        return (rect.x, rect.y, rect.width, rect.height)
+        x, y = rect.x, rect.y
+        if not self._screen_coords_trustworthy:
+            # The rectangle above is window-relative, not screen-absolute --
+            # see _element_coords_trustworthy -- so it needs a real window
+            # position added before it means anything as a screen point.
+            # Only reached at all when that capability was granted, which
+            # only happens with a geometry source wired in, so this offset
+            # is never silently skipped for one this method actually needed.
+            offset = self._window_offset(node)
+            if offset is None:
+                return None
+            x, y = x + offset[0], y + offset[1]
+        return (x, y, rect.width, rect.height)
 
     # -- windows -----------------------------------------------------------
 

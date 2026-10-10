@@ -1130,6 +1130,72 @@ class TestElements(AtspiTestCase):
             {e.name for e in found}, {"OK", "Cancel", "Enable notifications"}
         )
 
+
+class _FakeWindow:
+    __slots__ = ("pid",)
+
+    def __init__(self, pid):
+        self.pid = pid
+
+
+class _FakeWindowGeometrySource:
+    """A sibling backend standing in for `gnomeshell`.
+
+    Knows one window's real screen position, keyed by pid, and nothing
+    else `atspi.py`'s `_window_offset` needs.
+    """
+
+    def __init__(self, pid, offset):
+        self._pid = pid
+        self._offset = offset
+
+    def windows(self):
+        return [_FakeWindow(self._pid)]
+
+    def geometry(self, window):
+        return (*self._offset, 1280, 768)
+
+
+class TestWaylandElementGeometry(AtspiTestCase):
+    """The Wayland-only fix: a wired-in window-geometry source.
+
+    AT-SPI's own coordinates are window-relative on Wayland -- see
+    `_element_coords_trustworthy` -- so ELEMENT_GEOMETRY is withheld there
+    unless a sibling backend's real window position is wired in.
+    """
+
+    def test_element_geometry_is_withheld_on_wayland_with_no_source(self):
+        gui = self.backend(SessionType.WAYLAND)
+        self.assertNotIn(Capability.ELEMENT_GEOMETRY, gui.capabilities)
+
+    def test_a_window_geometry_source_restores_element_geometry(self):
+        self.frame._pid = 4242
+        gui = self.backend(SessionType.WAYLAND)
+        gui.set_window_geometry_source(_FakeWindowGeometrySource(4242, (0, 32)))
+        self.assertIn(Capability.ELEMENT_GEOMETRY, gui.capabilities)
+
+    def test_extents_adds_the_real_window_offset(self):
+        # The button's own fixture position is (10, 20) -- see build_tree --
+        # which is window-relative on Wayland; with the window's real
+        # screen position wired in as (0, 32), the true screen position is
+        # the sum of the two, not either alone.
+        self.frame._pid = 4242
+        gui = self.backend(SessionType.WAYLAND)
+        gui.set_window_geometry_source(_FakeWindowGeometrySource(4242, (0, 32)))
+        button = gui.find_element(name="OK")
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertEqual(gui.extents(button), (10, 52, 80, 30))
+
+    def test_no_matching_window_falls_back_to_unsupported(self):
+        # The source exists, but no window of its own has this pid --
+        # confirmed live is the only guarantee this offers, not a guess.
+        self.frame._pid = 4242
+        gui = self.backend(SessionType.WAYLAND)
+        gui.set_window_geometry_source(_FakeWindowGeometrySource(9999, (0, 32)))
+        button = gui.find_element(name="OK")
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertIsNone(gui.extents(button))
+
     def test_a_button_is_found_whichever_name_atspi_gives_it(self):
         # at-spi2 renamed ATSPI_ROLE_PUSH_BUTTON to ATSPI_ROLE_BUTTON without
         # changing the integer, so the string a desktop reports depends on its
