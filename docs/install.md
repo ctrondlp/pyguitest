@@ -25,7 +25,7 @@ rather than an error.
 | Backend | Serves | pip extra | From your distribution | On `PATH` |
 |---|---|---|---|---|
 | `atspi` | elements — buttons, text fields, dropdowns; windows on GNOME | `[atspi]` (dogtail) | PyGObject, pyatspi, at-spi2-core | — |
-| `windows` | window control on sway, Hyprland, niri | — | — | — (unix sockets, stdlib only) |
+| `windows` | window control on sway, Hyprland, niri and COSMIC | — | — | — (unix sockets, stdlib only) |
 | `windows` (KWin) | window control on KDE | — | — | `kdotool` |
 | `kwinevents` | window open/close/title events on KDE | — | PyGObject | — (loads an ad hoc KWin script at runtime; nothing to install) |
 | `gnomeshell` | window control, prompt-free per-window capture, and outputs with their scale on GNOME | — | PyGObject | — (plus the [Shell extension](../gnome-shell-extension/README.md), installed by hand) |
@@ -47,9 +47,9 @@ collide for historical reasons. Windows and macOS have backends of their own
 [On Windows](#on-windows) and [On macOS](#on-macos). `[dev]` (pytest, ruff,
 mypy) is covered in [CONTRIBUTING.md](../CONTRIBUTING.md).
 
-Two rows need less than they appear to. `windows` on sway, Hyprland and niri
-needs **nothing at all**: window control speaks their unix sockets using only
-the standard library. And `x11` with python-xlib installed captures and
+Two rows need less than they appear to. `windows` on sway, Hyprland, niri and
+COSMIC needs **nothing at all**: window control speaks their unix sockets
+using only the standard library. And `x11` with python-xlib installed captures and
 encodes PNGs itself, so it needs no screenshot tool either.
 
 ### The extras, all of them
@@ -80,7 +80,7 @@ the Screenshot and Clipboard portals need only PyGObject.
 
 | Desktop | What you install |
 |---|---|
-| sway / Hyprland / niri | `pip install pyguitest` — nothing else |
+| sway / Hyprland / niri / COSMIC | `pip install pyguitest` — nothing else |
 | GNOME | `pip install 'pyguitest[atspi]'` + three distribution packages |
 | GNOME, pure Wayland (no XWayland) | as GNOME, plus the [pyguitest-window-control extension](../gnome-shell-extension/README.md) for window placement/minimize |
 | KDE | as GNOME, plus `kdotool` for windows, and `gsettings set org.gnome.desktop.interface toolkit-accessibility true` or no application publishes any elements — [see below](#on-kde-one-more-step-that-is-not-a-package) |

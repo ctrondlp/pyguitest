@@ -757,17 +757,27 @@ class Session:
         environment: Environment,
         event_delay: float = 0.0,
         key_delay: float = 0.0,
+        click_via: str = "auto",
     ) -> None:
         """Wrap `backend` with the `environment` it was selected for.
 
         `event_delay` is the pause in seconds after each discrete input event,
         and `key_delay` the pause between characters when typing. Both replace
         X11::GUITest's global delay settings, which were module state there.
+        See `connect()` for why `event_delay`'s 0.0 default is worth
+        overriding for a script that drives real input.
+
+        `click_via` is the route `element.click()` takes when a call passes no
+        `via` of its own: `"action"` (the accessible action only), `"pointer"`
+        (the user pathway only) or `"auto"` (today's ladder, action first with
+        the pointer as the fallback). Settable mid-run, so one assignment can
+        switch a whole suite's policy.
         """
         self.backend = backend
         self.environment = environment
         self.event_delay = event_delay
         self.key_delay = key_delay
+        self.click_via = click_via
         # Where this session last commanded the pointer. Wayland has no
         # readback -- POINTER_QUERY is tier NO_PATH wherever there is no X
         # connection to read it from (X11 and XWayland both have one) -- so
@@ -2461,7 +2471,7 @@ class Session:
 
     def elements(
         self,
-        role: str | None = None,
+        role: str | Sequence[str] | None = None,
         name: str | re.Pattern[str] | None = None,
         within: Element | None = None,
         enabled: bool | None = None,
@@ -2486,6 +2496,16 @@ class Session:
         `within` scopes the search to one element's subtree, and takes an
         `Element` -- for a window, `gui.window_element(title)`, not the
         `Window` from `find_window`.
+
+        `role` may name several roles at once --
+        `role=(Role.PUSH_BUTTON, Role.CHECK_BOX)` -- matching any of them.
+        Prefer this over one `elements()` call per role when driving a whole
+        page of mixed controls: every backend's role filter resolves through
+        one search of the subtree in scope, so N separate role searches walk
+        that same subtree N times over, where one search naming all N roles
+        walks it once. Confirmed live: on AT-SPI, walking a ~130-element
+        window role by role (16 calls) took over a minute; the same 16 roles
+        in one call took a few seconds, the walk's own cost either way.
         """
         if isinstance(within, Window):
             # The one mix-up the two window types invite: `find_window` returns
@@ -2517,7 +2537,7 @@ class Session:
 
     def element(
         self,
-        role: str | None = None,
+        role: str | Sequence[str] | None = None,
         name: str | re.Pattern[str] | None = None,
         within: Element | None = None,
         enabled: bool | None = None,
@@ -3012,8 +3032,17 @@ class Session:
         raise ElementNotFound(f"no text field named {name!r}")
 
     def dropdown(self, name: str, within: Element | None = None) -> Element:
-        """Return the combo box named `name`."""
-        return self.element(role=Role.COMBO_BOX, name=name, within=within)
+        """Return the combo box named `name`.
+
+        A Qt combo box publishes its *current text* as the accessible name
+        and discards the name set on it, so the stable name often travels in
+        the accessible *description* instead. Try the description before
+        giving up.
+        """
+        try:
+            return self.element(role=Role.COMBO_BOX, name=name, within=within)
+        except ElementNotFound:
+            return self.element(role=Role.COMBO_BOX, description=name, within=within)
 
     def checkbox(self, name: str, within: Element | None = None) -> Element:
         """Return the check box named `name`."""
@@ -3551,7 +3580,7 @@ def connect(
     backend: str | Sequence[str] | None = None,
     environment: Environment | None = None,
     backend_options: dict | None = None,
-    **kwargs: float,
+    **kwargs: Any,
 ) -> Session:
     """Open an automation session.
 
@@ -3560,10 +3589,21 @@ def connect(
     normal case, and `supports()` is how you find out. Pass `backend` by name
     to override selection.
 
+    `event_delay` defaults to 0.0 -- no pause between a `move_mouse()` and
+    the `click()` after it -- which is not free: the target application can
+    get the button event before it has processed the pointer motion, and
+    the click is simply lost, no exception, just a control that never
+    responds. Confirmed live on two separate driver scripts, independently:
+    both ran for a long time looking fine because nothing checked that each
+    click actually landed, and `event_delay=0.15` turned a high silent-miss
+    rate into a clean run. A script driving real input against a real
+    application should usually set this rather than keep the default.
+
     `backend_options` goes to that named backend's own constructor, for
     settings only it understands -- `persist_mode`/`restore_token` on
     `portal` and `eiinput`, say. `**kwargs` is unrelated and configures the
-    Session's own delays. The returned backend is reachable as
+    Session's own delays (`event_delay`, `key_delay`) and its click route
+    (`click_via`). The returned backend is reachable as
     `session.backend`, which is how a caller reads a value back out:
 
         gui = connect(backend="portal", backend_options={

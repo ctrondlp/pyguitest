@@ -199,6 +199,10 @@ class TestCompositorDetection(unittest.TestCase):
         e = linux_detect(env(WAYLAND_DISPLAY="wayland-0", XDG_CURRENT_DESKTOP="KDE"))
         self.assertIs(e.compositor, Compositor.KWIN)
 
+    def test_cosmic(self):
+        e = linux_detect(env(WAYLAND_DISPLAY="wayland-0", XDG_CURRENT_DESKTOP="COSMIC"))
+        self.assertIs(e.compositor, Compositor.COSMIC)
+
     def test_wlroots_by_desktop_name(self):
         for desktop in ("sway", "Hyprland", "river", "niri"):
             with self.subTest(desktop=desktop):

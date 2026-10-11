@@ -20,7 +20,145 @@ All notable changes to pyguitest are recorded here. The format follows
   `QStackedWidget`, `QGraphicsView`, `QTabWidget` and `QKeySequenceEdit` all
   publish `filler`.
 
+- **`Element.click(via=...)` — choose the click pathway.** `via="action"` is
+  the accessible action only and raises `ElementNotActionable` where there is
+  none; `via="pointer"` is the user pathway only (extents, move, click) and
+  requires `ELEMENT_GEOMETRY` + `POINTER_MOVE` + `POINTER_BUTTON` up front, so
+  a headless or consent-less session fails at the call rather than a no-op
+  later; `via="auto"` (the default) is today's ladder, unchanged. `None` means
+  "use the session default" — a new `Session.click_via` attribute, default
+  `"auto"`, settable mid-run so one assignment can switch a whole suite's
+  policy. `double_click(via=...)` takes it too, where `"action"` is an honest
+  refusal (no toolkit publishes a double-click action) instead of today's
+  silent pointer click. `via=` chooses which route is *attempted*, never
+  whether a refusal is swallowed: a published action that refuses — a disabled
+  button, an HRESULT — still does not fall through to the pointer.
+
+- **`find_elements`/`elements`'s `role` accepts several roles at once.**
+  `role=(Role.PUSH_BUTTON, Role.CHECK_BOX)` matches either, in one search.
+  Every backend's role filter already resolved through `roles.spellings()`,
+  so this is one small change there (a sequence now returns the union of
+  each role's own spellings) that every backend inherits for free. Found
+  while driving a torture-test application's ~130-element window on
+  GhostBSD's AT-SPI: one role-by-role search of a page's 16 interactive
+  roles — the obvious way to enumerate "every actable control" — cost over a
+  minute, because each `find_elements(role=X)` call walks the whole subtree
+  in scope regardless of what matches, and 16 calls walk the same subtree
+  16 times. The same 16 roles in one `find_elements(role=ACTABLE_ROLES)`
+  call costs one walk, a few seconds — confirmed live, same desktop, same
+  window.
+
+- **`Compositor.COSMIC`, and window control for Pop!_OS 24.04's COSMIC
+  desktop.** COSMIC (System76's Smithay compositor) speaks none of the
+  protocols the other window backends drive — not sway/i3's IPC, not
+  Hyprland's socket, not niri's IPC, not KWin's scripting API — and has no
+  `kdotool`/`wmctrl`-style CLI. A new `cosmic` backend is a small stdlib-only
+  Wayland client that binds COSMIC's own `zcosmic_toplevel_info_v1` and
+  `zcosmic_toplevel_manager_v1` globals (layered on the standard
+  `ext_foreign_toplevel_list_v1`) to serve `WINDOW_LIST`, `WINDOW_STATE`,
+  `WINDOW_GEOMETRY`, `WINDOW_ACTIVATE`, `WINDOW_MINIMIZE` and
+  `WINDOW_AT_POINT`. Detection keys off `XDG_CURRENT_DESKTOP=COSMIC`.
+
 ### Fixed
+
+- **`ELEMENT_GEOMETRY` on pure Wayland can now be restored by a sibling
+  backend.** AT-SPI's own screen coordinates there are not garbage, just
+  mislabeled: confirmed live (Debian 13, GNOME/Mutter) a toplevel frame's
+  own extents report `(0, 0, ...)` and a child inside it reports its true
+  offset *within* that frame -- window-relative, presented as if it were
+  screen-absolute, because a pure Wayland client is genuinely never told
+  where it sits. `atspi.py` used to withhold `ELEMENT_GEOMETRY` outright
+  there, unconditionally, with no way back in. A sibling backend that
+  really is told its window positions -- the `gnomeshell` extension's
+  `ListWindows`, the only one checked so far -- now gets wired in
+  automatically (`backends/__init__.py::_combine`, new
+  `AtspiBackend.set_window_geometry_source`) whenever both are present in
+  the same session, and `extents()` adds that real offset to its own
+  rectangle. `element_at()` is not part of this yet -- it compares a
+  caller's screen-absolute point directly against each candidate's own,
+  still-relative rectangle, which needs the point corrected per-window
+  mid-walk, not a single offset; it still refuses outright on Wayland.
+
+- **`atspi.py`'s `windows()` never set `Window.pid`.** The constructor call
+  building each `Window` from a toplevel frame passed `handle`/`title`/
+  `app_id` and nothing else, leaving `pid` at `base.Window`'s own default
+  of `None` -- on every window this backend ever listed, on any desktop.
+  Harmless wherever something else supplies window listing instead (the
+  `gnomeshell`/`kwinevents`/x11 backends' own `windows()` do set it), which
+  is exactly why this went unnoticed: found only once a script connected
+  with `atspi` as the *sole* source of window listing -- GNOME Wayland
+  with no foreign-toplevel protocol and no `pyguitest-window-control`
+  extension installed, confirmed live on Debian 13. A caller matching
+  `find_windows(title=...)` against a known pid got `None` back every
+  time and silently matched nothing, and every element search meant to be
+  scoped `within=` that window instead fell back to searching the entire
+  desktop's accessible tree. `windows()` now reads the frame's own process
+  id the same way `Element.pid` already does.
+
+- **`Element.role` on AT-SPI reported the raw, version-dependent spelling,
+  not `Role.PUSH_BUTTON`'s.** at-spi2 2.61.1 renamed `ATSPI_ROLE_PUSH_BUTTON`
+  to `ATSPI_ROLE_BUTTON` without moving the integer (see `roles.py`'s own
+  `_ALIASES`), which `find_elements(role=...)` already hid on the way in via
+  `spellings()` -- but `element.role` read back whichever raw string that
+  at-spi2 reported, un-normalized. Harmless as long as nothing compared it
+  back against anything, which is exactly what stopped being true once
+  `find_elements(role=ACTABLE_ROLES)` (above) made "search once, then read
+  each match's own `.role` to tell them apart" the natural way to drive a
+  page of mixed controls: on an at-spi2 that uses the new spelling, every
+  push button's role came back `"button"`, matching none of a caller's own
+  `(name, "push button")` records. `Element.role` now runs the raw name
+  through the same alias table in reverse, so it always answers
+  `Role.PUSH_BUTTON`, on either at-spi2 generation.
+
+- **Four `atspi.py` bugs found torturing a Qt application on Debian 13's
+  at-spi2-core 2.56.2** (older than the 2.61.1 this backend was otherwise
+  exercised against), all confirmed live and covered by tests:
+  - **No `ATSPI_ROLE_ENTRY`.** A single-line `QLineEdit` and a multi-line
+    `QTextEdit` both report role `"text"` on 2.56, so `find_elements(role=
+    "entry")` and `Element.role` found nothing for ordinary text fields.
+    Told apart now by the `EDITABLE`-and-not-`MULTI_LINE` states, the one
+    distinction this at-spi2 keeps accurate.
+  - **A reaped node's state names came back unusable.** `getattr(state,
+    "name", str(state))` silently fell through to `str()`'s repr
+    (`"<enum ATSPI_STATE_EDITABLE of type Atspi.StateType>"`) on PyGObject
+    builds with no `.name` attribute on a state flag — confirmed live on
+    2.56 — making every state-based check (read-only fields, the entry/text
+    split above) see nothing. Falls back to stripping the `ATSPI_STATE_`
+    prefix off `.value_name` when `.name` is absent.
+  - **`queryComponent()` does not exist on this PyGObject build.** The
+    camelCase alias PyGObject adds on some builds is not GI-native, and its
+    absence broke `extents()` and `element_at()` (via `_at_point`) with a
+    bare `AttributeError`. Both fall back to the GI-native call through
+    `Atspi.Component` directly.
+  - **`import pyatspi` itself can raise, not just fail to exist.**
+    `python3-pyatspi` 2.46.1 against this PyGObject does `del
+    Atspi.Accessible.children` in its own init code, which raises
+    `AttributeError` since newer PyGObject never defines that attribute —
+    reaching `_pyatspi()` wrapped in nothing, so `ELEMENT_GEOMETRY` looked
+    entirely unavailable rather than merely missing one optional import.
+    `_pyatspi()` now catches `Exception`, not just `ImportError`, and
+    `_extents()` falls back to `Atspi.CoordType.SCREEN` (the same
+    underlying enum value `pyatspi.DESKTOP_COORDS` names) when `_pyatspi()`
+    itself fails — so `element_at()`/`extents()` no longer hard-depend on
+    an import this backend never otherwise needed.
+
+
+- **macOS `element_at` now respects stacking order.** The system-wide
+  `AXUIElementCopyElementAtPosition` carries no z-order, so a point over the
+  front-most window answered with a widget in a window stacked *underneath* it
+  — measured live, recording a click named an element in the window behind the
+  one actually pressed. `element_at` now hit-tests within the front-most
+  window first (found via `CGWindowList`'s front-to-back order) and falls back
+  to the system-wide hit test only for menus, the Dock and other surfaces that
+  are not layer-0 windows.
+
+- **`Session.dropdown(name)` on a Qt combo box.** A Qt combo box publishes its
+  *current text* as the accessible name and discards the name set on it, so a
+  stable name like `"Country"` travels in the accessible *description* instead
+  — and `dropdown("Country")` raised `ElementNotFound` because it only matched
+  the name. `dropdown()` now tries the description before giving up, so the
+  README's own `gui.dropdown("Country").choose("Sweden")` example resolves
+  against a Qt application.
 
 - **`Element.choose()` on an editable Qt combo box.** The docstring claimed
   it used "the combo box's own value setter", but the implementation was

@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 
+from ..capabilities import Capability
 from ..errors import BackendUnavailable, PyGUITestError
 from . import atspi as _atspi
 from .base import Element, GUIBackend, ImageMatch, Screen, Window
@@ -96,6 +97,41 @@ def _factory_for(name):
     )
 
 
+def _wire_atspi_window_geometry(members):
+    """Give an `atspi` member a window-position source, if one is present.
+
+    AT-SPI's own screen coordinates are window-*relative*, not absolute, on
+    pure Wayland -- a client is never told where it sits -- which is why
+    `atspi.py` otherwise withholds `ELEMENT_GEOMETRY` there entirely. A
+    sibling that genuinely knows window positions (the `gnomeshell`
+    extension's `ListWindows`, confirmed live) closes that gap: `atspi.py`
+    adds that sibling's own window offset to its own, otherwise-correct
+    *relative* rectangle. See `AtspiBackend.set_window_geometry_source` and
+    `_element_coords_trustworthy` for the rest of this.
+
+    Only `WINDOW_GEOMETRY`, checked directly on each candidate rather than
+    assumed of the first non-atspi member, because this runs before the
+    composite exists and only the composite enforces list-order precedence
+    for ambiguous capabilities -- a member offering something else (plain
+    input, say) is not a window-geometry source just by being present.
+    """
+    atspi_members = [m for m in members if isinstance(m, _atspi.AtspiBackend)]
+    if not atspi_members:
+        return
+    source = next(
+        (
+            m
+            for m in members
+            if m not in atspi_members and Capability.WINDOW_GEOMETRY in m.capabilities
+        ),
+        None,
+    )
+    if source is None:
+        return
+    for atspi_member in atspi_members:
+        atspi_member.set_window_geometry_source(source)
+
+
 def _combine(members):
     """One member as itself, several as a composite, closing all on failure.
 
@@ -104,6 +140,7 @@ def _combine(members):
     composite of one adds a layer of dispatch that routes everything to the
     only member there is.
     """
+    _wire_atspi_window_geometry(members)
     if len(members) == 1:
         return members[0]
     try:

@@ -35,6 +35,8 @@ __all__ = [
     "check_region",
     "identity_scope",
     "click_by_pointer",
+    "resolve_click_route",
+    "require_click_route",
 ]
 
 _Backend = TypeVar("_Backend", bound="GUIBackend")
@@ -198,6 +200,57 @@ def click_by_pointer(element: Element, reason: str) -> None:
             "nothing to hand back",
         )
     session.click_element(element)
+
+
+CLICK_ROUTES = ("action", "pointer", "auto")
+"""The routes `Element.click(via=...)` accepts, and what each means.
+
+`"action"` is the accessible action only; `"pointer"` is the user pathway
+only (extents, move, click); `"auto"` is today's ladder -- action first, with
+the pointer as the fallback -- and is the default so no existing script
+changes behaviour.
+"""
+
+
+def resolve_click_route(element: Element, via: str | None) -> str:
+    """The concrete click route: `via` resolved against the session default.
+
+    `via=None` means "use the session default", `Session.click_via`, which is
+    `"auto"` unless set otherwise. An unknown value is refused here rather
+    than silently acting like `"auto"`, because a caller who spelled a route
+    wrongly should hear about it.
+    """
+    route = via
+    if route is None:
+        session = getattr(element, "_session", None)
+        route = getattr(session, "click_via", "auto") if session is not None else "auto"
+    if route not in CLICK_ROUTES:
+        raise ValueError(
+            f"unknown click route {route!r}; expected one of {', '.join(CLICK_ROUTES)}"
+        )
+    return route
+
+
+def require_click_route(element: Element, route: str) -> None:
+    """Fail loudly now rather than no-op later, for the route `via` picked.
+
+    `"pointer"` needs the pointer half -- geometry to aim at, and move/button
+    to inject -- which a headless or consent-less session may not have;
+    `"action"` needs the accessible action. `"auto"` declares nothing, since
+    it degrades the way it always has. An element with no session behind it
+    has nothing to require, and the route itself reports the real problem.
+    """
+    session = getattr(element, "_session", None)
+    if session is None:
+        return
+    if route == "pointer":
+        session.require(
+            Capability.ELEMENT_GEOMETRY,
+            Capability.POINTER_MOVE,
+            Capability.POINTER_BUTTON,
+        )
+    elif route == "action":
+        session.require(Capability.ELEMENT_ACTION)
 
 
 class Window:
@@ -429,7 +482,7 @@ class Element(Protocol):
         """
         ...
 
-    def click(self) -> None:
+    def click(self, via: str | None = None) -> None:
         """Act on the element: the accessible action where there is one.
 
         The toolkit's own action first, named -- Invoke, Toggle, an MSAA
@@ -444,10 +497,16 @@ class Element(Protocol):
         backend -- has no pointer to reach, and raises `ElementNotActionable`
         rather than doing nothing; `Session.click_element` is the same call
         spelled for that case.
+
+        `via` chooses the route. `"action"` is the accessible action only,
+        raising `ElementNotActionable` where there is none; `"pointer"` is
+        the user pathway only (extents, move, click), raising rather than
+        silently substituting the action; `"auto"` (the default) is today's
+        ladder. `None` means "use the session's `click_via`".
         """
         ...
 
-    def double_click(self) -> None:
+    def double_click(self, via: str | None = None) -> None:
         """Double-click the element: locate it, then inject the gesture.
 
         Not an accessible action, the way click is. `click` names an action
@@ -463,6 +522,11 @@ class Element(Protocol):
         from a backend has no session to reach the pointer through, and says
         so rather than doing nothing; Session.double_click_element is the
         same call spelled for that case.
+
+        `via` may only be `"pointer"` (or `None`/`"auto"`, both of which mean
+        pointer here): no toolkit publishes a double-click action, so
+        `"action"` is an honest refusal instead of the silent pointer click
+        that happens today.
         """
         ...
 
@@ -1029,7 +1093,7 @@ class GUIBackend(ABC):
 
     def find_elements(
         self,
-        role: str | None = None,
+        role: str | Sequence[str] | None = None,
         name: str | re.Pattern | None = None,
         within: Element | None = None,
         enabled: bool | None = None,
@@ -1043,13 +1107,24 @@ class GUIBackend(ABC):
         geometry and input capabilities, and identical under X11 and Wayland.
         `name`/`description` take a plain string (exact match) or a compiled
         regex (`.search()`); `predicate` is an escape hatch for anything else.
+
+        `role` may name several roles at once -- `role=("push button",
+        "check box")` -- matching any of them in one search. This is not
+        just convenience: every backend's role filter funnels through
+        `roles.spellings()`, and a search is one walk of the subtree in
+        scope regardless of how many roles the predicate built from `role`
+        accepts, so asking for N roles in one call costs one walk, where N
+        separate calls cost N walks of the same subtree. Confirmed live on
+        AT-SPI (GhostBSD): one combined search over a ~130-element window
+        took the same few seconds as a single-role one; doing it role by
+        role for 16 roles turned that into over a minute.
         """
         self.require(Capability.ELEMENT_TREE)
         raise NotImplementedError
 
     def find_element(
         self,
-        role: str | None = None,
+        role: str | Sequence[str] | None = None,
         name: str | re.Pattern | None = None,
         within: Element | None = None,
         enabled: bool | None = None,
@@ -1057,7 +1132,10 @@ class GUIBackend(ABC):
         description: str | re.Pattern | None = None,
         predicate: Callable[[Element], bool] | None = None,
     ) -> Element | None:
-        """The first accessible element matching, or None."""
+        """The first accessible element matching, or None.
+
+        See `find_elements` for what `role` and the other filters accept.
+        """
         self.require(Capability.ELEMENT_TREE)
         raise NotImplementedError
 

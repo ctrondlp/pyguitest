@@ -2489,6 +2489,17 @@ class TestWidgetFinders(unittest.TestCase):
         self.gui.dropdown("Country").choose("Norway")
         self.assertEqual(self.gui.backend.elements[3].chosen, "Norway")
 
+    def test_dropdown_falls_back_to_description(self):
+        # A Qt combo box publishes its current text as the accessible name,
+        # so the stable name travels in the description; dropdown() must find
+        # it there rather than only matching the name.
+        backend = FakeBackend()
+        backend.elements = [
+            FakeElement(Role.COMBO_BOX, "Norway", description="Country")
+        ]
+        gui = pyguitest.Session(backend, pyguitest.detect())
+        self.assertEqual(gui.dropdown("Country").description, "Country")
+
     def test_checkbox(self):
         self.assertFalse(self.gui.checkbox("Remember me").checked)
 

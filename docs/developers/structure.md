@@ -65,6 +65,7 @@ pyguitest/
 │       ├── composite.py        merges backends, routes by capability
 │       ├── null.py             tier-1 only, for CI and dead sessions
 │       ├── windows.py          sway, Hyprland, niri, KDE window control
+│       ├── cosmic.py           COSMIC window control, a stdlib Wayland client
 │       ├── gnomeshell.py       window control via a GNOME Shell extension
 │       ├── displayconfig.py    Mutter's DisplayConfig, no shell extension needed
 │       ├── portalrequest.py    the XDG portal request/response dance, shared
@@ -165,7 +166,7 @@ whatever answers. Priority decides who wins a contested capability.
 
 | Priority | Name | Serves |
 |---|---|---|
-| 95 | `windows` | window control on sway, Hyprland, niri and KWin; wins `WINDOW_GEOMETRY` over AT-SPI |
+| 95 | `windows` | window control on sway, Hyprland, niri, KWin and COSMIC; wins `WINDOW_GEOMETRY` over AT-SPI |
 | 93 | `gnomeshell` | window control on Mutter, prompt-free per-window capture, and output/scale reporting (the last straight from Mutter's own `DisplayConfig`), via the `pyguitest-window-control` extension |
 | 90 | `atspi` | elements, and window listing where Mutter offers nothing |
 | 90 | `uia` | elements on Windows, via UI Automation (the `windows` extra) |
@@ -294,6 +295,7 @@ the policy stay separate.
 | Hyprland | `ipc.HyprlandSocket` | `ipc.HyprlandCLI` (`hyprctl`) |
 | niri | `ipc.NiriSocket` — line-delimited JSON | `ipc.NiriCLI` (`niri msg`) |
 | KWin | `kdotool` | — |
+| COSMIC | `cosmic._CosmicConnection` — a stdlib Wayland client speaking COSMIC's own protocols | — |
 
 Sockets mean no tool need be installed, no process spawn per query, a versioned
 wire format rather than scraped output, and a connection that stays open to
@@ -385,10 +387,12 @@ dependency. Three techniques:
 PYTHONPATH=src python3 -m unittest discover -s tests
 ```
 
-**What is not tested:** the sway, Hyprland and niri backends have never run
-against a live session -- the sway and Hyprland JSON schemas are
-reconstructions from their documentation, and niri's is transcribed from the
-`niri-ipc` crate's serde types, all unexercised against a real compositor.
+**What is not tested:** the sway, Hyprland, niri and COSMIC backends have never
+run against a live session -- the sway and Hyprland JSON schemas are
+reconstructions from their documentation, niri's is transcribed from the
+`niri-ipc` crate's serde types, and COSMIC's is a hand-rolled Wayland client
+written from the `cosmic-protocols` XML, all unexercised against a real
+compositor.
 UinputBackend has not been driven live either. KWin's `KdotoolBackend` has
 since been run live -- see [validation.md](../validation.md).
 

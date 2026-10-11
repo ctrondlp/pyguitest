@@ -24,7 +24,7 @@ gui = pyguitest.connect()
 
 Open an automation session.
 
-`connect(backend: str \| Sequence[str] \| None = None, environment: Environment \| None = None, backend_options: dict \| None = None, **kwargs: float) -> Session`
+`connect(backend: str \| Sequence[str] \| None = None, environment: Environment \| None = None, backend_options: dict \| None = None, **kwargs: Any) -> Session`
 
 ## Session control
 
@@ -48,8 +48,8 @@ The recommended way to drive an application: match on what a widget is and what 
 | `checkbox(name: str, within: Element \| None = None)` | `ELEMENT_TREE` |  | Return the check box named `name`. |
 | `link(name: str, within: Element \| None = None)` | `ELEMENT_TREE` |  | Return the link named `name`. |
 | `menu_item(name: str, within: Element \| None = None)` | `ELEMENT_TREE` |  | Return the menu item named `name`. |
-| `element(role: str \| None = None, name: str \| re.Pattern[str] \| None = None, within: Element \| None = None, enabled: bool \| None = None, visible: bool \| None = None, description: str \| re.Pattern[str] \| None = None, predicate: Callable[[Element], bool] \| None = None)` | `ELEMENT_TREE` |  | Return the first element matching every given filter. |
-| `elements(role: str \| None = None, name: str \| re.Pattern[str] \| None = None, within: Element \| None = None, enabled: bool \| None = None, visible: bool \| None = None, description: str \| re.Pattern[str] \| None = None, predicate: Callable[[Element], bool] \| None = None)` | `ELEMENT_TREE` |  | Return every accessible element matching every given filter. |
+| `element(role: str \| Sequence[str] \| None = None, name: str \| re.Pattern[str] \| None = None, within: Element \| None = None, enabled: bool \| None = None, visible: bool \| None = None, description: str \| re.Pattern[str] \| None = None, predicate: Callable[[Element], bool] \| None = None)` | `ELEMENT_TREE` |  | Return the first element matching every given filter. |
+| `elements(role: str \| Sequence[str] \| None = None, name: str \| re.Pattern[str] \| None = None, within: Element \| None = None, enabled: bool \| None = None, visible: bool \| None = None, description: str \| re.Pattern[str] \| None = None, predicate: Callable[[Element], bool] \| None = None)` | `ELEMENT_TREE` |  | Return every accessible element matching every given filter. |
 | `root_element()` | `ELEMENT_TREE` |  | The accessible-tree root. The replacement for the X11 window tree. |
 | `window_element(title: str \| re.Pattern[str])` | `ELEMENT_TREE` — uses `WINDOW_LIST` if present |  | The accessible Element for the window matching `title`. |
 | `focused()` | `ELEMENT_TREE` — uses `WINDOW_STATE` if present |  | The accessible element that currently has keyboard focus, or None. |
@@ -189,8 +189,8 @@ prevents by design lives here — on a Wayland session they raise
 | Call | Needs | | What it does |
 |------|-------|---|--------------|
 | `desktop_region()` | `SCREEN_INFO` |  | The screen rectangle a whole-desktop `capture()` covers, or None. |
-| `find_elements(role: str \| None = None, name: str \| re.Pattern \| None = None, within: Element \| None = None, enabled: bool \| None = None, visible: bool \| None = None, description: str \| re.Pattern \| None = None, predicate: Callable[[Element], bool] \| None = None)` | `ELEMENT_TREE` |  | Search the accessible tree. |
-| `find_element(role: str \| None = None, name: str \| re.Pattern \| None = None, within: Element \| None = None, enabled: bool \| None = None, visible: bool \| None = None, description: str \| re.Pattern \| None = None, predicate: Callable[[Element], bool] \| None = None)` | `ELEMENT_TREE` |  | The first accessible element matching, or None. |
+| `find_elements(role: str \| Sequence[str] \| None = None, name: str \| re.Pattern \| None = None, within: Element \| None = None, enabled: bool \| None = None, visible: bool \| None = None, description: str \| re.Pattern \| None = None, predicate: Callable[[Element], bool] \| None = None)` | `ELEMENT_TREE` |  | Search the accessible tree. |
+| `find_element(role: str \| Sequence[str] \| None = None, name: str \| re.Pattern \| None = None, within: Element \| None = None, enabled: bool \| None = None, visible: bool \| None = None, description: str \| re.Pattern \| None = None, predicate: Callable[[Element], bool] \| None = None)` | `ELEMENT_TREE` |  | The first accessible element matching, or None. |
 
 ## Types
 
@@ -207,11 +207,11 @@ One node of the accessible tree, as every backend agrees to expose it.
 | `child(role: str \| None = None, name: str \| None = None)` | Return the first descendant matching role and/or name, or None. |
 | `children` | The elements directly inside this one. |
 | `choose(option: str)` | Pick `option` from this dropdown by its visible text. |
-| `click()` | Act on the element: the accessible action where there is one. |
+| `click(via: str \| None = None)` | Act on the element: the accessible action where there is one. |
 | `collapse()` | Close a tree item or similar disclosure control. See `expand`. |
 | `description` | The element's longer accessible description, often a tooltip. |
 | `do_action(name: str)` | Perform a named accessible action, such as "click" or "activate". |
-| `double_click()` | Double-click the element: locate it, then inject the gesture. |
+| `double_click(via: str \| None = None)` | Double-click the element: locate it, then inject the gesture. |
 | `enabled` | Whether the element accepts input, rather than being greyed out. |
 | `expand()` | Open a tree item or similar disclosure control. |
 | `expandable` | Whether the element can be expanded or collapsed, like a tree item. |
@@ -359,16 +359,16 @@ provides the capability at all -- which today is nowhere.
 | `TEXT_ENTRY` | T4 | LibeiBackend, MacquartzBackend, PortalBackend, ToolInputBackend, UinputBackend, Win32Backend, X11Backend | Typing characters; needs a backend-controlled keymap, which raw uinput lacks |
 | `INPUT_SYNC` | T4 | LibeiBackend | Confirm the compositor has consumed the events sent so far, instead of sleeping and hoping; proves delivery to the compositor, never that the application processed or repainted them |
 | `INPUT_CAPTURE` | T4 | InputCaptureBackend | Learn where the pointer is from a real crossing of a screen edge the caller sets up, exclusively diverting real input for the length of one activation; not a query -- see Session.wait_for_pointer_activation, which can return None rather than answer at all if nobody moves the pointer there in time |
-| `WINDOW_LIST` | T3 | AtspiBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Enumerate toplevels, read titles and app ids |
+| `WINDOW_LIST` | T3 | AtspiBackend, CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Enumerate toplevels, read titles and app ids |
 | `WINDOW_EVENTS` | T3 | GnomeShellBackend, KWinEventsBackend, NiriBackend, SwayBackend, Win32Backend | Subscribe to open/close/title-change instead of polling |
-| `WINDOW_STATE` | T3 | AtspiBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Read minimized and activated state |
-| `WINDOW_ACTIVATE` | T3 | AtspiBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Raise and focus; there is no raise-without-focus operation |
-| `WINDOW_MINIMIZE` | T3 | GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Minimize and restore |
-| `WINDOW_GEOMETRY` | T3 | AtspiBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Read position and size; no foreign-toplevel protocol carries this |
+| `WINDOW_STATE` | T3 | AtspiBackend, CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Read minimized and activated state |
+| `WINDOW_ACTIVATE` | T3 | AtspiBackend, CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Raise and focus; there is no raise-without-focus operation |
+| `WINDOW_MINIMIZE` | T3 | CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Minimize and restore |
+| `WINDOW_GEOMETRY` | T3 | AtspiBackend, CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Read position and size; no foreign-toplevel protocol carries this |
 | `WINDOW_PLACEMENT` | T3 | GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Move to a position; placement is the compositor's prerogative |
 | `WINDOW_RESIZE` | T3 | GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Change width and height; separate from placement because a tiling compositor can size a window without letting anyone position it |
 | `WINDOW_PID` | T3 | GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Map a window to a process id; prefer app_id |
-| `WINDOW_AT_POINT` | T3 | GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Hit-test a coordinate; needs geometry and stacking order |
+| `WINDOW_AT_POINT` | T3 | CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Hit-test a coordinate; needs geometry and stacking order |
 | `SCREEN_CAPTURE` | T3 | PortalCaptureBackend, ToolCaptureBackend, Win32Backend, X11Backend | Pixels; a new feature, X11::GUITest never had it |
 | `WINDOW_CAPTURE` | T3 | GnomeShellBackend, MacosBackend, Win32Backend, X11Backend | Pixels of one window, captured natively rather than cropped out of a screen shot -- so an occluded or offscreen window still comes back whole |
 | `CLIPBOARD` | T3 | PortalBackend, ToolClipboardBackend, Win32Backend | Read and write the clipboard's text content; a new feature, X11::GUITest never had it |

@@ -795,6 +795,25 @@ class TestFindingElements(UiaTestCase):
         )
         self.assertIn("or", self.condition_kinds())
 
+    def test_role_accepts_several_roles_at_once(self):
+        # role=(...) matches any of them in one search -- see
+        # roles.spellings, which both the pushed-down condition and the
+        # client-side predicate resolve through.
+        self.automation.root.children.append(self.node(control_type=50000, name="OK"))
+        self.automation.root.children.append(
+            self.node(control_type=50002, name="Enable notifications")
+        )
+        found = self.backend.find_elements(role=("push button", "check box"))
+        self.assertEqual(
+            {element.name for element in found}, {"OK", "Enable notifications"}
+        )
+        self.assertIn(
+            (uia.UIA_ControlTypePropertyId, 50000), self.property_conditions()
+        )
+        self.assertIn(
+            (uia.UIA_ControlTypePropertyId, 50002), self.property_conditions()
+        )
+
     def test_a_name_is_pushed_down_as_a_property_condition(self):
         self.automation.root.children.append(self.node(name="Save"))
         self.backend.find_elements(name="Save")
@@ -1232,6 +1251,55 @@ class TestElementActions(UiaTestCase):
         self.assertEqual(caught.exception.role, "push button")
         self.assertEqual(caught.exception.name, "Kickoff")
         self.assertIn("gui.click_element(element)", str(caught.exception))
+
+    def test_click_via_action_only_uses_the_invoke_pattern(self):
+        node = self.node(name="Save")
+        invoke = node.add_pattern("invoke", FakePattern())
+        node.add_pattern("toggle", FakePattern())
+        self.element(node).click(via="action")
+        self.assertEqual(invoke.calls, ["Invoke"])
+
+    def test_click_via_action_with_no_pattern_is_a_typed_refusal(self):
+        # via="action" forbids the pointer fallback, so an element that offers
+        # no pattern raises instead of being clicked by coordinate.
+        node = self.node(name="Kickoff")
+        with self.assertRaises(ElementNotActionable) as caught:
+            self.element(node).click(via="action")
+        self.assertIn("forbids the pointer", str(caught.exception))
+
+    def test_click_via_pointer_skips_the_published_pattern(self):
+        # via="pointer" is the user pathway only: even an element that
+        # publishes an Invoke pattern is clicked by coordinate instead, and
+        # the pointer capabilities are declared up front.
+        node = self.node(name="Save")
+        node.add_pattern("invoke", FakePattern())
+        session = mock.Mock(click_via="auto")
+        element = self.element(node, session=session)
+        element.click(via="pointer")
+        session.click_element.assert_called_once_with(element)
+        session.require.assert_called_once_with(
+            Capability.ELEMENT_GEOMETRY,
+            Capability.POINTER_MOVE,
+            Capability.POINTER_BUTTON,
+        )
+
+    def test_click_via_action_requires_the_action_capability(self):
+        # via="action" declares its need up front: a session without the
+        # action capability fails loudly rather than at the action attempt.
+        node = self.node(name="Save")
+        node.add_pattern("invoke", FakePattern())
+        session = mock.Mock(click_via="auto")
+        element = self.element(node, session=session)
+        element.click(via="action")
+        session.require.assert_called_once_with(Capability.ELEMENT_ACTION)
+
+    def test_double_click_via_action_is_a_refusal(self):
+        # No toolkit publishes a double-click action, so via="action" is an
+        # honest refusal instead of the silent pointer click that the default
+        # performs.
+        node = self.node(name="Save")
+        with self.assertRaises(ElementNotActionable):
+            self.element(node).double_click(via="action")
 
     def test_click_reports_a_pattern_that_refused_rather_than_trying_another(self):
         # A disabled button's Invoke really did fail, and quietly trying Toggle

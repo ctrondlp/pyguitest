@@ -16,7 +16,9 @@ Those strings are not as stable as they look, which is what `spellings` is
 for -- see its docstring.
 """
 
-__all__ = ["Role", "spellings"]
+from collections.abc import Sequence
+
+__all__ = ["Role", "canonical_role", "spellings"]
 
 
 class Role:
@@ -110,13 +112,56 @@ stops being true.
 
 _SPELLINGS = {name: group for group in _ALIASES for name in group}
 
+_CANONICAL = {"button": Role.PUSH_BUTTON}
+"""The one spelling `canonical_role` normalizes each alias group's other
+members to -- `Role`'s own constant, so a script written against
+`Role.PUSH_BUTTON` sees exactly that back from `Element.role`, never the
+other spelling, whichever this desktop's at-spi2 happens to report.
+"""
 
-def spellings(role: str) -> frozenset[str]:
+
+def canonical_role(raw: str) -> str:
+    """`raw`, or the stable spelling it is an alias for.
+
+    What `Element.role` reads a search's own role-spelling matching
+    (`spellings`) gives for free but a *read-back* does not: a push button's
+    raw `roleName` is "button" on at-spi2 2.61.1 and "push button" on 2.56,
+    so a caller comparing `element.role` against `Role.PUSH_BUTTON` -- or
+    against a `(name, role)` pair read out of its own test data -- gets a
+    version-dependent answer unless something here settles on one spelling.
+    Measured live: a driver enumerating every actable control by reading
+    `element.role` back (one combined search, not 16 role-by-role ones) saw
+    every push button's role come back `"button"` on an at-spi2 that uses the
+    new name, which matched none of its own `(name, "push button")` records.
+    Roles with no alias group pass through unchanged.
+    """
+    return _CANONICAL.get(raw, raw)
+
+
+def spellings(role: str | Sequence[str]) -> frozenset[str]:
     """Every name the accessibility bus might report for `role`.
 
     Deliberately symmetric: a script that asks for "button" has to match a
     desktop that says "push button" just as much as the other way round, since
     a test written on one machine is run on another, and a recording outlives
     the at-spi2 it was made against.
+
+    `role` may name several roles at once -- `role=("push button", "check
+    box")` -- answering the union of each one's own spellings. This is what
+    lets `find_elements(role=ACTABLE_ROLES)` ask for every interactive role in
+    one search, rather than one search per role: measured live (GhostBSD's
+    at-spi2, a ~130-element window), one `find_all_descendants` call over a
+    window's subtree costs the same handful of seconds regardless of how many
+    roles the predicate accepts or how many elements match it, because the
+    cost is the walk itself, not the filter -- so 16 separate role-by-role
+    searches pay for 16 full walks of the same subtree where one search
+    scoped to all 16 roles pays for one. A caller driving every actable
+    control on a page, one role at a time, turned a few-second pass into
+    over a minute; see CHANGELOG.
     """
-    return _SPELLINGS.get(role, frozenset({role}))
+    if isinstance(role, str):
+        return _SPELLINGS.get(role, frozenset({role}))
+    result: set[str] = set()
+    for one in role:
+        result |= _SPELLINGS.get(one, frozenset({one}))
+    return frozenset(result)

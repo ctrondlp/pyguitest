@@ -103,7 +103,7 @@ from ..errors import (
 )
 from ..roles import Role, spellings
 from . import _winapi
-from .base import GUIBackend, click_by_pointer
+from .base import GUIBackend, click_by_pointer, require_click_route, resolve_click_route
 
 if TYPE_CHECKING:
     # Imported for annotations only: Session.element and the widget finders are
@@ -955,7 +955,7 @@ class Element:
         """
         return _current(self.node, "CurrentControlType", _ABSENT) is not _ABSENT
 
-    def click(self):
+    def click(self, via=None):
         """Act on the element directly -- no coordinates, no injection.
 
         Four routes, in the order providers implement them: the Invoke
@@ -1007,6 +1007,13 @@ class Element:
         backend gives when neither of its own routes is open, with this
         platform's reason in it rather than that one's.
         """
+        route = resolve_click_route(self, via)
+        if route == "pointer":
+            require_click_route(self, "pointer")
+            click_by_pointer(self, "clicked through the pointer (via='pointer')")
+            return
+        if route == "action":
+            require_click_route(self, "action")
         for action in ("invoke", "toggle"):
             if self._backend._call_pattern(self.node, action):
                 return
@@ -1018,13 +1025,21 @@ class Element:
             return
         if self._backend._call_pattern(self.node, "do default action"):
             return
+        if route == "action":
+            raise ElementNotActionable(
+                self.role,
+                self.name,
+                "UI Automation offers it no Invoke, Toggle, ExpandCollapse or "
+                "LegacyIAccessible pattern, and via='action' forbids the "
+                "pointer fallback",
+            )
         click_by_pointer(
             self,
             "UI Automation offers it no Invoke, Toggle or LegacyIAccessible "
             "pattern, so there is no accessible action to perform",
         )
 
-    def double_click(self):
+    def double_click(self, via=None):
         """Double-click the element: locate it, then inject the gesture.
 
         There is no accessible action to name here, the way `click` names one: a
@@ -1043,6 +1058,16 @@ class Element:
         is what double_click_element raises, and where there is no session to
         delegate to at all.
         """
+        route = resolve_click_route(self, via)
+        if route == "action":
+            raise ElementNotActionable(
+                self.role,
+                self.name,
+                "no toolkit publishes a double-click action, so via='action' "
+                "has nothing to perform",
+            )
+        if route == "pointer":
+            require_click_route(self, "pointer")
         if self._session is None:
             raise PyGUITestError(
                 f"{self.name!r} carries no session to double-click through -- "
