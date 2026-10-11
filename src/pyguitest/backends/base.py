@@ -911,6 +911,16 @@ class GUIBackend(ABC):
         self.require(Capability.WINDOW_EVENTS)
         raise NotImplementedError
 
+    def _normalize_window(self, window: Window | None) -> Window | None:
+        """Adjust `window` for cross-backend handle consistency, or pass it through.
+
+        Identity here: a single backend's own windows are always safe to act
+        on through itself. `CompositeBackend` overrides this -- see there for
+        why a window an event feed just issued can need re-homing before a
+        caller's next call (geometry, move_window, ...) touches it.
+        """
+        return window
+
     def is_window_viewable(self, window: Window) -> bool:
         """Whether `window` is currently mapped and showing.
 

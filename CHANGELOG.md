@@ -59,6 +59,21 @@ All notable changes to pyguitest are recorded here. The format follows
   `WINDOW_GEOMETRY`, `WINDOW_ACTIVATE`, `WINDOW_MINIMIZE` and
   `WINDOW_AT_POINT`. Detection keys off `XDG_CURRENT_DESKTOP=COSMIC`.
 
+- **COSMIC: `SCREEN_CAPTURE`/`WINDOW_CAPTURE`, `SCREEN_INFO`,
+  `WINDOW_EVENTS`, and a pointer.** The `cosmic` backend now also binds
+  `ext_image_copy_capture_manager_v1` (screen, window and region capture
+  into a memfd shm buffer, claimed only when the globals exist) and
+  `wl_output` (`screens()`), and streams `window_events()`/
+  `wait_for_window()` from the toplevel list's own push events. COSMIC has
+  no unprivileged virtual-pointer protocol — `zwlr_virtual_pointer_manager_v1`
+  is absent — so a new `pointer` backend factory (priority 65, just under
+  `input`) fills the gap a typing-only winner (`wtype` here) leaves, via
+  uinput or `ydotool`; `_screen_size()` gained a COSMIC source so uinput's
+  absolute axes are sized from the real output. All of it live-verified on
+  Pop!_OS 24.04: screen/window/region capture, `screens()`, open/close/title
+  window events, and a uinput pointer click landing on the exact pixel
+  requested (confirmed by screenshot, and by clicking a real button).
+
 ### Fixed
 
 - **`ELEMENT_GEOMETRY` on pure Wayland can now be restored by a sibling
@@ -180,6 +195,56 @@ All notable changes to pyguitest are recorded here. The format follows
   acts through a `show menu` action as a last resort, after `click`/`press`/
   `toggle`, so a recorded click on a submenu replays as opening that menu
   rather than a pointer move.
+
+- **`wtype`-sent modifier combos (`send_keys("^(c)")` and the like) silently
+  did nothing, on every `wtype`-based session, not only COSMIC's.** Each
+  `press_key`/`release_key` call ran `wtype -P <key>`/`-p <key>` as its own
+  subprocess; wtype's own man page: "the modifiers get released automatically
+  once the program terminates", so the process holding Ctrl down exited
+  (releasing it) before the next process even started pressing the key it was
+  meant to combine with. Confirmed live against a real COSMIC app: `Ctrl+A`
+  selected nothing and `Ctrl+C` copied nothing, every call reporting success.
+  Even batched into one process, `-P Control_L`/`-p Control_L` turned out not
+  to register as a held *modifier* at all -- only wtype's own `-M ctrl`/
+  `-m ctrl` does, confirmed by running both directly against the same app one
+  call apart. `press_key`/`release_key` now queue every press and release for
+  `wtype` and run them as one invocation once nothing is left held, routing a
+  recognized modifier (Control/Shift/Alt/Meta/Super, AltGr, Caps Lock) through
+  `-M`/`-m` instead of `-P`/`-p`. Re-verified live: `send_keys("^(a)")` then
+  `send_keys("^(c)")` now really select and copy.
+
+- **`ydotool` 0.1.x advertised a pointer and keyboard it could not actually
+  drive.** This adapter's command table speaks `ydotool` 1.0's syntax
+  (`mousemove --absolute -x`, hex click codes, `key CODE:1`), but Ubuntu and
+  Debian both still ship 0.1.8, whose CLI shares none of it -- every call
+  exited with a usage error, on any desktop where `ydotool` was the input
+  backend chosen. Construction now probes `ydotool mousemove --help` for
+  `--absolute` (0.1.8's help does not mention it) and, for 1.0+, requires
+  either the `ydotoold` socket or a writable `/dev/uinput`, raising
+  `BackendUnavailable` instead of composing a backend that fails on first
+  use.
+
+- **A `Window` an event-driven `wait_for_window()` issued could carry a
+  handle a *different* member backend later received.** `_window_family_provider`
+  (composite.py) keeps a `Window`'s issuing backend consistent with whichever
+  member later acts on it -- for `WINDOW_LIST`/`STATE`/`GEOMETRY`/`ACTIVATE`.
+  `WINDOW_EVENTS` was never in that set, because every event-driven backend so
+  far (sway, niri, KWin, the GNOME Shell extension) also provides window
+  placement itself, so the member `wait_for_window()`'s fast path called into
+  was always safe for its own output. COSMIC's own protocols have no
+  move/resize request, so it is the first `WINDOW_EVENTS` backend that does
+  not also provide `WINDOW_PLACEMENT` -- and on an XWayland session, X11Backend
+  is both present and does provide it, so `_window_family_provider` correctly
+  routed `geometry()` to X11Backend while `wait_for_window()`'s fast path had
+  handed back a `Window` from `cosmic`. Found live through a pyguitest-recorder
+  round trip: a generated script's `gui.geometry(expect_window(...))` crashed
+  with `AttributeError: 'int' object has no attribute 'get_geometry'` --
+  X11Backend trying to treat a zcosmic toplevel id (`0xFF000001`) as an Xlib
+  window object. A new `GUIBackend._normalize_window` (identity by default)
+  and `CompositeBackend._normalize_window` (re-homes a mismatched `Window` to
+  the family-consistent provider by title/app_id) close the gap;
+  `wait_for_window()`'s fast path runs every result through it. Re-verified
+  live: the same generated script now replays cleanly.
 
 ## [0.16.3] — 2026-10-05
 

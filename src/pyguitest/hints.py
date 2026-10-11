@@ -642,7 +642,7 @@ def _linux_hints(
     # is advice they do not need.
     captures_natively = (
         environment.has_xlib and environment.session_type is SessionType.X11
-    )
+    ) or environment.compositor is Compositor.COSMIC
     if not environment.can_capture:
         # The compositor decides before the distribution does: grim on
         # wlroots and spectacle on KWin are the tools that actually capture

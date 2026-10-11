@@ -3796,3 +3796,69 @@ attribute on every call (the count of reads is the assertion), a field the
 application changed under a held element reads the new text, a slider moved
 under one reads the new position, and a field written through `set_text` reads
 back the string it was given.
+
+## BSD: the `[x11]` extra alone, no `atspi`, on a real X11 desktop (2026-10-11)
+
+The first BSD entry in this file. GhostBSD (FreeBSD 15.0-RELEASE-p13), MATE
+1.26 on Xorg, python3.11, over SSH with `DISPLAY`/`DBUS_SESSION_BUS_ADDRESS`
+exported from the logged-in session's own `mate-session` process (plain SSH
+lands outside it, same as every other BSD/Linux box in this file). Run
+against this branch's source over `PYTHONPATH`, in a throwaway venv, with
+`python-xlib` and `dogtail` installed from PyPI and nothing installed with
+root — exactly the access a reader without `sudo` has.
+
+**Confirms the install docs' claim that the extras are independent and that
+`[x11]` without `[atspi]` genuinely gets you windows, input and capture but
+no element tree**, rather than that being a theoretical reading of the
+dependency table. `pyguitest` with no subcommand reported:
+
+```
+backend      input:xdotool+capture:import+clipboard:xclip+imagesearch:compare+x11
+note         libatspi is present but PyGObject is not; install the 'atspi' extra ...
+```
+
+`gui.supports(Capability.ELEMENT_TREE)` was `False`, and T5
+(`ELEMENT_ACTION`/`ELEMENT_GEOMETRY`/`ELEMENT_TREE`) were the only `[ no]`
+rows among T1–T4; everything window-, input- and capture-related was `[yes]`.
+A real `mate-calc` window was started, activated, focus-waited, driven by
+keyboard only (no element lookup available), and captured —
+`gui.button("7")` raised `CapabilityUnsupported` exactly where the table says
+it should, naming the missing extra in the message.
+
+**`doctor`'s remediation line for this gap is a BSD package name, not a Linux
+one**, confirmed against the live `pkg search` output on this box: `sudo pkg
+install py312-pygobject py312-atspi at-spi2-core` (FreeBSD has no `py311-*`
+build of either package; `atspi` needs `python3.12` here even though
+`python3.11` is this box's working dev interpreter for everything else — see
+the FreeBSD test-box memory). Not completed live: installing those needs
+root, which this run did not have; the `atspi` half of the `[x11,atspi]`
+combination is therefore confirmed only as far as "correctly detected and
+reported as absent," not as "confirmed working" the way `[x11]` alone is
+above.
+
+**A real timing race in `send_keys`, found while building the demo, not
+while looking for one — and `event_delay`'s default of `0.0` is the cause,
+confirmed by toggling it.** `gui.send_keys("7*6~")` against `mate-calc`, on a
+plain `connect()`, left the expression entry reading `7×6` with no result —
+the trailing `~` (this grammar's Enter shorthand) visibly did nothing.
+Sending the same keys as two calls, `gui.send_keys("7*6")` then
+`gui.tap_key("Return")`, evaluated to `42` every time; so did the original
+one-call form, unmodified, once the session was built with
+`connect(event_delay=0.05)` instead. `KeySender` (`src/pyguitest/sendkeys.py`)
+never reads `key_delay` — that is `type_text`'s pacing, not `send_keys`'s —
+but every character it sends still goes through `Session.tap_key` /
+`press_key` / `release_key`, each of which calls `_after_event` and so does
+pause `event_delay` after itself; at the default `0.0` that pause is zero,
+which is indistinguishable from no pacing at all until you have a widget
+that needs some. Against a GTK expression entry that updates itself off the
+main loop, an Enter sent immediately after the digit before it can arrive
+before the app has registered that digit. Working as designed — `event_delay`
+exists precisely to be raised against a chatty widget like this one — but the
+grammar's own docstring documents `~`/`\n` as "Enter" with no mention that a
+default-paced session can lose it to exactly this race, and nothing
+elsewhere flags a zero-delay `send_keys` racing a widget's own event loop as
+a known failure mode. Not filed as a fix in this run — `event_delay` already
+is the fix — but recorded here, and referenced from
+[install.md](install.md#worked-examples-what-one-extra-alone-actually-gets-you),
+so the next person chasing a `~` that "did nothing" against a slow widget
+finds this first.

@@ -494,6 +494,32 @@ def _kscreen_size():
     )
 
 
+def _cosmic_size():
+    """The output layout's bounding box on COSMIC, or None.
+
+    Asked over COSMIC's own protocols: the backend's handshake binds every
+    wl_output and records origin and mode, which is exactly the layout this
+    needs. A short-lived connection of its own, because `_screen_size` runs
+    while backends are still being built -- the composed session's cosmic
+    member does not exist yet.
+    """
+    from . import cosmic as _cosmic
+
+    backend = _cosmic.connect_cosmic()
+    if backend is None:
+        return None
+    try:
+        outputs = [o for o in backend._conn._outputs.values() if o.width and o.height]
+        if not outputs:
+            return None
+        return (
+            max(o.x + o.width for o in outputs),
+            max(o.y + o.height for o in outputs),
+        )
+    finally:
+        backend.close()
+
+
 def _screen_size(environment):
     """Best-effort (width, height) of the session's screen space.
 
@@ -536,6 +562,8 @@ def _screen_size(environment):
         sources.append(_mutter_size)
     elif environment.compositor is Compositor.KWIN:
         sources.append(_kscreen_size)
+    elif environment.compositor is Compositor.COSMIC:
+        sources.append(_cosmic_size)
     if environment.session_type in (SessionType.X11, SessionType.XWAYLAND):
         sources.append(_xrandr_size)
         sources.append(_xlib_size)
@@ -571,7 +599,7 @@ def _input_factory(environment):
     # installed -- XWayland still carries a real X connection, which is
     # exactly what XTest-based tools need; they just cannot see the
     # session's native Wayland clients through it.
-    from ..session import Compositor, SessionType
+    from ..session import SessionType
     from . import uinput as _uinput
 
     x11 = environment.session_type in (SessionType.X11, SessionType.XWAYLAND)
@@ -579,14 +607,13 @@ def _input_factory(environment):
         tools.INPUT_TOOLS,
         allow_x11_only=x11,
         # The compositor alone decides this one -- an X connection is not a
-        # substitute for the wlroots protocols wtype needs. `or x11` here
-        # let wtype through on a plain X11 session (no Wayland at all) and
-        # on GNOME/KDE XWayland, where it cannot work; being keymap-safe it
-        # then outranked xdotool, so a session xdotool would have driven
-        # correctly got a backend that fails on every call. A wlroots
-        # session with
-        # XWayland is unaffected: its compositor is WLROOTS either way.
-        allow_wlroots_only=environment.compositor is Compositor.WLROOTS,
+        # substitute for the protocols wtype needs. `or x11` here let wtype
+        # through on a plain X11 session (no Wayland at all) and on GNOME/KDE
+        # XWayland, where it cannot work; being keymap-safe it then outranked
+        # xdotool, so a session xdotool would have driven correctly got a
+        # backend that fails on every call. A wlroots or COSMIC session with
+        # XWayland is unaffected: its compositor is what it is either way.
+        compositor=environment.compositor.value,
     )
 
     for tool in usable:
@@ -612,6 +639,57 @@ def _input_factory(environment):
 
 
 register(_input_factory, "input", priority=70)
+
+
+def _pointer_factory(environment):
+    """Fill the pointer gap a typing-only input transport leaves.
+
+    `_input_factory` ranks keymap-safe typing first, and on COSMIC (and a
+    wlroots session without wdotool) its winner is wtype -- which serves
+    KEY_EVENT/TEXT_ENTRY and nothing else, so the composed session had no
+    pointer at all even where uinput or ydotool could click everything.
+    This factory adds that second transport. Registered just below `input`,
+    so in the composite the keymap-safe tool keeps every capability it
+    serves and this member answers only what it left unserved -- the
+    pointer.
+
+    Declines when the first usable keymap-safe tool serves the pointer
+    itself (wdotool, xdotool on X11): `_input_factory` returns that tool
+    and there is no gap. Declines likewise when there is no keymap-safe
+    tool at all, because `_input_factory` then falls through to the same
+    uinput/ydotool ranking this would duplicate.
+    """
+    from .. import tools
+    from ..session import SessionType
+    from . import uinput as _uinput
+
+    x11 = environment.session_type in (SessionType.X11, SessionType.XWAYLAND)
+    usable = tools.discover(
+        tools.INPUT_TOOLS,
+        allow_x11_only=x11,
+        compositor=environment.compositor.value,
+    )
+    safe = [tool for tool in usable if tool.keymap_safe]
+    if not safe or Capability.POINTER_MOVE in safe[0].capabilities:
+        return None
+
+    if _uinput.available():
+        try:
+            return _uinput.UinputBackend(screen_size=_screen_size(environment))
+        except (BackendUnavailable, PyGUITestError):
+            pass
+
+    for tool in usable:
+        if Capability.POINTER_MOVE not in tool.capabilities:
+            continue
+        try:
+            return ToolInputBackend(tool)
+        except BackendUnavailable:
+            continue
+    return None
+
+
+register(_pointer_factory, "pointer", priority=65)
 
 
 def _window_factory(environment):
@@ -654,7 +732,7 @@ def _capture_factory(environment):
         # absorb. The fallback stays as the safety net for a tool that is
         # broken for some reason this cannot predict.
         allow_x_root_only=environment.session_type is SessionType.X11,
-        allow_wlroots_only=environment.compositor is Compositor.WLROOTS,
+        compositor=environment.compositor.value,
         allow_mutter_incompatible=environment.compositor is not Compositor.MUTTER,
     )
     for tool in usable:

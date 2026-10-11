@@ -81,26 +81,33 @@ class TestX11OnlyTools(unittest.TestCase):
         self.assertEqual(tools.discover([fake], allow_x11_only=False), ())
 
 
-class TestWlrootsOnlyTools(unittest.TestCase):
+class TestCompositorGatedTools(unittest.TestCase):
     """Regression: wtype was selected on GNOME, where it cannot work.
 
-    Mutter implements none of the wlroots protocols wtype needs
+    Mutter implements none of the protocols wtype needs
     (zwp_virtual_keyboard_manager_v1), so it installs, runs, exits zero and
-    types nothing. Being installed is not the same as being usable.
+    types nothing. COSMIC does implement it, so the gate must be a compositor
+    allowlist, not a single wlroots boolean. Being installed is not the same
+    as being usable.
     """
 
-    def test_wtype_is_flagged_wlroots_only(self):
+    def test_wtype_is_allowed_on_wlroots_and_cosmic(self):
         by_name = {t.name: t for t in tools.INPUT_TOOLS}
-        self.assertTrue(by_name["wtype"].wlroots_only)
-        self.assertFalse(by_name["ydotool"].wlroots_only)
-        self.assertFalse(by_name["wdotool"].wlroots_only)
+        self.assertEqual(by_name["wtype"].compositors, frozenset({"wlroots", "cosmic"}))
+        self.assertIsNone(by_name["ydotool"].compositors)
+        self.assertIsNone(by_name["wdotool"].compositors)
 
     def test_discover_excludes_it_when_the_compositor_lacks_the_protocol(self):
-        wtype = next(t for t in tools.INPUT_TOOLS if t.name == "wtype")
-        group = [tools.ExternalTool(REAL_BINARY, frozenset(), wlroots_only=True)]
-        self.assertEqual(len(tools.discover(group, allow_wlroots_only=True)), 1)
-        self.assertEqual(tools.discover(group, allow_wlroots_only=False), ())
-        self.assertTrue(wtype.wlroots_only)
+        group = [
+            tools.ExternalTool(
+                REAL_BINARY, frozenset(), compositors=frozenset({"wlroots", "cosmic"})
+            )
+        ]
+        self.assertEqual(tools.discover(group, compositor="wlroots"), tuple(group))
+        self.assertEqual(tools.discover(group, compositor="cosmic"), tuple(group))
+        self.assertEqual(tools.discover(group, compositor="mutter"), ())
+        # No compositor named means no compositor filtering (best()'s default).
+        self.assertEqual(tools.discover(group, compositor=None), tuple(group))
 
 
 class TestRootReadingToolsNeedARealXServer(unittest.TestCase):
@@ -285,7 +292,7 @@ class TestMacosClipboardTool(unittest.TestCase):
         tool = self._by_name()["pbcopy"]
         self.assertFalse(tool.x11_only)
         self.assertFalse(tool.mutter_incompatible)
-        self.assertFalse(tool.wlroots_only)
+        self.assertIsNone(tool.compositors)
 
     def test_it_is_last_so_it_only_wins_when_nothing_else_can(self):
         # The X11 tools must stay ahead of it: a Linux box carrying shim
@@ -373,19 +380,20 @@ class TestImageSearchTools(unittest.TestCase):
 
 
 class TestMutterIncompatibleTools(unittest.TestCase):
-    """mutter_incompatible: distinct from wlroots_only.
+    """mutter_incompatible: distinct from the compositor allowlist.
 
     Confirmed live on KDE Plasma 6: wl-copy/wl-paste round-trip correctly
-    on KWin, which is not a wlroots compositor. wlroots_only would wrongly
-    exclude KWin from a tool that actually works there, so wl-clipboard's
-    real constraint (Mutter lacks wlr-data-control-unstable-v1) needs its
-    own flag rather than reusing that one.
+    on KWin, which is not a wlroots compositor. A compositors={wlroots}
+    allowlist would wrongly exclude KWin from a tool that actually works
+    there, so wl-clipboard's real constraint (Mutter lacks
+    wlr-data-control-unstable-v1) needs its own flag rather than reusing that
+    one.
     """
 
     def test_wl_copy_is_flagged_mutter_incompatible_not_wlroots_only(self):
         by_name = {t.name: t for t in tools.CLIPBOARD_TOOLS}
         self.assertTrue(by_name["wl-copy"].mutter_incompatible)
-        self.assertFalse(by_name["wl-copy"].wlroots_only)
+        self.assertIsNone(by_name["wl-copy"].compositors)
         self.assertFalse(by_name["xclip"].mutter_incompatible)
 
     def test_spectacle_is_flagged_mutter_incompatible(self):
@@ -396,14 +404,14 @@ class TestMutterIncompatibleTools(unittest.TestCase):
         # failed every whole-screen capture.
         by_name = {t.name: t for t in tools.CAPTURE_TOOLS}
         self.assertTrue(by_name["spectacle"].mutter_incompatible)
-        self.assertFalse(by_name["spectacle"].wlroots_only)
+        self.assertIsNone(by_name["spectacle"].compositors)
 
     def test_grim_is_flagged_wlroots_only(self):
-        # grim reads frames over wlr-screencopy, which Mutter does not
-        # implement -- the same shape of silent failure as wtype, one
+        # grim reads frames over wlr-screencopy, which Mutter and COSMIC do
+        # not implement -- the same shape of silent failure as wtype, one
         # capability over.
         by_name = {t.name: t for t in tools.CAPTURE_TOOLS}
-        self.assertTrue(by_name["grim"].wlroots_only)
+        self.assertEqual(by_name["grim"].compositors, frozenset({"wlroots"}))
         self.assertFalse(by_name["grim"].mutter_incompatible)
 
     def test_discover_excludes_it_only_via_its_own_flag(self):
@@ -412,6 +420,6 @@ class TestMutterIncompatibleTools(unittest.TestCase):
             tools.discover([fake], allow_mutter_incompatible=True), (fake,)
         )
         self.assertEqual(tools.discover([fake], allow_mutter_incompatible=False), ())
-        # wlroots_only=False by default: the wlroots filter must not also
+        # compositors=None by default: the compositor filter must not also
         # catch this tool as a side effect of the other one being set.
-        self.assertEqual(tools.discover([fake], allow_wlroots_only=False), (fake,))
+        self.assertEqual(tools.discover([fake], compositor="mutter"), (fake,))

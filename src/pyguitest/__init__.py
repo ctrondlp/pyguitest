@@ -1840,9 +1840,14 @@ class Session:
             # window through find_windows and timed out here.
             pattern = _title_pattern(title)
             wanted = pattern if isinstance(title, re.Pattern) else pattern.pattern
-            return self._in_event_slices(
+            found = self._in_event_slices(
                 lambda seconds: self.backend.wait_for_window(wanted, seconds), timeout
             )
+            # The member that serves WINDOW_EVENTS is not always the one
+            # later window-family calls (geometry, move_window, ...) get
+            # routed to -- see CompositeBackend._normalize_window for the
+            # live COSMIC+XWayland case this closes.
+            return self.backend._normalize_window(found)
 
         def topmost_match() -> Window | None:
             """The last of the matching windows, which is the topmost one."""

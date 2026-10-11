@@ -351,7 +351,7 @@ provides the capability at all -- which today is nowhere.
 | `PROCESS_LAUNCH` | T1 | *session itself* | Start and run applications |
 | `TIMING` | T1 | *session itself* | Waits, and inter-event and inter-key delays |
 | `IMAGE_LOCATE` | T1 | ToolImageSearchBackend | Find a template image's position inside an already-captured screenshot by pixel comparison; a new feature, X11::GUITest never had it, and needs no live display connection, only files |
-| `SCREEN_INFO` | T2 | GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Output enumeration, resolution, scale (wl_output) |
+| `SCREEN_INFO` | T2 | CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Output enumeration, resolution, scale (wl_output) |
 | `POINTER_MOVE` | T4 | LibeiBackend, MacquartzBackend, ToolInputBackend, UinputBackend, Win32Backend, X11Backend | Absolute pointer positioning; relative-only injection cannot do this |
 | `POINTER_BUTTON` | T4 | LibeiBackend, MacquartzBackend, PortalBackend, ToolInputBackend, UinputBackend, Win32Backend, X11Backend | Button press and release |
 | `POINTER_SCROLL` | T4 | LibeiBackend, MacquartzBackend, PortalBackend, ToolInputBackend, UinputBackend, Win32Backend, X11Backend | Axis events; X11 buttons 4/5 were scroll, Wayland's are not |
@@ -360,7 +360,7 @@ provides the capability at all -- which today is nowhere.
 | `INPUT_SYNC` | T4 | LibeiBackend | Confirm the compositor has consumed the events sent so far, instead of sleeping and hoping; proves delivery to the compositor, never that the application processed or repainted them |
 | `INPUT_CAPTURE` | T4 | InputCaptureBackend | Learn where the pointer is from a real crossing of a screen edge the caller sets up, exclusively diverting real input for the length of one activation; not a query -- see Session.wait_for_pointer_activation, which can return None rather than answer at all if nobody moves the pointer there in time |
 | `WINDOW_LIST` | T3 | AtspiBackend, CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Enumerate toplevels, read titles and app ids |
-| `WINDOW_EVENTS` | T3 | GnomeShellBackend, KWinEventsBackend, NiriBackend, SwayBackend, Win32Backend | Subscribe to open/close/title-change instead of polling |
+| `WINDOW_EVENTS` | T3 | CosmicBackend, GnomeShellBackend, KWinEventsBackend, NiriBackend, SwayBackend, Win32Backend | Subscribe to open/close/title-change instead of polling |
 | `WINDOW_STATE` | T3 | AtspiBackend, CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Read minimized and activated state |
 | `WINDOW_ACTIVATE` | T3 | AtspiBackend, CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Raise and focus; there is no raise-without-focus operation |
 | `WINDOW_MINIMIZE` | T3 | CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Minimize and restore |
@@ -369,8 +369,8 @@ provides the capability at all -- which today is nowhere.
 | `WINDOW_RESIZE` | T3 | GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Change width and height; separate from placement because a tiling compositor can size a window without letting anyone position it |
 | `WINDOW_PID` | T3 | GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Map a window to a process id; prefer app_id |
 | `WINDOW_AT_POINT` | T3 | CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Hit-test a coordinate; needs geometry and stacking order |
-| `SCREEN_CAPTURE` | T3 | PortalCaptureBackend, ToolCaptureBackend, Win32Backend, X11Backend | Pixels; a new feature, X11::GUITest never had it |
-| `WINDOW_CAPTURE` | T3 | GnomeShellBackend, MacosBackend, Win32Backend, X11Backend | Pixels of one window, captured natively rather than cropped out of a screen shot -- so an occluded or offscreen window still comes back whole |
+| `SCREEN_CAPTURE` | T3 | CosmicBackend, PortalCaptureBackend, ToolCaptureBackend, Win32Backend, X11Backend | Pixels; a new feature, X11::GUITest never had it |
+| `WINDOW_CAPTURE` | T3 | CosmicBackend, GnomeShellBackend, MacosBackend, Win32Backend, X11Backend | Pixels of one window, captured natively rather than cropped out of a screen shot -- so an occluded or offscreen window still comes back whole |
 | `CLIPBOARD` | T3 | PortalBackend, ToolClipboardBackend, Win32Backend | Read and write the clipboard's text content; a new feature, X11::GUITest never had it |
 | `ELEMENT_TREE` | T5 | AtspiBackend, MacosBackend, UiaBackend | Walk the accessible tree; replaces the X11 window-tree walk |
 | `ELEMENT_ACTION` | T5 | AtspiBackend, MacosBackend, UiaBackend | Act on an element without coordinates or injection permission |
