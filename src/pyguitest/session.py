@@ -84,12 +84,17 @@ class Compositor(Enum):
     WLROOTS implements both foreign-toplevel protocols plus the unprivileged
     virtual-device protocols; KWIN implements foreign-toplevel and scripting;
     MUTTER implements neither foreign-toplevel protocol, so window work there
-    needs a Shell extension.
+    needs a Shell extension. COSMIC, System76's Smithay compositor, ships its
+    own zcosmic_toplevel_* window protocols and the unprivileged
+    zwp_virtual_keyboard_manager_v1, so it is a family of its own.
     """
 
     MUTTER = "mutter"
     KWIN = "kwin"
     WLROOTS = "wlroots"
+    COSMIC = "cosmic"
+    """Smithay, not wlroots: window work goes through COSMIC's own
+    zcosmic_toplevel_* protocols rather than a foreign-toplevel or IPC one."""
     DWM = "dwm"
     """Windows' own compositor, and the one member that is effectively a
     constant: composition cannot be turned off since Windows 8. It is
@@ -1560,6 +1565,8 @@ def _compositor(env: Mapping[str, str], session_type: SessionType) -> Compositor
         return Compositor.MUTTER
     if "kde" in haystack or "plasma" in haystack:
         return Compositor.KWIN
+    if "cosmic" in haystack:
+        return Compositor.COSMIC
     if any(h in haystack for h in _WLROOTS_HINTS) or env.get("SWAYSOCK"):
         return Compositor.WLROOTS
     if env.get("HYPRLAND_INSTANCE_SIGNATURE"):

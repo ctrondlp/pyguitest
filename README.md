@@ -30,6 +30,14 @@ Use it to:
 - 🎬 Choreograph screen action for film, TV and stage — a character's typing
   and clicking, landing on cue
 
+The desktop environments it can drive include, but may not be limited to:
+
+- **GNOME** (Mutter) and **KDE Plasma** (KWin)
+- **Xfce** and other X11 desktops, including the BSDs
+- **COSMIC** (Pop!_OS)
+- **sway**, **Hyprland** and **niri** (the wlroots family)
+- **Windows** and **macOS**
+
 **Status:** beta. Every capability is implemented on every backend that can
 support it. Much of it has been run against real GNOME, KDE, sway, Xfce, X11,
 GhostBSD, Windows 11 and macOS sessions, and some of it has not yet;

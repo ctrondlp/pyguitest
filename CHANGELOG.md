@@ -48,6 +48,17 @@ All notable changes to pyguitest are recorded here. The format follows
   call costs one walk, a few seconds — confirmed live, same desktop, same
   window.
 
+- **`Compositor.COSMIC`, and window control for Pop!_OS 24.04's COSMIC
+  desktop.** COSMIC (System76's Smithay compositor) speaks none of the
+  protocols the other window backends drive — not sway/i3's IPC, not
+  Hyprland's socket, not niri's IPC, not KWin's scripting API — and has no
+  `kdotool`/`wmctrl`-style CLI. A new `cosmic` backend is a small stdlib-only
+  Wayland client that binds COSMIC's own `zcosmic_toplevel_info_v1` and
+  `zcosmic_toplevel_manager_v1` globals (layered on the standard
+  `ext_foreign_toplevel_list_v1`) to serve `WINDOW_LIST`, `WINDOW_STATE`,
+  `WINDOW_GEOMETRY`, `WINDOW_ACTIVATE`, `WINDOW_MINIMIZE` and
+  `WINDOW_AT_POINT`. Detection keys off `XDG_CURRENT_DESKTOP=COSMIC`.
+
 ### Fixed
 
 - **`ELEMENT_GEOMETRY` on pure Wayland can now be restored by a sibling

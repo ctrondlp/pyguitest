@@ -870,6 +870,13 @@ def for_compositor(compositor):
         import shutil
 
         return KdotoolBackend() if shutil.which("kdotool") else None
+    if compositor is Compositor.COSMIC:
+        from .cosmic import connect_cosmic
+
+        try:
+            return connect_cosmic()
+        except OSError:
+            return None
     return None
 
 
