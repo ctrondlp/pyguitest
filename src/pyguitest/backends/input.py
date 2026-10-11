@@ -367,21 +367,23 @@ class ToolInputBackend(GUIBackend):
                 "this ydotool predates 1.0 and takes none of the commands "
                 "this adapter emits; install ydotool 1.0+"
             )
-        # 1.0 injects through ydotoold's socket, falling back to opening
-        # /dev/uinput itself; with neither available every call fails too.
-        # os.getuid is POSIX-only -- ydotool itself is Linux/BSD-only, but
-        # this must not crash a test or a stray PATH hit on Windows before
-        # the real question (does the socket or /dev/uinput exist) is even
-        # asked, which `os.path.exists`/`os.access` already answer False
-        # for there regardless.
-        getuid = getattr(os, "getuid", None)
+        # 1.0 only ever talks to ydotoold over this socket -- confirmed
+        # against the client's own source (Client/ydotool.c): a failed
+        # connection exits 2 with "Please check if ydotoold is running",
+        # never falling back to /dev/uinput itself (that fallback belongs to
+        # the *daemon*, a separate process, and to this package's own
+        # unrelated UinputBackend). A writable /dev/uinput says nothing
+        # about whether ydotoold is actually listening, so it is not
+        # consulted here.
         socket_path = os.environ.get("YDOTOOL_SOCKET") or (
-            f"/run/user/{getuid()}/.ydotool_socket" if getuid else ""
+            f"{os.environ['XDG_RUNTIME_DIR']}/.ydotool_socket"
+            if os.environ.get("XDG_RUNTIME_DIR")
+            else "/tmp/.ydotool_socket"
         )
-        if not os.path.exists(socket_path) and not os.access("/dev/uinput", os.W_OK):
+        if not os.path.exists(socket_path):
             raise BackendUnavailable(
-                "ydotoold is not running and /dev/uinput is not writable; "
-                "start ydotoold or add your user to the 'input' group"
+                f"ydotoold is not running (no socket at {socket_path}); "
+                "start it, or set $YDOTOOL_SOCKET if it listens elsewhere"
             )
 
     # GUIBackend.name/MODIFIER_KEYS/KEY_ALIASES are plain, writable class
@@ -572,8 +574,26 @@ class ToolInputBackend(GUIBackend):
         Warns when the active tool cannot guarantee the characters arrive as
         written; pass allow_keymap_unsafe=False to refuse instead, which is the
         right setting for a suite that asserts on typed content.
+
+        Raises for wtype specifically if a modifier `press_key` opened is
+        still held: this call would run in a process of its own, started
+        *after* the held key's process has already exited and released it
+        (see release_key's docstring on why that release happens the moment
+        the process ends), so the text would arrive unmodified and the
+        caller would have no way to tell. `send_keys()`'s own chords never
+        hit this -- everything inside one stays on press_key/tap_key/
+        release_key, never type_text -- so it is only a direct, interleaved
+        call to the public API that can.
         """
         self.require(Capability.TEXT_ENTRY)
+        if self.tool.name == "wtype" and self._wtype_held:
+            raise PyGUITestError(
+                f"wtype cannot type text while {sorted(self._wtype_held)} is "
+                "held -- it only holds a key for the lifetime of one process, "
+                "and this call would run in a separate one, after that "
+                "process (and the hold with it) has already ended; release "
+                "the key first, or use send_keys() for the whole combination"
+            )
         if not self.tool.keymap_safe:
             message = (
                 f"{self.tool.name} injects scancodes below the compositor; typed "

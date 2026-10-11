@@ -244,6 +244,29 @@ class TestWtypeModifierBatching(unittest.TestCase):
             ],
         )  # fmt: skip
 
+    def test_type_text_while_a_modifier_is_held_is_refused_not_silent(self):
+        # press_key("Control_L"); type_text("a"); release_key("Control_L")
+        # is a real, documented call pattern (Session exposes all three
+        # separately), and it is one this adapter cannot honor: type_text
+        # would run in its own process, started after the held key's own
+        # process -- and the hold with it -- has already ended, so "a"
+        # would arrive unmodified with nothing telling the caller why.
+        # send_keys() never hits this: every character inside a chord goes
+        # through tap_key, never type_text.
+        gui = self._backend()
+        gui.press_key("Control_L")
+        with self.assertRaises(PyGUITestError) as caught:
+            gui.type_text("a")
+        self.assertIn("Control_L", str(caught.exception))
+        self.assertEqual(self.runner.calls, [])
+
+    def test_type_text_is_unaffected_once_nothing_is_held(self):
+        gui = self._backend()
+        gui.press_key("a")
+        gui.release_key("a")
+        gui.type_text("hello")
+        self.assertEqual(self.runner.calls[-1], ["wtype", "--", "hello"])
+
 
 class TestYdotoolConstructionGate(unittest.TestCase):
     """A ydotool the command table cannot drive is refused at construction.
@@ -262,32 +285,67 @@ class TestYdotoolConstructionGate(unittest.TestCase):
         def __init__(self, stdout):
             self.stdout = stdout
 
-    def _construct(self, help_text, socket_exists=False, uinput_writable=False):
+    def _construct(self, help_text, exists, env=None):
+        """Build the backend with `exists` wired into os.path.exists.
+
+        A bool becomes its return value; a callable becomes its side_effect,
+        so a precedence test can assert *which* path was actually checked.
+        """
+        patched_exists = (
+            mock.patch("os.path.exists", side_effect=exists)
+            if callable(exists)
+            else mock.patch("os.path.exists", return_value=exists)
+        )
         with mock.patch(
             "pyguitest.backends.input.subprocess.run",
             return_value=self._Help(help_text),
         ):
-            with mock.patch("os.path.exists", return_value=socket_exists):
-                with mock.patch("os.access", return_value=uinput_writable):
-                    with mock.patch.dict("os.environ", {}, clear=False):
-                        return ToolInputBackend(BY_NAME["ydotool"])
+            with patched_exists:
+                with mock.patch.dict("os.environ", env or {}, clear=True):
+                    return ToolInputBackend(BY_NAME["ydotool"])
 
     def test_the_pre_1_0_cli_is_refused(self):
         with self.assertRaises(BackendUnavailable) as caught:
-            self._construct("Usage: mousemove [--delay <ms>] <x> <y>")
+            self._construct("Usage: mousemove [--delay <ms>] <x> <y>", False)
         self.assertIn("predates 1.0", str(caught.exception))
 
     def test_1_0_with_the_daemon_socket_constructs(self):
-        backend = self._construct("-a, --absolute", socket_exists=True)
+        backend = self._construct("-a, --absolute", True)
         self.assertEqual(backend.tool.name, "ydotool")
 
-    def test_1_0_without_daemon_or_uinput_access_is_refused(self):
-        with self.assertRaises(BackendUnavailable) as caught:
-            self._construct("-a, --absolute")
+    def test_1_0_without_the_daemon_socket_is_refused(self):
+        # Writable /dev/uinput does not help: ydotool 1.0's CLI only ever
+        # talks to ydotoold over this socket (confirmed against the
+        # client's own source) -- it never falls back to uinput itself.
+        with mock.patch("os.access", return_value=True):
+            with self.assertRaises(BackendUnavailable) as caught:
+                self._construct("-a, --absolute", False)
         self.assertIn("ydotoold is not running", str(caught.exception))
 
-    def test_1_0_without_daemon_but_writable_uinput_constructs(self):
-        backend = self._construct("-a, --absolute", uinput_writable=True)
+    def test_socket_path_prefers_the_env_var_over_xdg_runtime_dir(self):
+        # Matches ydotool's own client/ydotool.c precedence: $YDOTOOL_SOCKET
+        # first, $XDG_RUNTIME_DIR/.ydotool_socket second, /tmp/.ydotool_socket
+        # last. If this adapter checked the wrong path, a real daemon
+        # listening on the env-var path would be reported as not running.
+        backend = self._construct(
+            "-a, --absolute",
+            lambda path: path == "/custom/sock",
+            env={"YDOTOOL_SOCKET": "/custom/sock", "XDG_RUNTIME_DIR": "/run/user/1000"},
+        )
+        self.assertEqual(backend.tool.name, "ydotool")
+
+    def test_socket_path_falls_back_to_xdg_runtime_dir(self):
+        backend = self._construct(
+            "-a, --absolute",
+            lambda path: path == "/run/user/1000/.ydotool_socket",
+            env={"XDG_RUNTIME_DIR": "/run/user/1000"},
+        )
+        self.assertEqual(backend.tool.name, "ydotool")
+
+    def test_socket_path_falls_back_to_tmp_with_no_env_at_all(self):
+        backend = self._construct(
+            "-a, --absolute", lambda path: path == "/tmp/.ydotool_socket", env={}
+        )
         self.assertEqual(backend.tool.name, "ydotool")
 
     def test_a_missing_binary_is_refused_not_crashed_on(self):

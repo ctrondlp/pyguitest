@@ -705,6 +705,28 @@ class TestNormalizeWindowAcrossEventsAndPlacement(unittest.TestCase):
 
         self.assertIs(composite._normalize_window(from_events), from_x11)
 
+    def test_an_ambiguous_match_is_declined_rather_than_guessed(self):
+        # Two windows sharing title and app_id -- "Untitled Document" twice
+        # is the ordinary case -- are not a real cross-backend identity.
+        # Picking the first would risk a later move_window() moving the
+        # wrong one.
+        events = self.EventsOnly([])
+        placement = self.PlacementOnly([])
+        from_events = Window(
+            handle=1, backend=events, title="Untitled", app_id="org.editor"
+        )
+        first = Window(
+            handle=2, backend=placement, title="Untitled", app_id="org.editor"
+        )
+        second = Window(
+            handle=3, backend=placement, title="Untitled", app_id="org.editor"
+        )
+        events._found = [from_events]
+        placement._found = [first, second]
+        composite = CompositeBackend([events, placement])
+
+        self.assertIs(composite._normalize_window(from_events), from_events)
+
     def test_no_match_hands_back_the_original(self):
         events = self.EventsOnly([])
         placement = self.PlacementOnly([])

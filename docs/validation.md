@@ -3829,8 +3829,8 @@ it should, naming the missing extra in the message.
 one**, confirmed against the live `pkg search` output on this box: `sudo pkg
 install py312-pygobject py312-atspi at-spi2-core` (FreeBSD has no `py311-*`
 build of either package; `atspi` needs `python3.12` here even though
-`python3.11` is this box's working dev interpreter for everything else — see
-the FreeBSD test-box memory). Not completed live: installing those needs
+`python3.11` is this box's working dev interpreter for everything else). Not
+completed live: installing those needs
 root, which this run did not have; the `atspi` half of the `[x11,atspi]`
 combination is therefore confirmed only as far as "correctly detected and
 reported as absent," not as "confirmed working" the way `[x11]` alone is

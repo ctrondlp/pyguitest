@@ -211,18 +211,55 @@ All notable changes to pyguitest are recorded here. The format follows
   `wtype` and run them as one invocation once nothing is left held, routing a
   recognized modifier (Control/Shift/Alt/Meta/Super, AltGr, Caps Lock) through
   `-M`/`-m` instead of `-P`/`-p`. Re-verified live: `send_keys("^(a)")` then
-  `send_keys("^(c)")` now really select and copy.
+  `send_keys("^(c)")` now really select and copy. `type_text()` now raises
+  rather than silently typing unmodified text if a caller interleaves it
+  with a modifier `press_key()` already opened -- a real, documented call
+  shape (`Session` exposes `press_key`/`type_text`/`release_key`
+  separately) that the batching above cannot honor: it would run in a
+  process of its own, started after the held key's process (and the hold
+  with it) has already ended. `send_keys()` itself never hits this --
+  every character inside a chord goes through `tap_key`, never `type_text`.
 
 - **`ydotool` 0.1.x advertised a pointer and keyboard it could not actually
-  drive.** This adapter's command table speaks `ydotool` 1.0's syntax
-  (`mousemove --absolute -x`, hex click codes, `key CODE:1`), but Ubuntu and
-  Debian both still ship 0.1.8, whose CLI shares none of it -- every call
-  exited with a usage error, on any desktop where `ydotool` was the input
-  backend chosen. Construction now probes `ydotool mousemove --help` for
-  `--absolute` (0.1.8's help does not mention it) and, for 1.0+, requires
-  either the `ydotoold` socket or a writable `/dev/uinput`, raising
-  `BackendUnavailable` instead of composing a backend that fails on first
-  use.
+  drive, and the 1.0+ gate that replaced it checked the wrong socket and
+  accepted a daemon that was not there.** This adapter's command table
+  speaks `ydotool` 1.0's syntax (`mousemove --absolute -x`, hex click codes,
+  `key CODE:1`), but Ubuntu and Debian both still ship 0.1.8, whose CLI
+  shares none of it -- every call exited with a usage error, on any desktop
+  where `ydotool` was the input backend chosen. Construction now probes
+  `ydotool mousemove --help` for `--absolute` (0.1.8's help does not mention
+  it) and, for 1.0+, requires a reachable `ydotoold` socket, resolved the
+  way the client itself does (confirmed against its own source): `$YDOTOOL_
+  SOCKET`, then `$XDG_RUNTIME_DIR/.ydotool_socket`, then `/tmp/.ydotool_
+  socket`. A writable `/dev/uinput` is not accepted as a substitute -- the
+  1.0+ CLI always talks to `ydotoold` over this socket and never opens
+  `/dev/uinput` itself; that fallback belongs to the daemon, a separate
+  process, and to this package's own unrelated in-process `UinputBackend`.
+  Both gaps meant a real `ydotoold` listening on a non-default
+  `$XDG_RUNTIME_DIR` could be reported as absent, and a writable-but-daemon-
+  less `/dev/uinput` could compose a backend that still failed on first use.
+
+- **`cosmic`'s screen/window capture leaked a session, pool, buffer and
+  frame -- plus the capture source itself -- on every call.** None of them
+  were ever sent their protocol `destroy` request, so a long run calling
+  `screenshot()` repeatedly kept all of them alive on the compositor,
+  including a shm pool the size of the screen each time; the mmap backing
+  the pixel buffer was never explicitly closed either. All five are now
+  destroyed, child-before-parent, in a `finally` that runs whether the
+  capture succeeds or raises. Live-reverified with 15 consecutive
+  `screenshot()` calls in just over a second, no error.
+
+- **A region capture on a multi-output COSMIC desktop could crop the wrong
+  output's pixels, or fail outright for a region that would actually fit on
+  a different output.** `capture(region=...)` always sourced from
+  `next(iter(self._conn._outputs))` -- whichever output happened to be
+  bound first -- regardless of where the region actually was. It now picks
+  the bound output that fully contains the region and raises
+  `CapabilityUnsupported` up front if none does, rather than cropping
+  against an output the region was never on. A whole-screen capture (no
+  region) is still the first bound output only; compositing every output
+  into one image is not implemented, now stated outright in `capture()`'s
+  own docstring instead of left to be discovered.
 
 - **A `Window` an event-driven `wait_for_window()` issued could carry a
   handle a *different* member backend later received.** `_window_family_provider`
@@ -241,10 +278,15 @@ All notable changes to pyguitest are recorded here. The format follows
   with `AttributeError: 'int' object has no attribute 'get_geometry'` --
   X11Backend trying to treat a zcosmic toplevel id (`0xFF000001`) as an Xlib
   window object. A new `GUIBackend._normalize_window` (identity by default)
-  and `CompositeBackend._normalize_window` (re-homes a mismatched `Window` to
-  the family-consistent provider by title/app_id) close the gap;
-  `wait_for_window()`'s fast path runs every result through it. Re-verified
-  live: the same generated script now replays cleanly.
+  and `CompositeBackend._normalize_window` (re-homes a mismatched `Window`
+  to the family-consistent provider by title/app_id) close the gap;
+  `wait_for_window()`'s fast path runs every result through it. Neither
+  field is a real cross-backend identity -- two windows can share both, and
+  the same application can carry a different app_id on each side of an
+  XWayland boundary -- so a match is only trusted when it is the *unique*
+  one; an ambiguous or absent match hands back the original, mismatched
+  handle rather than guessing which window was meant. Re-verified live: the
+  same generated script now replays cleanly.
 
 ## [0.16.3] — 2026-10-05
 

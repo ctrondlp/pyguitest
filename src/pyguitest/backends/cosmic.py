@@ -133,19 +133,27 @@ _WOUT_VERSION = 4
 _CC_CREATE_SESSION = 0
 _OUTPUT_CREATE_SOURCE = 0
 _TOPLEVEL_CREATE_SOURCE = 0
+_SOURCE_DESTROY = 0
+"""`ext_image_capture_source_v1.destroy` -- the opaque handle both source
+managers wrap has no other request, the same single-purpose shape as the
+session and frame objects below, both of which really do put `destroy` at 0."""
 _CCS_CREATE_FRAME = 0
+_CCS_DESTROY = 1
 _CCS_BUFFER_SIZE = 0
 _CCS_SHM_FORMAT = 1
 _CCS_DONE = 4
+_CCF_DESTROY = 0
 _CCF_ATTACH_BUFFER = 1
 _CCF_DAMAGE_BUFFER = 2
 _CCF_CAPTURE = 3
 _CCF_READY = 3
 _CCF_FAILED = 4
 
-# -- wl_shm / wl_shm_pool --------------------------------------------------
+# -- wl_shm / wl_shm_pool / wl_buffer --------------------------------------
 _SHM_CREATE_POOL = 0
 _SHM_POOL_CREATE_BUFFER = 0
+_SHM_POOL_DESTROY = 1
+_BUFFER_DESTROY = 0
 
 # The 8-bit shm formats COSMIC advertises, both BGR order: the low byte is R,
 # so a pixel is [R, G, B, A/X] in memory. The 10-bit variants ('AB30'/'XB30')
@@ -695,6 +703,15 @@ class _CosmicConnection:
         to one frame, capture, and read the pixels back. Events for any other
         object are dispatched to `_handle` as they arrive, so the toplevel and
         output caches stay fresh during the wait.
+
+        Takes ownership of `source_id`: both call sites in `capture()` create
+        one just for this call and never touch it again, so this is also
+        where it gets destroyed. Every protocol object this method allocates
+        -- session, pool, buffer, frame, and `source_id` itself -- is
+        destroyed here before returning or raising, child-before-parent
+        (frame, then buffer, then pool, then session, then source); without
+        this a long run calling `screenshot()` repeatedly leaked all of them
+        on the compositor side, a shm pool the size of the screen included.
         """
         session = self._allocate("ext_image_copy_capture_session_v1")
         self._send(
@@ -702,71 +719,89 @@ class _CosmicConnection:
             _CC_CREATE_SESSION,
             [("n", session), ("o", source_id), ("u", 0)],
         )
-        width = height = 0
-        fmt = 0
-        while True:
-            object_id, opcode, payload = self._recv_message()
-            if object_id == session:
-                reader = _Reader(payload)
-                if opcode == _CCS_BUFFER_SIZE:
-                    width, height = reader.uint(), reader.uint()
-                elif opcode == _CCS_SHM_FORMAT:
-                    fourcc = reader.uint()
-                    if fmt == 0 and fourcc in _SHM_8BIT_FORMATS:
-                        fmt = fourcc
-                elif opcode == _CCS_DONE:
-                    break
-                # dmabuf_device/dmabuf_format are ignored; a stopped session
-                # surfaces as the frame never becoming ready below.
-            else:
-                self._handle(object_id, opcode, payload)
-        if not width or not height or not fmt:
-            raise OSError("COSMIC offered no 8-bit shm format for capture")
-
-        stride = width * 4
-        size = stride * height
-        fd = os.memfd_create("pyguitest-cosmic-capture", 0)
+        pending_destroy: list[tuple[int, int]] = [
+            (session, _CCS_DESTROY),
+            (source_id, _SOURCE_DESTROY),
+        ]
         try:
-            os.ftruncate(fd, size)
-            pool = self._allocate("wl_shm_pool")
-            self._send_fd(self._shm, _SHM_CREATE_POOL, [("n", pool), ("i", size)], fd)
-            buffer = self._allocate("wl_buffer")
-            self._send(
-                pool,
-                _SHM_POOL_CREATE_BUFFER,
-                [
-                    ("n", buffer),
-                    ("i", 0),
-                    ("i", width),
-                    ("i", height),
-                    ("i", stride),
-                    ("u", fmt),
-                ],
-            )
-            frame = self._allocate("ext_image_copy_capture_frame_v1")
-            self._send(session, _CCS_CREATE_FRAME, [("n", frame)])
-            self._send(frame, _CCF_ATTACH_BUFFER, [("o", buffer)])
-            self._send(
-                frame,
-                _CCF_DAMAGE_BUFFER,
-                [("i", 0), ("i", 0), ("i", width), ("i", height)],
-            )
-            self._send(frame, _CCF_CAPTURE, [])
+            width = height = 0
+            fmt = 0
             while True:
                 object_id, opcode, payload = self._recv_message()
-                if object_id == frame:
-                    if opcode == _CCF_READY:
+                if object_id == session:
+                    reader = _Reader(payload)
+                    if opcode == _CCS_BUFFER_SIZE:
+                        width, height = reader.uint(), reader.uint()
+                    elif opcode == _CCS_SHM_FORMAT:
+                        fourcc = reader.uint()
+                        if fmt == 0 and fourcc in _SHM_8BIT_FORMATS:
+                            fmt = fourcc
+                    elif opcode == _CCS_DONE:
                         break
-                    if opcode == _CCF_FAILED:
-                        raise OSError(
-                            f"COSMIC capture failed (reason {_Reader(payload).uint()})"
-                        )
-                    continue  # transform/damage/presentation_time: ignore
-                self._handle(object_id, opcode, payload)
-            data = mmap.mmap(fd, size, mmap.MAP_SHARED, mmap.PROT_READ)
-            return width, height, bytes(data)
+                    # dmabuf_device/dmabuf_format are ignored; a stopped
+                    # session surfaces as the frame never becoming ready below.
+                else:
+                    self._handle(object_id, opcode, payload)
+            if not width or not height or not fmt:
+                raise OSError("COSMIC offered no 8-bit shm format for capture")
+
+            stride = width * 4
+            size = stride * height
+            fd = os.memfd_create("pyguitest-cosmic-capture", 0)
+            try:
+                os.ftruncate(fd, size)
+                pool = self._allocate("wl_shm_pool")
+                self._send_fd(
+                    self._shm, _SHM_CREATE_POOL, [("n", pool), ("i", size)], fd
+                )
+                pending_destroy.insert(0, (pool, _SHM_POOL_DESTROY))
+                buffer = self._allocate("wl_buffer")
+                self._send(
+                    pool,
+                    _SHM_POOL_CREATE_BUFFER,
+                    [
+                        ("n", buffer),
+                        ("i", 0),
+                        ("i", width),
+                        ("i", height),
+                        ("i", stride),
+                        ("u", fmt),
+                    ],
+                )
+                pending_destroy.insert(0, (buffer, _BUFFER_DESTROY))
+                frame = self._allocate("ext_image_copy_capture_frame_v1")
+                self._send(session, _CCS_CREATE_FRAME, [("n", frame)])
+                pending_destroy.insert(0, (frame, _CCF_DESTROY))
+                self._send(frame, _CCF_ATTACH_BUFFER, [("o", buffer)])
+                self._send(
+                    frame,
+                    _CCF_DAMAGE_BUFFER,
+                    [("i", 0), ("i", 0), ("i", width), ("i", height)],
+                )
+                self._send(frame, _CCF_CAPTURE, [])
+                while True:
+                    object_id, opcode, payload = self._recv_message()
+                    if object_id == frame:
+                        if opcode == _CCF_READY:
+                            break
+                        if opcode == _CCF_FAILED:
+                            raise OSError(
+                                "COSMIC capture failed "
+                                f"(reason {_Reader(payload).uint()})"
+                            )
+                        continue  # transform/damage/presentation_time: ignore
+                    self._handle(object_id, opcode, payload)
+                data = mmap.mmap(fd, size, mmap.MAP_SHARED, mmap.PROT_READ)
+                try:
+                    return width, height, bytes(data)
+                finally:
+                    data.close()
+            finally:
+                os.close(fd)
         finally:
-            os.close(fd)
+            for object_id, opcode in pending_destroy:
+                with contextlib.suppress(OSError):
+                    self._send(object_id, opcode, [])
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -967,12 +1002,37 @@ class CosmicBackend(_WindowBackend):
         opcode = _ZTM_SET_MINIMIZED if minimized else _ZTM_UNSET_MINIMIZED
         self._conn._send(self._conn._manager, opcode, [("o", cosmic)])
 
+    def _output_for_region(self, region: tuple[int, int, int, int]) -> int | None:
+        """The bound output id whose bounds fully contain `region`, or None.
+
+        A region can land on any output, not just the first one `capture()`
+        would otherwise default to -- cropping it out of the wrong output's
+        buffer either raises `_crop_bgra`'s own out-of-bounds error on a
+        multi-output desktop where the region would actually fit on a
+        *different* output, or, worse, silently returns pixels from the
+        wrong screen if the coordinates happen to overlap by chance.
+        """
+        x, y, width, height = region
+        for output_id, output in self._conn._outputs.items():
+            if (
+                output.x <= x
+                and output.y <= y
+                and x + width <= output.x + output.width
+                and y + height <= output.y + output.height
+            ):
+                return output_id
+        return None
+
     def capture(self, window=None, path=None, region=None):
         """Screenshot the desktop, one window, or one rectangle.
 
-        Screen capture is the first bound output; a region is cropped out of it
-        in memory. A window is captured through its own toplevel source, which
-        this connection holds for exactly the Window handles it hands out.
+        A region is captured from whichever bound output actually contains
+        it, cropped out of that output's own buffer in memory. A whole-screen
+        capture (no `window`, no `region`) is the first bound output only --
+        on a multi-output desktop that is one monitor, not the whole desktop;
+        compositing every output into one image is not implemented. A window
+        is captured through its own toplevel source, which this connection
+        holds for exactly the Window handles it hands out.
         """
         self.require(
             Capability.WINDOW_CAPTURE
@@ -986,7 +1046,17 @@ class CosmicBackend(_WindowBackend):
             source = self._conn._create_toplevel_source(handle)
             width, height, raw = self._conn._capture_frame(source)
         else:
-            output_id = next(iter(self._conn._outputs))
+            if region is not None:
+                output_id = self._output_for_region(region)
+                if output_id is None:
+                    raise CapabilityUnsupported(
+                        Capability.SCREEN_CAPTURE,
+                        self.name,
+                        f"region {tuple(region)} is not fully contained in "
+                        "any single bound output",
+                    )
+            else:
+                output_id = next(iter(self._conn._outputs))
             source = self._conn._create_output_source(output_id)
             width, height, raw = self._conn._capture_frame(source)
             if region is not None:

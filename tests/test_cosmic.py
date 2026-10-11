@@ -300,6 +300,71 @@ class TestCaptureCapabilities(unittest.TestCase):
         self.assertIn(Capability.WINDOW_CAPTURE, backend.capabilities)
 
 
+def _output(x, y, width, height):
+    return mock.Mock(x=x, y=y, width=width, height=height)
+
+
+class TestOutputForRegion(unittest.TestCase):
+    """capture() picks the output a region actually lands on, not just the first."""
+
+    def test_picks_the_output_that_contains_the_region(self):
+        conn = mock.Mock(
+            _outputs={
+                1: _output(0, 0, 1280, 800),
+                2: _output(1280, 0, 1920, 1080),
+            }
+        )
+        backend = CosmicBackend(conn)
+        self.assertEqual(backend._output_for_region((1280, 10, 100, 100)), 2)
+        self.assertEqual(backend._output_for_region((10, 10, 100, 100)), 1)
+
+    def test_a_region_crossing_two_outputs_matches_neither(self):
+        conn = mock.Mock(
+            _outputs={
+                1: _output(0, 0, 1280, 800),
+                2: _output(1280, 0, 1920, 1080),
+            }
+        )
+        backend = CosmicBackend(conn)
+        self.assertIsNone(backend._output_for_region((1200, 10, 200, 100)))
+
+    def test_no_output_contains_a_fully_offscreen_region(self):
+        conn = mock.Mock(_outputs={1: _output(0, 0, 1280, 800)})
+        backend = CosmicBackend(conn)
+        self.assertIsNone(backend._output_for_region((5000, 5000, 10, 10)))
+
+
+class TestCaptureSelectsTheRightOutput(unittest.TestCase):
+    """capture(region=...) sources pixels from the output the region is on."""
+
+    def _backend(self):
+        conn = mock.Mock(
+            _outputs={
+                1: _output(0, 0, 1280, 800),
+                2: _output(1280, 0, 1920, 1080),
+            }
+        )
+        conn._create_output_source.return_value = 99
+        conn._capture_frame.return_value = (100, 100, b"\0" * (100 * 100 * 4))
+        return CosmicBackend(conn), conn
+
+    def test_a_region_on_the_second_output_sources_from_it(self):
+        backend, conn = self._backend()
+        backend.capture(region=(1280, 10, 50, 50))
+        conn._create_output_source.assert_called_once_with(2)
+
+    def test_a_region_spanning_no_single_output_is_refused(self):
+        backend, conn = self._backend()
+        with self.assertRaises(CapabilityUnsupported):
+            backend.capture(region=(1200, 10, 200, 50))
+        conn._create_output_source.assert_not_called()
+
+    def test_no_region_still_defaults_to_the_first_output(self):
+        backend, conn = self._backend()
+        backend.capture()
+        conn._create_output_source.assert_called_once_with(1)
+
+
 class TestScreens(unittest.TestCase):
     """screens() reports each bound output's size, scale and name."""
 
