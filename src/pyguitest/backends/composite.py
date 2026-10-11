@@ -249,6 +249,54 @@ class CompositeBackend(GUIBackend):
                 return member
         return normal
 
+    def _normalize_window(self, window):
+        """Re-home `window` to the family-consistent provider, if it is not already.
+
+        WINDOW_EVENTS sits outside `_WINDOW_FAMILY` on purpose: adding it
+        would not change which member answers it, since no member on a
+        COSMIC-plus-XWayland session offers both events and placement, and
+        `_window_family_provider` would still fall back to the events-only
+        one. The mismatch it leaves is real, though -- confirmed live via
+        pyguitest-recorder, replaying a script generated on exactly that
+        session. `wait_for_window`'s fast path (Capability.WINDOW_EVENTS)
+        calls straight into whichever member serves it, bypassing the family
+        check entirely, so the Window it hands back can carry a handle only
+        *that* member understands. `expect_window(...)` found a window
+        issued by `cosmic` (zcosmic_toplevel_handle_v1 ids have the high bit
+        set, e.g. 0xFF000001); the next line called `geometry()`, which
+        `_window_family_provider` correctly routes to `x11` for
+        WINDOW_PLACEMENT reasons -- and X11Backend's own `geometry()` tried
+        `(0xFF000001).get_geometry()`, an AttributeError reported as
+        "window is gone".
+
+        Re-resolves by title and app_id through the family-consistent
+        provider's own `windows()`, trading the event path's speed (already
+        spent, since this runs after the window was found) for a handle
+        later window-family calls can actually use. Neither field is a
+        real cross-backend identity -- two windows can share both, and the
+        same application can carry a different app_id on each side of an
+        XWayland boundary -- so a match is only trusted when it is the
+        *unique* one. No match, or more than one, leaves the question of
+        which window was meant unanswered: the window closed in the gap,
+        the consistent provider genuinely cannot see it, or two candidates
+        are indistinguishable from here. Any of those hands back what was
+        given rather than guessing, same as the composite's own fallback
+        when no consistent member exists at all -- guessing wrong is worse
+        than leaving the original, mismatched handle for the caller's next
+        call to raise on honestly.
+        """
+        if window is None:
+            return None
+        family = self._window_family_provider(Capability.WINDOW_LIST)
+        if family is None or window.backend is family:
+            return window
+        matches = [
+            candidate
+            for candidate in family.windows()
+            if candidate.title == window.title and candidate.app_id == window.app_id
+        ]
+        return matches[0] if len(matches) == 1 else window
+
     def member(self, name):
         """The member backend called `name`.
 

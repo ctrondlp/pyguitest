@@ -109,9 +109,9 @@ class TestReadmeMatchesToolRegistry(unittest.TestCase):
     def test_constrained_tools_are_flagged_in_the_docs(self):
         # A reader must be able to see why a tool they installed was ignored.
         for tool in tools.INPUT_TOOLS + tools.CAPTURE_TOOLS:
-            if tool.wlroots_only:
+            if tool.compositors:
                 with self.subTest(tool=tool.name):
-                    self.assertRegex(INSTALL, rf"{tool.name}[^\n]*wlroots only")
+                    self.assertRegex(INSTALL, rf"{tool.name}[^\n]*\*[^\n]*wlroots")
             if tool.x11_only:
                 with self.subTest(tool=tool.name):
                     self.assertRegex(INSTALL, rf"{tool.name}[^\n]*X11 only")

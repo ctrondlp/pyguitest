@@ -49,6 +49,26 @@ _YDOTOOL_MODIFIER_KEYS = {
     "&": "100",  # KEY_RIGHTALT
 }
 
+_WTYPE_MODIFIER_NAMES = {
+    "Control_L": "ctrl", "Control_R": "ctrl",
+    "Shift_L": "shift", "Shift_R": "shift",
+    "Alt_L": "alt", "Alt_R": "alt",
+    "Meta_L": "logo", "Meta_R": "logo",
+    "Super_L": "logo", "Super_R": "logo",
+    "ISO_Level3_Shift": "altgr",
+    "Caps_Lock": "capslock",
+}  # fmt: skip
+"""GUIBackend.MODIFIER_KEYS' X11 keysym names, in wtype's own `-M`/`-m`
+vocabulary ("ctrl", "shift", "alt", "logo", "altgr", "capslock").
+
+Live-confirmed on COSMIC this matters, not just a spelling preference:
+`-P Control_L`/`-p Control_L` presses and releases the physical key but
+does not register as a held modifier the way `-M ctrl`/`-m ctrl` does --
+`send_keys("^(a)")` sent that way typed a plain "a" and left Ctrl+A's
+select-all (and the Ctrl+C that followed) unrecognised by the app, even
+batched into one process (see `press_key`/`release_key` below). `-M`/`-m`
+on the same modifier, everything else unchanged, is what actually works."""
+
 _YDOTOOL_KEY_ALIASES = {
     "BAC": "14",  # KEY_BACKSPACE
     "BS": "14",
@@ -313,7 +333,58 @@ class ToolInputBackend(GUIBackend):
         self.tool = tool
         self._commands = _COMMANDS[tool.name]
         self._timeout = timeout
+        if runner is None and tool.name == "ydotool":
+            self._require_modern_ydotool()
         self._runner = runner or self._run
+        self._wtype_queue: list[str] = []
+        self._wtype_held: set[str] = set()
+
+    def _require_modern_ydotool(self) -> None:
+        """Reject a ydotool this adapter's command table cannot drive.
+
+        The commands in _COMMANDS speak ydotool 1.0's syntax (`mousemove
+        --absolute -x`, hex click codes, `key CODE:1`), but Ubuntu and
+        Debian still ship 0.1.8, whose CLI shares none of it -- every call
+        exits with a usage error. Probed at construction, the way grim and
+        spectacle are gated at discovery, so the capability is withheld
+        here rather than advertised and broken on first use. `mousemove
+        --help` naming `--absolute` is the discriminator: 0.1.8 rejects the
+        option and its help does not mention it.
+        """
+        import os
+
+        try:
+            result = subprocess.run(
+                ["ydotool", "mousemove", "--help"],
+                capture_output=True,
+                text=True,
+                timeout=self._timeout,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise BackendUnavailable(f"ydotool could not be probed: {exc}") from exc
+        if "--absolute" not in (result.stdout or "") + (result.stderr or ""):
+            raise BackendUnavailable(
+                "this ydotool predates 1.0 and takes none of the commands "
+                "this adapter emits; install ydotool 1.0+"
+            )
+        # 1.0 only ever talks to ydotoold over this socket -- confirmed
+        # against the client's own source (Client/ydotool.c): a failed
+        # connection exits 2 with "Please check if ydotoold is running",
+        # never falling back to /dev/uinput itself (that fallback belongs to
+        # the *daemon*, a separate process, and to this package's own
+        # unrelated UinputBackend). A writable /dev/uinput says nothing
+        # about whether ydotoold is actually listening, so it is not
+        # consulted here.
+        socket_path = os.environ.get("YDOTOOL_SOCKET") or (
+            f"{os.environ['XDG_RUNTIME_DIR']}/.ydotool_socket"
+            if os.environ.get("XDG_RUNTIME_DIR")
+            else "/tmp/.ydotool_socket"
+        )
+        if not os.path.exists(socket_path):
+            raise BackendUnavailable(
+                f"ydotoold is not running (no socket at {socket_path}); "
+                "start it, or set $YDOTOOL_SOCKET if it listens elsewhere"
+            )
 
     # GUIBackend.name/MODIFIER_KEYS/KEY_ALIASES are plain, writable class
     # attributes so a subclass can just set e.g. `name = "atspi"`; overriding
@@ -444,13 +515,54 @@ class ToolInputBackend(GUIBackend):
     # -- keyboard ----------------------------------------------------------
 
     def press_key(self, key):
-        """Press a key by name."""
+        """Press a key by name.
+
+        wtype alone is batched rather than run immediately, and a recognized
+        modifier is sent via `-M` rather than `-P` -- see release_key, which
+        actually runs the batch, for why both matter.
+        """
         self.require(Capability.KEY_EVENT)
+        if self.tool.name == "wtype":
+            flag = "-M" if key in _WTYPE_MODIFIER_NAMES else "-P"
+            self._wtype_queue += [flag, _WTYPE_MODIFIER_NAMES.get(key, key)]
+            self._wtype_held.add(key)
+            return None
         return self._runner(self._commands["key_down"](key))
 
     def release_key(self, key):
-        """Release a key by name."""
+        """Release a key by name.
+
+        wtype alone needs two departures from the obvious one-call-per-event
+        shape, both found live on COSMIC chasing a single symptom:
+        send_keys("^(a)") selected nothing and send_keys("^(c)") then copied
+        nothing.
+
+        First, batching. wtype's own man page warns "the modifiers get
+        released automatically once the program terminates" -- each
+        invocation is a short-lived Wayland client, so a separate process
+        per press and release (fine for every other tool here, whose
+        held-key state lives in the X server or a uinput device instead)
+        released Ctrl before the "a" press's own process even existed.
+        Queuing every press and release and running them as one invocation
+        once nothing is left held keeps the whole chord inside a single
+        process's lifetime.
+
+        Second, and still needed even batched into one process: `-P
+        Control_L`/`-p Control_L` presses and releases the physical key but
+        does not register as a held *modifier* the way `-M ctrl`/`-m ctrl`
+        does -- confirmed by testing both directly against a live COSMIC
+        app, one call apart. `_WTYPE_MODIFIER_NAMES` is what routes a
+        recognized modifier through `-M`/`-m` instead.
+        """
         self.require(Capability.KEY_EVENT)
+        if self.tool.name == "wtype":
+            flag = "-m" if key in _WTYPE_MODIFIER_NAMES else "-p"
+            self._wtype_queue += [flag, _WTYPE_MODIFIER_NAMES.get(key, key)]
+            self._wtype_held.discard(key)
+            if self._wtype_held:
+                return None
+            argv, self._wtype_queue = ["wtype", *self._wtype_queue], []
+            return self._runner(argv)
         return self._runner(self._commands["key_up"](key))
 
     def type_text(self, text, delay=0.0, allow_keymap_unsafe=True):
@@ -462,8 +574,26 @@ class ToolInputBackend(GUIBackend):
         Warns when the active tool cannot guarantee the characters arrive as
         written; pass allow_keymap_unsafe=False to refuse instead, which is the
         right setting for a suite that asserts on typed content.
+
+        Raises for wtype specifically if a modifier `press_key` opened is
+        still held: this call would run in a process of its own, started
+        *after* the held key's process has already exited and released it
+        (see release_key's docstring on why that release happens the moment
+        the process ends), so the text would arrive unmodified and the
+        caller would have no way to tell. `send_keys()`'s own chords never
+        hit this -- everything inside one stays on press_key/tap_key/
+        release_key, never type_text -- so it is only a direct, interleaved
+        call to the public API that can.
         """
         self.require(Capability.TEXT_ENTRY)
+        if self.tool.name == "wtype" and self._wtype_held:
+            raise PyGUITestError(
+                f"wtype cannot type text while {sorted(self._wtype_held)} is "
+                "held -- it only holds a key for the lifetime of one process, "
+                "and this call would run in a separate one, after that "
+                "process (and the hold with it) has already ended; release "
+                "the key first, or use send_keys() for the whole combination"
+            )
         if not self.tool.keymap_safe:
             message = (
                 f"{self.tool.name} injects scancodes below the compositor; typed "

@@ -412,19 +412,26 @@ class TestToolDiscoveryMatchesTheSession(unittest.TestCase):
         ):
             return linux_detect(environment).input_tools
 
-    def test_a_wlroots_only_tool_is_not_listed_for_a_plain_x11_session(self):
-        # Regression: the wlroots gate was `compositor is WLROOTS or
+    def test_a_compositor_gated_tool_is_not_listed_for_a_plain_x11_session(self):
+        # Regression: the compositor gate was `compositor is WLROOTS or
         # x11_session`, so wtype was listed wherever an X display existed
         # -- including a session with no Wayland compositor at all.
         tools_found = self._tools(env(DISPLAY=":0", XDG_SESSION_TYPE="x11"))
         self.assertNotIn("wtype", tools_found)
         self.assertIn("xdotool", tools_found)
 
-    def test_a_wlroots_only_tool_is_not_listed_for_gnome_xwayland(self):
+    def test_a_compositor_gated_tool_is_not_listed_for_gnome_xwayland(self):
         tools_found = self._tools(
             env(WAYLAND_DISPLAY="wayland-0", DISPLAY=":0", XDG_CURRENT_DESKTOP="GNOME")
         )
         self.assertNotIn("wtype", tools_found)
+
+    def test_a_cosmic_session_lists_wtype(self):
+        # COSMIC implements zwp_virtual_keyboard_manager_v1, which wtype needs.
+        tools_found = self._tools(
+            env(WAYLAND_DISPLAY="wayland-0", XDG_CURRENT_DESKTOP="COSMIC")
+        )
+        self.assertIn("wtype", tools_found)
 
     def test_a_wlroots_session_still_lists_its_own_tools(self):
         tools_found = self._tools(

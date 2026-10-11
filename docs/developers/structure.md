@@ -177,6 +177,7 @@ whatever answers. Priority decides who wins a contested capability.
 | 70 | `input` | pointer and keyboard through a CLI tool, or uinput |
 | 70 | `win32` | windows, window events, screens, input, capture and the clipboard on Windows, in plain `ctypes` |
 | 70 | `macquartz` *(opt-in)* | pointer and keyboard on macOS, via `CGEventPost` |
+| 65 | `pointer` | uinput or ydotool, only where `input`'s keymap-safe winner is typing-only (wtype on COSMIC/wlroots), so the session still has a pointer |
 | 60 | `capture` | screenshots |
 | 58 | `clipboard` | clipboard text through `wl-clipboard`, `xclip`, `xsel` or `pbcopy`/`pbpaste` |
 | 58 | `portalcapture` *(opt-in)* | screenshots via the Screenshot portal, needing no tool installed |
@@ -325,10 +326,11 @@ Ordered by correctness first, then cost:
 that asserts on typed content.
 
 Rank is not the only filter. A tool must also be *carryable* by the session:
-`x11_only` tools cannot see native Wayland clients, and `wlroots_only` tools
-need protocols Mutter and KWin do not implement. `discover()` applies both
-before rank is consulted, because a tool that runs, exits zero and does nothing
-is the worst failure available.
+`x11_only` tools cannot see native Wayland clients, and a tool with a
+`compositors` allowlist needs the matching compositor (wtype needs a protocol
+only wlroots and COSMIC implement; grim one only wlroots does). `discover()`
+applies both before rank is consulted, because a tool that runs, exits zero and
+does nothing is the worst failure available.
 
 Both uinput routes need membership of the `input` group; `/dev/uinput` is
 root-only by default.

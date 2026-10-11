@@ -1280,6 +1280,13 @@ class Environment:
         # needs it -- see X11Backend.capabilities.
         if self.has_xlib and self.session_type is SessionType.X11:
             return True
+        # COSMIC's own window backend captures over ext-image-copy-capture-v1
+        # with no tool installed (see backends/cosmic.py). Optimistic the same
+        # way the portal answer below is: an older COSMIC without the
+        # copy-capture globals would still answer True here, and the backend
+        # then withholds SCREEN_CAPTURE/WINDOW_CAPTURE itself.
+        if self.compositor is Compositor.COSMIC:
+            return True
         return self.has_portal and self.has_pygobject
 
     @property
@@ -1795,17 +1802,16 @@ def detect(env: Mapping[str, str] | None = None) -> Environment:
     # limitation that remains once they are included, not a reason to
     # exclude them.
     x11_session = session_type in (SessionType.X11, SessionType.XWAYLAND)
-    # A wlroots-only tool needs a wlroots compositor, and nothing else
-    # substitutes: an X connection does not, which is why this is not
-    # `or x11_session`. See _input_factory in backends/__init__.py, which
-    # makes the same call for the backend this list only describes.
-    wlroots = compositor is Compositor.WLROOTS
+    # A tool gated by its `compositors` allowlist is offered only where that
+    # compositor is running; an X connection does not substitute, which is why
+    # this is not `or x11_session`. See _input_factory in backends/__init__.py,
+    # which makes the same call for the backend this list only describes.
     input_tools = tuple(
         t.name
         for t in _tools.discover(
             _tools.INPUT_TOOLS,
             allow_x11_only=x11_session,
-            allow_wlroots_only=wlroots,
+            compositor=compositor.value,
         )
     )
     if input_tools and not _tools.best(_tools.INPUT_TOOLS, keymap_safe_only=True):
@@ -1888,7 +1894,7 @@ def detect(env: Mapping[str, str] | None = None) -> Environment:
                 # which is what `doctor` prints and `hints.py` reads -- names
                 # only tools that can actually capture here. grim needs
                 # wlr-screencopy and spectacle needs KWin.
-                allow_wlroots_only=wlroots,
+                compositor=compositor.value,
                 allow_mutter_incompatible=compositor is not Compositor.MUTTER,
             )
         ),

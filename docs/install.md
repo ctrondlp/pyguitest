@@ -80,7 +80,8 @@ the Screenshot and Clipboard portals need only PyGObject.
 
 | Desktop | What you install |
 |---|---|
-| sway / Hyprland / niri / COSMIC | `pip install pyguitest` — nothing else |
+| sway / Hyprland / niri | `pip install pyguitest` — nothing else |
+| COSMIC | `pip install 'pyguitest[uinput]'` + `wtype` — windows, capture and screens need nothing; `wtype` adds keymap-safe typing, and the pointer comes from uinput, since COSMIC implements no unprivileged virtual-pointer protocol |
 | GNOME | `pip install 'pyguitest[atspi]'` + three distribution packages |
 | GNOME, pure Wayland (no XWayland) | as GNOME, plus the [pyguitest-window-control extension](../gnome-shell-extension/README.md) for window placement/minimize |
 | KDE | as GNOME, plus `kdotool` for windows, and `gsettings set org.gnome.desktop.interface toolkit-accessibility true` or no application publishes any elements — [see below](#on-kde-one-more-step-that-is-not-a-package) |
@@ -95,6 +96,72 @@ including the GNOME Shell extension. The opt-in rows are different:
 it is the sole route (`portalcapture`, on a GNOME session with no other
 capture path) — see [Backend registry](developers/structure.md#backend-registry)
 for why they are opt-in.
+
+## Worked examples: what one extra alone actually gets you
+
+The table above says `x11` is windows, input and capture, and that elements
+need `atspi` too. Taken literally, that means a plain `pip install
+"pyguitest[x11]"` should give you a working script that drives a real
+window by keystroke and screenshot but cannot look anything up by role or
+name — and that is exactly what [validation.md](validation.md#bsd-the-x11-extra-alone-no-atspi-on-a-real-x11-desktop-2026-10-11)
+confirms, live, on a GhostBSD/MATE box with only `python-xlib` installed
+and no root access at all:
+
+```python
+import pyguitest
+
+# event_delay paces every discrete input event send_keys() generates, not
+# just send_keys() calls as a whole -- at the default of 0.0, a trailing
+# `~` (Enter) can reach a widget that is still processing the keystrokes
+# just before it. See the validation entry above for what that looked
+# like against mate-calc before this was set.
+with pyguitest.connect(event_delay=0.05) as gui:
+    print(gui.environment.summary())
+    print(
+        "elements available:", gui.supports(pyguitest.Capability.ELEMENT_TREE)
+    )  # False
+
+    with gui.start_app(["mate-calc"]) as app:
+        window = gui.expect_window("Calculator", timeout=15)
+        gui.activate_window(window)
+        gui.wait_window_focus(window, timeout=5)
+
+        # No element lookup available -- pure keyboard input instead.
+        gui.send_keys("7*6~")  # ~ is Enter
+
+        gui.screenshot("result.png", window=window)
+
+        try:
+            gui.button("7")
+        except pyguitest.CapabilityUnsupported as e:
+            print("as expected, no element tree:", e)
+```
+
+Add `atspi` and the same desktop gets the element tree too — this half is
+the pattern used throughout the rest of the docs and book, not something
+freshly verified in this run (the box above had no root to install the
+system packages `atspi` needs):
+
+```python
+import pyguitest
+from pyguitest import Role
+
+with pyguitest.connect() as gui:  # backend=["atspi", "x11"] automatically
+    with gui.start_app(["mate-calc"]) as app:
+        window = gui.expect_window("Calculator", timeout=15)
+        gui.activate_window(window)
+        gui.wait_window_focus(window, timeout=5)
+
+        gui.expect_element(role=Role.PUSH_BUTTON, name="7").click()
+        gui.expect_element(role=Role.PUSH_BUTTON, name="×").click()
+        gui.expect_element(role=Role.PUSH_BUTTON, name="6").click()
+        gui.expect_element(role=Role.PUSH_BUTTON, name="=").click()
+```
+
+Both examples install, and run, without touching anything outside the two
+pip extras named above: no system package manager, no `sudo`, nothing
+beyond what `pip install "pyguitest[x11,atspi]"` fetches on a machine that
+already has PyGObject and pyatspi from its distribution.
 
 ## On Windows
 
@@ -320,7 +387,7 @@ raises.
 
 | Group | Tools |
 |---|---|
-| Input | `wdotool`, `wtype` *(wlroots only)*, `ydotool` *(keymap-unsafe)*, `xdotool` *(X11 only)* |
+| Input | `wdotool`, `wtype` *(wlroots and COSMIC)*, `ydotool` *(keymap-unsafe)*, `xdotool` *(X11 only)* |
 | Capture | `grim` *(wlroots only)*, `gnome-screenshot` *(real X11 only)*, `spectacle` *(KDE only)*, `import` *(X11 only, and real X11 only)*, `screencapture` *(macOS only)* |
 | Clipboard | `wl-copy`/`wl-paste` (wl-clipboard — not on GNOME, where the `portal` row above is the only clipboard path), `xclip`, `xsel` *(X11 only)*, `pbcopy`/`pbpaste` *(macOS only)* |
 | Windows | `swaymsg`, `hyprctl`, `niri msg`, `kdotool` |

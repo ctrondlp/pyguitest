@@ -70,12 +70,13 @@ class ExternalTool:
     """False if the tool injects scancodes below the compositor, so typed text
     depends on the session's active keyboard layout."""
 
-    wlroots_only: bool = False
-    """True if the tool needs a wlroots-only protocol. wtype needs
-    zwp_virtual_keyboard_manager_v1, which Mutter does not implement -- it
-    installs and runs there, and silently does nothing. `grim` needs
-    wlr-screencopy for the same shape of failure, which is why the flag is
-    about the protocol and not about typing."""
+    compositors: frozenset[str] | None = None
+    """The compositors this tool can work on, by `Compositor.value`, or None for
+    any compositor. Replaces the old `wlroots_only` boolean, which could not say
+    "wlroots *and* COSMIC": `wtype` needs `zwp_virtual_keyboard_manager_v1`,
+    which both implement, while `grim` needs `wlr-screencopy`, which only
+    wlroots implements. A tool with this set is dropped when `discover()`'s
+    `compositor` argument names a compositor not in it."""
 
     x11_only: bool = False
     """True if the tool talks to an X server and so cannot see native Wayland
@@ -104,17 +105,17 @@ class ExternalTool:
     Two very different mechanisms land here, which is why the flag is named
     for the compositor it fails on rather than for either protocol.
     `wl-copy` needs wlr-data-control-unstable-v1, which Mutter does not
-    implement. That is distinct from wlroots_only: KWin is not a wlroots
-    compositor but does implement this protocol -- confirmed live on KDE
-    Plasma 6, where wl-copy/wl-paste round-tripped correctly and wl-copy
-    forked into the background to keep serving the selection, so
-    wlroots_only would incorrectly exclude KWin. `spectacle` reaches the
-    screen only through KWin's own screenshot API and exits non-zero
-    everywhere else -- measured on Fedora 44 / GNOME Shell 50.0, where
-    `spectacle -b -n -f -o out.png` prints "Spectacle requires KDE Plasma's
-    KWin compositor" and writes nothing. Left unflagged it advertised
-    SCREEN_CAPTURE on a session where no whole-screen capture could
-    succeed."""
+    implement. That is distinct from a `compositors` allowlist: KWin is not a
+    wlroots compositor but does implement this protocol -- confirmed live on
+    KDE Plasma 6, where wl-copy/wl-paste round-tripped correctly and wl-copy
+    forked into the background to keep serving the selection, so a
+    `compositors={wlroots}` allowlist would incorrectly exclude KWin.
+    `spectacle` reaches the screen only through KWin's own screenshot API and
+    exits non-zero everywhere else -- measured on Fedora 44 / GNOME Shell
+    50.0, where `spectacle -b -n -f -o out.png` prints "Spectacle requires
+    KDE Plasma's KWin compositor" and writes nothing. Left unflagged it
+    advertised SCREEN_CAPTURE on a session where no whole-screen capture
+    could succeed."""
 
     also_needs: str = ""
     """A second binary this tool's own operations need, checked by `present`
@@ -207,8 +208,8 @@ INPUT_TOOLS = (
     ExternalTool(
         "wtype",
         frozenset({Capability.KEY_EVENT, Capability.TEXT_ENTRY}),
-        "wlr virtual-keyboard; typing only, and wlroots compositors only",
-        wlroots_only=True,
+        "wlr virtual-keyboard; typing only, on wlroots and COSMIC",
+        compositors=frozenset({"wlroots", "cosmic"}),
     ),
     ExternalTool(
         "ydotool",
@@ -232,7 +233,7 @@ CAPTURE_TOOLS = (
         "wlroots; reads frames over wlr-screencopy, a protocol Mutter and "
         "KWin do not implement -- installed and run there it captures "
         "nothing",
-        wlroots_only=True,
+        compositors=frozenset({"wlroots"}),
     ),
     ExternalTool(
         "gnome-screenshot",
@@ -390,9 +391,9 @@ CLIPBOARD_TOOLS = (
 def discover(
     group: Sequence[ExternalTool],
     allow_x11_only: bool = True,
-    allow_wlroots_only: bool = True,
     allow_x_root_only: bool = True,
     allow_mutter_incompatible: bool = True,
+    compositor: str | None = None,
 ) -> tuple[ExternalTool, ...]:
     """Every usable tool in `group`, in preference order.
 
@@ -402,9 +403,13 @@ def discover(
     allow_x11_only=False
         drops tools that only see the X server. They run, but address an almost
         empty XWayland root rather than the desktop.
-    allow_wlroots_only=False
-        drops tools needing wlroots-only protocols. They run, exit
-        successfully, and do nothing -- the worst failure of the three.
+    compositor="wlroots"
+        drops tools whose `compositors` allowlist does not include the named
+        compositor (by `Compositor.value`). Pass the session's compositor so a
+        tool that needs a protocol that compositor lacks -- wtype on GNOME, grim
+        on COSMIC -- is not offered; it would run, exit successfully, and do
+        nothing, the worst failure of the three. None performs no compositor
+        filtering, which `best()` relies on.
     allow_x_root_only=False
         drops tools that capture by reading the X root window. Pass False for
         anything but a real X11 session, XWayland included: the root is
@@ -413,7 +418,7 @@ def discover(
     allow_mutter_incompatible=False
         drops tools that cannot work on Mutter at all -- wl-clipboard, which
         needs a protocol Mutter lacks, and spectacle, which needs KWin's own
-        screenshot API. Distinct from allow_wlroots_only: KWin needs this
+        screenshot API. Distinct from the compositor allowlist: KWin needs this
         flag rather than that one, being neither a wlroots compositor nor a
         Mutter one.
     """
@@ -422,7 +427,7 @@ def discover(
         for t in group
         if t.present
         and (allow_x11_only or not t.x11_only)
-        and (allow_wlroots_only or not t.wlroots_only)
+        and (compositor is None or t.compositors is None or compositor in t.compositors)
         and (allow_x_root_only or not t.x_root_only)
         and (allow_mutter_incompatible or not t.mutter_incompatible)
     )

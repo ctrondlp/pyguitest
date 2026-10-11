@@ -94,6 +94,12 @@ pip install 'pyguitest[atspi]'     # + element automation
 pip install 'pyguitest[x11]'       # + the X11/XWayland backend (tier-6 reads, native capture)
 ```
 
+Extras combine, and which ones you need depends on your desktop —
+`pip install 'pyguitest[atspi,uinput]'` is a common line on GNOME/KDE,
+`pip install 'pyguitest[uinput]'` is enough on COSMIC. See
+[docs/install.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/install.md#by-desktop-in-practice)
+for what each desktop actually needs, or just run `pyguitest doctor`.
+
 The AT-SPI libraries come from your distribution (`pyguitest doctor` names
 them), so a virtualenv needs `--system-site-packages` to see them.
 

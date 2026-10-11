@@ -631,7 +631,12 @@ class TestInputFactoryRanking(unittest.TestCase):
             tools.ExternalTool, "present", property(lambda self: self.name in present)
         ):
             with mock.patch("pyguitest.backends.uinput.available", return_value=False):
-                return backends._input_factory(environment)
+                # The ydotool construction probe asks the real binary; these
+                # tests rank pretend-installed tools on machines without it.
+                with mock.patch.object(
+                    backends.ToolInputBackend, "_require_modern_ydotool"
+                ):
+                    return backends._input_factory(environment)
 
     def test_a_keymap_safe_tool_wins_over_an_unsafe_one(self):
         backend = self._pick(_env(session_type=SessionType.X11), {"ydotool", "xdotool"})
@@ -648,20 +653,20 @@ class TestInputFactoryRanking(unittest.TestCase):
         backend = self._pick(_env(session_type=SessionType.WAYLAND), {"xdotool"})
         self.assertIsNone(backend)
 
-    def test_a_wlroots_only_tool_is_not_offered_to_a_plain_x11_session(self):
-        # Regression: allow_wlroots_only was `compositor is WLROOTS or
+    def test_a_compositor_gated_tool_is_not_offered_to_a_plain_x11_session(self):
+        # Regression: the compositor gate was `compositor is WLROOTS or
         # x11`, so wtype survived discovery wherever an X connection
         # existed. Being keymap-safe it then outranked xdotool, so a
         # session xdotool would have driven correctly got a backend that
-        # fails on every call -- wtype needs
-        # zwp_virtual_keyboard_manager_v1, and an X server is not that.
+        # fails on every call -- wtype needs zwp_virtual_keyboard_manager_v1,
+        # and an X server is not that.
         backend = self._pick(
             _env(session_type=SessionType.X11, compositor=Compositor.NONE),
             {"wtype", "xdotool"},
         )
         self.assertEqual(backend.tool.name, "xdotool")
 
-    def test_a_wlroots_only_tool_is_not_offered_to_gnome_xwayland_either(self):
+    def test_a_compositor_gated_tool_is_not_offered_to_gnome_xwayland_either(self):
         # Same trap, the commoner session: Mutter implements none of the
         # protocols wtype needs, XWayland or not.
         backend = self._pick(
@@ -669,6 +674,16 @@ class TestInputFactoryRanking(unittest.TestCase):
             {"wtype", "xdotool"},
         )
         self.assertEqual(backend.tool.name, "xdotool")
+
+    def test_wtype_is_offered_on_cosmic(self):
+        # COSMIC (Smithay) implements zwp_virtual_keyboard_manager_v1, which
+        # wtype needs, so it must be offered there -- unlike on Mutter.
+        backend = self._pick(
+            _env(session_type=SessionType.WAYLAND, compositor=Compositor.COSMIC),
+            {"wtype"},
+        )
+        self.assertIsNotNone(backend)
+        self.assertEqual(backend.tool.name, "wtype")
 
     def test_a_wlroots_session_with_xwayland_still_gets_its_wlroots_tool(self):
         # The narrowing must not cost sway anything: its compositor is
@@ -694,6 +709,66 @@ class TestInputFactoryRanking(unittest.TestCase):
                         _env(session_type=SessionType.WAYLAND)
                     )
         self.assertIs(backend, fake)
+
+
+class TestPointerFactory(unittest.TestCase):
+    """The pointer factory fills exactly the gap a typing-only winner leaves.
+
+    On COSMIC (and a wlroots session without wdotool) the input factory's
+    keymap-safe winner is wtype, which serves no pointer capability at all;
+    the composed session then cannot click anything. This second member adds
+    the pointer -- and must add nothing anywhere the input factory's own
+    choice already serves it, or every session grows a duplicate transport.
+    """
+
+    _COSMIC = _env(session_type=SessionType.WAYLAND, compositor=Compositor.COSMIC)
+
+    def _pick(self, environment, present, uinput_available=False):
+        with mock.patch.object(
+            tools.ExternalTool, "present", property(lambda self: self.name in present)
+        ):
+            with mock.patch(
+                "pyguitest.backends.uinput.available", return_value=uinput_available
+            ):
+                with mock.patch.object(
+                    backends.ToolInputBackend, "_require_modern_ydotool"
+                ):
+                    return backends._pointer_factory(environment)
+
+    def test_cosmic_with_wtype_gets_ydotool_for_the_pointer(self):
+        backend = self._pick(self._COSMIC, {"wtype", "ydotool"})
+        self.assertIsNotNone(backend)
+        self.assertEqual(backend.tool.name, "ydotool")
+
+    def test_uinput_is_preferred_over_ydotool(self):
+        fake = mock.Mock()
+        with mock.patch.object(
+            tools.ExternalTool,
+            "present",
+            property(lambda self: self.name in {"wtype", "ydotool"}),
+        ):
+            with mock.patch("pyguitest.backends.uinput.available", return_value=True):
+                with mock.patch(
+                    "pyguitest.backends.uinput.UinputBackend", return_value=fake
+                ):
+                    backend = backends._pointer_factory(self._COSMIC)
+        self.assertIs(backend, fake)
+
+    def test_declines_when_the_keymap_safe_winner_serves_the_pointer(self):
+        # xdotool is keymap-safe and pointer-capable: the input factory
+        # returns it and there is no gap to fill.
+        backend = self._pick(_env(session_type=SessionType.X11), {"xdotool", "ydotool"})
+        self.assertIsNone(backend)
+
+    def test_declines_without_any_keymap_safe_tool(self):
+        # The input factory itself falls through to uinput/ydotool then;
+        # building the same transport twice serves nothing.
+        backend = self._pick(self._COSMIC, {"ydotool"})
+        self.assertIsNone(backend)
+
+    def test_declines_when_nothing_pointer_capable_exists(self):
+        backend = self._pick(self._COSMIC, {"wtype"})
+        self.assertIsNone(backend)
 
 
 class TestOtherFactoriesDeclineCleanly(unittest.TestCase):

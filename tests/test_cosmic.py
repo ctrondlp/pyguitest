@@ -20,9 +20,16 @@ import socket
 import struct
 from unittest import mock
 
-from pyguitest.backends.cosmic import CosmicBackend, _CosmicConnection, connect_cosmic
+from pyguitest.backends.cosmic import (
+    CosmicBackend,
+    _bgr_rows,
+    _CosmicConnection,
+    _crop_bgra,
+    connect_cosmic,
+)
 from pyguitest.backends.windows import for_compositor
-from pyguitest.errors import WindowNotFound
+from pyguitest.capabilities import Capability
+from pyguitest.errors import CapabilityUnsupported, WindowNotFound
 from pyguitest.session import Compositor
 
 # Object ids, traced through the client's deterministic allocation order:
@@ -229,6 +236,199 @@ class TestConnectCosmic(unittest.TestCase):
             "pyguitest.backends.cosmic.connect_cosmic", side_effect=OSError
         ):
             self.assertIsNone(for_compositor(Compositor.COSMIC))
+
+
+class TestCaptureHelpers(unittest.TestCase):
+    """The pixel shuffles the capture path depends on, in isolation.
+
+    The capture flow itself is live-verified (probe 7 against a real COSMIC
+    desktop); these pin the two pure functions that turn the compositor's
+    BGR-order buffer into a PNG, which a live run cannot easily prove are
+    colour-correct.
+    """
+
+    def test_bgr_rows_reorders_each_pixel_to_rgb(self):
+        # Two pixels: (R=10,G=20,B=30) then (R=40,G=50,B=60).
+        raw = bytes([10, 20, 30, 0xFF, 40, 50, 60, 0x00])
+        self.assertEqual(list(_bgr_rows(raw, 2, 1)), [bytes([10, 20, 30, 40, 50, 60])])
+
+    def test_crop_extracts_the_rectangle(self):
+        # 2x2 pixels of [R, G, B, X]; take the bottom-right 1x1.
+        raw = bytes([1, 2, 3, 0, 4, 5, 6, 0, 7, 8, 9, 0, 10, 11, 12, 0])
+        self.assertEqual(_crop_bgra(raw, 2, 2, 1, 1, 1, 1), bytes([10, 11, 12, 0]))
+
+    def test_crop_rejects_a_rectangle_outside_the_buffer(self):
+        with self.assertRaises(CapabilityUnsupported):
+            _crop_bgra(b"\0" * 16, 2, 2, 1, 1, 2, 1)
+
+
+class TestCaptureCapabilities(unittest.TestCase):
+    """Capture is claimed only when the copy-capture globals were bound."""
+
+    def _backend(self, **attrs):
+        state = {
+            "_capture_mgr": 0,
+            "_shm": 0,
+            "_output_capture_mgr": 0,
+            "_toplevel_capture_mgr": 0,
+            "_outputs": {},
+        }
+        state.update(attrs)
+        return CosmicBackend(mock.Mock(**state))
+
+    def test_capture_is_claimed_when_the_globals_exist(self):
+        backend = self._backend(
+            _capture_mgr=1,
+            _shm=1,
+            _output_capture_mgr=1,
+            _toplevel_capture_mgr=1,
+            _outputs={1: (0, 0)},
+        )
+        self.assertIn(Capability.SCREEN_CAPTURE, backend.capabilities)
+        self.assertIn(Capability.WINDOW_CAPTURE, backend.capabilities)
+
+    def test_capture_is_not_claimed_without_them(self):
+        backend = self._backend()
+        self.assertNotIn(Capability.SCREEN_CAPTURE, backend.capabilities)
+        self.assertNotIn(Capability.WINDOW_CAPTURE, backend.capabilities)
+
+    def test_screen_capture_needs_an_output(self):
+        backend = self._backend(
+            _capture_mgr=1, _shm=1, _output_capture_mgr=1, _toplevel_capture_mgr=1
+        )
+        self.assertNotIn(Capability.SCREEN_CAPTURE, backend.capabilities)
+        self.assertIn(Capability.WINDOW_CAPTURE, backend.capabilities)
+
+
+def _output(x, y, width, height):
+    return mock.Mock(x=x, y=y, width=width, height=height)
+
+
+class TestOutputForRegion(unittest.TestCase):
+    """capture() picks the output a region actually lands on, not just the first."""
+
+    def test_picks_the_output_that_contains_the_region(self):
+        conn = mock.Mock(
+            _outputs={
+                1: _output(0, 0, 1280, 800),
+                2: _output(1280, 0, 1920, 1080),
+            }
+        )
+        backend = CosmicBackend(conn)
+        self.assertEqual(backend._output_for_region((1280, 10, 100, 100)), 2)
+        self.assertEqual(backend._output_for_region((10, 10, 100, 100)), 1)
+
+    def test_a_region_crossing_two_outputs_matches_neither(self):
+        conn = mock.Mock(
+            _outputs={
+                1: _output(0, 0, 1280, 800),
+                2: _output(1280, 0, 1920, 1080),
+            }
+        )
+        backend = CosmicBackend(conn)
+        self.assertIsNone(backend._output_for_region((1200, 10, 200, 100)))
+
+    def test_no_output_contains_a_fully_offscreen_region(self):
+        conn = mock.Mock(_outputs={1: _output(0, 0, 1280, 800)})
+        backend = CosmicBackend(conn)
+        self.assertIsNone(backend._output_for_region((5000, 5000, 10, 10)))
+
+
+class TestCaptureSelectsTheRightOutput(unittest.TestCase):
+    """capture(region=...) sources pixels from the output the region is on."""
+
+    def _backend(self):
+        conn = mock.Mock(
+            _outputs={
+                1: _output(0, 0, 1280, 800),
+                2: _output(1280, 0, 1920, 1080),
+            }
+        )
+        conn._create_output_source.return_value = 99
+        conn._capture_frame.return_value = (100, 100, b"\0" * (100 * 100 * 4))
+        return CosmicBackend(conn), conn
+
+    def test_a_region_on_the_second_output_sources_from_it(self):
+        backend, conn = self._backend()
+        backend.capture(region=(1280, 10, 50, 50))
+        conn._create_output_source.assert_called_once_with(2)
+
+    def test_a_region_spanning_no_single_output_is_refused(self):
+        backend, conn = self._backend()
+        with self.assertRaises(CapabilityUnsupported):
+            backend.capture(region=(1200, 10, 200, 50))
+        conn._create_output_source.assert_not_called()
+
+    def test_no_region_still_defaults_to_the_first_output(self):
+        backend, conn = self._backend()
+        backend.capture()
+        conn._create_output_source.assert_called_once_with(1)
+
+
+class TestScreens(unittest.TestCase):
+    """screens() reports each bound output's size, scale and name."""
+
+    def test_screens_reports_each_output(self):
+        def output(width, height, scale, name):
+            out = mock.Mock(width=width, height=height, scale=scale)
+            out.name = name  # `name` is special to Mock's constructor, not here
+            return out
+
+        conn = mock.Mock(
+            _outputs={
+                7: output(1280, 800, 2, "DP-1"),
+                9: output(1920, 1080, 1, "HDMI-1"),
+            }
+        )
+        backend = CosmicBackend(conn)
+        screens = backend.screens()
+        self.assertEqual(
+            [(s.index, s.width, s.height, s.scale, s.name) for s in screens],
+            [(0, 1280, 800, 2, "DP-1"), (1, 1920, 1080, 1, "HDMI-1")],
+        )
+
+
+class TestWindowEvents(unittest.TestCase):
+    """window_events() drains the connection's recorded change queue."""
+
+    def test_window_events_yields_queued_changes(self):
+        toplevel = mock.Mock(title="Editor", app_id="org.editor", closed=False)
+        conn = mock.Mock(
+            _events=[("new", 5), ("title", 5), ("close", 5)],
+            _toplevels={5: toplevel},
+        )
+        backend = CosmicBackend(conn)
+        events = list(backend.window_events(timeout=0))
+        self.assertEqual([e.change for e in events], ["new", "title", "close"])
+        self.assertEqual([e.window.title for e in events], ["Editor"] * 3)
+
+
+class TestWindowEventsWire(unittest.TestCase):
+    """Changes are recorded without `ext_foreign_toplevel_list_v1.finished`.
+
+    cosmic-comp never sends `finished` (verified live, 2026-10-11), so gating
+    event recording on it recorded nothing. The initial listing is instead
+    separated from real changes by when they arrive: everything up to the end
+    of the handshake is pre-existing state, everything after is an event.
+    """
+
+    def test_handshake_discards_the_initial_listing(self):
+        backend, _ = _make_backend(self, done_count=0)
+        self.assertEqual(backend._conn._events, [])
+
+    def test_changes_after_connect_are_yielded_without_finished(self):
+        backend, server = _make_backend(self, done_count=0)
+        new_handle = 0xFF000002
+        server.sendall(
+            _msg(LIST, 0, ("u", new_handle))
+            + _msg(new_handle, 2, ("s", "Doc"))
+            + _msg(new_handle, 0)  # closed
+        )
+        events = backend.window_events(timeout=0.5)
+        self.assertEqual(next(events).change, "new")
+        event = next(events)
+        self.assertEqual((event.change, event.window.title), ("title", "Doc"))
+        self.assertEqual(next(events).change, "close")
 
 
 if __name__ == "__main__":

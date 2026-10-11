@@ -7,6 +7,7 @@ say so rather than appear to have tried.
 
 import unittest
 import warnings
+from unittest import mock
 
 from pyguitest import tools
 from pyguitest.backends.input import KeymapWarning, ToolInputBackend
@@ -162,6 +163,197 @@ class TestCapabilityHonesty(unittest.TestCase):
         fake = tools.ExternalTool("some-future-tool", frozenset())
         with self.assertRaises(BackendUnavailable):
             ToolInputBackend(fake)
+
+
+class TestWtypeModifierBatching(unittest.TestCase):
+    """wtype batches a held chord into one invocation instead of one per key.
+
+    Found live on COSMIC: send_keys("^(a)") issued as three separate wtype
+    processes (press Control_L, tap a, release Control_L) typed a plain "a"
+    and selected nothing, because wtype's own man page says held modifiers
+    "get released automatically once the program terminates" -- the first
+    process was long gone before the second even started. Every other tool
+    here holds state outside the CLI process (the X server for xdotool, a
+    uinput device for ydotool), so only wtype needs this.
+    """
+
+    def _backend(self):
+        self.runner = Recorder()
+        return ToolInputBackend(BY_NAME["wtype"], runner=self.runner)
+
+    def test_a_held_modifier_and_key_become_one_invocation(self):
+        gui = self._backend()
+        gui.press_key("Control_L")
+        gui.press_key("a")
+        gui.release_key("a")
+        gui.release_key("Control_L")
+        self.assertEqual(
+            self.runner.calls,
+            [["wtype", "-M", "ctrl", "-P", "a", "-p", "a", "-m", "ctrl"]],
+        )
+
+    def test_a_recognized_modifier_uses_dash_m_not_dash_capital_p(self):
+        # -P Control_L presses the physical key but does not register as a
+        # held *modifier* the way -M ctrl does -- confirmed live on COSMIC
+        # by testing both directly against the same app, one call apart.
+        gui = self._backend()
+        for name, short in [
+            ("Control_L", "ctrl"),
+            ("Shift_R", "shift"),
+            ("Alt_L", "alt"),
+            ("Super_L", "logo"),
+            ("ISO_Level3_Shift", "altgr"),
+        ]:
+            with self.subTest(name=name):
+                gui.press_key(name)
+                gui.release_key(name)
+                self.assertEqual(
+                    self.runner.calls[-1], ["wtype", "-M", short, "-m", short]
+                )
+
+    def test_a_plain_tap_still_becomes_one_invocation(self):
+        gui = self._backend()
+        gui.press_key("a")
+        gui.release_key("a")
+        self.assertEqual(self.runner.calls, [["wtype", "-P", "a", "-p", "a"]])
+
+    def test_nothing_runs_until_every_held_key_is_released(self):
+        gui = self._backend()
+        gui.press_key("Control_L")
+        self.assertEqual(self.runner.calls, [])
+        gui.press_key("Shift_L")
+        self.assertEqual(self.runner.calls, [])
+
+    def test_a_nested_group_still_batches_as_one_call(self):
+        # send_keys("^(+(l))"): Ctrl-Shift-l.
+        gui = self._backend()
+        gui.press_key("Control_L")
+        gui.press_key("Shift_L")
+        gui.press_key("l")
+        gui.release_key("l")
+        gui.release_key("Shift_L")
+        gui.release_key("Control_L")
+        self.assertEqual(
+            self.runner.calls,
+            [
+                [
+                    "wtype",
+                    "-M", "ctrl", "-M", "shift", "-P", "l",
+                    "-p", "l", "-m", "shift", "-m", "ctrl",
+                ]
+            ],
+        )  # fmt: skip
+
+    def test_type_text_while_a_modifier_is_held_is_refused_not_silent(self):
+        # press_key("Control_L"); type_text("a"); release_key("Control_L")
+        # is a real, documented call pattern (Session exposes all three
+        # separately), and it is one this adapter cannot honor: type_text
+        # would run in its own process, started after the held key's own
+        # process -- and the hold with it -- has already ended, so "a"
+        # would arrive unmodified with nothing telling the caller why.
+        # send_keys() never hits this: every character inside a chord goes
+        # through tap_key, never type_text.
+        gui = self._backend()
+        gui.press_key("Control_L")
+        with self.assertRaises(PyGUITestError) as caught:
+            gui.type_text("a")
+        self.assertIn("Control_L", str(caught.exception))
+        self.assertEqual(self.runner.calls, [])
+
+    def test_type_text_is_unaffected_once_nothing_is_held(self):
+        gui = self._backend()
+        gui.press_key("a")
+        gui.release_key("a")
+        gui.type_text("hello")
+        self.assertEqual(self.runner.calls[-1], ["wtype", "--", "hello"])
+
+
+class TestYdotoolConstructionGate(unittest.TestCase):
+    """A ydotool the command table cannot drive is refused at construction.
+
+    Ubuntu/Debian still ship 0.1.8, whose CLI takes none of the 1.0 syntax
+    the adapter emits -- found live on Pop!_OS 24.04, where it would have
+    advertised pointer capabilities that exit with a usage error on every
+    call. An injected runner skips the probe, which is what keeps every
+    other test in this file hermetic.
+    """
+
+    class _Help:
+        returncode = 0
+        stderr = ""
+
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    def _construct(self, help_text, exists, env=None):
+        """Build the backend with `exists` wired into os.path.exists.
+
+        A bool becomes its return value; a callable becomes its side_effect,
+        so a precedence test can assert *which* path was actually checked.
+        """
+        patched_exists = (
+            mock.patch("os.path.exists", side_effect=exists)
+            if callable(exists)
+            else mock.patch("os.path.exists", return_value=exists)
+        )
+        with mock.patch(
+            "pyguitest.backends.input.subprocess.run",
+            return_value=self._Help(help_text),
+        ):
+            with patched_exists:
+                with mock.patch.dict("os.environ", env or {}, clear=True):
+                    return ToolInputBackend(BY_NAME["ydotool"])
+
+    def test_the_pre_1_0_cli_is_refused(self):
+        with self.assertRaises(BackendUnavailable) as caught:
+            self._construct("Usage: mousemove [--delay <ms>] <x> <y>", False)
+        self.assertIn("predates 1.0", str(caught.exception))
+
+    def test_1_0_with_the_daemon_socket_constructs(self):
+        backend = self._construct("-a, --absolute", True)
+        self.assertEqual(backend.tool.name, "ydotool")
+
+    def test_1_0_without_the_daemon_socket_is_refused(self):
+        # Writable /dev/uinput does not help: ydotool 1.0's CLI only ever
+        # talks to ydotoold over this socket (confirmed against the
+        # client's own source) -- it never falls back to uinput itself.
+        with mock.patch("os.access", return_value=True):
+            with self.assertRaises(BackendUnavailable) as caught:
+                self._construct("-a, --absolute", False)
+        self.assertIn("ydotoold is not running", str(caught.exception))
+
+    def test_socket_path_prefers_the_env_var_over_xdg_runtime_dir(self):
+        # Matches ydotool's own client/ydotool.c precedence: $YDOTOOL_SOCKET
+        # first, $XDG_RUNTIME_DIR/.ydotool_socket second, /tmp/.ydotool_socket
+        # last. If this adapter checked the wrong path, a real daemon
+        # listening on the env-var path would be reported as not running.
+        backend = self._construct(
+            "-a, --absolute",
+            lambda path: path == "/custom/sock",
+            env={"YDOTOOL_SOCKET": "/custom/sock", "XDG_RUNTIME_DIR": "/run/user/1000"},
+        )
+        self.assertEqual(backend.tool.name, "ydotool")
+
+    def test_socket_path_falls_back_to_xdg_runtime_dir(self):
+        backend = self._construct(
+            "-a, --absolute",
+            lambda path: path == "/run/user/1000/.ydotool_socket",
+            env={"XDG_RUNTIME_DIR": "/run/user/1000"},
+        )
+        self.assertEqual(backend.tool.name, "ydotool")
+
+    def test_socket_path_falls_back_to_tmp_with_no_env_at_all(self):
+        backend = self._construct(
+            "-a, --absolute", lambda path: path == "/tmp/.ydotool_socket", env={}
+        )
+        self.assertEqual(backend.tool.name, "ydotool")
+
+    def test_a_missing_binary_is_refused_not_crashed_on(self):
+        with mock.patch(
+            "pyguitest.backends.input.subprocess.run", side_effect=OSError("no ydotool")
+        ):
+            with self.assertRaises(BackendUnavailable):
+                ToolInputBackend(BY_NAME["ydotool"])
 
 
 class TestKeymapSafety(unittest.TestCase):

@@ -59,6 +59,21 @@ All notable changes to pyguitest are recorded here. The format follows
   `WINDOW_GEOMETRY`, `WINDOW_ACTIVATE`, `WINDOW_MINIMIZE` and
   `WINDOW_AT_POINT`. Detection keys off `XDG_CURRENT_DESKTOP=COSMIC`.
 
+- **COSMIC: `SCREEN_CAPTURE`/`WINDOW_CAPTURE`, `SCREEN_INFO`,
+  `WINDOW_EVENTS`, and a pointer.** The `cosmic` backend now also binds
+  `ext_image_copy_capture_manager_v1` (screen, window and region capture
+  into a memfd shm buffer, claimed only when the globals exist) and
+  `wl_output` (`screens()`), and streams `window_events()`/
+  `wait_for_window()` from the toplevel list's own push events. COSMIC has
+  no unprivileged virtual-pointer protocol — `zwlr_virtual_pointer_manager_v1`
+  is absent — so a new `pointer` backend factory (priority 65, just under
+  `input`) fills the gap a typing-only winner (`wtype` here) leaves, via
+  uinput or `ydotool`; `_screen_size()` gained a COSMIC source so uinput's
+  absolute axes are sized from the real output. All of it live-verified on
+  Pop!_OS 24.04: screen/window/region capture, `screens()`, open/close/title
+  window events, and a uinput pointer click landing on the exact pixel
+  requested (confirmed by screenshot, and by clicking a real button).
+
 ### Fixed
 
 - **`ELEMENT_GEOMETRY` on pure Wayland can now be restored by a sibling
@@ -180,6 +195,98 @@ All notable changes to pyguitest are recorded here. The format follows
   acts through a `show menu` action as a last resort, after `click`/`press`/
   `toggle`, so a recorded click on a submenu replays as opening that menu
   rather than a pointer move.
+
+- **`wtype`-sent modifier combos (`send_keys("^(c)")` and the like) silently
+  did nothing, on every `wtype`-based session, not only COSMIC's.** Each
+  `press_key`/`release_key` call ran `wtype -P <key>`/`-p <key>` as its own
+  subprocess; wtype's own man page: "the modifiers get released automatically
+  once the program terminates", so the process holding Ctrl down exited
+  (releasing it) before the next process even started pressing the key it was
+  meant to combine with. Confirmed live against a real COSMIC app: `Ctrl+A`
+  selected nothing and `Ctrl+C` copied nothing, every call reporting success.
+  Even batched into one process, `-P Control_L`/`-p Control_L` turned out not
+  to register as a held *modifier* at all -- only wtype's own `-M ctrl`/
+  `-m ctrl` does, confirmed by running both directly against the same app one
+  call apart. `press_key`/`release_key` now queue every press and release for
+  `wtype` and run them as one invocation once nothing is left held, routing a
+  recognized modifier (Control/Shift/Alt/Meta/Super, AltGr, Caps Lock) through
+  `-M`/`-m` instead of `-P`/`-p`. Re-verified live: `send_keys("^(a)")` then
+  `send_keys("^(c)")` now really select and copy. `type_text()` now raises
+  rather than silently typing unmodified text if a caller interleaves it
+  with a modifier `press_key()` already opened -- a real, documented call
+  shape (`Session` exposes `press_key`/`type_text`/`release_key`
+  separately) that the batching above cannot honor: it would run in a
+  process of its own, started after the held key's process (and the hold
+  with it) has already ended. `send_keys()` itself never hits this --
+  every character inside a chord goes through `tap_key`, never `type_text`.
+
+- **`ydotool` 0.1.x advertised a pointer and keyboard it could not actually
+  drive, and the 1.0+ gate that replaced it checked the wrong socket and
+  accepted a daemon that was not there.** This adapter's command table
+  speaks `ydotool` 1.0's syntax (`mousemove --absolute -x`, hex click codes,
+  `key CODE:1`), but Ubuntu and Debian both still ship 0.1.8, whose CLI
+  shares none of it -- every call exited with a usage error, on any desktop
+  where `ydotool` was the input backend chosen. Construction now probes
+  `ydotool mousemove --help` for `--absolute` (0.1.8's help does not mention
+  it) and, for 1.0+, requires a reachable `ydotoold` socket, resolved the
+  way the client itself does (confirmed against its own source): `$YDOTOOL_
+  SOCKET`, then `$XDG_RUNTIME_DIR/.ydotool_socket`, then `/tmp/.ydotool_
+  socket`. A writable `/dev/uinput` is not accepted as a substitute -- the
+  1.0+ CLI always talks to `ydotoold` over this socket and never opens
+  `/dev/uinput` itself; that fallback belongs to the daemon, a separate
+  process, and to this package's own unrelated in-process `UinputBackend`.
+  Both gaps meant a real `ydotoold` listening on a non-default
+  `$XDG_RUNTIME_DIR` could be reported as absent, and a writable-but-daemon-
+  less `/dev/uinput` could compose a backend that still failed on first use.
+
+- **`cosmic`'s screen/window capture leaked a session, pool, buffer and
+  frame -- plus the capture source itself -- on every call.** None of them
+  were ever sent their protocol `destroy` request, so a long run calling
+  `screenshot()` repeatedly kept all of them alive on the compositor,
+  including a shm pool the size of the screen each time; the mmap backing
+  the pixel buffer was never explicitly closed either. All five are now
+  destroyed, child-before-parent, in a `finally` that runs whether the
+  capture succeeds or raises. Live-reverified with 15 consecutive
+  `screenshot()` calls in just over a second, no error.
+
+- **A region capture on a multi-output COSMIC desktop could crop the wrong
+  output's pixels, or fail outright for a region that would actually fit on
+  a different output.** `capture(region=...)` always sourced from
+  `next(iter(self._conn._outputs))` -- whichever output happened to be
+  bound first -- regardless of where the region actually was. It now picks
+  the bound output that fully contains the region and raises
+  `CapabilityUnsupported` up front if none does, rather than cropping
+  against an output the region was never on. A whole-screen capture (no
+  region) is still the first bound output only; compositing every output
+  into one image is not implemented, now stated outright in `capture()`'s
+  own docstring instead of left to be discovered.
+
+- **A `Window` an event-driven `wait_for_window()` issued could carry a
+  handle a *different* member backend later received.** `_window_family_provider`
+  (composite.py) keeps a `Window`'s issuing backend consistent with whichever
+  member later acts on it -- for `WINDOW_LIST`/`STATE`/`GEOMETRY`/`ACTIVATE`.
+  `WINDOW_EVENTS` was never in that set, because every event-driven backend so
+  far (sway, niri, KWin, the GNOME Shell extension) also provides window
+  placement itself, so the member `wait_for_window()`'s fast path called into
+  was always safe for its own output. COSMIC's own protocols have no
+  move/resize request, so it is the first `WINDOW_EVENTS` backend that does
+  not also provide `WINDOW_PLACEMENT` -- and on an XWayland session, X11Backend
+  is both present and does provide it, so `_window_family_provider` correctly
+  routed `geometry()` to X11Backend while `wait_for_window()`'s fast path had
+  handed back a `Window` from `cosmic`. Found live through a pyguitest-recorder
+  round trip: a generated script's `gui.geometry(expect_window(...))` crashed
+  with `AttributeError: 'int' object has no attribute 'get_geometry'` --
+  X11Backend trying to treat a zcosmic toplevel id (`0xFF000001`) as an Xlib
+  window object. A new `GUIBackend._normalize_window` (identity by default)
+  and `CompositeBackend._normalize_window` (re-homes a mismatched `Window`
+  to the family-consistent provider by title/app_id) close the gap;
+  `wait_for_window()`'s fast path runs every result through it. Neither
+  field is a real cross-backend identity -- two windows can share both, and
+  the same application can carry a different app_id on each side of an
+  XWayland boundary -- so a match is only trusted when it is the *unique*
+  one; an ambiguous or absent match hands back the original, mismatched
+  handle rather than guessing which window was meant. Re-verified live: the
+  same generated script now replays cleanly.
 
 ## [0.16.3] — 2026-10-05
 

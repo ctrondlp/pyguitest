@@ -618,6 +618,148 @@ class TestWindowFamilyPrefersAFullServiceMember(unittest.TestCase):
         self.assertIs(window.backend, self.atspi)
 
 
+class TestNormalizeWindowAcrossEventsAndPlacement(unittest.TestCase):
+    """A Window an event feed issued, re-homed before a placement call.
+
+    WINDOW_EVENTS sits outside `_WINDOW_FAMILY`, so `_window_family_provider`
+    never had to reconcile it with WINDOW_LIST/GEOMETRY/etc -- on every
+    desktop before COSMIC, whichever member offered events also offered
+    placement, so the Window it issued was already safe for itself. COSMIC's
+    own protocols have no move/resize request, so it is the first member
+    that offers WINDOW_EVENTS without WINDOW_PLACEMENT; X11Backend, present
+    for the XWayland app being waited on, is the opposite split. Live-found
+    through pyguitest-recorder: a generated script's `expect_window(...)`
+    then `gui.geometry(...)` crashed inside X11Backend trying
+    `(0xFF000001).get_geometry()` -- a zcosmic toplevel id treated as an
+    Xlib window object.
+    """
+
+    class EventsOnly(GUIBackend):
+        """Offers WINDOW_EVENTS and the family, never WINDOW_PLACEMENT."""
+
+        name = "cosmic"
+        capabilities = CapabilitySet(
+            {
+                Capability.WINDOW_LIST,
+                Capability.WINDOW_STATE,
+                Capability.WINDOW_GEOMETRY,
+                Capability.WINDOW_ACTIVATE,
+                Capability.WINDOW_EVENTS,
+            }
+        )
+
+        def __init__(self, found):
+            self._found = found
+
+        def windows(self):
+            return list(self._found)
+
+    class PlacementOnly(GUIBackend):
+        """Offers the family and WINDOW_PLACEMENT, never WINDOW_EVENTS."""
+
+        name = "x11"
+        capabilities = CapabilitySet(
+            {
+                Capability.WINDOW_LIST,
+                Capability.WINDOW_STATE,
+                Capability.WINDOW_GEOMETRY,
+                Capability.WINDOW_ACTIVATE,
+                Capability.WINDOW_PLACEMENT,
+            }
+        )
+
+        def __init__(self, found):
+            self._found = found
+
+        def windows(self):
+            return list(self._found)
+
+    def test_a_window_the_events_member_issued_is_re_homed(self):
+        events = self.EventsOnly([])
+        placement = self.PlacementOnly([])
+        from_events = Window(handle=0xFF000001, backend=events, title="Editor")
+        from_x11 = Window(handle=object(), backend=placement, title="Editor")
+        events._found = [from_events]
+        placement._found = [from_x11]
+        composite = CompositeBackend([events, placement])
+
+        normalized = composite._normalize_window(from_events)
+        self.assertIs(normalized, from_x11)
+        self.assertIs(normalized.backend, placement)
+
+    def test_matches_by_title_and_app_id_not_identity(self):
+        events = self.EventsOnly([])
+        placement = self.PlacementOnly([])
+        from_events = Window(
+            handle=1, backend=events, title="Editor", app_id="org.editor"
+        )
+        from_x11 = Window(
+            handle=2, backend=placement, title="Editor", app_id="org.editor"
+        )
+        wrong_app = Window(
+            handle=3, backend=placement, title="Editor", app_id="org.other"
+        )
+        events._found = [from_events]
+        placement._found = [wrong_app, from_x11]
+        composite = CompositeBackend([events, placement])
+
+        self.assertIs(composite._normalize_window(from_events), from_x11)
+
+    def test_an_ambiguous_match_is_declined_rather_than_guessed(self):
+        # Two windows sharing title and app_id -- "Untitled Document" twice
+        # is the ordinary case -- are not a real cross-backend identity.
+        # Picking the first would risk a later move_window() moving the
+        # wrong one.
+        events = self.EventsOnly([])
+        placement = self.PlacementOnly([])
+        from_events = Window(
+            handle=1, backend=events, title="Untitled", app_id="org.editor"
+        )
+        first = Window(
+            handle=2, backend=placement, title="Untitled", app_id="org.editor"
+        )
+        second = Window(
+            handle=3, backend=placement, title="Untitled", app_id="org.editor"
+        )
+        events._found = [from_events]
+        placement._found = [first, second]
+        composite = CompositeBackend([events, placement])
+
+        self.assertIs(composite._normalize_window(from_events), from_events)
+
+    def test_no_match_hands_back_the_original(self):
+        events = self.EventsOnly([])
+        placement = self.PlacementOnly([])
+        from_events = Window(handle=1, backend=events, title="Closed by now")
+        events._found = [from_events]
+        placement._found = []
+        composite = CompositeBackend([events, placement])
+
+        self.assertIs(composite._normalize_window(from_events), from_events)
+
+    def test_none_passes_through(self):
+        composite = CompositeBackend([self.EventsOnly([]), self.PlacementOnly([])])
+        self.assertIsNone(composite._normalize_window(None))
+
+    def test_already_the_family_providers_own_window_is_unchanged(self):
+        # No mismatch to fix: a Window the consistent provider itself issued
+        # should not trigger a windows() re-scan.
+        placement = self.PlacementOnly([])
+        own = Window(handle=1, backend=placement, title="Editor")
+        placement._found = [own]
+        composite = CompositeBackend([self.EventsOnly([]), placement])
+
+        self.assertIs(composite._normalize_window(own), own)
+
+    def test_base_guibackend_is_the_identity(self):
+        # Every non-composite backend only ever hands out its own windows,
+        # so there is nothing to normalize -- confirms the default stays a
+        # plain pass-through for every backend that does not override it.
+        backend = self.PlacementOnly([])
+        window = Window(handle=1, backend=backend, title="Editor")
+        self.assertIs(GUIBackend._normalize_window(backend, window), window)
+
+
 class TestCaptureSurvivesABrokenBackend(unittest.TestCase):
     """One installed-but-broken tool must not take capture down.
 

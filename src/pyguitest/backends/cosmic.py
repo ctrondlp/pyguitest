@@ -28,19 +28,25 @@ management protocol's `close` request has no corresponding capability here
 
 from __future__ import annotations
 
+import array
 import contextlib
+import mmap
 import os
+import re
 import select
 import socket
 import struct
+import tempfile
 import time
+from collections.abc import Iterator
 from typing import cast
 
 from ..capabilities import Capability, CapabilitySet
-from ..errors import WindowNotFound
+from ..errors import CapabilityUnsupported, WindowNotFound
 from ..ipc import DEFAULT_TIMEOUT
-from .base import Window
-from .windows import _WindowBackend
+from ..png import write_rgb
+from .base import Screen, Window, check_region
+from .windows import WindowEvent, _WindowBackend
 
 __all__ = ["CosmicBackend", "connect_cosmic"]
 
@@ -102,16 +108,57 @@ _STATE_FULLSCREEN = 3
 # -- wl_output (wayland.xml) -----------------------------------------------
 # Bound so the toplevel geometry event -- emitted only relative to outputs the
 # client has bound -- arrives at all, and so its output-relative x/y can be
-# corrected with the output's own origin. Only the events this client reads
-# are named; mode, done, scale, name and description are read and discarded.
+# corrected with the output's own origin. geometry, mode, scale and name feed
+# screens(); done and description are read and discarded.
 
 _WOUT_GEOMETRY = 0
 _WOUT_MODE = 1
 _WOUT_DONE = 2
 _WOUT_SCALE = 3
+_WOUT_NAME = 4
+
+_WOUT_MODE_CURRENT = 0x1
+"""The wl_output.mode flag naming the mode currently in use."""
 
 _WOUT_VERSION = 4
 """The wl_output version this client binds (the highest, for name/description)."""
+
+# -- ext-image-copy-capture-v1 / ext-image-capture-source-v1 ---------------
+# COSMIC's screen and window capture, verified live on Pop!_OS 24.04. The two
+# source managers wrap an opaque ext_image_capture_source_v1; the copy-capture
+# manager turns a source into a session that fills client buffers (see
+# _capture_frame). Opcodes are the order requests/events appear in
+# wayland-protocols (staging), v1.
+
+_CC_CREATE_SESSION = 0
+_OUTPUT_CREATE_SOURCE = 0
+_TOPLEVEL_CREATE_SOURCE = 0
+_SOURCE_DESTROY = 0
+"""`ext_image_capture_source_v1.destroy` -- the opaque handle both source
+managers wrap has no other request, the same single-purpose shape as the
+session and frame objects below, both of which really do put `destroy` at 0."""
+_CCS_CREATE_FRAME = 0
+_CCS_DESTROY = 1
+_CCS_BUFFER_SIZE = 0
+_CCS_SHM_FORMAT = 1
+_CCS_DONE = 4
+_CCF_DESTROY = 0
+_CCF_ATTACH_BUFFER = 1
+_CCF_DAMAGE_BUFFER = 2
+_CCF_CAPTURE = 3
+_CCF_READY = 3
+_CCF_FAILED = 4
+
+# -- wl_shm / wl_shm_pool / wl_buffer --------------------------------------
+_SHM_CREATE_POOL = 0
+_SHM_POOL_CREATE_BUFFER = 0
+_SHM_POOL_DESTROY = 1
+_BUFFER_DESTROY = 0
+
+# The 8-bit shm formats COSMIC advertises, both BGR order: the low byte is R,
+# so a pixel is [R, G, B, A/X] in memory. The 10-bit variants ('AB30'/'XB30')
+# are skipped in favour of these; either 8-bit one decodes identically.
+_SHM_8BIT_FORMATS = frozenset({0x34324241, 0x34324258})  # ABGR8888, XBGR8888
 
 _REFRESH_DRAIN = 0.2
 """Seconds to wait for cosmic-comp's rate-limited refresh to deliver the
@@ -152,6 +199,50 @@ def _encode(object_id: int, opcode: int, fields: list[tuple[str, object]]) -> by
             raise ValueError(f"unknown wire field kind {kind!r}")
     size = 8 + len(body)
     return struct.pack("<II", object_id, (size << 16) | opcode) + bytes(body)
+
+
+def _bgr_rows(raw: bytes, width: int, height: int) -> Iterator[bytes]:
+    """Yield RGB scanlines from a BGR-order 32bpp capture buffer.
+
+    COSMIC's 8-bit shm formats store each pixel as [R, G, B, A/X], so a
+    stride-3 scanline is the buffer's bytes 0, 1 and 2 of every 4. Slicing
+    rather than a per-pixel loop keeps a 4K capture from spending a second in
+    Python on the colour shuffle.
+    """
+    stride = width * 4
+    for y in range(height):
+        row = raw[y * stride : (y + 1) * stride]
+        out = bytearray(width * 3)
+        out[0::3] = row[0::4]
+        out[1::3] = row[1::4]
+        out[2::3] = row[2::4]
+        yield bytes(out)
+
+
+def _crop_bgra(
+    raw: bytes, width: int, height: int, x: int, y: int, rw: int, rh: int
+) -> bytes:
+    """Crop a buffer-relative (x, y, rw, rh) out of a 32bpp BGRA buffer.
+
+    Raises for a rectangle that would fall outside the captured output; a
+    caller asking for a region a single-output capture cannot cover is a
+    capability gap, not something to silently return a plausible-looking
+    image of the wrong thing for.
+    """
+    if x < 0 or y < 0 or x + rw > width or y + rh > height:
+        raise CapabilityUnsupported(
+            Capability.SCREEN_CAPTURE,
+            "cosmic",
+            f"region {(x, y, rw, rh)} extends outside the captured "
+            f"{width}x{height} output",
+        )
+    stride = width * 4
+    out = bytearray(rw * rh * 4)
+    for row in range(rh):
+        src = (y + row) * stride + x * 4
+        dst = row * rw * 4
+        out[dst : dst + rw * 4] = raw[src : src + rw * 4]
+    return bytes(out)
 
 
 class _Reader:
@@ -217,6 +308,20 @@ class _Toplevel:
         self.closed = False
 
 
+class _Output:
+    """One bound wl_output's properties: origin, size, scale and name."""
+
+    __slots__ = ("x", "y", "width", "height", "scale", "name")
+
+    def __init__(self) -> None:
+        self.x = 0
+        self.y = 0
+        self.width = 0
+        self.height = 0
+        self.scale = 1
+        self.name = ""
+
+
 class _CosmicConnection:
     """A minimal synchronous Wayland client for COSMIC's toplevel globals.
 
@@ -232,13 +337,18 @@ class _CosmicConnection:
         self._globals: dict[int, tuple[str, int]] = {}
         self._toplevels: dict[int, _Toplevel] = {}
         self._cosmic_handle: dict[int, int] = {}
-        self._outputs: dict[int, tuple[int, int]] = {}
+        self._outputs: dict[int, _Output] = {}
         self._registry = 0
         self._info = 0
         self._manager = 0
         self._list = 0
         self._seat = 0
+        self._shm = 0
+        self._capture_mgr = 0
+        self._output_capture_mgr = 0
+        self._toplevel_capture_mgr = 0
         self._finished = False
+        self._events: list[tuple[str, int]] = []
         self._handshake()
 
     # -- wire primitives ---------------------------------------------------
@@ -256,6 +366,20 @@ class _CosmicConnection:
         self, object_id: int, opcode: int, fields: list[tuple[str, object]]
     ) -> None:
         self._sock.sendall(_encode(object_id, opcode, fields))
+
+    def _send_fd(
+        self, object_id: int, opcode: int, fields: list[tuple[str, object]], fd: int
+    ) -> None:
+        """Send one message whose payload carries a file descriptor.
+
+        `wl_shm.create_pool` takes its fd out-of-band over SCM_RIGHTS, with no
+        fd field in the message body itself, which is why `_encode` does not
+        know the kind.
+        """
+        self._sock.sendmsg(
+            [_encode(object_id, opcode, fields)],
+            [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [fd]))],
+        )
 
     def _recv_exact(self, count: int) -> bytes:
         chunks = []
@@ -341,7 +465,7 @@ class _CosmicConnection:
                     ("n", object_id),
                 ],
             )
-            self._outputs[object_id] = (0, 0)
+            self._outputs[object_id] = _Output()
 
     def _handshake(self) -> None:
         self._registry = self._allocate("wl_registry")
@@ -352,6 +476,16 @@ class _CosmicConnection:
         self._manager = self._bind("zcosmic_toplevel_manager_v1", 4)
         self._list = self._bind("ext_foreign_toplevel_list_v1", 1)
         self._seat = self._bind("wl_seat", 1)
+        # Capture is optional: an older COSMIC without the copy-capture
+        # protocols still gets window control, just no screenshots.
+        self._shm = self._bind("wl_shm", 2)
+        self._capture_mgr = self._bind("ext_image_copy_capture_manager_v1", 1)
+        self._output_capture_mgr = self._bind(
+            "ext_output_image_capture_source_manager_v1", 1
+        )
+        self._toplevel_capture_mgr = self._bind(
+            "ext_foreign_toplevel_image_capture_source_manager_v1", 1
+        )
         self._bind_outputs()
 
         if not self._info or not self._manager or not self._list:
@@ -364,6 +498,11 @@ class _CosmicConnection:
                 "where geometry was added"
             )
         self._sync_toplevels()
+        # The initial listing's own `toplevel`/`title` events landed above as
+        # recorded events, but they describe windows that already existed when
+        # this connection opened -- not changes a window_events() subscriber
+        # should see. Discard them now that the listing is known complete.
+        self._events.clear()
 
     def _sync_toplevels(self) -> None:
         """Drain events and request COSMIC handles for any new toplevels.
@@ -427,6 +566,24 @@ class _CosmicConnection:
             object_id, opcode, payload = self._recv_message()
             self._handle(object_id, opcode, payload)
 
+    def _wait_for_event(self, timeout: float | None) -> bool:
+        """Read until a window event is queued, or `timeout` seconds pass.
+
+        Returns True if an event is now in `_events`; the caller drains it.
+        `timeout` of None blocks until an event arrives.
+        """
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while not self._events:
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                return False
+            readable, _, _ = select.select([self._sock], [], [], remaining)
+            if not readable:
+                return False
+            object_id, opcode, payload = self._recv_message()
+            self._handle(object_id, opcode, payload)
+        return True
+
     # -- event dispatch ----------------------------------------------------
 
     def _handle(self, object_id: int, opcode: int, payload: bytes) -> None:
@@ -454,6 +611,7 @@ class _CosmicConnection:
         if opcode == _EFL_TOPLEVEL:
             handle = _Reader(payload).uint()
             self._toplevels[handle] = _Toplevel()
+            self._events.append(("new", handle))
         elif opcode == _EFL_FINISHED:
             self._finished = True
 
@@ -462,8 +620,10 @@ class _CosmicConnection:
         reader = _Reader(payload)
         if opcode == _EFH_CLOSED:
             toplevel.closed = True
+            self._events.append(("close", object_id))
         elif opcode == _EFH_TITLE:
             toplevel.title = reader.string()
+            self._events.append(("title", object_id))
         elif opcode == _EFH_APP_ID:
             toplevel.app_id = reader.string()
         elif opcode == _EFH_IDENTIFIER:
@@ -485,7 +645,8 @@ class _CosmicConnection:
                 reader.int_(),
                 reader.int_(),
             )
-            origin_x, origin_y = self._outputs.get(output_id, (0, 0))
+            output = self._outputs.get(output_id)
+            origin_x, origin_y = (output.x, output.y) if output else (0, 0)
             toplevel.geometry = (x + origin_x, y + origin_y, width, height)
         elif opcode == _ZTH_OUTPUT_ENTER:
             toplevel.outputs.add(reader.obj())
@@ -493,15 +654,154 @@ class _CosmicConnection:
             toplevel.outputs.discard(reader.obj())
 
     def _handle_output(self, object_id: int, opcode: int, payload: bytes) -> None:
-        """Record an output's origin from wl_output.geometry; ignore the rest.
+        """Record geometry, mode, scale and name; ignore done/description.
 
-        mode, done, scale, name and description carry no coordinate the
-        toplevel geometry correction needs, so they are read and discarded.
+        `mode` reports every mode the output supports, so only the one flagged
+        `current` updates the size `screens()` reports.
         """
-        if opcode != _WOUT_GEOMETRY:
-            return
+        output = self._outputs[object_id]
         reader = _Reader(payload)
-        self._outputs[object_id] = (reader.int_(), reader.int_())
+        if opcode == _WOUT_GEOMETRY:
+            output.x, output.y = reader.int_(), reader.int_()
+        elif opcode == _WOUT_MODE:
+            flags = reader.uint()
+            width, height = reader.int_(), reader.int_()
+            if flags & _WOUT_MODE_CURRENT:
+                output.width, output.height = width, height
+        elif opcode == _WOUT_SCALE:
+            output.scale = reader.int_()
+        elif opcode == _WOUT_NAME:
+            output.name = reader.string()
+
+    # -- capture -----------------------------------------------------------
+
+    def _create_output_source(self, output_id: int) -> int:
+        """An ext_image_capture_source_v1 for one wl_output."""
+        source = self._allocate("ext_image_capture_source_v1")
+        self._send(
+            self._output_capture_mgr,
+            _OUTPUT_CREATE_SOURCE,
+            [("n", source), ("o", output_id)],
+        )
+        return source
+
+    def _create_toplevel_source(self, handle: int) -> int:
+        """An ext_image_capture_source_v1 for one foreign toplevel handle."""
+        source = self._allocate("ext_image_capture_source_v1")
+        self._send(
+            self._toplevel_capture_mgr,
+            _TOPLEVEL_CREATE_SOURCE,
+            [("n", source), ("o", handle)],
+        )
+        return source
+
+    def _capture_frame(self, source_id: int) -> tuple[int, int, bytes]:
+        """Capture one frame from `source_id`, returning (width, height, bgra).
+
+        One pass through ext-image-copy-capture-v1: create a session over the
+        source, read the buffer constraints, fill a memfd shm buffer, attach it
+        to one frame, capture, and read the pixels back. Events for any other
+        object are dispatched to `_handle` as they arrive, so the toplevel and
+        output caches stay fresh during the wait.
+
+        Takes ownership of `source_id`: both call sites in `capture()` create
+        one just for this call and never touch it again, so this is also
+        where it gets destroyed. Every protocol object this method allocates
+        -- session, pool, buffer, frame, and `source_id` itself -- is
+        destroyed here before returning or raising, child-before-parent
+        (frame, then buffer, then pool, then session, then source); without
+        this a long run calling `screenshot()` repeatedly leaked all of them
+        on the compositor side, a shm pool the size of the screen included.
+        """
+        session = self._allocate("ext_image_copy_capture_session_v1")
+        self._send(
+            self._capture_mgr,
+            _CC_CREATE_SESSION,
+            [("n", session), ("o", source_id), ("u", 0)],
+        )
+        pending_destroy: list[tuple[int, int]] = [
+            (session, _CCS_DESTROY),
+            (source_id, _SOURCE_DESTROY),
+        ]
+        try:
+            width = height = 0
+            fmt = 0
+            while True:
+                object_id, opcode, payload = self._recv_message()
+                if object_id == session:
+                    reader = _Reader(payload)
+                    if opcode == _CCS_BUFFER_SIZE:
+                        width, height = reader.uint(), reader.uint()
+                    elif opcode == _CCS_SHM_FORMAT:
+                        fourcc = reader.uint()
+                        if fmt == 0 and fourcc in _SHM_8BIT_FORMATS:
+                            fmt = fourcc
+                    elif opcode == _CCS_DONE:
+                        break
+                    # dmabuf_device/dmabuf_format are ignored; a stopped
+                    # session surfaces as the frame never becoming ready below.
+                else:
+                    self._handle(object_id, opcode, payload)
+            if not width or not height or not fmt:
+                raise OSError("COSMIC offered no 8-bit shm format for capture")
+
+            stride = width * 4
+            size = stride * height
+            fd = os.memfd_create("pyguitest-cosmic-capture", 0)
+            try:
+                os.ftruncate(fd, size)
+                pool = self._allocate("wl_shm_pool")
+                self._send_fd(
+                    self._shm, _SHM_CREATE_POOL, [("n", pool), ("i", size)], fd
+                )
+                pending_destroy.insert(0, (pool, _SHM_POOL_DESTROY))
+                buffer = self._allocate("wl_buffer")
+                self._send(
+                    pool,
+                    _SHM_POOL_CREATE_BUFFER,
+                    [
+                        ("n", buffer),
+                        ("i", 0),
+                        ("i", width),
+                        ("i", height),
+                        ("i", stride),
+                        ("u", fmt),
+                    ],
+                )
+                pending_destroy.insert(0, (buffer, _BUFFER_DESTROY))
+                frame = self._allocate("ext_image_copy_capture_frame_v1")
+                self._send(session, _CCS_CREATE_FRAME, [("n", frame)])
+                pending_destroy.insert(0, (frame, _CCF_DESTROY))
+                self._send(frame, _CCF_ATTACH_BUFFER, [("o", buffer)])
+                self._send(
+                    frame,
+                    _CCF_DAMAGE_BUFFER,
+                    [("i", 0), ("i", 0), ("i", width), ("i", height)],
+                )
+                self._send(frame, _CCF_CAPTURE, [])
+                while True:
+                    object_id, opcode, payload = self._recv_message()
+                    if object_id == frame:
+                        if opcode == _CCF_READY:
+                            break
+                        if opcode == _CCF_FAILED:
+                            raise OSError(
+                                "COSMIC capture failed "
+                                f"(reason {_Reader(payload).uint()})"
+                            )
+                        continue  # transform/damage/presentation_time: ignore
+                    self._handle(object_id, opcode, payload)
+                data = mmap.mmap(fd, size, mmap.MAP_SHARED, mmap.PROT_READ)
+                try:
+                    return width, height, bytes(data)
+                finally:
+                    data.close()
+            finally:
+                os.close(fd)
+        finally:
+            for object_id, opcode in pending_destroy:
+                with contextlib.suppress(OSError):
+                    self._send(object_id, opcode, [])
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -512,20 +812,22 @@ class _CosmicConnection:
 
 _COSMIC_CAPABILITIES = frozenset(
     {
+        Capability.SCREEN_INFO,
         Capability.WINDOW_LIST,
         Capability.WINDOW_STATE,
         Capability.WINDOW_GEOMETRY,
         Capability.WINDOW_ACTIVATE,
         Capability.WINDOW_MINIMIZE,
         Capability.WINDOW_AT_POINT,
+        Capability.WINDOW_EVENTS,
     }
 )
-"""What COSMIC's own protocols serve, and nothing more.
+"""What COSMIC's own protocols always serve.
 
-Not WINDOW_PLACEMENT/WINDOW_RESIZE (the protocols have no move/resize
-request), not WINDOW_PID (no pid is published), not SCREEN_INFO (the
-wl_output binding is held now, but screen enumeration is not implemented),
-not WINDOW_EVENTS (needs a streaming subscription)."""
+SCREEN_CAPTURE and WINDOW_CAPTURE are added by the backend's `capabilities`
+property when the copy-capture globals are present, since those are optional
+on an older COSMIC. Not WINDOW_PLACEMENT/WINDOW_RESIZE (the protocols have no
+move/resize request) and not WINDOW_PID (no pid is published)."""
 
 
 class CosmicBackend(_WindowBackend):
@@ -539,12 +841,70 @@ class CosmicBackend(_WindowBackend):
 
     @property
     def capabilities(self) -> CapabilitySet:
-        """Listing, state, geometry, activate and minimize -- COSMIC's subset."""
-        return CapabilitySet(_COSMIC_CAPABILITIES)
+        """Window control, plus capture when the copy-capture globals exist."""
+        caps = set(_COSMIC_CAPABILITIES)
+        if self._conn._capture_mgr and self._conn._shm:
+            if self._conn._output_capture_mgr and self._conn._outputs:
+                caps.add(Capability.SCREEN_CAPTURE)
+            if self._conn._toplevel_capture_mgr:
+                caps.add(Capability.WINDOW_CAPTURE)
+        return CapabilitySet(caps)
 
     def close(self) -> None:
         """Close the Wayland connection."""
         self._conn.close()
+
+    def screens(self) -> list[Screen]:
+        """Every output, in advertised order."""
+        self.require(Capability.SCREEN_INFO)
+        return [
+            Screen(
+                index=index,
+                width=output.width,
+                height=output.height,
+                scale=output.scale,
+                name=output.name,
+            )
+            for index, output in enumerate(self._conn._outputs.values())
+        ]
+
+    def window_events(self, timeout=None):
+        """Yield WindowEvents as COSMIC pushes them.
+
+        `timeout` bounds the whole subscription in seconds; the generator ends
+        (rather than raising) once it expires. None waits indefinitely.
+        """
+        self.require(Capability.WINDOW_EVENTS)
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            if self._conn._events:
+                change, handle = self._conn._events.pop(0)
+                toplevel = self._conn._toplevels.get(handle)
+                if toplevel is not None:
+                    yield WindowEvent(
+                        change=change, window=self._window(handle, toplevel)
+                    )
+                continue
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                return
+            if not self._conn._wait_for_event(remaining):
+                return
+
+    def wait_for_window(self, title, timeout=None):
+        """Block until a window whose title matches `title` appears.
+
+        Checks existing windows first, so one already open is not missed.
+        """
+        self.require(Capability.WINDOW_EVENTS)
+        pattern = re.compile(title)
+        for existing in self.windows():
+            if pattern.search(existing.title):
+                return existing
+        for event in self.window_events(timeout=timeout):
+            if event.change in ("new", "title") and pattern.search(event.window.title):
+                return event.window
+        return None
 
     def _refresh(self) -> None:
         self._conn._sync_toplevels()
@@ -641,6 +1001,74 @@ class CosmicBackend(_WindowBackend):
         cosmic = self._cosmic_of(window)
         opcode = _ZTM_SET_MINIMIZED if minimized else _ZTM_UNSET_MINIMIZED
         self._conn._send(self._conn._manager, opcode, [("o", cosmic)])
+
+    def _output_for_region(self, region: tuple[int, int, int, int]) -> int | None:
+        """The bound output id whose bounds fully contain `region`, or None.
+
+        A region can land on any output, not just the first one `capture()`
+        would otherwise default to -- cropping it out of the wrong output's
+        buffer either raises `_crop_bgra`'s own out-of-bounds error on a
+        multi-output desktop where the region would actually fit on a
+        *different* output, or, worse, silently returns pixels from the
+        wrong screen if the coordinates happen to overlap by chance.
+        """
+        x, y, width, height = region
+        for output_id, output in self._conn._outputs.items():
+            if (
+                output.x <= x
+                and output.y <= y
+                and x + width <= output.x + output.width
+                and y + height <= output.y + output.height
+            ):
+                return output_id
+        return None
+
+    def capture(self, window=None, path=None, region=None):
+        """Screenshot the desktop, one window, or one rectangle.
+
+        A region is captured from whichever bound output actually contains
+        it, cropped out of that output's own buffer in memory. A whole-screen
+        capture (no `window`, no `region`) is the first bound output only --
+        on a multi-output desktop that is one monitor, not the whole desktop;
+        compositing every output into one image is not implemented. A window
+        is captured through its own toplevel source, which this connection
+        holds for exactly the Window handles it hands out.
+        """
+        self.require(
+            Capability.WINDOW_CAPTURE
+            if window is not None
+            else Capability.SCREEN_CAPTURE
+        )
+        region = check_region(region, window)
+        if window is not None:
+            handle = self._handle(window)
+            self._toplevel(window)  # raises WindowNotFound if it is gone
+            source = self._conn._create_toplevel_source(handle)
+            width, height, raw = self._conn._capture_frame(source)
+        else:
+            if region is not None:
+                output_id = self._output_for_region(region)
+                if output_id is None:
+                    raise CapabilityUnsupported(
+                        Capability.SCREEN_CAPTURE,
+                        self.name,
+                        f"region {tuple(region)} is not fully contained in "
+                        "any single bound output",
+                    )
+            else:
+                output_id = next(iter(self._conn._outputs))
+            source = self._conn._create_output_source(output_id)
+            width, height, raw = self._conn._capture_frame(source)
+            if region is not None:
+                x, y, rw, rh = region
+                output = self._conn._outputs[output_id]
+                raw = _crop_bgra(raw, width, height, x - output.x, y - output.y, rw, rh)
+                width, height = rw, rh
+        if path is None:
+            descriptor, path = tempfile.mkstemp(suffix=".png")
+            os.close(descriptor)
+        write_rgb(path, width, height, _bgr_rows(raw, width, height))
+        return path
 
 
 def connect_cosmic() -> CosmicBackend | None:

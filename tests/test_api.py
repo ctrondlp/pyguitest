@@ -570,6 +570,67 @@ class TestWaitForWindow(unittest.TestCase):
         self.assertEqual(gui.backend.asked, ("Editor", pyguitest._EVENT_SLICE))
         self.assertEqual(window.title, "Document - Editor")
 
+    def test_the_fast_path_normalizes_a_window_across_composite_members(self):
+        # Live-found through pyguitest-recorder on COSMIC+XWayland: the
+        # member serving WINDOW_EVENTS (no WINDOW_PLACEMENT there) is not
+        # always the one geometry()/move_window() get routed to. Without
+        # CompositeBackend._normalize_window, this returns a Window whose
+        # handle only the events member understands, and the next
+        # window-family call on it crashes in a different backend entirely.
+        # See TestNormalizeWindowAcrossEventsAndPlacement in
+        # test_composite.py for the unit-level coverage of the mechanism
+        # itself; this confirms Session.wait_for_window actually uses it.
+        from pyguitest.backends.composite import CompositeBackend
+
+        class EventsOnly(GUIBackend):
+            name = "cosmic"
+            capabilities = CapabilitySet(
+                {
+                    Capability.WINDOW_LIST,
+                    Capability.WINDOW_STATE,
+                    Capability.WINDOW_GEOMETRY,
+                    Capability.WINDOW_ACTIVATE,
+                    Capability.WINDOW_EVENTS,
+                }
+            )
+
+            def __init__(self, issued):
+                self._issued = issued
+
+            def windows(self):
+                return [self._issued]
+
+            def wait_for_window(self, title, timeout):
+                return self._issued
+
+        class PlacementOnly(GUIBackend):
+            name = "x11"
+            capabilities = CapabilitySet(
+                {
+                    Capability.WINDOW_LIST,
+                    Capability.WINDOW_STATE,
+                    Capability.WINDOW_GEOMETRY,
+                    Capability.WINDOW_ACTIVATE,
+                    Capability.WINDOW_PLACEMENT,
+                }
+            )
+
+            def __init__(self, issued):
+                self._issued = issued
+
+            def windows(self):
+                return [self._issued]
+
+        events = EventsOnly(None)
+        placement = PlacementOnly(None)
+        events._issued = Window(handle=0xFF000001, backend=events, title="Editor")
+        placement._issued = Window(handle=object(), backend=placement, title="Editor")
+        composite = CompositeBackend([events, placement])
+        gui = pyguitest.Session(composite, pyguitest.detect())
+
+        window = gui.wait_for_window("Editor", timeout=5)
+        self.assertIs(window.backend, placement)
+
     def test_a_window_the_subscription_missed_is_found_by_the_next_slice(self):
         class EventBackend(FakeBackend):
             def __init__(self):
