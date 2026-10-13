@@ -7,7 +7,52 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.17.0] — 2026-10-13
+
 ### Added
+
+- **`BackendCallTimeout`: the `atspi` backend no longer hangs forever on a
+  genuinely stuck underlying call.** Every direct dogtail/GI call in the
+  backend now runs bounded instead of called directly -- not just the
+  read-only paths (`find_elements`, `extents`, every `Element` property via
+  `_node_attr`), but every action and mutation too: `Element.click`,
+  `focus`, `set_text`, `do_action`, `select`, `expand`/`collapse`, `choose`,
+  `find`, `is_ancestor_of`, the coordinate-click fallback, the whole
+  `element_at` hit-test walk, and the `AtspiBackend` window methods
+  (`windows`, `active_window`, `is_window_viewable`, `activate_window`,
+  `geometry`) plus the internal `_frame_pid` helper. Confirmed live
+  (GhostBSD, then again on Pop!_OS/COSMIC driving the same torture-test
+  fixture): a single AT-SPI call can lock up completely -- not slow, stuck,
+  no exception, nothing left to poll -- and every `wait_for_*`/`wait_until`
+  timeout in the calling script was powerless against it, since each one
+  only checks its own deadline *between* calls to a function that itself
+  never returns control to Python at all. Chasing this one call site at a
+  time was a dead end too, twice: fixing `find_elements`/`extents`/`pid`
+  first closed one observed hang and simply moved the stall to a different,
+  still-unguarded property; later, fixing only `click()` left `grabFocus`,
+  `select`, `choose`'s combo-value write, and every window method equally
+  exposed. The fix now covers every such call site in the module, not a
+  hand-picked subset. `signal.alarm` does not reliably help either
+  (confirmed live it did not interrupt this specific hang): the call is
+  stuck inside a blocking native GI/D-Bus call that never hands control
+  back to the interpreter loop, and CPython only delivers a pending signal
+  between bytecode instructions. The fix is a worker-thread join with a
+  timeout instead -- it cannot stop the stuck call (nothing in Python can),
+  but it reliably lets the caller move on, raising the new
+  `BackendCallTimeout` rather than hanging the whole session.
+  `BackendCallTimeout` is deliberately let through every `except Exception`
+  that used to fold a quick ordinary failure into `None`/a default -- a hang
+  is not the same fact as an honest "no answer," and callers need to tell
+  them apart. Configurable per session via
+  `connect(backend_options={"atspi": {"call_timeout": ...}})` (default 20s,
+  generous against this project's own documented AT-SPI costs elsewhere).
+  Other backends are unaffected; this is atspi-specific because it is the
+  only one with a confirmed instance of this failure so far. Confirmed live,
+  end to end: a full torture-test run that previously made zero progress
+  for its entire time budget now completes a full 9-tab, ~46-menu-leaf walk
+  in one pass on GhostBSD, and a separate, genuinely stuck `click()` call on
+  Pop!_OS/COSMIC degrades to one bounded failure instead of hanging the
+  whole run.
 
 - **`Role.DIAL`, `Role.SPLIT_PANE`, `Role.LAYERED_PANE` and `Role.FILLER`.**
   Four at-spi role names a caller could reach before only by hardcoding the
@@ -75,6 +120,73 @@ All notable changes to pyguitest are recorded here. The format follows
   requested (confirmed by screenshot, and by clicking a real button).
 
 ### Fixed
+
+- **`active_window()` on the `atspi` backend no longer needs pyatspi, and no
+  longer calls a dogtail method that modern dogtail does not have.** Two
+  pre-existing faults stacked here, and the first hid the second. It called
+  `window.handle.getState()`, a camelCase alias dogtail 2.1.0 has dropped,
+  so it raised `AttributeError: 'Accessible' object has no attribute
+  'getState'` -- confirmed live on Debian 13 and Pop!_OS/COSMIC, where the
+  handle is a dogtail-extended `Atspi.Accessible` rather than a `Node`.
+  Fixing that exposed the real blocker: `_state_active()` imported pyatspi
+  for one constant, and on those boxes `import pyatspi` fails with
+  `AttributeError` -- a broken install rather than a missing one, which no
+  "is it installed" check would catch. So the call raised
+  `CapabilityUnsupported` from inside a capability the backend had already
+  advertised: `supports(Capability.WINDOW_STATE)` answered `True` while
+  every call through it failed.
+
+  Both are gone because the state is now read by *name* through the existing
+  `_node_state_names` helper (`"ACTIVE" in names`) rather than compared
+  against pyatspi's constant -- the same decision `expanded`/`expandable`
+  already made, for the same reason, and it needs neither pyatspi nor a
+  camelCase alias. `state_set` is present on every dogtail generation.
+  `wait_window_focus()` and `focus_window()` sit directly on top of this, so
+  both were unusable on those two desktops and are not any more. Found by a
+  torture-test driver run that died on its first window-focus wait.
+- **The `uinput` backend's virtual device no longer declares `KEY_POWER`,
+  which was making synthetic input silently do nothing at all.** Confirmed
+  live (Debian 13, GNOME/Wayland, a fresh reboot ruled out session drift as
+  the cause): the device's keyboard-range capability sweep included
+  `KEY_POWER` (116), and `udevadm info` showed that alone was enough for
+  `systemd-udevd` to tag the whole device `power-switch`
+  (`CURRENT_TAGS=:power-switch:`) instead of the `seat`/`uaccess` tags
+  logind grants an ordinary input device for the active session. Without
+  `uaccess`, Mutter can never open the device -- every click and keystroke
+  this backend sent was accepted by the kernel and then silently dropped,
+  session-wide, with no exception anywhere to catch, surviving a reboot
+  since it is a deterministic classification rather than transient state. No
+  GUI test needs to simulate a hardware power button; `KEY_POWER` is now
+  excluded from the declared range, nothing else about it changed.
+
+- **`macos`'s `windows()` no longer drops a genuinely on-screen modal
+  dialog.** Confirmed live: a Qt `QFileDialog` opened app-modal reports
+  `kCGWindowLayer=8` (`NSModalPanelWindowLevel`), not `0` -- `_visible_entry`
+  required exactly layer `0`, so a driver waiting for "a new window after
+  this click" never saw a file/color/font picker that was plainly on
+  screen and fully interactive, even though `gui.elements(role="window")`
+  (a different, AX-only lookup) already found it. Layer `8` is now let
+  through alongside `0`; the junk layers the original measurement ruled
+  out (the Dock at `20`, the menu bar at `24`, Control Center at `25`, and
+  layer `0`'s own non-window helper surfaces) are each their own specific
+  layer, and none of them is `8`.
+
+- **`macos`'s `activate_window()` now activates the application, not just
+  the window.** It performed `AXRaise` and, when that succeeded, never ran
+  the AppKit `NSRunningApplication.activate` branch at all. The two answer
+  different questions: `AXRaise` reorders one window *within* its
+  application -- which is what `windows()`/`active_window()` read -- while
+  the AppKit activation is what makes the application frontmost and gives
+  it the **key window**, and `macquartz` posts keys with
+  `CGEventPost(kCGHIDEventTap, ...)`, which the window server routes to the
+  frontmost application's key window rather than to whichever window was
+  raised last. Confirmed live (macOS 26.7): after an `AXRaise` alone,
+  `active_window()` named the window and `NSWorkspace`'s own
+  `frontmostApplication()` named the app, while text typed immediately
+  afterwards went to a different application entirely -- a window
+  activated for every purpose except the one a test usually wants it for.
+  Both routes now run; only a machine where *neither* answered is a
+  refusal. See `docs/validation.md` for the measurements.
 
 - **`ELEMENT_GEOMETRY` on pure Wayland can now be restored by a sibling
   backend.** AT-SPI's own screen coordinates there are not garbage, just
@@ -287,6 +399,53 @@ All notable changes to pyguitest are recorded here. The format follows
   one; an ambiguous or absent match hands back the original, mismatched
   handle rather than guessing which window was meant. Re-verified live: the
   same generated script now replays cleanly.
+
+### Documentation
+
+- **The thin docstrings across the public `Session` API are now thorough**,
+  and since `docs/api.md` is generated from them, the API reference gained
+  the same detail. The ones rewritten are those whose one-line summary left
+  out something a caller gets wrong in practice: `click`/`press_button`
+  move nothing and click wherever the pointer already is (and buttons 4/5
+  are not how to scroll -- `scroll()` is, in detents);
+  `release_key`/`release_button` leak held input state past `close()`,
+  which to a user looks like a stuck modifier or drag;
+  `press_key`/`tap_key` take backend-native key *names*, not characters,
+  and resolve no aliases (that is `send_keys`'s `{}` grammar);
+  `type_text` is the keymap-aware path and types into whatever already has
+  focus; `windows()` is ordered bottom-to-top, so the topmost window is
+  `[-1]` -- the convention `find_window`/`window_at` already resolved ties
+  with, documented only on them before; `wait()` is almost always the wrong
+  tool, with the per-condition waits named; `geometry`/`move_window`/
+  `resize_window` are requests a window manager may clamp or refuse, and
+  reading a position back after setting it is unreliable on GNOME's
+  XWayland; `screens()` has no primary flag and no per-output position;
+  `activate_window` asks once without waiting, and on macOS has to activate
+  the *application*, not just raise the window; `set_clipboard` is text-only
+  and an X11 selection can vanish with its owning process. Three carry this
+  session's own findings: `active_window()` reporting the right window is
+  *necessary but not sufficient* for keystrokes to land there (confirmed
+  live on macOS, where another process's panel took every keystroke while
+  changing no window-manager focus), and `window_at()`/`element_at()` are
+  the authoritative check for what a coordinate click will really hit
+  (confirmed live, where a widget's centre fell outside its own window,
+  landed on the Dock, and launched an unrelated application that then held
+  the keyboard for the rest of the run). The six role shorthands
+  (`button`, `text_field`, `dropdown`, `checkbox`, `menu_item`, `link`)
+  gained their shared contract -- exact name matching, `within=` scoping,
+  `ElementNotFound` rather than `None` -- documented once above them rather
+  than repeated six times.
+- **New troubleshooting entry for `BackendCallTimeout`**, including the
+  table that separates it from a `wait_for_*` timeout (one call that never
+  returned, versus a condition that never became true), what to do in the
+  order worth trying, the `backend_options={"atspi": {"call_timeout": ...}}`
+  spelling, and the caveat that raising the error does not kill the call,
+  so retrying in a loop accumulates stuck threads.
+- **`AtspiBackend.__init__`'s `call_timeout` documentation corrected.** It
+  claimed to cover `find_elements`/`extents`; it now lists every backend
+  method that honours it, and records the known limitation that `Element`'s
+  own methods are bounded to the module default instead, since an element
+  holds no reference back to the backend that produced it.
 
 ## [0.16.3] — 2026-10-05
 

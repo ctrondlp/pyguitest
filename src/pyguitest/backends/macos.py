@@ -1917,10 +1917,24 @@ class MacosBackend(GUIBackend):
         - The pair is exact: the layer-0 entries that are also on screen are
           precisely the six windows a person could see -- Terminal, TextEdit's
           four, and a first-run installer panel.
+
+        Layer 8 (`NSModalPanelWindowLevel`) is let through too, confirmed live
+        against a real, on-screen, user-interactive window the original
+        measurement above did not happen to include: a Qt `QFileDialog` opened
+        app-modal reports `kCGWindowLayer=8`, `kCGWindowIsOnscreen=True`, and a
+        real AX counterpart -- genuinely visible and genuinely a window, just
+        not at layer 0 the way an ordinary top-level one is. `windows()`
+        missing it meant a driver script waiting for "a new window after this
+        click" never saw a dialog that was plainly on screen. Layer 8 names a
+        specific, documented NSWindow level for exactly this kind of panel
+        (modal dialogs, print/color/font pickers), not a grab-bag the way plain
+        "any nonzero layer" would be -- the junk layers measured above (20, 24,
+        25, and 0's own helper surfaces) are each their own specific thing, and
+        none of them is 8.
         """
-        return (
-            bool(entry.get("kCGWindowIsOnscreen")) and entry.get("kCGWindowLayer") == 0
-        )
+        if not bool(entry.get("kCGWindowIsOnscreen")):
+            return False
+        return entry.get("kCGWindowLayer") in (0, 8)
 
     def _window_from(self, entry, titles):
         """A `Window` for one window-server entry, enriched from `titles`.
@@ -1985,8 +1999,9 @@ class MacosBackend(GUIBackend):
 
         CoreGraphics is the source of truth and Accessibility is the enrichment,
         which is the join ADR 004 describes and what a live run fixes the shape of.
-        The filter is `_visible_entry`'s pair -- on screen *and* layer 0 -- and that
-        method carries the numbers that rule out either field on its own.
+        The filter is `_visible_entry`'s pair -- on screen *and* layer 0 or 8 --
+        and that method carries the numbers that rule out either field on its
+        own, plus the live modal-dialog case that motivated adding layer 8.
 
         Titles come from the join rather than from CoreGraphics, because macOS
         withholds other applications' window names without the Screen Recording
@@ -2209,10 +2224,22 @@ class MacosBackend(GUIBackend):
           documented way and needs no permission at all, and which raises the
           application's whole window set -- AppKit has no per-window equivalent.
 
-        So the AX route is used first where the grant is in place, and the AppKit
-        one is what keeps this working on a machine without it. A handle the window
-        server no longer lists is a `WindowNotFound`; a machine that refuses both
-        routes is a typed `CapabilityUnsupported` saying which two answered.
+        **Both routes run, not one or the other.** They answer different
+        questions, and a caller who activates a window wants both answered:
+        `AXRaise` picks *which* window of the application comes forward, and
+        the AppKit activation is what makes the application itself frontmost --
+        which is what gives it the **key window**, and so where keyboard input
+        goes. Confirmed live (macOS 26.7): after an `AXRaise` alone the window
+        is visibly in front and `active_window` names it, while the *typed*
+        text still lands in whatever application was frontmost before --
+        because `macquartz` posts keys with `CGEventPost(kCGHIDEventTap, ...)`,
+        which the window server routes to the frontmost application's key
+        window and not to whichever window was most recently raised. Raising
+        without activating is therefore a window that looks activated to every
+        query this package can make and is not activated for the one purpose a
+        test usually wants it for. A handle the window server no longer lists
+        is a `WindowNotFound`; a machine where *neither* route answered is a
+        typed `CapabilityUnsupported`.
         """
         self.require(Capability.WINDOW_ACTIVATE)
         entry = self._entry_for(window.handle)
@@ -2231,11 +2258,13 @@ class MacosBackend(GUIBackend):
                     # to the AppKit route below rather than failing an activation
                     # that route could still serve.
                     pass
-        # Raising reorders the window server's list, which is what `windows` and
-        # `active_window` read, so both caches go -- including where the AX raise was
-        # the route that worked.
+        activated = pid is not None and self._activate(pid)
+        # Both routes reorder the window server's list, which is what `windows`
+        # and `active_window` read, so both caches go -- after *both* have run,
+        # rather than between them, so that nothing can refill a cache from the
+        # ordering that held partway through an activation.
         self._forget_windows()
-        if not raised and pid is not None and not self._activate(pid):
+        if not raised and not activated:
             raise CapabilityUnsupported(
                 Capability.WINDOW_ACTIVATE,
                 self.name,

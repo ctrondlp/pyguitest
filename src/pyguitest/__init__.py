@@ -43,6 +43,7 @@ from .backends import Element, GUIBackend, ImageMatch, NullBackend, Screen, Wind
 from .capabilities import TIERS, Capability, CapabilitySet, Tier
 from .errors import (
     AccessibilityViolation,
+    BackendCallTimeout,
     BackendUnavailable,
     CapabilityUnsupported,
     ClipboardMismatch,
@@ -80,7 +81,7 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T")
 
-__version__ = "0.16.3"
+__version__ = "0.17.0"
 
 __all__ = [
     "connect",
@@ -104,6 +105,7 @@ __all__ = [
     "NullBackend",
     "PyGUITestError",
     "AccessibilityViolation",
+    "BackendCallTimeout",
     "BackendUnavailable",
     "CapabilityUnsupported",
     "ClipboardMismatch",
@@ -799,7 +801,19 @@ class Session:
         return CapabilitySet(set(self.backend.capabilities) | SESSION_CAPABILITIES)
 
     def supports(self, capability: Capability) -> bool:
-        """Whether this session provides `capability`."""
+        """Whether this session provides `capability`.
+
+        For branching on what a desktop can do -- taking a screenshot where
+        capture exists, skipping that assertion where it does not. Where the
+        test simply cannot run without it, prefer require(), which raises at
+        the top of the test naming the missing capability instead of letting
+        it surface mid-run.
+
+        A True answer means the capability is wired up, not that every call
+        through it will succeed: permission can still be refused, and a
+        consent prompt can still be dismissed. See `capabilities` for the
+        whole set and report() for a readable table.
+        """
         return capability in self.capabilities
 
     def require(self, *capabilities: Capability) -> None:
@@ -887,7 +901,21 @@ class Session:
         return subprocess.run(command, **kwargs)
 
     def wait(self, seconds: float) -> None:
-        """Sleep for `seconds`. Replaces WaitSeconds."""
+        """Sleep for `seconds`. Replaces WaitSeconds.
+
+        An unconditional sleep, and almost always the wrong tool: it is
+        simultaneously too short on a loaded machine and wasted time on a
+        fast one, which is how a suite ends up both flaky and slow. Wait for
+        the thing you actually mean instead -- wait_for_window,
+        wait_window_close, wait_window_focus, wait_for_process, wait_until,
+        or sync() where the backend can prove the compositor has consumed
+        the input.
+
+        Kept because a few situations have nothing to poll: an animation
+        with no observable end state, or a deliberate pause between
+        keystrokes (for which `key_delay` and `event_delay` are the
+        session-wide form).
+        """
         time.sleep(seconds)
 
     # -- input, with the session's delays applied --------------------------
@@ -908,17 +936,50 @@ class Session:
         self._after_event()
 
     def press_button(self, button: int) -> None:
-        """Press a mouse button. 1 is left, 2 middle, 3 right."""
+        """Press a mouse button. 1 is left, 2 middle, 3 right.
+
+        Presses wherever the pointer already is -- this moves nothing --
+        and holds the button down until release_button(). For a plain click
+        use click(); for a press-move-release use drag(), which handles the
+        intermediate motion a toolkit needs to see a drag as a drag.
+        """
         self.backend.press_button(button)
         self._after_event()
 
     def release_button(self, button: int) -> None:
-        """Release a mouse button."""
+        """Release a mouse button.
+
+        A press with no matching release outlives the session: nothing here
+        tracks held buttons to let go of them on close, and the compositor
+        goes on believing the button is down -- which looks to the user like
+        a stuck drag they cannot click out of. Pair every press_button with
+        this, under try/finally if anything between them can raise, or use
+        click()/drag(), which pair them for you.
+        """
         self.backend.release_button(button)
         self._after_event()
 
     def click(self, button: int = 1) -> None:
-        """Press and release a mouse button. Replaces ClickMouseButton."""
+        """Press and release a mouse button. Replaces ClickMouseButton.
+
+        Clicks wherever the pointer already is -- this moves nothing. Pair
+        it with move_mouse(), or use click_element(), which takes its
+        destination from the element's own extents:
+
+            gui.move_mouse(x, y)
+            gui.click()
+
+            gui.click_element(gui.button("Save"))   # move and click
+
+        `button` is 1 left, 2 middle, 3 right. Do not reach for 4/5 to
+        scroll: X11's button-as-wheel encoding is not how the other
+        backends express a wheel at all -- scroll() is, in detents, on every
+        backend (see its docstring for the sign convention).
+
+        `event_delay` is applied after the press *and* after the release, so
+        a session configured with one holds the button down for that long
+        rather than emitting a zero-length click some toolkits drop.
+        """
         self.press_button(button)
         self.release_button(button)
 
@@ -1462,22 +1523,79 @@ class Session:
     # -- keyboard ----------------------------------------------------------
 
     def press_key(self, key: str) -> None:
-        """Press a key by name, without releasing it."""
+        """Press a key by name, without releasing it.
+
+        `key` is passed to the backend as written, in that backend's own
+        key vocabulary: X11 keysym names (`"Return"`, `"Escape"`,
+        `"Control_L"`, `"a"`) on X11 and the xdotool/wdotool/wtype adapters,
+        evdev names on uinput. The abbreviations in GUIBackend.KEY_ALIASES
+        (`{BAC}`, `{PGU}`) are send_keys's `{}` grammar, not this -- nothing
+        is resolved here, so a name this backend does not know surfaces as
+        the backend's own error.
+
+        The name is a key, not a character to type: press_key("A") is the A
+        *key*, not a capital A (that is Shift held plus `"a"`, or simply
+        type_text).
+
+        Use this only to *hold* a key -- a modifier while something else is
+        pressed. For a single keystroke use tap_key, and for a combination
+        prefer send_keys("^(c)"), which releases in the right order even if
+        something between the press and the release raises.
+        """
         self.backend.press_key(key)
         self._after_event()
 
     def release_key(self, key: str) -> None:
-        """Release a key by name."""
+        """Release a key by name.
+
+        Same stuck-state hazard as release_button, and worse in practice: a
+        modifier left down survives this session and silently rewrites every
+        keystroke the *user* then types, with nothing on screen to say why.
+        Nothing here tracks held keys to release them on close. Pair every
+        press_key with this under try/finally, or let send_keys do the
+        pairing.
+        """
         self.backend.release_key(key)
         self._after_event()
 
     def tap_key(self, key: str) -> None:
-        """Press and release a key. Replaces PressReleaseKey."""
+        """Press and release a key. Replaces PressReleaseKey.
+
+        The normal way to send one keystroke. Takes the same backend-native
+        key names as press_key, and like it sends a *key*, not a character
+        -- for text use type_text, and for a key with modifiers use
+        send_keys:
+
+            gui.tap_key("Return")
+            gui.send_keys("^(s)")       # Ctrl-S, modifier released for you
+        """
         self.press_key(key)
         self.release_key(key)
 
     def type_text(self, text: str, delay: float | None = None, **kwargs: Any) -> None:
-        """Type `text`, using the session's `key_delay` unless overridden."""
+        """Type `text`, using the session's `key_delay` unless overridden.
+
+        The keymap-aware path, and the right one for arbitrary or non-ASCII
+        text: it asks the backend to produce the characters rather than
+        naming keys to press, so it does not depend on the active layout the
+        way press_key does. `delay` is the pause *between characters*, and
+        defaults to the session's `key_delay` (itself 0.0 unless set at
+        connect time) -- raise it for a toolkit that drops fast input, such
+        as a field that re-validates or autocompletes on every keystroke.
+
+        This types into whatever has keyboard focus; it does not focus
+        anything. Focus the field first (`Element.focus()`, a click, or
+        press_tab), and on a multi-window app confirm the right window has
+        focus -- "the right app is frontmost" is not the same as "keys land
+        there". For literal text mixed with key combinations in one string,
+        see send_keys; for text containing its `^%+#&{}~` metacharacters,
+        see quote_for_type.
+
+        `**kwargs` reach the backend: `allow_keymap_unsafe=False` refuses to
+        type through a scancode-injecting backend (uinput, ydotool) that
+        cannot know the active layout, rather than typing the wrong
+        characters -- see GUIBackend.type_text.
+        """
         delay = self.key_delay if delay is None else delay
         self.backend.type_text(text, delay=delay, **kwargs)
 
@@ -1532,7 +1650,26 @@ class Session:
     # -- finding things ----------------------------------------------------
 
     def windows(self) -> list[Window]:
-        """Return every open window."""
+        """Return every open window.
+
+        **Ordered bottom-to-top**, so the last entry is the topmost window
+        and `windows()[-1]` is the one a user would say is in front. That
+        convention is what find_window() and window_at() both resolve ties
+        with; a caller doing its own filtering should take `[-1]`, not
+        `[0]`. On X11 the order is `_NET_CLIENT_LIST_STACKING`'s.
+
+        "Every window" is the window manager's own list, which is not the
+        same as what the user can see: it includes windows parked
+        off-screen, and a desktop's own panels and utility toplevels --
+        confirmed live on Xfce, where xfce4-panel alone holds several
+        same-titled toplevels, some of them off-screen. Filter with
+        find_windows()/find_window(), and ask is_window_viewable() where
+        "actually mapped and showing" is what matters.
+
+        Titles are not identifiers and can drift after a window opens (see
+        Window's docstring); `app_id` is the stable one where a backend
+        fills it in.
+        """
         return self.backend.windows()
 
     def find_windows(
@@ -1911,6 +2048,13 @@ class Session:
         a backend without WINDOW_GEOMETRY, WINDOW_ACTIVATE or WINDOW_STATE
         simply reports False, since not being able to ask is not a different
         answer from "it did not take".
+
+        A True here is as good as `active_window()`, which is the thing it
+        checks -- and on macOS that is necessary but not sufficient for
+        keystrokes to arrive: a panel belonging to another process can take
+        them while changing no window-manager focus, so this still reports
+        True. See `active_window()` for the measured case and for what to
+        check instead when input is vanishing.
         """
         try:
             last = self.geometry(window)
@@ -3023,13 +3167,37 @@ class Session:
     #
     # Sugar over element(): the common widget kinds, named as a user would
     # describe them rather than by their AT-SPI role string.
+    #
+    # All of them share one contract, documented here rather than repeated
+    # on each: `name` is matched exactly (pass a compiled regex, or call
+    # element() directly, for anything looser), `within=` scopes the search
+    # to one Element's subtree -- `gui.window_element(title)`, not the
+    # Window from find_window -- and a miss raises ElementNotFound rather
+    # than returning None, so a script stops at the mistake. "Name" is the
+    # accessible name a screen reader would announce, which is the widget's
+    # label, not its variable name or its tooltip.
 
     def button(self, name: str, within: Element | None = None) -> Element:
-        """Return the push button labelled `name`."""
+        """Return the push button labelled `name`.
+
+        Push buttons only. A toolbar item, a tab, or a menu entry that looks
+        like a button to a user usually publishes a different role -- reach
+        for menu_item(), or element(role=...), rather than assuming this
+        covers them.
+        """
         return self.element(role=Role.PUSH_BUTTON, name=name, within=within)
 
     def text_field(self, name: str, within: Element | None = None) -> Element:
-        """Return the text box named `name`."""
+        """Return the text box named `name`.
+
+        Tries three roles in order -- ENTRY, TEXT, PASSWORD_TEXT -- because
+        no single one covers every toolkit's idea of a text box: at-spi2
+        versions without a dedicated single-line role report one as `text`,
+        and a password field is its own role everywhere.
+
+        A read-only field is still returned; it simply never reports typed
+        input (its READ_ONLY state is the honest signal to check first).
+        """
         for role in (Role.ENTRY, Role.TEXT, Role.PASSWORD_TEXT):
             found = self.elements(role=role, name=name, within=within)
             if found:
@@ -3050,15 +3218,39 @@ class Session:
             return self.element(role=Role.COMBO_BOX, description=name, within=within)
 
     def checkbox(self, name: str, within: Element | None = None) -> Element:
-        """Return the check box named `name`."""
+        """Return the check box named `name`.
+
+        Check boxes only, not radio buttons or toggle buttons -- each is its
+        own role. Read the returned element's `checked` to see its state,
+        and `checkable` first: `checked` answers a real boolean on
+        everything, whether or not it has a box to check.
+        """
         return self.element(role=Role.CHECK_BOX, name=name, within=within)
 
     def menu_item(self, name: str, within: Element | None = None) -> Element:
-        """Return the menu item named `name`."""
+        """Return the menu item named `name`.
+
+        Finding a menu item does not require its menu to be open -- the
+        accessible tree publishes the whole structure -- so the usual way to
+        invoke one is to find it and `click()` it, with no need to click
+        through its parent menus first.
+
+        A submenu's own entry carries this role too, and a checkable item
+        reports its state through `checked`. Top-level menu bar entries
+        ("File") may publish `menu` rather than `menu item` depending on the
+        toolkit; use element(role=...) where that distinction matters.
+        """
         return self.element(role=Role.MENU_ITEM, name=name, within=within)
 
     def link(self, name: str, within: Element | None = None) -> Element:
-        """Return the link named `name`."""
+        """Return the link named `name`.
+
+        The link's text is its name. A Chromium or Electron application
+        publishes no accessible tree at all until an assistive technology is
+        announced, so this raising ElementNotFound on every link in such an
+        app is a sign of that rather than of a wrong name -- see
+        docs/troubleshooting.md.
+        """
         return self.element(role=Role.LINK, name=name, within=within)
 
     # -- delegated to the backend ------------------------------------------
@@ -3126,35 +3318,146 @@ class Session:
         return self.backend.wait_for_pointer_activation(timeout=timeout)
 
     def screens(self) -> list[Screen]:
-        """Every output, in advertised order."""
+        """Every output, in advertised order.
+
+        "Advertised order" is the display server's own, which is not a
+        statement about which output the desktop calls primary -- there is
+        no primary flag here, so a multi-monitor test should identify an
+        output by `name` rather than trusting index 0. The `screen=`
+        argument on move_mouse()/window_at() indexes this list.
+
+        A `Screen` reports size, scale and name but *not* its position in
+        the desktop's coordinate space, so this alone cannot say where one
+        output sits relative to another. `width`/`height` are physical
+        pixels, the same units geometry() and screenshot() use; `scale` is
+        DPI over 96 and never a pixel count.
+        """
         return self.backend.screens()
 
     def active_window(self) -> Window | None:
-        """The currently focused window, or None."""
+        """The currently focused window, or None if nothing holds focus.
+
+        What the *window manager* considers focused, which is not a promise
+        about where injected keystrokes will land. The two can disagree:
+        confirmed live on macOS, where a panel belonging to another process
+        (Quick Note's) took every keystroke while this kept correctly
+        reporting the application's own window, because that panel changed
+        no window-manager focus. So treat a matching answer here as
+        necessary, not sufficient -- if input is vanishing, check what is
+        really under the cursor with window_at()/element_at() rather than
+        trusting this.
+
+        None is an ordinary answer, not an error: an empty desktop, or a
+        moment between one window losing focus and the next gaining it. Use
+        wait_window_focus() to wait for a specific window instead of polling
+        this.
+        """
         return self.backend.active_window()
 
     def is_window_viewable(self, window: Window) -> bool:
-        """Whether `window` is currently mapped and showing."""
+        """Whether `window` is currently mapped and showing.
+
+        The honest test for "is this on screen", as against merely present
+        in windows() -- which also lists off-screen and utility toplevels.
+        A one-shot state read, deliberately not a wait: wait_for_window()
+        and wait_window_close() are the polling forms.
+
+        "Showing" is about map state, not visibility to a human: a window
+        fully covered by another still answers True.
+        """
         return self.backend.is_window_viewable(window)
 
     def window_at(self, x: int, y: int, screen: int = 0) -> Window | None:
-        """The topmost window covering a screen coordinate, or None."""
+        """The topmost window covering a screen coordinate, or None.
+
+        The authoritative answer to "what will a click here actually hit",
+        and worth asking before a coordinate click rather than after. A
+        control's reported rectangle can lie outside its own window --
+        scrolled below the fold, say -- and clicking its centre then hits
+        whatever else owns that point: confirmed live on macOS, where a
+        widget's centre landed on the Dock, launched an unrelated
+        application and handed it the keyboard focus for the rest of the
+        run. element_at() is the finer-grained form of the same check.
+
+        Resolves ties the way windows() is ordered: topmost wins. None
+        means no window covers the point -- bare desktop, or off every
+        output.
+        """
         return self.backend.window_at(x, y, screen)
 
     def geometry(self, window: Window) -> tuple[int, int, int, int]:
-        """`window`'s (x, y, width, height) in screen coordinates."""
+        """`window`'s (x, y, width, height) in screen coordinates.
+
+        The most commonly missing capability (Capability.WINDOW_GEOMETRY),
+        and raises CapabilityUnsupported where it is absent rather than
+        guessing. Wayland gives a client no window coordinates of its own,
+        so there it depends on a compositor-specific route being available
+        (gnomeshell, kdotool, cosmic) -- `supports(Capability.
+        WINDOW_GEOMETRY)` is the way to ask, and `pyguitest doctor` says
+        what is missing.
+
+        `x, y` is the top-left corner. Whether decorations are included
+        varies by window manager, so compare geometries read in one session
+        rather than hard-coding pixel expectations, and re-read after any
+        move, resize or layout change instead of caching a snapshot.
+
+        One known caveat worth reading before building on this: on GNOME's
+        XWayland specifically, a geometry read straight after move_window()
+        can report a position nowhere near where the window actually
+        renders -- see docs/troubleshooting.md and validation.md. Do not
+        write a test that sets a position and reads it back.
+        """
         return self.backend.geometry(window)
 
     def move_window(self, window: Window, x: int, y: int) -> None:
-        """Move a window's top-left corner to (x, y)."""
+        """Move a window's top-left corner to (x, y).
+
+        A request, not a command: a window manager may clamp it to keep the
+        window on an output, offset it by the decoration frame, or refuse a
+        maximized or fullscreen window outright. Nothing here waits for or
+        verifies the result.
+
+        Do not assert by reading geometry() back -- on GNOME's XWayland
+        that read can report a position nowhere near where the window
+        actually renders, even though the move visibly worked. See
+        docs/troubleshooting.md.
+        """
         self.backend.move_window(window, x, y)
 
     def resize_window(self, window: Window, width: int, height: int) -> None:
-        """Resize a window to `width` by `height`."""
+        """Resize a window to `width` by `height`.
+
+        Also a request: a client's own minimum and maximum size hints win,
+        and a tiling window manager may ignore it completely. Whether the
+        size covers the decoration frame or just the client area varies by
+        window manager, so size a window relative to a geometry() read in
+        the same session rather than to a hard-coded number.
+
+        Resizing reflows the application's layout, so every element extent
+        read before this is stale -- re-read them afterwards.
+        """
         self.backend.resize_window(window, width, height)
 
     def activate_window(self, window: Window) -> None:
-        """Raise and focus. There is no raise-without-focus operation."""
+        """Raise and focus. There is no raise-without-focus operation.
+
+        The two are one operation on purpose: no desktop this supports
+        offers a reliable raise that leaves focus alone, so splitting them
+        would mean promising something a backend cannot keep.
+
+        Asks once and returns immediately -- it does not wait for the
+        request to be honored. A window manager may take a moment (or
+        refuse outright, under a focus-stealing-prevention policy), so a
+        script that clicks or types straight afterwards cannot tell whether
+        focus arrived. Follow it with wait_window_focus() whenever the next
+        step is input.
+
+        "Raise" can mean less than it sounds like: on macOS, raising a
+        window only reorders it *within* its own application, and the
+        application itself has to be activated for keystrokes to reach it
+        at all -- this does both there. On an application with several
+        windows, raising one does not raise its siblings.
+        """
         self.backend.activate_window(window)
 
     def wait_window_focus(
@@ -3183,7 +3486,17 @@ class Session:
         )
 
     def minimize_window(self, window: Window, minimized: bool = True) -> None:
-        """Minimize a window, or restore it when `minimized` is False."""
+        """Minimize a window, or restore it when `minimized` is False.
+
+        A minimized window stays in windows() -- it still exists, so
+        find_window() keeps matching it. is_window_viewable() is what
+        distinguishes the two states.
+
+        Minimizing usually unmaps the window, which can make its elements
+        stop publishing extents (or publish empty ones) until it is
+        restored; restoring does not re-raise or re-focus it, so follow
+        with activate_window() where the next step is input.
+        """
         self.backend.minimize_window(window, minimized)
 
     def window_events(self, timeout: float | None = None) -> Iterator[WindowEvent]:
@@ -3196,7 +3509,17 @@ class Session:
         return self.backend.window_events(timeout=timeout)
 
     def root_element(self) -> Element:
-        """The accessible-tree root. The replacement for the X11 window tree."""
+        """The accessible-tree root. The replacement for the X11 window tree.
+
+        The desktop-wide root: its children are *applications*, whose
+        children are their windows. Rarely what a test wants directly --
+        elements()/element() search from here already, and
+        window_element(title) is the scoped starting point for one window.
+
+        Reach for it to enumerate what is running, or as a `within=` of
+        last resort. Walking the whole tree is expensive: an unscoped,
+        unfiltered walk crosses every application on the desktop.
+        """
         return self._bind(self.backend.root_element())
 
     def extents(self, element: Element) -> tuple[int, int, int, int] | None:
@@ -3258,7 +3581,18 @@ class Session:
     def set_clipboard(self, text: str, primary: bool = False) -> None:
         """Replace the text content of the clipboard, or of PRIMARY.
 
-        See `get_clipboard` on `primary=`.
+        Replaces rather than appends, and the two selections are
+        independent: writing the clipboard never touches PRIMARY or the
+        other way round. See `get_clipboard` on `primary=`.
+
+        Text only -- there is no API here for images or other flavours, and
+        setting text clears whatever richer content the selection held.
+
+        On X11 a selection is owned by a live process rather than stored by
+        the server, so what happens after the owner exits is the desktop's
+        business: with no clipboard manager running, a selection written by
+        a process that then exits can simply vanish. Read it back with
+        assert_clipboard() where the test depends on it.
         """
         self.backend.set_clipboard(text, primary=primary)
 
@@ -3289,24 +3623,76 @@ class Session:
     # gets CapabilityUnsupported the same way as every operation above,
     # rather than the AttributeError a failed dynamic forward used to give.
 
+    # The three global input-state reads. They share one caveat, documented
+    # here rather than three times over: no Wayland compositor permits
+    # reading global input state at all -- it is what a keylogger reads --
+    # so these are absent there, and under XWayland they answer only for X's
+    # world. Where XWayland cannot answer it returns **the last value it had
+    # rather than an error**: measured on GNOME Shell 51.beta, a pointer
+    # commanded over a native Wayland surface went on reporting the previous
+    # position indefinitely. A stale coordinate is a well-formed answer, so
+    # this fails silently -- an assertion on it fails somewhere else
+    # entirely, or passes for the wrong reason. See
+    # docs/troubleshooting.md#pointer-and-key-state-reads-look-stale.
+
     def pointer_position(self) -> tuple[int, int]:
-        """The global pointer position. Replaces GetMousePos."""
+        """The global pointer position. Replaces GetMousePos.
+
+        In the coordinate space `screens()` reports. Works on X11, Windows
+        and macOS; see the note above for why an XWayland answer can be
+        silently stale. To check where a click will land, prefer
+        window_at()/element_at() over comparing this against an expectation.
+        """
         return self.backend.pointer_position()
 
     def is_button_pressed(self, button: int) -> bool:
-        """Whether a mouse button is currently held down."""
+        """Whether a mouse button is currently held down.
+
+        Same numbering as click() -- 1 left, 2 middle, 3 right -- and
+        reports the *desktop's* state, so a button a user is physically
+        holding reads as pressed too, not only one this session injected.
+        See the note above for the Wayland and XWayland caveats.
+        """
         return self.backend.is_button_pressed(button)
 
     def is_key_pressed(self, key: str) -> bool:
-        """Whether a key is currently held down. Replaces IsKeyPressed."""
+        """Whether a key is currently held down. Replaces IsKeyPressed.
+
+        Takes the same backend-native key name as press_key. Useful for
+        asserting a modifier was actually released after a combination; see
+        the note above, and be aware key state under XWayland is accurate
+        only while an X client holds focus.
+        """
         return self.backend.is_key_pressed(key)
 
     def set_window_title(self, window: Window, title: str) -> None:
-        """Replaces SetWindowName. Impersonation is possible under X11."""
+        """Replaces SetWindowName. Impersonation is possible under X11.
+
+        Renames *another* application's window, which X11 permits any client
+        to do -- that is the impersonation note, and the reason no Wayland
+        protocol offers it. Mostly useful for tagging a window a test
+        created so later lookups are unambiguous.
+
+        The application may well rename it back: a title is the client's to
+        set, and anything that redraws it (a document change, a tab switch)
+        overwrites this. Do not use it as durable identity -- `app_id` is
+        the stable handle where a backend fills it in.
+        """
         self.backend.set_window_title(window, title)
 
     def lower_window(self, window: Window) -> None:
-        """Replaces LowerWindow -- no foreign-toplevel protocol offers this."""
+        """Replaces LowerWindow -- no foreign-toplevel protocol offers this.
+
+        Sends a window to the bottom of the stack. There is no Wayland
+        route: the foreign-toplevel protocols expose activate and close but
+        nothing to lower, so this raises CapabilityUnsupported there rather
+        than approximating it by raising everything else.
+
+        Not a mirror of activate_window(), which deliberately couples
+        raising with focusing: this only restacks, and what happens to
+        keyboard focus afterwards is the window manager's policy. Read
+        active_window() if the next step depends on it.
+        """
         self.backend.lower_window(window)
 
     def is_window_cursor(self, window: Window, shape: int) -> bool:
@@ -3352,7 +3738,22 @@ class Session:
         return getattr(backend, attr)
 
     def close(self) -> None:
-        """Release the backend's resources."""
+        """Release the backend's resources.
+
+        Closes display connections, virtual input devices and any portal or
+        libei session the backend opened. Prefer the context-manager form,
+        which closes on the way out even if the body raises:
+
+            with pyguitest.connect() as gui:
+                ...
+
+        What this does *not* do is undo input state: a key or button left
+        down by press_key/press_button stays down afterwards, because
+        nothing here tracks what a caller is holding. Release them yourself
+        -- see release_key. Applications started with start_app() are also
+        unaffected; use that as a context manager, or terminate them, to
+        avoid leaving windows behind.
+        """
         self.backend.close()
 
     def __enter__(self) -> Session:

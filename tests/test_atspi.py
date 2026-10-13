@@ -376,12 +376,12 @@ class AtspiTestCase(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def backend(self, session_type=SessionType.X11):
+    def backend(self, session_type=SessionType.X11, **kwargs):
         env = detect({"DISPLAY": ":0", "XDG_SESSION_TYPE": "x11"})
         import dataclasses
 
         return self.atspi.AtspiBackend(
-            dataclasses.replace(env, session_type=session_type)
+            dataclasses.replace(env, session_type=session_type), **kwargs
         )
 
 
@@ -1078,36 +1078,50 @@ class TestWindows(AtspiTestCase):
         self.assertEqual(windows[0].app_id, "gedit")
 
 
-class TestActiveWindow(AtspiTestCase):
-    """A missing pyatspi must raise typed, not crash active_window().
+_FAKE_SCREEN_COORDS = 0
+"""`Atspi.CoordType.SCREEN`'s value, as a plain int: the fakes compare it
+numerically and never need the real enum."""
 
-    It is imported bare inside _state_active, not through the guarded
-    _dogtail() pattern, and is declared in no dependency list -- only
-    dogtail is pulled in by the atspi extra, with pyatspi meant to come
-    from the distro. A box with dogtail but not pyatspi used to get a bare
-    ImportError from active_window() on a backend that otherwise looked
-    fully constructed.
+
+class TestActiveWindow(AtspiTestCase):
+    """active_window() must not depend on pyatspi being importable.
+
+    pyatspi is declared in no dependency list -- only dogtail comes from
+    the atspi extra, with pyatspi meant to arrive from the distribution --
+    so a box can have a perfectly working accessibility stack without it.
+    Confirmed live on Debian 13 and Pop!_OS/COSMIC, where `import pyatspi`
+    fails with AttributeError (a broken install, not a missing one) and
+    this call used to raise CapabilityUnsupported from inside a capability
+    the backend had already advertised as available. Reading the state set
+    by name needs neither pyatspi nor a camelCase dogtail alias.
     """
 
-    def test_missing_pyatspi_raises_a_typed_error_not_a_bare_import_error(self):
-        # pyatspi is genuinely not installed in this environment, so this
-        # exercises the real failure path rather than a simulated one.
+    def test_active_window_works_without_pyatspi(self):
         with mock.patch.dict(sys.modules, {"pyatspi": None}):
             gui = self.backend()
-            with self.assertRaises(CapabilityUnsupported) as ctx:
-                gui.active_window()
-            self.assertIn("pyatspi", str(ctx.exception))
-
-    def test_active_window_is_found_once_pyatspi_is_available(self):
-        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
-            gui = self.backend()
-            self.frame._active = True
+            self.frame.state_set = ["ACTIVE"]
             self.assertEqual(gui.active_window().title, "Document - Editor")
 
     def test_returns_none_when_no_frame_is_active(self):
-        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+        with mock.patch.dict(sys.modules, {"pyatspi": None}):
             gui = self.backend()
+            self.frame.state_set = []
             self.assertIsNone(gui.active_window())
+
+    def test_a_pyatspi_dependent_call_still_raises_typed_not_bare(self):
+        """The paths that *do* need pyatspi keep their typed failure.
+
+        active_window no longer needs it, but element geometry still does.
+        The guarantee under test is the one that mattered originally: a box
+        with dogtail and no usable pyatspi gets CapabilityUnsupported
+        naming pyatspi, not a bare ImportError escaping from inside a
+        backend that otherwise looks fully constructed.
+        """
+        with mock.patch.dict(sys.modules, {"pyatspi": None}):
+            gui = self.backend()
+            with self.assertRaises(CapabilityUnsupported) as ctx:
+                gui._pyatspi(Capability.ELEMENT_GEOMETRY)
+            self.assertIn("pyatspi", str(ctx.exception))
 
 
 class TestElements(AtspiTestCase):
@@ -1131,11 +1145,93 @@ class TestElements(AtspiTestCase):
         )
 
 
-class _FakeWindow:
-    __slots__ = ("pid",)
+class _HangingFindChildrenNode(FakeNode):
+    """A node whose `findChildren` never returns, within any test budget.
 
-    def __init__(self, pid):
+    Stands in for the real, live-confirmed AT-SPI hang `BackendCallTimeout`
+    exists for (a `QTreeView`, GhostBSD): the call simply never comes back,
+    no exception, nothing to catch. A `threading.Event` the test can set is
+    not needed here -- the worker thread `_run_bounded` starts is
+    `daemon=True` precisely so a thread that never finishes (this one)
+    cannot block the test process either.
+    """
+
+    def findChildren(self, pred):
+        import time
+
+        time.sleep(999)
+        return []  # pragma: no cover - never reached within the test timeout
+
+
+class _HangingExtentsComponent(FakeComponent):
+    def getExtents(self, coord_type):
+        import time
+
+        time.sleep(999)
+        return FakeRect(0, 0, 0, 0)  # pragma: no cover - never reached
+
+
+class _HangingExtentsNode(FakeNode):
+    """A node whose Component interface answers, but `getExtents` hangs.
+
+    The other half of the same live-confirmed hang, one level down
+    (`_extents`'s own `getExtents` call rather than `find_elements`'s
+    `findChildren`).
+    """
+
+    def queryComponent(self):
+        if not self._component:
+            raise NotImplementedError("no Component interface")
+        return _HangingExtentsComponent(self)
+
+
+class TestBackendCallTimeout(AtspiTestCase):
+    """A worker-thread-bounded call that genuinely never returns is reported.
+
+    Reported as hung rather than silently taking the whole session down
+    with it -- see atspi.py's `_run_bounded` and errors.py's
+    `BackendCallTimeout` for the live incident this guards against.
+    """
+
+    def test_find_elements_raises_on_a_genuinely_hung_call(self):
+        gui = self.backend(call_timeout=0.05)
+        hung = _HangingFindChildrenNode("Model Tree", "tree")
+        self.frame.children.append(hung)
+        self.addCleanup(self.frame.children.remove, hung)
+        with self.assertRaises(pyguitest.BackendCallTimeout):
+            gui.find_elements(role="tree", within=self.atspi.Element(self.frame))
+
+    def test_extents_raises_on_a_genuinely_hung_call(self):
+        gui = self.backend(call_timeout=0.05)
+        hung = _HangingExtentsNode("Model Tree", "tree", position=(1, 2), size=(3, 4))
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            with self.assertRaises(pyguitest.BackendCallTimeout):
+                gui.extents(self.atspi.Element(hung))
+
+    def test_an_ordinary_fast_call_is_unaffected(self):
+        # A short call_timeout must not misfire against a call that
+        # actually returns promptly -- the guard is for a call that never
+        # comes back at all, not a blanket slowdown.
+        gui = self.backend(call_timeout=0.05)
+        found = gui.find_elements(role="push button")
+        self.assertEqual([e.name for e in found], ["OK", "Cancel"])
+
+    def test_a_quick_ordinary_failure_still_degrades_to_none(self):
+        # An element with no Component interface at all still answers None,
+        # same as before this guard existed -- only a genuine hang becomes
+        # BackendCallTimeout, not every other way extents() can fail.
+        gui = self.backend(call_timeout=0.05)
+        no_component = FakeNode("No Geometry", "label", component=False)
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertIsNone(gui.extents(self.atspi.Element(no_component)))
+
+
+class _FakeWindow:
+    __slots__ = ("pid", "title")
+
+    def __init__(self, pid, title=None):
         self.pid = pid
+        self.title = title
 
 
 class _FakeWindowGeometrySource:
@@ -1151,6 +1247,28 @@ class _FakeWindowGeometrySource:
 
     def windows(self):
         return [_FakeWindow(self._pid)]
+
+    def geometry(self, window):
+        return (*self._offset, 1280, 768)
+
+
+class _FakeTitleOnlyGeometrySource:
+    """A sibling backend standing in for `cosmic`.
+
+    `pid` is always `None` on every `Window` this offers -- not a gap in
+    this fake, but the real thing: confirmed against
+    `zcosmic_toplevel_info_v1`'s own protocol XML (v3) that no pid-bearing
+    event exists there at all, so `cosmic.py`'s real `windows()` can never
+    populate it either. Keyed by title instead, the only identity this
+    source can ever offer.
+    """
+
+    def __init__(self, title, offset):
+        self._title = title
+        self._offset = offset
+
+    def windows(self):
+        return [_FakeWindow(None, title=self._title)]
 
     def geometry(self, window):
         return (*self._offset, 1280, 768)
@@ -1192,6 +1310,54 @@ class TestWaylandElementGeometry(AtspiTestCase):
         self.frame._pid = 4242
         gui = self.backend(SessionType.WAYLAND)
         gui.set_window_geometry_source(_FakeWindowGeometrySource(9999, (0, 32)))
+        button = gui.find_element(name="OK")
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertIsNone(gui.extents(button))
+
+    def test_falls_back_to_title_when_the_source_never_has_a_pid(self):
+        # COSMIC, confirmed live and against the protocol XML (see
+        # _FakeTitleOnlyGeometrySource's own docstring): the geometry
+        # source's windows() always answers pid=None, not just this one.
+        # frame._pid is deliberately left unset here (defaults to 0 in
+        # FakeNode) to assert this path does not depend on the frame side
+        # having a pid either -- only a title.
+        gui = self.backend(SessionType.WAYLAND)
+        gui.set_window_geometry_source(
+            _FakeTitleOnlyGeometrySource("Document - Editor", (0, 32))
+        )
+        button = gui.find_element(name="OK")
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertEqual(gui.extents(button), (10, 52, 80, 30))
+
+    def test_pid_match_is_tried_before_the_title_fallback(self):
+        # A source offering both a correctly-pid-matched window and a
+        # same-titled-but-wrong one must use the pid match, not stumble
+        # into the title fallback by processing windows() in the wrong
+        # order.
+        class _MixedSource:
+            def windows(self):
+                return [
+                    _FakeWindow(4242, title="Document - Editor"),
+                    _FakeWindow(None, title="Document - Editor"),
+                ]
+
+            def geometry(self, window):
+                return (
+                    (0, 32, 1280, 768) if window.pid == 4242 else (999, 999, 1280, 768)
+                )
+
+        self.frame._pid = 4242
+        gui = self.backend(SessionType.WAYLAND)
+        gui.set_window_geometry_source(_MixedSource())
+        button = gui.find_element(name="OK")
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertEqual(gui.extents(button), (10, 52, 80, 30))
+
+    def test_no_title_match_either_falls_back_to_unsupported(self):
+        gui = self.backend(SessionType.WAYLAND)
+        gui.set_window_geometry_source(
+            _FakeTitleOnlyGeometrySource("Some Other Window", (0, 32))
+        )
         button = gui.find_element(name="OK")
         with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
             self.assertIsNone(gui.extents(button))
@@ -1703,6 +1869,35 @@ class TestElementGeometry(AtspiTestCase):
         with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
             self.assertEqual(gui.element_at(20, 30).name, "OK")
             self.assertEqual(gui.element_at(120, 30).name, "Cancel")
+
+    def test_element_at_works_without_pyatspi(self):
+        """`element_at` wanted one constant from pyatspi and nothing else.
+
+        The same stacked fault `active_window` had, in a second method:
+        a pyatspi whose own `import` fails -- confirmed live on Debian 13
+        and Pop!_OS/COSMIC, where it raises AttributeError rather than
+        ImportError -- made this refuse on a desktop whose accessibility
+        stack was otherwise fine. `extents` had already routed around it
+        with `Atspi.CoordType.SCREEN`; this had not. Patched to None rather
+        than to a fake, so the fallback is what answers.
+        """
+        gui = self.gui()
+        # The GI fallback is patched rather than executed. Importing a real
+        # typelib into this process is a global side effect, and doing it
+        # here was measured breaking a *later* `from gi.repository import
+        # Gio` in the portal suite with "metaclass conflict", which that
+        # backend then reported as "PyGObject is not installed". What this
+        # test needs to know is only that the fallback is reached and its
+        # value used when pyatspi is unavailable.
+        with (
+            mock.patch.dict(sys.modules, {"pyatspi": None}),
+            mock.patch.object(
+                self.atspi, "_gi_screen_coords", return_value=_FAKE_SCREEN_COORDS
+            ) as coords,
+        ):
+            self.assertEqual(gui.element_at(20, 30).name, "OK")
+            self.assertEqual(gui.element_at(120, 30).name, "Cancel")
+        self.assertTrue(coords.called, "the pyatspi-free fallback was not used")
 
     def test_element_at_descends_past_the_frame_to_a_leaf(self):
         # The frame claims the point first; the answer must be the deepest

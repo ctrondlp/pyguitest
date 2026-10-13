@@ -59,6 +59,7 @@ keywords = [
     "ui-automation", "uia",
     "linux", "bsd", "freebsd", "windows", "win32", "macos", "quartz", "cocoa",
     "x11", "wayland", "xwayland", "gnome", "kde", "sway",
+    "hyprland", "wlroots", "niri", "cosmic", "pop-os", "arch-linux",
     "accessibility", "at-spi", "atspi", "dogtail", "ax", "comtypes", "pyobjc",
     "xdotool", "libei", "cgevent",
     "screenshot", "clipboard", "template-matching",

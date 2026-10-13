@@ -86,7 +86,7 @@ The recommended way to drive an application: match on what a widget is and what 
 | `windows()` | `WINDOW_LIST` |  | Return every open window. |
 | `find_window(title: str \| re.Pattern[str] \| None = None, app_id: str \| Sequence[str] \| None = None)` | `WINDOW_LIST` |  | The topmost window matching `title` and/or `app_id`. |
 | `find_windows(title: str \| re.Pattern[str] \| None = None, app_id: str \| Sequence[str] \| None = None)` | `WINDOW_LIST` |  | Every window matching `title` and/or `app_id` (exact). |
-| `active_window()` | `WINDOW_STATE` |  | The currently focused window, or None. |
+| `active_window()` | `WINDOW_STATE` |  | The currently focused window, or None if nothing holds focus. |
 | `window_at(x: int, y: int, screen: int = 0)` | `WINDOW_AT_POINT` |  | The topmost window covering a screen coordinate, or None. |
 | `geometry(window: Window)` | `WINDOW_GEOMETRY` |  | `window`'s (x, y, width, height) in screen coordinates. |
 | `move_window(window: Window, x: int, y: int)` | `WINDOW_PLACEMENT` |  | Move a window's top-left corner to (x, y). |
@@ -414,6 +414,7 @@ WINDOW_ROLES
 |-----------|-------------|
 | `PyGUITestError` | Base for every error raised by this package. |
 | `AccessibilityViolation` | The accessible tree is missing names, or reuses one ambiguously. |
+| `BackendCallTimeout` | A single backend call ran past its own time budget and was abandoned. |
 | `BackendUnavailable` | No backend could drive the current session. |
 | `CapabilityUnsupported` | The active backend cannot perform this operation. |
 | `ClipboardMismatch` | The clipboard does not hold the text that was expected. |
@@ -450,6 +451,7 @@ WINDOW_ROLES
 | `NullBackend` | A backend for sessions with no usable display server. |
 | `PyGUITestError` | Base for every error raised by this package. |
 | `AccessibilityViolation` | The accessible tree is missing names, or reuses one ambiguously. |
+| `BackendCallTimeout` | A single backend call ran past its own time budget and was abandoned. |
 | `BackendUnavailable` | No backend could drive the current session. |
 | `CapabilityUnsupported` | The active backend cannot perform this operation. |
 | `ClipboardMismatch` | The clipboard does not hold the text that was expected. |

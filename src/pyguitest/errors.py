@@ -114,6 +114,42 @@ class PortalTimeout(PyGUITestError):
         )
 
 
+class BackendCallTimeout(PyGUITestError):
+    """A single backend call ran past its own time budget and was abandoned.
+
+    Distinct from the `timeout` on a `wait_for_*`/`wait_until` call, which
+    bounds how long *polling* waits for a condition to become true between
+    repeated calls to the backend. This is the narrower, stranger failure
+    underneath that: one single call -- not a loop of them -- simply never
+    returns at all, with no exception and nothing left to poll. Confirmed
+    live against AT-SPI/dogtail (GhostBSD, a `QTreeView` in a torture-test
+    fixture): one `find_elements()` call touching that one widget's subtree
+    locked up completely -- not slow, stuck -- and took the whole calling
+    script down with it, since every `wait_for_*` timeout in that script was
+    only ever checking its deadline *between* calls to a function that
+    itself never returned control to Python at all. `signal.alarm` does not
+    reliably help here either: confirmed live that it did not interrupt this
+    specific hang, which is stuck inside a blocking native (GI/D-Bus) call
+    that never hands control back to the interpreter loop, and CPython only
+    delivers a pending signal between bytecode instructions.
+
+    The call is not actually killed when this is raised -- nothing in Python
+    can forcibly stop another thread's blocking native call -- so it may
+    still be running in the background afterward; see whichever backend
+    raised this for what that means there.
+    """
+
+    def __init__(self, what: str, timeout: float) -> None:
+        """Record what call this was and the budget it exceeded."""
+        self.what = what
+        self.timeout = timeout
+        super().__init__(
+            f"{what} did not return within {timeout:g}s and was abandoned "
+            "(the call itself hung, not merely ran slowly -- see "
+            "BackendCallTimeout's own docstring)"
+        )
+
+
 class ElementNotFound(PyGUITestError):
     """No accessible element matched the search.
 

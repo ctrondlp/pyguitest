@@ -27,6 +27,10 @@ been tried at all". The same record sorted that way instead:
 - **Ubuntu 24.04 LTS, GNOME Shell 46** — [the older-shell
   pass](#run-live-on-ubuntu-2404-lts-gnome-shell-46-wayland), which is where
   several "newer Mutter does this, older does not" answers come from.
+- **Debian 13 and Pop!_OS/COSMIC, Wayland, with dogtail 2.1.0** — [three
+  faults in one call path](#dogtail-210-and-a-broken-pyatspi-debian-13-and-cosmic-2026-10-13):
+  a camelCase alias modern dogtail no longer has, a pyatspi whose own import
+  fails, and an unversioned GI import that broke an unrelated backend.
 - **X11, properly** — [a real X11 session, Xfce under
   xfwm4, and Xvfb against GTK3 and GTK4](#run-live-on-a-real-x11-session):
   the whole API including tier 6, and the two caveats XWayland has that a
@@ -51,6 +55,17 @@ been tried at all". The same record sorted that way instead:
   swapped for a fresh one.
 - **sway (wlroots), headless and genuinely pure Wayland** — window control
   and the IPC sockets, run with no display server to fall back on.
+- **GhostBSD (X11), a genuinely hung AT-SPI call** — [`find_elements`
+  against a `QTreeView` locked up completely, and `signal.alarm` could not
+  rescue it](#ghostbsd-x11-a-genuinely-hung-at-spi-call-2026-10-11): why
+  `BackendCallTimeout` exists and why it is a worker-thread join, not a
+  signal handler.
+- **macOS 26.7, two window bugs found by driving a Qt fixture** — [a modal
+  dialog `windows()` could not see, and a window raised without its
+  application being
+  activated](#macos-267-two-window-bugs-found-by-driving-a-qt-fixture-2026-10-13):
+  why "is my window focused" and "where will my keystrokes land" are
+  different questions on a Mac.
 - **[Not run live](#not-run-live)** is the half worth reading first: it is
   what stops anything above being a promise about your desktop.
 
@@ -3862,3 +3877,155 @@ is the fix — but recorded here, and referenced from
 [install.md](install.md#worked-examples-what-one-extra-alone-actually-gets-you),
 so the next person chasing a `~` that "did nothing" against a slow widget
 finds this first.
+
+## GhostBSD (X11), a genuinely hung AT-SPI call (2026-10-11)
+
+Found while driving `pyguitest-torture-test` (a separate fixture repo, not
+part of this package) through its own validation campaign, not while
+testing pyguitest directly — but the failure is pyguitest's own, not the
+fixture's, so it is recorded here.
+
+A full driving run against GhostBSD's native X11/AT-SPI session reached the
+fixture's "Trees & Tables" tab and then produced no further output at all
+for the rest of the process's budget (300s). Live diagnosis (temporary
+instrumentation around each step) localized this to one single call:
+`find_elements()` scoped to a `QTreeView` ("Model Tree") simply never
+returned — not slow, not an exception, nothing left to poll. Every
+`wait_for_*`/`wait_until` timeout elsewhere in the calling script was
+powerless against it, since each one only checks its own deadline *between*
+calls to a function that itself never hands control back.
+
+**`signal.alarm` was tried first, in the calling script, and confirmed not
+to work.** A `SIGALRM`-based watchdog wrapped around the same call made no
+observable difference — identical symptom, identical silence, for the full
+budget, twice. The call is stuck inside a blocking native (GI/D-Bus) call
+that never returns control to the interpreter loop, and CPython only
+delivers a pending signal between bytecode instructions, so a truly wedged
+native call defeats a signal-based timeout outright. This is the reason
+`BackendCallTimeout`'s fix (`atspi.py`'s `_run_bounded`) is a worker-thread
+`join(timeout)` instead: it cannot stop the stuck call either — nothing in
+Python can force another thread to abort a blocking C/D-Bus call — but it
+reliably lets the *caller* move on, which a signal handler here did not.
+
+Not reproduced in isolation: three separate standalone repro scripts
+against the same widget, during the same session, all succeeded where the
+full run hung — matching the shape (if not the specifics) of a separate,
+earlier-documented GhostBSD oddity around menu-dialog detection in the same
+fixture's validation history. Whatever makes this one widget's AT-SPI call
+lock up appears tied to accumulated state over a longer session rather than
+anything reproducible from a cold start, which is exactly the scenario
+`BackendCallTimeout` exists for: a caller cannot always avoid triggering the
+hang, so the fix is surviving it rather than preventing it.
+
+## macOS 26.7: two window bugs, found by driving a Qt fixture (2026-10-13)
+
+Found the same way the GhostBSD hang above was — driving
+`pyguitest-torture-test` (a separate fixture repo, not part of this
+package) rather than testing pyguitest directly. Both failures are
+pyguitest's own, so they are recorded here. The machine is the same
+Intel VM as the macOS sections above, running macOS 26.7 at 1280x800,
+with Accessibility granted.
+
+### `windows()` dropped every modal dialog
+
+The symptom: a driver clicked a button that opens a `QFileDialog`, then
+waited for a new window and never saw one, while the dialog was plainly on
+screen and fully interactive. `gui.elements(role="window")` — a pure AX
+lookup — listed it immediately; `gui.windows()` never did.
+
+`windows()` filters the window server's list through `_visible_entry`,
+which required `kCGWindowLayer == 0`. Measured on the live dialog:
+
+| field | value |
+|---|---|
+| `kCGWindowName` | `Save File` |
+| `kCGWindowLayer` | **8** |
+| `kCGWindowIsOnscreen` | `True` |
+| `kCGWindowBounds` | `{X 212, Y 140, W 636, H 462}` |
+
+Layer 8 is `NSModalPanelWindowLevel`, the documented level for exactly this
+kind of panel. The original layer-0 measurement that `_visible_entry`'s
+docstring records is still correct about what it saw — six ordinary
+top-level windows — it simply had no modal dialog open at the time. Layer 8
+is now accepted alongside 0. The junk layers that measurement ruled out are
+each their own specific thing (Dock 20, menu bar 24, Control Center 25, and
+layer 0's own helper surfaces), and none of them is 8.
+
+### `activate_window()` raised the window without activating the application
+
+The symptom, and the reason it took so long to see: after
+`activate_window()`, **every query this package can make said the window was
+activated** — `active_window()` named it, and `NSWorkspace`'s own
+`frontmostApplication()` named the app — while text typed immediately
+afterwards went to a different application entirely.
+
+`activate_window` tried `AXRaise` first and, when that succeeded, set
+`raised = True` and never ran the AppKit `NSRunningApplication.activate`
+branch. Those two do different things:
+
+- `AXRaise` reorders one window *within* its application. That is what
+  `windows()`/`active_window()` read, which is why both answered happily.
+- The application activation is what makes the app frontmost and gives it
+  the **key window** — and `macquartz` posts keys with
+  `CGEventPost(kCGHIDEventTap, ...)`, which the window server routes to the
+  frontmost application's key window, not to whichever window was raised
+  last.
+
+So a raised-but-not-activated window is activated for every purpose except
+the one a test usually wants. Both routes now run; only a machine where
+*neither* answered is a refusal.
+
+The practical lesson, which cost most of the time spent here: on macOS,
+"is my window focused" and "where will my keystrokes land" are different
+questions, and the window-shaped answer is the misleading one. The way to
+check the second is to ask what is actually under the click point —
+`gui.element_at(x, y)` — which is how the fixture's own bug was finally
+found, a click landing on `role='dock item' name='Notes'` because the
+target control's centre sat below the app window and on top of the Dock.
+
+## dogtail 2.1.0 and a broken pyatspi: Debian 13 and COSMIC (2026-10-13)
+
+Driving the torture-test fixture on two freshly-provisioned boxes -- Debian
+13 (dogtail 2.1.0, `atspi+uinput`) and Pop!_OS/COSMIC -- found three faults
+stacked in one call path. Each hid the next, so they are worth reading in
+the order they surfaced.
+
+**1. `window.handle.getState()` does not exist on dogtail 2.1.0.** The
+handle `windows()` hands out is a dogtail-extended `Atspi.Accessible`, not a
+`Node`, and 2.1.0 has dropped that camelCase alias:
+`AttributeError: 'Accessible' object has no attribute 'getState'`. Probing
+every camelCase call in the backend against that version showed this was the
+only one still reachable -- `get_process_id` and the `text` setattr were
+already the modern spellings, and `doActionNamed`, `grabFocus` and
+`findChildren` all still exist.
+
+**2. Underneath it, `import pyatspi` fails.** `_state_active()` wanted one
+constant from pyatspi, and on both boxes the module raises `AttributeError`
+on import -- a *broken* install rather than a missing one, which no "is it
+installed" check would catch. So `active_window()` raised
+`CapabilityUnsupported` from inside a capability the backend had already
+advertised: `supports(Capability.WINDOW_STATE)` answered `True` while every
+call through it failed. `wait_window_focus()` and `focus_window()` sit
+directly on top, so both were unusable on these desktops.
+
+Fixed by reading the state *names* through `_node_state_names`
+(`"ACTIVE" in names`) rather than comparing against pyatspi's constant --
+the decision `expanded`/`expandable` already made, for this exact reason.
+`element_at()` had the same one-constant dependency and got the same
+treatment; `extents()` had already routed around it.
+
+**3. An unversioned GI import, found while fixing the above.** Two helpers
+did `from gi.repository import Atspi` with no `gi.require_version("Atspi",
+"2.0")` first. PyGObject warns about this, and the warning is not cosmetic:
+loading the typelib unversioned leaves `gi.repository` in a state where a
+later, perfectly correct `from gi.repository import Gio` in another backend
+dies with `TypeError: metaclass conflict`. The portal backend catches that
+and reports **"PyGObject is not installed"** -- a message pointing nowhere
+near the cause. Reproduced in one process: touching the atspi helper first
+made the portal backend unusable for the rest of the run. Both helpers now
+require the version first.
+
+**Result.** All three platforms reach `all controls verified` with zero
+control failures: GhostBSD/FreeBSD 15 (0 stalls), Debian 13 (8), COSMIC (9).
+Every one of those stalls was absorbed by `BackendCallTimeout`'s bound
+rather than hanging the run, which is the first real workout that has had.

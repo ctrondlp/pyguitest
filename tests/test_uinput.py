@@ -157,6 +157,55 @@ class TestDeclaredAbsoluteRange(unittest.TestCase):
         self.assertEqual(self._libinput_transform(1919, 1920, 1920), 1918)
 
 
+class TestDeclaredKeyCapabilities(unittest.TestCase):
+    """KEY_POWER must never be among the keys this device declares.
+
+    Confirmed live (Debian 13, GNOME/Wayland, surviving a reboot): declaring
+    it -- even alongside the rest of a complete keyboard range -- makes
+    systemd-udevd classify the whole virtual device `power-switch`, which
+    (confirmed via `udevadm info`) leaves it without the `seat`/`uaccess`
+    tags logind grants an ordinary input device for the active session.
+    Without those, Mutter never opens the device at all: every synthetic
+    click and keystroke this backend sends is silently dropped, session-wide,
+    with no exception anywhere to catch.
+    """
+
+    def test_key_power_is_never_declared(self):
+        captured = {}
+        patcher = fake_evdev()
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        module = sys.modules["evdev"]
+        module.ecodes.KEY_COMPOSE = 127
+        module.ecodes.REL_HWHEEL = 6
+        module.ecodes.KEY_POWER = 116
+        # The real evdev.ecodes.keys maps every known code to its name(s);
+        # the shared fake leaves it empty (so the keyboard-range sweep this
+        # guards is a no-op in every other test here). Populate the full
+        # KEY_ESC..KEY_COMPOSE range, KEY_POWER included, so this test
+        # actually exercises the exclusion rather than vacuously passing.
+        module.ecodes.keys = {code: f"KEY_{code}" for code in range(1, 128)}
+
+        def make(capabilities, **_kw):
+            captured.update(capabilities)
+            return FakeDevice()
+
+        module.UInput = make
+        from pyguitest.backends import uinput
+
+        with mock.patch("os.path.exists", return_value=False):
+            with mock.patch("time.sleep"):
+                uinput.UinputBackend(screen_size=(1920, 974))
+
+        declared = captured[module.ecodes.EV_KEY]
+        self.assertNotIn(module.ecodes.KEY_POWER, declared)
+        # The exclusion is specific to KEY_POWER -- confirm the rest of the
+        # swept range (an ordinary key on either side of it) still declares,
+        # so this is not just an empty/truncated capability list.
+        self.assertIn(module.ecodes.KEY_POWER - 1, declared)
+        self.assertIn(module.ecodes.KEY_POWER + 1, declared)
+
+
 class TestPointer(UinputTestCase):
     def test_absolute_motion_writes_both_axes_then_syncs(self):
         self.gui.move_mouse(100, 200)
