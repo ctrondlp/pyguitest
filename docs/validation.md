@@ -31,6 +31,11 @@ been tried at all". The same record sorted that way instead:
   faults in one call path](#dogtail-210-and-a-broken-pyatspi-debian-13-and-cosmic-2026-10-13):
   a camelCase alias modern dogtail no longer has, a pyatspi whose own import
   fails, and an unversioned GI import that broke an unrelated backend.
+- **Omarchy / Hyprland, Wayland** — [the first wlroots compositor run
+  against](#omarchy--hyprland-the-first-wlroots-compositor-run-against-2026-10-13):
+  every window capability served by `hyprland` against a real compositor, a
+  full torture-test pass, and no library change needed. niri is now the only
+  supported desktop with no live run behind it.
 - **X11, properly** — [a real X11 session, Xfce under
   xfwm4, and Xvfb against GTK3 and GTK4](#run-live-on-a-real-x11-session):
   the whole API including tier 6, and the two caveats XWayland has that a
@@ -1205,7 +1210,8 @@ about *when it fires*, not about what it does.
 
 **What this run does not cover.** Hyprland and niri, which speak variants of
 the same IPC shape and stay in "Not run live" — neither is installed on this
-machine. Input on sway beyond the in-process uinput the composite selected.
+machine. (Hyprland has since been run, on Omarchy, 2026-10-13; see below.)
+Input on sway beyond the in-process uinput the composite selected.
 And recording: pyguitest-recorder needs XRecord, so a sway session with no
 XWayland is one it cannot record at all, by the same platform property
 described in that project's `architecture.md`.
@@ -1828,14 +1834,18 @@ row as a result, generated from the backend's own `capabilities`.
     since UIA publishes no per-application node to group by.
 
   A claim leaves this list only when a run puts its output beside it here.
-- **The wlroots compositor IPC backends** — ~~sway~~, Hyprland, niri. Their
+- **The wlroots compositor IPC backends** — ~~sway~~, ~~Hyprland~~, niri. Their
   tests replay recorded output and stand-ins, on a sandbox where none of
   those are available to test against. **sway left this list on 2026-09-22**:
   window listing, geometry, placement, resize, activation, minimize through
   the scratchpad, `window_at()` and a real `window_events()` subscription all
   ran against a live headless sway, 7/7 — see the dedicated section above.
-  Hyprland and niri remain, speaking variants of the same IPC shape, and
-  neither is installed on the machine that closed sway. Two other names have
+  **Hyprland left it on 2026-10-13**, on Omarchy (Arch), against a real
+  compositor rather than a headless one — every window capability the backend
+  publishes, serving a full torture-test pass, with no library change; see the
+  dedicated section below. niri alone remains, speaking a variant of the same
+  IPC shape, and it is installed on none of the machines that closed the
+  other two. Two other names have
   left this list: `KdotoolBackend` has since run live on KWin, and
   `UinputBackend` on both KWin and GNOME — above, and in the tier-6 caveat
   below, where a commanded move was read back off a real X client 1px out
@@ -2045,8 +2055,9 @@ The rest of the review's pyguitest half, in its own numbering:
   real portal, and keyboard, pointer and scroll delivery *after* `Start()` not measured,
   because it needs a live GNOME or KDE session with consent. Unchanged, and still the
   most valuable single live run nobody has made.
-- **Hyprland and niri remain unvalidated.** Unchanged: sway has been run, its two
-  wlroots siblings have not, and they are listed in the untested material rather than
+- **Hyprland and niri remain unvalidated.** ~~Unchanged: sway has been run, its two
+  wlroots siblings have not~~ — **half-closed on 2026-10-13**: Hyprland has now been
+  run live on Omarchy. niri is still listed in the untested material rather than
   claimed by the capability model.
 - **`Environment.detect()` is heuristic, so "supported" means "worth attempting".**
   Agreed as a documentation matter rather than a defect; the doctor and the backend
@@ -4029,3 +4040,46 @@ require the version first.
 control failures: GhostBSD/FreeBSD 15 (0 stalls), Debian 13 (8), COSMIC (9).
 Every one of those stalls was absorbed by `BackendCallTimeout`'s bound
 rather than hanging the run, which is the first real workout that has had.
+
+## Omarchy / Hyprland: the first wlroots compositor run against (2026-10-13)
+
+Hyprland and niri were both on record above as never having met a live
+compositor. This closes half of that, and it is the entry with the least to
+report, which is the result: **pyguitest needed no changes whatsoever.**
+
+The box is Omarchy (Arch), Hyprland on Wayland, driving the same Qt
+torture-test fixture — 702 widgets, 105 verified controls — that the other
+five platforms run. It reached `all controls verified`.
+
+`connect()` composed
+`hyprland+atspi+input:wtype+capture:grim+clipboard:wl-copy+imagesearch:compare`
+unaided, and **every window capability came from `hyprland`**: list, state,
+activate, minimize, geometry, placement, resize, `pid` and at-point. This is
+the backend whose tests, until now, replayed recorded `hyprctl` output against
+a sandbox where no Hyprland existed; the shape those tests assumed was right.
+`pyguitest` with no subcommand already printed `compositor wlroots (Hyprland)`
+and listed `hyprctl`, and `hints.py` already knew Arch's package names, so
+nothing in the library had to be taught about this platform — the answer to
+"does the doctor need teaching" was no, by inspection and then by running it.
+
+**Pointer injection here is a permission, not a protocol.** `/dev/uinput`
+exists but is root-owned and the account is not in the `input` group, so
+`POINTER_MOVE`/`POINTER_BUTTON` are absent and the pointer-free strategy —
+AT-SPI action clicks, Tab-seeking for real focus — applies, as it does on
+COSMIC and Debian. The difference is that here it is recoverable: `sudo
+usermod -aG input <user>` and a re-login would unlock the full pointer-driven
+path. On COSMIC and Debian no permission change can help. pyguitest diagnoses
+this unprompted, in those words, which is what the capability model is for.
+
+**A platform difference worth keeping.** `Element.focus()` sets focus on
+Hyprland — measured, `focused=True` afterwards — on an element that 70 Tab
+presses never reached. On COSMIC and the local GNOME desktop the same call was
+measured *not* to move real keyboard focus, which is why the fixture's drivers
+seek focus by Tab first and verify before typing. Same call, same backend
+family, different answer per compositor: the reason a driver checks rather
+than assumes.
+
+**What this run does not cover.** niri, still, speaking a variant of the same
+IPC shape and installed on none of these machines. Pointer input on Hyprland,
+for the permission reason above rather than any protocol one. `window_events()`
+was not subscribed to here; sway's live run is what covers that call.
