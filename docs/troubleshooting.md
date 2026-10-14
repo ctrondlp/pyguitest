@@ -7,6 +7,7 @@ here, `pyguitest debug` collects everything a bug report needs — see
 - [`gui.button("Save")` raises ElementNotFound](#guibuttonsave-raises-elementnotfound)
 - [No GTK3 or Qt application has any accessible elements](#no-gtk3-or-qt-application-has-any-accessible-elements)
 - [One application has no accessible elements at all](#one-application-has-no-accessible-elements-at-all)
+- [A call raises BackendCallTimeout, or the script hangs and ignores every timeout](#a-call-raises-backendcalltimeout-or-the-script-hangs-and-ignores-every-timeout)
 - [Nothing works on macOS: no elements, no input, black screenshots](#nothing-works-on-macos-no-elements-no-input-black-screenshots)
 - [Injected input does nothing](#injected-input-does-nothing)
 - [The wrong characters get typed](#the-wrong-characters-get-typed)
@@ -119,6 +120,56 @@ depends on who starts the application: launch it with
 costs those applications real performance.
 [install.md](install.md#chromium-and-electron-apps-need-an-at-to-be-announced)
 has the exact commands.
+
+## A call raises BackendCallTimeout, or the script hangs and ignores every timeout
+
+`BackendCallTimeout` means one *single* backend call never returned — not
+that a `wait_for_*` loop ran out of patience. The two are easy to confuse
+and the distinction is what tells you where to look:
+
+| | What ran long | What the timeout bounds |
+|---|---|---|
+| `wait_for_*` / `wait_until` timing out | the *condition* never became true | how long **polling** continues between calls |
+| `BackendCallTimeout` | one call never returned **at all** | that **one call** |
+
+Confirmed live on AT-SPI/dogtail: a single `find_elements()` touching one
+`QTreeView`'s subtree locked up completely, and took the whole script with
+it — every `wait_for_*` deadline in that script was only ever checked
+*between* calls to a function that never handed control back. Before the
+bound existed the symptom was a script that hung forever and survived
+SIGTERM; now it raises.
+
+What to do when you see it:
+
+1. **Treat it as a wedged toolkit, not a slow one.** 20 seconds for one
+   accessibility call is already far outside the normal range (a whole
+   `find_elements` walk over a ~130-element window costs a few seconds).
+   Raising the budget usually just makes the hang take longer to report.
+2. **Narrow the search so it stops touching the widget that wedges.** Scope
+   `find_elements` to a window or container rather than the whole tree, or
+   drive that one control through `Element.click()`/`do_action()` instead of
+   walking its children.
+3. **Restart the accessibility bus if every call starts timing out.** A
+   degraded `at-spi2` bus makes this error appear everywhere at once rather
+   than on one widget.
+4. **Only then adjust the budget**, per session:
+
+   ```python
+   gui = pyguitest.connect(backend_options={"atspi": {"call_timeout": 45}})
+   ```
+
+   This covers the backend's own calls (`find_elements`, `extents`,
+   `element_at`, `windows`, `active_window`, `activate_window`,
+   `is_window_viewable`, `geometry`). `Element`'s properties and methods are
+   bounded too, but to the built-in 20s default — an element holds no
+   reference back to its backend.
+
+One caveat worth knowing: raising this does **not** kill the call. Nothing
+in Python can force another thread to abandon a blocking native call, so the
+wedged call may still be sitting there afterwards, holding whatever it holds.
+A caller that retries in a loop can therefore accumulate stuck threads;
+catch it, report it, and tear the session down rather than retrying
+indefinitely.
 
 ## Nothing works on macOS: no elements, no input, black screenshots
 

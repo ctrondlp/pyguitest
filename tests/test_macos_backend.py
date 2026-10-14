@@ -816,6 +816,18 @@ class TestTheWindowJoin(BackendTestCase):
             ],
         )
 
+    def test_a_modal_dialog_at_layer_8_is_listed_too(self):
+        # Confirmed live: a Qt QFileDialog opened app-modal reports
+        # kCGWindowLayer=8 (NSModalPanelWindowLevel), not 0 -- a real,
+        # on-screen, user-interactive window `_visible_entry` used to drop
+        # entirely, leaving a driver script's "wait for a new window after
+        # this click" never seeing a dialog that was plainly on screen.
+        onscreen = self.onscreen_windows() + [
+            window(500, 999, "SomeApp", (212, 140, 636, 462), layer=8, name="Save File")
+        ]
+        backend = self.make(onscreen=onscreen)
+        self.assertIn("Save File", [w.title for w in backend.windows()])
+
     def test_a_coregraphics_name_is_the_fallback_where_ax_has_none(self):
         # The one name CoreGraphics gave up on the live machine was the Window Server's
         # own menu bar, so the fallback is real rather than theoretical: it is used
@@ -1058,6 +1070,26 @@ class TestWindowWrites(BackendTestCase):
         self.backend.activate_window(self.terminal)
         self.assertEqual(self.node.performed, ["AXRaise"])
         self.assertIsNone(self.backend._cache_onscreen)
+
+    def test_raising_a_window_also_activates_its_application(self):
+        # The two answer different questions and a caller wants both: AXRaise picks
+        # which window comes forward, and the application activation is what gives it
+        # the key window -- where `CGEventPost(kCGHIDEventTap, ...)` actually delivers
+        # keys. Confirmed live on macOS 26.7: after an AXRaise alone the window is
+        # visibly in front and `active_window` names it, while typed text still goes
+        # to whatever application was frontmost before.
+        running = mock.Mock()
+        running.activateWithOptions_.return_value = True
+        appkit = types.SimpleNamespace(
+            NSApplicationActivateAllWindows=1 << 9,
+            NSRunningApplication=mock.Mock(
+                runningApplicationWithProcessIdentifier_=mock.Mock(return_value=running)
+            ),
+        )
+        with mock.patch.dict(sys.modules, {"AppKit": appkit}):
+            self.backend.activate_window(self.terminal)
+        self.assertEqual(self.node.performed, ["AXRaise"])
+        running.activateWithOptions_.assert_called_once_with(1 << 9)
 
     def test_activating_a_window_the_server_no_longer_lists_is_a_refusal(self):
         gone = macos.Window(9999, self.backend, pid=2829)

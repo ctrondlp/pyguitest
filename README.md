@@ -182,6 +182,19 @@ table as what is implemented and validation.md as what has been measured.
 [ADR 004](https://github.com/ctrondlp/pyguitest/blob/main/docs/developers/adr-004-macos.md)
 record each platform's design.
 
+Much of what validation.md records comes from one deliberately hostile test
+target: [pyguitest-torture-test][torture], a **702-widget** Qt application
+built as the worst case for this library — 61 distinct widget classes and 95
+menu and toolbar actions across nine tabs, every control carrying a stable
+accessible name, and a status bar that reports each action so a test can
+prove an interaction *landed* rather than assume it. Its 105 uniquely-named
+controls are each driven and status-bar-verified, plus the whole menu bar, on
+six platforms: FreeBSD/GhostBSD, Pop!\_OS/COSMIC, Debian, Omarchy/Hyprland,
+Windows and macOS — the Hyprland run being the first time this library has
+been exercised against a wlroots compositor.
+Every real bug those runs turned up in pyguitest itself is written up in
+validation.md, and every one of them is fixed.
+
 ## Usage
 
 ```python
@@ -336,6 +349,7 @@ absent. Everything after `record` is passed straight through, so
 flags works unchanged.
 
 [recorder]: https://github.com/ctrondlp/pyguitest-recorder
+[torture]: https://github.com/ctrondlp/pyguitest-torture-test
 [testable-guis]: https://github.com/ctrondlp/pyguitest-recorder/blob/main/docs/testable-guis.md
 
 ## Documentation

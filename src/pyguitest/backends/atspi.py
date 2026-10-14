@@ -18,14 +18,17 @@ therefore declared only where those coordinates can be trusted.
 import contextlib
 import io
 import os
+import queue
 import re
 import shutil
 import socket
 import subprocess
+import threading
 from typing import TYPE_CHECKING, Any
 
 from ..capabilities import Capability, CapabilitySet
 from ..errors import (
+    BackendCallTimeout,
     BackendUnavailable,
     CapabilityUnsupported,
     ElementNotActionable,
@@ -112,7 +115,17 @@ def _gi_component():
     where this was found and confirmed live (PyGObject/at-spi2 2.56, Debian
     13).
     """
-    from gi.repository import Atspi  # noqa: PLC0415 - optional dep, see _pyatspi
+    import gi  # noqa: PLC0415 - optional dep, see _pyatspi
+
+    # `require_version` before the import, not after: without it
+    # PyGObject loads the typelib unversioned and warns, and a *later*
+    # clean `from gi.repository import Gio` in another backend then
+    # dies with "metaclass conflict" -- which that caller reports as
+    # "PyGObject is not installed", nowhere near the real cause.
+    # Reproduced in one process: touching this helper first made the
+    # portal backend unusable for the rest of the run.
+    gi.require_version("Atspi", "2.0")
+    from gi.repository import Atspi
 
     return Atspi.Component
 
@@ -124,19 +137,38 @@ def _gi_screen_coords():
     underlying C enum, for when `pyatspi` itself is what is unavailable (see
     `_pyatspi`), not just `queryComponent`.
     """
-    from gi.repository import Atspi  # noqa: PLC0415 - optional dep, see _pyatspi
+    import gi  # noqa: PLC0415 - optional dep, see _pyatspi
+
+    # `require_version` before the import, not after: without it
+    # PyGObject loads the typelib unversioned and warns, and a *later*
+    # clean `from gi.repository import Gio` in another backend then
+    # dies with "metaclass conflict" -- which that caller reports as
+    # "PyGObject is not installed", nowhere near the real cause.
+    # Reproduced in one process: touching this helper first made the
+    # portal backend unusable for the rest of the run.
+    gi.require_version("Atspi", "2.0")
+    from gi.repository import Atspi
 
     return Atspi.CoordType.SCREEN
 
 
-def _at_point(pyatspi, node, x, y):
-    """The child of `node` at a screen point, or None."""
-    try:
-        return node.queryComponent().getAccessibleAtPoint(x, y, pyatspi.DESKTOP_COORDS)
-    except AttributeError:
-        return _gi_component().get_accessible_at_point(
-            node, x, y, pyatspi.DESKTOP_COORDS
-        )
+def _at_point(coords, node, x, y):
+    """The child of `node` at a screen point, or None.
+
+    Bounded like every other direct AT-SPI round trip in this module --
+    `element_at` walks every application on the desktop, calling this once
+    per node descended into, so an unbounded hang here would be the
+    widest-blast-radius version of the same failure `_run_bounded`'s own
+    docstring describes.
+    """
+
+    def _call():
+        try:
+            return node.queryComponent().getAccessibleAtPoint(x, y, coords)
+        except AttributeError:
+            return _gi_component().get_accessible_at_point(node, x, y, coords)
+
+    return _run_bounded(_DEFAULT_CALL_TIMEOUT, _call)
 
 
 def _frame_pid(frame):
@@ -157,7 +189,13 @@ def _frame_pid(frame):
     one field that makes matching a window to its process possible at all.
     """
     try:
-        pid = int(frame.get_process_id())
+        # Bounded the same way Element.pid is -- this docstring already
+        # says it is the same read, duplicated; the bound needs duplicating
+        # along with it. See _run_bounded's own docstring for the hang
+        # class this guards against.
+        pid = int(_run_bounded(_DEFAULT_CALL_TIMEOUT, frame.get_process_id))
+    except BackendCallTimeout:
+        raise
     except Exception:  # noqa: BLE001 - an unanswered pid is not an error
         return None
     return pid or None
@@ -495,6 +533,30 @@ def available():
     return _dogtail() is not None
 
 
+_NO_DEFAULT = object()
+"""Sentinel: `_node_attr` was given no `default`, so a missing attribute
+should raise `AttributeError` like a plain attribute access would, not
+silently answer some placeholder value."""
+
+
+def _node_attr(node, attr, default=_NO_DEFAULT):
+    """Bounded `getattr(node, attr)` / `getattr(node, attr, default)`.
+
+    Every simple `Element` property below reads one attribute off the
+    underlying dogtail node -- `self.node.name`, `self.node.showing`, and
+    so on. Each one of those is exactly the shape of call `_run_bounded`
+    exists for: ordinarily instant (dogtail caches most of them), but
+    confirmed live (GhostBSD, the same session `BackendCallTimeout`'s own
+    docstring describes) that `.name`/`.description` specifically can also
+    hang completely, not just `find_elements`/`extents`/`get_process_id`.
+    Routed through plain `getattr` rather than reimplemented per-property so
+    every property gets the same protection without hand-wiring each one.
+    """
+    if default is _NO_DEFAULT:
+        return _run_bounded(_DEFAULT_CALL_TIMEOUT, getattr, node, attr)
+    return _run_bounded(_DEFAULT_CALL_TIMEOUT, getattr, node, attr, default)
+
+
 class Element:
     """One node of the accessible tree.
 
@@ -522,7 +584,7 @@ class Element:
     @property
     def name(self):
         """The element's accessible name, such as a button's label."""
-        return self.node.name
+        return _node_attr(self.node, "name")
 
     @property
     def role(self):
@@ -541,7 +603,7 @@ class Element:
         `find_elements(role=...)` already hides on the way in, now hidden
         on the way back out too.
         """
-        raw = self.node.roleName
+        raw = _node_attr(self.node, "roleName")
         if _is_entry_reported_as_text(self.node, (Role.ENTRY,)):
             return Role.ENTRY
         return canonical_role(raw)
@@ -549,38 +611,40 @@ class Element:
     @property
     def parent(self):
         """The containing element, or None at the root."""
-        parent = self.node.parent
+        parent = _node_attr(self.node, "parent")
         return Element(parent, self._session) if parent is not None else None
 
     @property
     def children(self):
         """The elements directly inside this one."""
-        return [Element(child, self._session) for child in self.node.children]
+        return [
+            Element(child, self._session) for child in _node_attr(self.node, "children")
+        ]
 
     @property
     def visible(self):
         """Whether the element is currently showing."""
-        return self.node.showing
+        return _node_attr(self.node, "showing")
 
     @property
     def enabled(self):
         """Whether the element accepts input, rather than being greyed out."""
-        return getattr(self.node, "sensitive", True)
+        return _node_attr(self.node, "sensitive", True)
 
     @property
     def description(self):
         """The element's longer accessible description, often a tooltip."""
-        return getattr(self.node, "description", "") or ""
+        return _node_attr(self.node, "description", "") or ""
 
     @property
     def text(self):
         """The element's text content, for text boxes and labels."""
-        return getattr(self.node, "text", None)
+        return _node_attr(self.node, "text", None)
 
     @property
     def value(self):
         """The numeric value of a slider, spinner, or progress bar."""
-        return getattr(self.node, "value", None)
+        return _node_attr(self.node, "value", None)
 
     @property
     def checked(self):
@@ -590,12 +654,12 @@ class Element:
         checkable ones -- AT-SPI's checked state is just unset elsewhere.
         Read `checkable` first to know whether this value means anything.
         """
-        return getattr(self.node, "checked", None)
+        return _node_attr(self.node, "checked", None)
 
     @property
     def checkable(self):
         """Whether the element has a check box, radio button, or toggle."""
-        return getattr(self.node, "checkable", False)
+        return _node_attr(self.node, "checkable", False)
 
     @property
     def selected(self):
@@ -604,12 +668,12 @@ class Element:
         Same caveat as `checked`: this is a real boolean everywhere, not
         only on selectable elements. Read `selectable` first.
         """
-        return getattr(self.node, "selected", None)
+        return _node_attr(self.node, "selected", None)
 
     @property
     def selectable(self):
         """Whether the element can be a list item, tab, or menu selection."""
-        return getattr(self.node, "selectable", False)
+        return _node_attr(self.node, "selectable", False)
 
     @property
     def expanded(self):
@@ -646,18 +710,25 @@ class Element:
 
         Delegates to `_node_state_names`; see there for why `.name` alone is
         not enough.
+
+        Bounded here rather than inside `_node_state_names` itself, which is
+        deliberate: the other caller of that helper is the search predicate,
+        which already runs inside `find_elements`'s own bounded worker, and
+        bounding it again there would spawn one thread per node per walk.
+        This path -- an `Element` property a caller reads directly -- is the
+        one that is not covered by anything else.
         """
-        return _node_state_names(self.node)
+        return _run_bounded(_DEFAULT_CALL_TIMEOUT, _node_state_names, self.node)
 
     @property
     def focused(self):
         """Whether the element currently has keyboard focus."""
-        return getattr(self.node, "focused", False)
+        return _node_attr(self.node, "focused", False)
 
     @property
     def actions(self):
         """The names of the actions this element offers, e.g. 'click'."""
-        return sorted(getattr(self.node, "actions", {}) or {})
+        return sorted(_node_attr(self.node, "actions", {}) or {})
 
     @property
     def pid(self):
@@ -669,7 +740,19 @@ class Element:
         the same answer as not being asked.
         """
         try:
-            pid = int(self.node.get_process_id())
+            # Bounded, not called directly: get_process_id() is a live
+            # per-call round trip (unlike most of this class's properties,
+            # which read an already-cached dogtail attribute), called once
+            # per element in a tree walk -- exactly the shape of the other
+            # confirmed-live AT-SPI hang this guards against (see
+            # BackendCallTimeout's own docstring), just with many more
+            # chances to hit it per walk. BackendCallTimeout is let through
+            # rather than folded into "pid unknown" below, for the same
+            # reason `_extents` lets it through: a hang is not the same fact
+            # as a bridge honestly not answering.
+            pid = int(_run_bounded(_DEFAULT_CALL_TIMEOUT, self.node.get_process_id))
+        except BackendCallTimeout:
+            raise
         except Exception:  # noqa: BLE001 - an unanswered pid is not an error
             return None
         return pid or None
@@ -689,7 +772,9 @@ class Element:
         itself become the thing that raises.
         """
         try:
-            return not self.node.dead
+            return not _run_bounded(_DEFAULT_CALL_TIMEOUT, lambda: self.node.dead)
+        except BackendCallTimeout:
+            raise
         except Exception:  # noqa: BLE001 - a dead node can fail several ways
             return False
 
@@ -747,7 +832,7 @@ class Element:
             return
         if route == "action":
             require_click_route(self, "action")
-        actions = self.node.actions or {}
+        actions = _run_bounded(_DEFAULT_CALL_TIMEOUT, lambda: self.node.actions) or {}
         # `toggle` last: GTK publishes it alone on a switch (a GtkSwitch has no
         # `click`), and UI Automation's click() already acts through its own
         # `toggle`. Without it a recorded click on a switch replayed as a
@@ -770,7 +855,18 @@ class Element:
             None,
         )
         if name is not None:
-            self.node.doActionNamed(name)
+            # Bounded the same way every other Element property/backend
+            # call in this module is -- confirmed live (Pop!_OS/COSMIC)
+            # that `doActionNamed` can genuinely hang the same class of way
+            # `find_elements`/`extents`/etc. already could: a torture-test
+            # driver run blocked here for minutes, surviving even a plain
+            # `timeout`-sent SIGTERM (the call is stuck in a native GI/D-Bus
+            # call that never hands control back to the interpreter, same
+            # root cause `_run_bounded`'s own docstring describes), and only
+            # died to SIGKILL. `BackendCallTimeout` lets a caller treat this
+            # the same as any other bounded-but-failed AT-SPI call instead
+            # of hanging the whole process.
+            _run_bounded(_DEFAULT_CALL_TIMEOUT, self.node.doActionNamed, name)
             return
         if route == "action":
             raise ElementNotActionable(
@@ -790,7 +886,9 @@ class Element:
         INT_MIN "not showing" sentinel -- become `ElementNotActionable`.
         """
         try:
-            self.node.click()
+            _run_bounded(_DEFAULT_CALL_TIMEOUT, self.node.click)
+        except BackendCallTimeout:
+            raise
         except (RuntimeError, ValueError) as error:
             text = str(error).lower()
             # dogtail's `check_coordinates` wording, not any mention of the
@@ -855,19 +953,19 @@ class Element:
 
     def focus(self):
         """Give the element keyboard focus."""
-        self.node.grabFocus()
+        _run_bounded(_DEFAULT_CALL_TIMEOUT, self.node.grabFocus)
 
     def set_text(self, text):
         """Replace the element's text content."""
-        self.node.text = text
+        _run_bounded(_DEFAULT_CALL_TIMEOUT, setattr, self.node, "text", text)
 
     def do_action(self, name):
         """Perform a named accessible action, such as "click" or "activate"."""
-        self.node.doActionNamed(name)
+        _run_bounded(_DEFAULT_CALL_TIMEOUT, self.node.doActionNamed, name)
 
     def select(self):
         """Select this element, for a list item, tab, or menu entry."""
-        self.node.select()
+        _run_bounded(_DEFAULT_CALL_TIMEOUT, self.node.select)
 
     def expand(self):
         """Open this tree item or similar disclosure control.
@@ -895,7 +993,7 @@ class Element:
         already has for "click"/"press": an AT-SPI action's wording is the
         toolkit's, not a contract this package can rely on staying fixed.
         """
-        actions = self.node.actions or {}
+        actions = _run_bounded(_DEFAULT_CALL_TIMEOUT, lambda: self.node.actions) or {}
         name = next((a for a in actions if "expand" in a.lower()), None)
         if name is None:
             raise ElementNotActionable(
@@ -904,7 +1002,7 @@ class Element:
                 f"{self.role} {self.name!r} offers no action naming "
                 f"'expand'; it offers {', '.join(sorted(actions)) or 'none'}",
             )
-        self.node.doActionNamed(name)
+        _run_bounded(_DEFAULT_CALL_TIMEOUT, self.node.doActionNamed, name)
 
     def choose(self, option):
         """Pick `option` from this dropdown by its visible text.
@@ -918,11 +1016,18 @@ class Element:
         `text` child and fall back to `combovalue`, which works where the
         toolkit publishes menu items with a `click` action (GTK).
         """
-        for child in self.node.children:
-            if child.roleName == Role.TEXT:
-                child.text = option
-                return
-        self.node.combovalue = option
+
+        def _pick():
+            for child in self.node.children:
+                if child.roleName == Role.TEXT:
+                    child.text = option
+                    return True
+            return False
+
+        if not _run_bounded(_DEFAULT_CALL_TIMEOUT, _pick):
+            _run_bounded(
+                _DEFAULT_CALL_TIMEOUT, setattr, self.node, "combovalue", option
+            )
 
     def options(self):
         """The choices this dropdown or list offers, as Elements."""
@@ -934,7 +1039,8 @@ class Element:
         from dogtail import predicate
 
         pred = predicate.GenericPredicate(roleName=role, name=name)
-        return [Element(n, self._session) for n in self.node.findChildren(pred)]
+        children = _run_bounded(_DEFAULT_CALL_TIMEOUT, self.node.findChildren, pred)
+        return [Element(n, self._session) for n in children]
 
     def child(self, role=None, name=None):
         """Return the first descendant matching role and/or name, or None."""
@@ -945,7 +1051,7 @@ class Element:
         """Whether `other` sits somewhere inside this element."""
         node = other.node
         while node is not None:
-            node = node.parent
+            node = _run_bounded(_DEFAULT_CALL_TIMEOUT, lambda n=node: n.parent)
             if node == self.node:
                 return True
         return False
@@ -1082,6 +1188,56 @@ def _build_predicate(role, name, enabled, visible, description, predicate):
     return matches
 
 
+_DEFAULT_CALL_TIMEOUT = 20.0
+"""Default seconds a single AT-SPI call gets before `_run_bounded` treats it
+as hung rather than merely slow.
+
+Generous relative to this project's own documented AT-SPI costs elsewhere
+(a few seconds per `find_elements` walk over a ~130-element window -- see
+`spellings`'s docstring), so an ordinary slow call under load does not
+misfire into a false timeout; see `AtspiBackend.__init__`'s `call_timeout`
+for how to override it per session.
+"""
+
+
+def _run_bounded(seconds, fn, *args, **kwargs):
+    """Run `fn(*args, **kwargs)` bounded to `seconds`, or raise `BackendCallTimeout`.
+
+    Runs `fn` in a worker thread rather than calling it directly. Why:
+    confirmed live (GhostBSD, the hang `BackendCallTimeout`'s own docstring
+    describes) that `signal.alarm` does *not* reliably interrupt this
+    specific failure -- the blocking call
+    is stuck inside a native (GI/D-Bus) call that never hands control back
+    to the interpreter loop, and CPython only delivers a pending signal
+    between bytecode instructions, so a truly wedged native call defeats a
+    signal-based timeout outright. A worker thread has the opposite
+    tradeoff: it reliably lets the *caller* move on, but it cannot actually
+    stop the stuck call either -- nothing in Python can force another
+    thread to abort a blocking C/D-Bus call. The thread is left running,
+    `daemon=True` so it cannot block interpreter exit, and whatever it
+    eventually returns (if it ever does) is simply discarded -- a caller
+    that got `BackendCallTimeout` has already moved on and has nothing to
+    hand that late result to.
+    """
+    outcome: queue.Queue = queue.Queue(maxsize=1)
+
+    def run():
+        try:
+            outcome.put((True, fn(*args, **kwargs)))
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's side below, not swallowed
+            outcome.put((False, exc))
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(seconds)
+    if worker.is_alive():
+        raise BackendCallTimeout(getattr(fn, "__name__", repr(fn)), seconds)
+    ok, value = outcome.get()
+    if ok:
+        return value
+    raise value
+
+
 _UNPLACED = -1_000_000
 """Below this, an x or y is a "no position" marker rather than a coordinate.
 
@@ -1098,8 +1254,28 @@ class AtspiBackend(GUIBackend):
 
     name = "atspi"
 
-    def __init__(self, environment=None):
-        """Connect to the accessibility bus through dogtail."""
+    def __init__(self, environment=None, call_timeout: float = _DEFAULT_CALL_TIMEOUT):
+        """Connect to the accessibility bus through dogtail.
+
+        `call_timeout` is the budget every method on *this backend* gives a
+        single underlying AT-SPI call before treating it as hung rather than
+        slow and raising `BackendCallTimeout` -- `find_elements`, `extents`,
+        `element_at`, `windows`, `active_window`, `activate_window`,
+        `is_window_viewable` and `geometry` all honour it. See that error's
+        and `_run_bounded`'s own docstrings for why this exists and why it
+        is a worker-thread join rather than a `signal.alarm`. Settable per
+        session via `connect(backend_options={"atspi": {"call_timeout": ...}})`.
+
+        Known limitation: `Element`'s own methods and properties are bounded
+        too, but to the module-level `_DEFAULT_CALL_TIMEOUT` rather than to
+        this value -- an `Element` wraps a bare dogtail node and holds no
+        reference back to the backend that produced it, and elements are
+        also built by `Element.parent`/`children`/`find` while walking, far
+        from any backend. So overriding `call_timeout` changes the budget on
+        backend calls only; element calls keep the default. Both defaults
+        are the same number, so this only diverges for a caller that
+        overrides it.
+        """
         modules = _dogtail()
         if modules is None:
             if not a11y_bus_reachable():
@@ -1118,7 +1294,8 @@ class AtspiBackend(GUIBackend):
             )
         self._tree, self._predicate = modules
         self.environment = environment
-        self._window_geometry_source = None
+        self._window_geometry_source: Any = None
+        self._call_timeout = call_timeout
 
     def set_window_geometry_source(self, backend):
         """Let `backend` correct this one's element coordinates on Wayland.
@@ -1185,41 +1362,85 @@ class AtspiBackend(GUIBackend):
         ancestor with a window role, reads *its* pid (`_frame_pid`, the
         same read `windows()` uses), and matches that against the
         geometry source's own window list -- the two backends' Window
-        objects are never the same object, so pid is the only identity
-        they share.
+        objects are never the same object, so pid is normally the only
+        identity they share.
+
+        Falls back to matching by title when pid matching finds nothing --
+        confirmed live (COSMIC, Pop!_OS 24.04) that this is not merely a
+        missing pid on one frame but a structural gap in the geometry
+        source itself: `zcosmic_toplevel_info_v1` (the protocol
+        `cosmic.py`'s `windows()` is built on) has no pid-bearing event at
+        all in its v3 spec, confirmed directly against the protocol XML
+        (`cosmic-toplevel-info-unstable-v1.xml`), not just empirically --
+        every `Window` that backend returns has `pid=None`, always. Title
+        is a weaker identity than pid (two windows could share one), but
+        it is the only one this geometry source can ever offer, and this
+        project's own `windows()` matching elsewhere already accepts that
+        same tradeoff for title-only backends.
         """
         if self._window_geometry_source is None:
             return None
-        frame = node
-        depth = 0
-        while frame is not None and frame.roleName not in Role.WINDOW_ROLES:
-            try:
-                frame = frame.parent
-            except Exception:  # noqa: BLE001 - a reaped node has no parent to read
-                return None
-            depth += 1
-            if depth > _MAX_DEPTH:
-                return None
+        frame = self._window_frame(node)
         if frame is None:
-            return None
-        pid = _frame_pid(frame)
-        if pid is None:
             return None
         try:
             windows = self._window_geometry_source.windows()
         except Exception:  # noqa: BLE001 - a sibling backend's own failure is not ours
             return None
-        for window in windows:
-            if getattr(window, "pid", None) != pid:
-                continue
-            try:
-                geom = self._window_geometry_source.geometry(window)
-            except Exception:  # noqa: BLE001 - ditto
-                return None
-            if geom is None:
-                return None
-            return (geom[0], geom[1])
+        pid = _frame_pid(frame)
+        if pid is not None:
+            for window in windows:
+                if getattr(window, "pid", None) == pid:
+                    return self._geometry_source_offset(window)
+        # Bounded like every other bus read in this module -- `_node_attr`'s
+        # own helper rather than a bare attribute read, so a frame whose name
+        # hangs cannot hang the geometry lookup that needed it.
+        title = _node_attr(frame, "name", None)
+        if title:
+            for window in windows:
+                if getattr(window, "title", None) == title:
+                    return self._geometry_source_offset(window)
         return None
+
+    def _window_frame(self, node):
+        """`node`'s nearest window-role ancestor, or None.
+
+        One bounded call for the whole ascent rather than one per level:
+        both `.roleName` (read every iteration, in the loop condition) and
+        `.parent` are live bus round trips of exactly the shape
+        `_run_bounded` exists for, and bounding each of them separately
+        would pay for a worker thread per level of the tree.
+        """
+
+        def ascend():
+            frame = node
+            depth = 0
+            while frame is not None and frame.roleName not in Role.WINDOW_ROLES:
+                try:
+                    frame = frame.parent
+                except Exception:  # noqa: BLE001 - a reaped node has no parent
+                    return None
+                depth += 1
+                if depth > _MAX_DEPTH:
+                    return None
+            return frame
+
+        try:
+            return _run_bounded(self._call_timeout, ascend)
+        except BackendCallTimeout:
+            raise
+        except Exception:  # noqa: BLE001 - a reaped node cannot be walked up from
+            return None
+
+    def _geometry_source_offset(self, window):
+        """`(x, y)` from `_window_geometry_source.geometry(window)`, or None."""
+        try:
+            geom = self._window_geometry_source.geometry(window)
+        except Exception:  # noqa: BLE001 - a sibling backend's own failure is not ours
+            return None
+        if geom is None:
+            return None
+        return (geom[0], geom[1])
 
     # -- elements ----------------------------------------------------------
 
@@ -1249,7 +1470,8 @@ class AtspiBackend(GUIBackend):
         self.require(Capability.ELEMENT_TREE)
         node = within.node if within is not None else self._tree.root
         pred = _build_predicate(role, name, enabled, visible, description, predicate)
-        return [Element(n) for n in node.findChildren(pred)]
+        children = _run_bounded(self._call_timeout, node.findChildren, pred)
+        return [Element(n) for n in children]
 
     def find_element(
         self,
@@ -1325,39 +1547,54 @@ class AtspiBackend(GUIBackend):
             raise CapabilityUnsupported(
                 Capability.ELEMENT_GEOMETRY, self.name, _WAYLAND_COORDS
             )
-        pyatspi = self._pyatspi(Capability.ELEMENT_GEOMETRY)
+        try:
+            coords = self._pyatspi(Capability.ELEMENT_GEOMETRY).DESKTOP_COORDS
+        except CapabilityUnsupported:
+            # Same reasoning `extents` records below, and the same single
+            # constant: a pyatspi whose own import fails (Debian 13,
+            # Pop!_OS/COSMIC -- confirmed live) would otherwise make this
+            # method unusable on a desktop whose accessibility stack is
+            # fine. `Atspi.CoordType.SCREEN` is that constant's value from
+            # the same C enum, so nothing here really needs the module.
+            coords = _gi_screen_coords()
         best = None
         best_area = None
-        for app in self._tree.root.applications():
-            for node in self._hits_in(pyatspi, app, x, y):
+        applications = _run_bounded(
+            self._call_timeout, lambda: list(self._tree.root.applications())
+        )
+        for app in applications:
+            for node in self._hits_in(coords, app, x, y):
                 area = self._area(node)
                 if best is None or area < best_area:
                     best, best_area = node, area
         return Element(best) if best is not None else None
 
-    def _hits_in(self, pyatspi, app, x, y):
+    def _hits_in(self, coords, app, x, y):
         """The deepest believable node under each of one app's toplevels."""
         found = []
         try:
-            for frame in app.children:
+            frames = _run_bounded(self._call_timeout, lambda: list(app.children))
+            for frame in frames:
                 if self._covers(frame, x, y):
-                    found.append(self._descend(pyatspi, frame, x, y))
+                    found.append(self._descend(coords, frame, x, y))
+        except BackendCallTimeout:
+            raise
         except Exception:  # noqa: BLE001 - a dead application is not an error
             return found
         return found
 
-    def _descend(self, pyatspi, node, x, y):
+    def _descend(self, coords, node, x, y):
         """Follow the point down to the deepest node that really covers it."""
         for _ in range(_MAX_DEPTH):
-            child = _at_point(pyatspi, node, x, y)
+            child = _at_point(coords, node, x, y)
             if child is None or not self._covers(child, x, y):
-                child = self._past_a_container(pyatspi, node, x, y)
+                child = self._past_a_container(coords, node, x, y)
             if child is None:
                 return node
             node = child
         return node
 
-    def _past_a_container(self, pyatspi, node, x, y):
+    def _past_a_container(self, coords, node, x, y):
         """A covering node one level further down, where the walk dead-ends.
 
         The descent assumes the tree nests geometrically: that a node
@@ -1388,7 +1625,9 @@ class AtspiBackend(GUIBackend):
         is refused here exactly as it was before.
         """
         try:
-            children = list(node)
+            children = _run_bounded(self._call_timeout, lambda: list(node))
+        except BackendCallTimeout:
+            raise
         except Exception:  # noqa: BLE001 - a dead node has no children
             return None
         for child in children:
@@ -1396,8 +1635,12 @@ class AtspiBackend(GUIBackend):
             # `list(node)` -- must not abandon the rest: uncaught, it escaped
             # to `_hits_in`, which drops the whole application, a worse
             # answer than the coarse node this step exists to refine.
+            # `_at_point` bounds its own call; only its own BackendCallTimeout
+            # is let through here, same as everywhere else in this module.
             try:
-                found = _at_point(pyatspi, child, x, y)
+                found = _at_point(coords, child, x, y)
+            except BackendCallTimeout:
+                raise
             except Exception:  # noqa: BLE001 - try the next child instead
                 continue
             if found is not None and self._covers(found, x, y):
@@ -1444,8 +1687,20 @@ class AtspiBackend(GUIBackend):
             # broken import to route around.
             pyatspi = None
             coords = _gi_screen_coords()
+
+        def _get_extents():
+            return node.queryComponent().getExtents(coords)
+
         try:
-            rect = node.queryComponent().getExtents(coords)
+            # Bounded, not called directly: confirmed live (GhostBSD, a
+            # QTreeView) that this specific call can hang completely rather
+            # than raise or return -- see BackendCallTimeout's and
+            # _run_bounded's own docstrings. BackendCallTimeout is let
+            # through both `except Exception` clauses below rather than
+            # being swallowed into "no extents" like an ordinary failure,
+            # since a hang is not the same fact as an element genuinely
+            # having no rectangle and callers need to tell the two apart.
+            rect = _run_bounded(self._call_timeout, _get_extents)
         except AttributeError:
             # `queryComponent` is a camelCase alias PyGObject adds to
             # `Atspi.Accessible` on some builds, not a GI-native method --
@@ -1461,9 +1716,15 @@ class AtspiBackend(GUIBackend):
             # GI-native interface call keeps that coordinate guarantee on
             # every PyGObject build instead of only the ones with the alias.
             try:
-                rect = _gi_component().get_extents(node, coords)
+                rect = _run_bounded(
+                    self._call_timeout, _gi_component().get_extents, node, coords
+                )
+            except BackendCallTimeout:
+                raise
             except Exception:  # noqa: BLE001 - no Component interface, or a dead node
                 return None
+        except BackendCallTimeout:
+            raise
         except Exception:  # noqa: BLE001 - no Component interface, or a dead node
             return None
         if rect is None or rect.width <= 0 or rect.height <= 0:
@@ -1507,9 +1768,16 @@ class AtspiBackend(GUIBackend):
         """
         self.require(Capability.WINDOW_LIST)
         found = []
-        for app in self._tree.root.applications():
+        applications = _run_bounded(
+            self._call_timeout, lambda: list(self._tree.root.applications())
+        )
+        for app in applications:
             try:
-                frames = app.children
+                frames = _run_bounded(
+                    self._call_timeout, lambda a=app: list(a.children)
+                )
+            except BackendCallTimeout:
+                raise
             except Exception:  # noqa: BLE001 - a dead application is not an error
                 # Mirrors _hits_in's own guard: an application exiting
                 # between the app list and this read is ordinary, and
@@ -1535,7 +1803,29 @@ class AtspiBackend(GUIBackend):
         """The focused window, or None."""
         self.require(Capability.WINDOW_STATE)
         for window in self.windows():
-            if window.handle.getState().contains(self._state_active()):
+            # `get_state_set` first, `getState` second: dogtail 2.1.0 no
+            # longer carries the camelCase alias this used to call, and the
+            # handle is a dogtail-extended `Atspi.Accessible` rather than a
+            # Node -- confirmed live on Debian 13 (dogtail 2.1.0, backend
+            # `atspi+uinput`), where `getState` raised AttributeError and
+            # took `active_window`, and so `wait_window_focus` and
+            # `focus_window` above it, down with it. Both spellings are
+            # tried because the older one is all a pre-2.1 dogtail has.
+            # Read the state *names* rather than comparing against
+            # pyatspi's STATE_ACTIVE constant, for the same reason
+            # `expanded`/`expandable` do it this way: it keeps the check
+            # working where pyatspi is absent or broken. Confirmed live on
+            # Debian 13 and Pop!_OS/COSMIC that both were needed. First,
+            # dogtail 2.1.0 no longer carries the camelCase `getState` this
+            # used to call, so it raised AttributeError. Fixing that
+            # surfaced the real blocker underneath: `import pyatspi` fails
+            # with AttributeError there -- not ImportError, a broken
+            # install rather than a missing one -- so the constant lookup
+            # raised CapabilityUnsupported from inside a capability the
+            # backend had already advertised. `state_set` is on every
+            # dogtail generation and needs neither.
+            names = _run_bounded(self._call_timeout, _node_state_names, window.handle)
+            if "ACTIVE" in names:
                 return window
         return None
 
@@ -1553,7 +1843,7 @@ class AtspiBackend(GUIBackend):
         # really the same dogtail Node, which nothing here has a static type
         # for since dogtail is an optional runtime import.
         node: Any = window.handle if isinstance(window, Window) else window.node
-        return bool(node.showing)
+        return bool(_run_bounded(self._call_timeout, lambda: node.showing))
 
     def _pyatspi(self, capability):
         """The pyatspi module, or a typed error naming what wanted it.
@@ -1594,15 +1884,17 @@ class AtspiBackend(GUIBackend):
     def activate_window(self, window):
         """Give a window keyboard focus."""
         self.require(Capability.WINDOW_ACTIVATE)
-        window.handle.grabFocus()
+        _run_bounded(self._call_timeout, window.handle.grabFocus)
 
     def geometry(self, window):
         """A window's (x, y, width, height), where coordinates are reliable."""
         self.require(Capability.WINDOW_GEOMETRY, _WAYLAND_COORDS)
         node: Any = window.handle if isinstance(window, Window) else window.node
         try:
-            x, y = node.position
-            width, height = node.size
+            x, y = _run_bounded(self._call_timeout, lambda: node.position)
+            width, height = _run_bounded(self._call_timeout, lambda: node.size)
+        except BackendCallTimeout:
+            raise
         except Exception as exc:
             # dogtail's Component.get_size/get_position route through its own
             # ponytail helper on GNOME -- a real system daemon and D-Bus call,

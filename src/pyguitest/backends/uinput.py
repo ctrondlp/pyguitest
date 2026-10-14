@@ -222,7 +222,27 @@ class UinputBackend(GUIBackend):
                 # BTN_TOOL_FINGER and the joystick range, which combined with
                 # the ABS_X/ABS_Y axes below lets libinput classify this
                 # device as a touchscreen or tablet instead of a pointer.
-                + [c for c in range(e.KEY_ESC, e.KEY_COMPOSE + 1) if c in e.keys]
+                # KEY_POWER (116) excluded even though it falls in that
+                # range: confirmed live (Debian 13, GNOME/Wayland, fresh
+                # reboot, ruling out session drift) that advertising it tags
+                # the whole device `power-switch` in udev -- `udevadm info`
+                # showed `CURRENT_TAGS=:power-switch:` with neither `seat`
+                # nor `uaccess`, the tags logind normally grants an input
+                # device for the active session. Without `uaccess`, Mutter
+                # can never open the device at all: every synthetic click
+                # and keystroke this backend sent was silently dropped, with
+                # no error anywhere, session-wide, surviving a reboot (so
+                # not transient session state -- a deterministic
+                # classification this device's own declared capabilities
+                # triggered). No GUI test needs to simulate a hardware power
+                # button; excluding the one key id that causes this is safer
+                # than asking every caller to work around a udev
+                # misclassification their own device declaration caused.
+                + [
+                    c
+                    for c in range(e.KEY_ESC, e.KEY_COMPOSE + 1)
+                    if c in e.keys and c != e.KEY_POWER
+                ]
             ),
             e.EV_ABS: [(e.ABS_X, axis(width)), (e.ABS_Y, axis(height))],
             e.EV_REL: [e.REL_WHEEL, e.REL_HWHEEL],
