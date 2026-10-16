@@ -22,6 +22,26 @@ class BackendUnavailable(PyGUITestError):
     """No backend could drive the current session."""
 
 
+class VersionTooOld(PyGUITestError):
+    """The installed pyguitest is older than the floor a script declared.
+
+    Raised by require_version(). Exists for scripts that outlive the machine
+    they were written on: a generated or shared script states the release it
+    was checked against and an older install fails right at that line, naming
+    both versions and the upgrade command, instead of part way through a run
+    with an AttributeError on an API the older release does not have.
+    """
+
+    def __init__(self, minimum: str, installed: str) -> None:
+        """Record the floor the script declared and the version actually here."""
+        self.minimum = minimum
+        self.installed = installed
+        super().__init__(
+            f"this script requires pyguitest >= {minimum}, but {installed} is "
+            f"installed -- upgrade with `pip install 'pyguitest>={minimum}'`"
+        )
+
+
 # What every CapabilityUnsupported message ends with. It lives in the
 # exception rather than at the raise sites because it is the same sentence at
 # all of them, and the one that matters most is the plainest: a capability no

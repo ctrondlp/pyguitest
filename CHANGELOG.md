@@ -7,6 +7,21 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.18.0] — 2026-10-16
+
+### Added
+
+- **`pyguitest.require_version("0.18")` / `gui.require_version()`** — a
+  travelling script's floor on the package itself, the counterpart of
+  `gui.require()` for capabilities. A generated or shared script states the
+  release it was checked against and an older install fails at that line
+  with the new typed `VersionTooOld` error naming both versions and the pip
+  upgrade command, instead of part way through a run with an
+  `AttributeError` on an API the older release does not have. The floor is
+  compared numerically per component ("0.17" accepts every 0.17.x) and is a
+  floor, not a pin — newer releases pass, matching the `>=` a requirements
+  file would state.
+
 ## [0.17.1] — 2026-10-15
 
 ### Fixed
@@ -4730,7 +4745,8 @@ First public release.
 - A `pyguitest` command-line entry point.
 - PEP 561 type information (`py.typed`); no hard runtime dependencies.
 
-[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.17.1...HEAD
+[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/ctrondlp/pyguitest/compare/v0.17.1...v0.18.0
 [0.17.1]: https://github.com/ctrondlp/pyguitest/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/ctrondlp/pyguitest/compare/v0.16.3...v0.17.0
 [0.16.3]: https://github.com/ctrondlp/pyguitest/compare/v0.16.2...v0.16.3

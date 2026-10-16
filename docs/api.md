@@ -172,6 +172,7 @@ Raise on failure with a message naming what was actually found, for use directly
 | `is_window_cursor(window: Window, shape: int)` | `WINDOW_CURSOR_QUERY` |  | Whether `window` is currently showing cursor `shape`. |
 | `lower_window(window: Window)` | `WINDOW_LOWER` |  | Replaces LowerWindow -- no foreign-toplevel protocol offers this. |
 | `pointer_position()` | `POINTER_QUERY` |  | The global pointer position. Replaces GetMousePos. |
+| `require_version(minimum: str)` |  |  | Raise VersionTooOld unless this pyguitest is at least `minimum`. |
 | `row_values(row: Element)` |  |  | `row`'s own column values, as plain text, one per child cell. |
 | `set_window_title(window: Window, title: str)` | `WINDOW_TITLE_SET` |  | Replaces SetWindowName. Impersonation is possible under X11. |
 | `tree_items(root: Element, role: str \| None = None, max_depth: int = 24)` | `ELEMENT_ACTION`, `ELEMENT_TREE` |  | Every descendant of `root`, opening collapsed branches to reach them. |
@@ -424,6 +425,7 @@ WINDOW_ROLES
 | `ImageNotFound` | No match for the template image cleared the similarity threshold. |
 | `PermissionRequired` | The operation exists but was not granted. |
 | `PortalTimeout` | A portal request was accepted but never answered. |
+| `VersionTooOld` | The installed pyguitest is older than the floor a script declared. |
 | `WindowNotFound` | No window matched, or a handle refers to a window that has closed. |
 
 ## Module-level names
@@ -461,6 +463,8 @@ WINDOW_ROLES
 | `ImageNotFound` | No match for the template image cleared the similarity threshold. |
 | `PermissionRequired` | The operation exists but was not granted. |
 | `PortalTimeout` | A portal request was accepted but never answered. |
+| `VersionTooOld` | The installed pyguitest is older than the floor a script declared. |
 | `WindowNotFound` | No window matched, or a handle refers to a window that has closed. |
+| `require_version` | Raise VersionTooOld unless this pyguitest is at least `minimum`. |
 | `backends` | Backend registry and selection. |
 | `compat` | The X11::GUITest 0.29 migration table, as data. |

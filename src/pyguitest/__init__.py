@@ -54,6 +54,7 @@ from .errors import (
     PermissionRequired,
     PortalTimeout,
     PyGUITestError,
+    VersionTooOld,
     WindowNotFound,
 )
 from .png import png_size as _png_size
@@ -81,7 +82,7 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T")
 
-__version__ = "0.17.1"
+__version__ = "0.18.0"
 
 __all__ = [
     "connect",
@@ -115,7 +116,9 @@ __all__ = [
     "ImageNotFound",
     "PermissionRequired",
     "PortalTimeout",
+    "VersionTooOld",
     "WindowNotFound",
+    "require_version",
     "backends",
     "compat",
 ]
@@ -138,6 +141,38 @@ def quote_for_type(text: str | None) -> str | None:
     if text is None:
         return None
     return _SENDKEYS_SPECIAL.sub(r"{\1}", text)
+
+
+def _release_tuple(version: str, what: str) -> tuple[int, ...]:
+    """Parse a dotted release like "0.17" into comparable integers."""
+    try:
+        return tuple(int(part) for part in version.split("."))
+    except ValueError:
+        raise ValueError(
+            f"{what} {version!r} is not a dotted release like '0.17' or '0.17.1'"
+        ) from None
+
+
+def require_version(minimum: str) -> None:
+    """Raise VersionTooOld unless this pyguitest is at least `minimum`.
+
+    For a script that travels: state the release it was checked against at
+    the top -- pyguitest.require_version("0.18") -- and an older install
+    fails right there, naming both versions and the pip command, instead of
+    part way through a run with an AttributeError on an API that release
+    does not have. Also available on the session as gui.require_version(),
+    the counterpart of gui.require() for the package itself rather than
+    the desktop.
+
+    `minimum` is a dotted release like "0.17" or "0.17.2", compared
+    numerically per component against the components it names -- "0.17"
+    accepts every 0.17.x. It is a floor, not a pin: a newer pyguitest
+    passes, matching the `>=` a requirements file would state.
+    """
+    floor = _release_tuple(minimum, "minimum version")
+    installed = _release_tuple(__version__, "installed version")
+    if installed[: len(floor)] < floor:
+        raise VersionTooOld(minimum, __version__)
 
 
 NAMED_ROLES = (
@@ -825,6 +860,21 @@ class Session:
         for capability in capabilities:
             if capability not in self.capabilities:
                 self.backend.require(capability)
+
+    def require_version(self, minimum: str) -> None:
+        """Raise VersionTooOld unless this pyguitest is at least `minimum`.
+
+        The counterpart of require() for the package itself rather than the
+        desktop: a script written against this release declares that fact up
+        front and fails here, naming both versions, rather than mid-run with
+        an AttributeError on an API an older release does not have.
+
+        Delegates to the module-level pyguitest.require_version(), which
+        also works before connect(); this method exists so a script holding
+        only `gui` declares its floor the same way it declares the
+        capabilities it needs.
+        """
+        require_version(minimum)
 
     def report(self) -> str:
         """A support table for this session, for logs and bug reports.
