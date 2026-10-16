@@ -549,6 +549,65 @@ jobs:
           print("macos extra installed; PyObjC imported; macquartz registered")
           PY
 
+  freebsd:
+    name: FreeBSD, in a VM on the nightly schedule
+    runs-on: ubuntu-latest
+    # The README claims BSD and docs/validation.md's BSD record comes from a
+    # person at a GhostBSD machine -- live, real, and run only when someone
+    # thinks to. This job is the continuous half of that claim: GitHub has no
+    # BSD runners, so vmactions boots a FreeBSD VM under QEMU on this one and
+    # runs the same bare, dependency-free suite the `tests` job runs on
+    # Linux. What it catches is the class of bug that shipped before --
+    # /proc reads, Linux-only imports, `ps` spellings -- on the platform
+    # where they break, without waiting for the next live session.
+    #
+    # Nightly and dispatch only, not pushes or PRs: the VM takes several
+    # minutes to boot before a single test runs, and `main` is covered the
+    # next night. Deliberately NOT in `publish`'s needs -- a job that does
+    # not run on tag pushes would leave publish waiting on a skip.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Run the test suite on FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        with:
+          # Tracks what the live boxes run: GhostBSD sits on FreeBSD 15.
+          release: "15.0"
+          usesh: true
+          prepare: pkg install -y python3
+          # The same claim as the Linux `tests` job -- no pip install, no
+          # display, runtime probing all the way down -- plus the same two
+          # floors the windows and macos jobs assert: a mass import failure
+          # must not read as a quietly tiny green suite, and the Linux-,
+          # Windows- and Mac-only tests have to skip *loudly* here rather
+          # than not fire their guards at all.
+          run: |
+            set -e
+            # vmactions syncs the workspace into the VM at the same path and
+            # starts `run` in it; the fallback covers a VM where GITHUB_
+            # variables are not exported.
+            cd "${GITHUB_WORKSPACE:-.}"
+            PYTHONPATH=src python3 - <<'PY'
+            import sys
+            import unittest
+
+            result = unittest.TextTestRunner(verbosity=2).run(
+                unittest.TestLoader().discover("tests")
+            )
+            skipped = len(result.skipped)
+            print(
+                f"\nran {result.testsRun}, skipped {skipped}, "
+                f"failures {len(result.failures)}, errors {len(result.errors)}"
+            )
+            if result.failures or result.errors:
+                sys.exit(1)
+            if result.testsRun < 800:
+                sys.exit(f"only {result.testsRun} tests ran -- something did not import")
+            if skipped < 10:
+                sys.exit(f"only {skipped} tests skipped -- the platform guards did not run")
+            PY
+
   build:
     name: build sdist and wheel
     runs-on: ubuntu-latest

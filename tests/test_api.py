@@ -3290,3 +3290,54 @@ class TestCaptureOnFailure(unittest.TestCase):
         self.assertIsNone(caught.exception.screenshot)
         self.assertIsNotNone(caught.exception.accessibility_tree)
         self.assertIsNotNone(caught.exception.focused_element)
+
+
+class TestRequireVersion(unittest.TestCase):
+    """require_version(): a travelling script's floor on the package itself.
+
+    A generated or shared script states the release it was checked against
+    and an older install fails at that line, naming both versions, rather
+    than mid-run with an AttributeError on an API the release lacks.
+    """
+
+    def test_the_installed_version_satisfies_itself(self):
+        pyguitest.require_version(pyguitest.__version__)
+
+    def test_a_shorter_floor_accepts_any_patch_of_that_minor(self):
+        major, minor, _patch = pyguitest.__version__.split(".")
+        pyguitest.require_version(f"{major}.{minor}")
+
+    def test_an_older_floor_passes_because_it_is_a_floor_not_a_pin(self):
+        pyguitest.require_version("0.1")
+
+    def test_a_newer_floor_raises_naming_both_versions(self):
+        with self.assertRaises(pyguitest.VersionTooOld) as caught:
+            pyguitest.require_version("999.0")
+        self.assertIn("999.0", str(caught.exception))
+        self.assertIn(pyguitest.__version__, str(caught.exception))
+        self.assertEqual(caught.exception.minimum, "999.0")
+        self.assertEqual(caught.exception.installed, pyguitest.__version__)
+
+    def test_a_newer_patch_of_the_same_minor_raises(self):
+        major, minor, patch = (int(n) for n in pyguitest.__version__.split("."))
+        with self.assertRaises(pyguitest.VersionTooOld):
+            pyguitest.require_version(f"{major}.{minor}.{patch + 1}")
+
+    def test_comparison_is_numeric_not_lexicographic(self):
+        # "0.9" > "0.17" as strings; as releases 0.9 is the older one and
+        # must pass against any 0.10+.
+        pyguitest.require_version("0.9")
+
+    def test_garbage_is_a_value_error_not_a_version_failure(self):
+        with self.assertRaises(ValueError):
+            pyguitest.require_version("latest")
+
+    def test_the_session_method_is_the_same_check(self):
+        gui = pyguitest.Session(FakeBackend(), pyguitest.detect())
+        gui.require_version(pyguitest.__version__)
+        with self.assertRaises(pyguitest.VersionTooOld):
+            gui.require_version("999.0")
+
+    def test_the_error_and_function_are_public_exports(self):
+        self.assertIn("require_version", pyguitest.__all__)
+        self.assertIn("VersionTooOld", pyguitest.__all__)
