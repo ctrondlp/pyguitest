@@ -322,9 +322,13 @@ difference between a hypothesis and an answer.
 ## X11::GUITest cheat sheet
 
 The most-used half of the module. `pyguitest migrate script.pl` reports the
-tier of every call in a real file and exits non-zero when one has no Wayland
-path, so a port can be gated in CI; the full 50-export table lives in
-`pyguitest.compat` and is explained in
+tier, replacement and line numbers of every call in a real file — give it a
+directory and it walks the Perl sources under it, `--json` for a CI step that
+wants more than an exit status. It exits non-zero on the two kinds of call a
+human has to decide about: the ones Wayland refuses, and the two with no
+replacement anywhere (`GetScreenDepth`, `GetWindowsFromPid`). The full
+50-export table lives in `pyguitest.compat`, alongside the `:CONST` integers
+in `compat.CONSTANTS`, and is explained in
 [developers/wayland-audit.md](developers/wayland-audit.md).
 
 | X11::GUITest | pyguitest | Note |
@@ -347,14 +351,17 @@ path, so a port can be gated in CI; the full 50-export table lives in
 | `ClickWindow` | `Element.click` | Prefer `gui.button(...).click()` |
 | `GetRootWindow` / `GetChildWindows` / `GetParentWindow` | `root_element` / `Element.children` / `Element.parent` | The accessible tree, not the window tree |
 | `GetScreenRes` / `ScreenCount` | `Screen.size` / `len(gui.screens())` | |
+| `IsWindow` / `IsWindowViewable` | `is_window_open` / `is_window_viewable` | The second reads minimized state, not X11's `IsViewable` |
 | `GetMousePos` | `pointer_position()` | X11, Windows and macOS; raises on Wayland |
-| `IsKeyPressed`, `IsMouseButtonPressed`, `SetWindowName`, `LowerWindow`, `IsWindowCursor` | X11 and Microsoft Windows | Deliberately prevented on Wayland, where they raise |
+| `IsKeyPressed` / `IsMouseButtonPressed` | `is_key_pressed` / `is_button_pressed` | X11 and Windows only; deliberately prevented on Wayland, where they raise |
+| `SetWindowName` / `LowerWindow` / `IsWindowCursor` | `set_window_title` / `lower_window` / `is_window_cursor` | As above. `is_window_cursor` takes the integer the `XC_*` constants carried |
+| `DEF_WAIT`, `M_LEFT`, `M_BTN1`…`M_BTN5`, `XC_*` | plain integers | `:CONST` exports nothing needing a pyguitest name: buttons go to `click()`, `M_UP`/`M_DOWN` become `scroll(dy=±1)`, cursor shapes pass through unchanged |
 
-The second row is the one that decides whether a port is possible at all. If a
-script depends on reading global input state, it can be ported to X11,
-XWayland and Windows — where these are ordinary API calls — but not to
+The `IsKeyPressed` row is the one that decides whether a port is possible at
+all. If a script depends on reading global input state, it can be ported to
+X11, XWayland and Windows — where these are ordinary API calls — but not to
 Wayland, and no backend will ever change that, because preventing it is the
-point. The row above it is the exception inside that set: the pointer's
-position is readable on macOS too — a plain `CGEventGetLocation` read needing
-no grant — which is why `api.md`'s capability table lists three backends for
+point. `GetMousePos` is the exception inside that set: the pointer's position
+is readable on macOS too — a plain `CGEventGetLocation` read needing no grant
+— which is why `api.md`'s capability table lists three backends for
 `POINTER_QUERY` and two for the rest.

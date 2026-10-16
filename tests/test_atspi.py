@@ -1304,15 +1304,24 @@ class TestWaylandElementGeometry(AtspiTestCase):
         with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
             self.assertEqual(gui.extents(button), (10, 52, 80, 30))
 
-    def test_no_matching_window_falls_back_to_unsupported(self):
-        # The source exists, but no window of its own has this pid --
-        # confirmed live is the only guarantee this offers, not a guess.
+    def test_no_matching_window_raises_capability_unsupported(self):
+        # The source exists, but no window of its own has this pid. The
+        # element's own rectangle is fine -- it is the *window* that has no
+        # position to add -- so the answer is a typed refusal naming that,
+        # not None: None means "this element has no rectangle", and a caller
+        # unpacking it got `TypeError: cannot unpack non-iterable NoneType
+        # object`, which names neither cause. Measured live on niri 26.04,
+        # where tile_pos_in_workspace_view is null even for an on-screen
+        # tiled window and every element in the tree hit this path.
         self.frame._pid = 4242
         gui = self.backend(SessionType.WAYLAND)
         gui.set_window_geometry_source(_FakeWindowGeometrySource(9999, (0, 32)))
         button = gui.find_element(name="OK")
         with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
-            self.assertIsNone(gui.extents(button))
+            with self.assertRaises(CapabilityUnsupported) as caught:
+                gui.extents(button)
+        self.assertIn("window-relative", str(caught.exception))
+        self.assertIn("is_window_viewable", str(caught.exception))
 
     def test_falls_back_to_title_when_the_source_never_has_a_pid(self):
         # COSMIC, confirmed live and against the protocol XML (see
@@ -1353,14 +1362,17 @@ class TestWaylandElementGeometry(AtspiTestCase):
         with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
             self.assertEqual(gui.extents(button), (10, 52, 80, 30))
 
-    def test_no_title_match_either_falls_back_to_unsupported(self):
+    def test_no_title_match_either_raises_capability_unsupported(self):
+        # Same refusal when the title route misses too -- see the pid test
+        # above for why this is a typed error rather than None.
         gui = self.backend(SessionType.WAYLAND)
         gui.set_window_geometry_source(
             _FakeTitleOnlyGeometrySource("Some Other Window", (0, 32))
         )
         button = gui.find_element(name="OK")
         with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
-            self.assertIsNone(gui.extents(button))
+            with self.assertRaises(CapabilityUnsupported):
+                gui.extents(button)
 
     def test_a_button_is_found_whichever_name_atspi_gives_it(self):
         # at-spi2 renamed ATSPI_ROLE_PUSH_BUTTON to ATSPI_ROLE_BUTTON without
@@ -1506,6 +1518,68 @@ class TestWaylandElementGeometry(AtspiTestCase):
         with self.assertRaises(RuntimeError):
             self.atspi.Element(node).click()
         self.assertEqual(node.actions_performed, [])
+
+    def _ponytail_less_node(self):
+        return FakeNode(
+            name="Open",
+            role="menu item",
+            actions={"ShowMenu": {}},
+            click_raises=RuntimeError(
+                "Error in ponytail initiation might be caused by several reasons"
+            ),
+        )
+
+    def _pointer_session(self, extents=(10, 10, 60, 20)):
+        session = mock.Mock(click_via="auto")
+        session.supports.return_value = True
+        session.extents.return_value = extents
+        return session
+
+    def test_click_without_ponytail_takes_the_session_s_own_pointer(self):
+        # Measured live on GhostBSD/X11 replaying a recording: dogtail refused
+        # for want of gnome-ponytail-daemon while the session's x11 pointer
+        # had just served thousands of gui.click() calls. The second rung is
+        # that pointer, aimed by the session's own extents.
+        node = self._ponytail_less_node()
+        session = self._pointer_session()
+        element = self.atspi.Element(node, session)
+        element.click()
+        session.click_element.assert_called_once_with(element)
+        self.assertEqual(node.actions_performed, [])
+
+    def test_click_without_a_pointer_in_the_session_refuses_up_front(self):
+        # No second rung to try, so no extents lookup is paid for either, and
+        # dogtail's account of the first rung is the cause.
+        node = self._ponytail_less_node()
+        session = self._pointer_session()
+        session.supports.return_value = False
+        with self.assertRaises(ElementNotActionable) as ctx:
+            self.atspi.Element(node, session).click()
+        self.assertIsInstance(ctx.exception.__cause__, RuntimeError)
+        session.extents.assert_not_called()
+        session.click_element.assert_not_called()
+
+    def test_click_with_no_rectangle_chains_dogtail_s_refusal_underneath(self):
+        # The refusal says what the session could not do; the cause names
+        # the rung this desktop lacks. Without the chain a ponytail-less
+        # desktop reads as "no session".
+        node = self._ponytail_less_node()
+        session = self._pointer_session(extents=None)
+        with self.assertRaises(ElementNotActionable) as ctx:
+            self.atspi.Element(node, session).click()
+        self.assertIn("no rectangle", str(ctx.exception))
+        self.assertIsInstance(ctx.exception.__cause__, RuntimeError)
+        session.click_element.assert_not_called()
+
+    def test_a_hang_in_the_pointer_rung_stays_a_hang(self):
+        # The extents lookup is the very getExtents call measured hanging on
+        # GhostBSD. A hang is not "cannot be clicked" and must not be
+        # reported as one.
+        node = self._ponytail_less_node()
+        session = self._pointer_session()
+        session.extents.side_effect = pyguitest.BackendCallTimeout("getExtents", 5)
+        with self.assertRaises(pyguitest.BackendCallTimeout):
+            self.atspi.Element(node, session).click()
 
     def test_click_falls_back_when_the_element_has_no_coordinates(self):
         # AT-SPI answers INT_MIN for x and y when a component is not showing,

@@ -17,7 +17,11 @@ unread rather than mirrored by a parser on this side. See _record().
 
 The migration scan is a lexical pass over Perl sources: it finds X11::GUITest
 calls and reports the tier each lands in, so the cost of a port can be read off
-before any code is written.
+before any code is written. It covers both halves of `qw(:ALL)` -- the 50
+functions of `@EXPORT_OK` and the `:CONST` integers, which have no pyguitest
+spelling because they did not need one -- and exits non-zero on the two kinds
+of call a human has to decide about rather than translate: the ones Wayland
+refuses, and the two with no replacement anywhere.
 """
 
 import argparse
@@ -34,12 +38,22 @@ from enum import Enum
 from . import Capability, __version__, connect, tools
 from .backends.atspi import a11y_bus_probe
 from .capabilities import TIERS, Tier
-from .compat import LEGACY
+from .compat import CONSTANTS, LEGACY
 from .hints import advice, detect_distro, hints_for
 from .inspect import format_tree, tree_data
 from .session import assistive_technology_enabled, toolkit_accessibility
 
 _CALL = re.compile(r"\b(" + "|".join(sorted(LEGACY, key=len, reverse=True)) + r")\b")
+
+# The `:CONST` half of `qw(:ALL)`, which the function table does not carry.
+# `XC_*` stands for the ~85 cursor shapes, matched by prefix rather than
+# listed; the rest are matched by name, longest first for the same reason
+# _CALL is (M_BTN1 must not win over a longer name sharing its prefix).
+_CONST = re.compile(
+    r"\b(XC_[A-Z0-9_]+|"
+    + "|".join(sorted((n for n in CONSTANTS if n != "XC_*"), key=len, reverse=True))
+    + r")\b"
+)
 
 # Env vars the desktop-detection logic in session.py actually reads
 # (session_type/compositor classification, plus the sway/Hyprland IPC
@@ -467,37 +481,187 @@ def _inspect(json_output: bool = False, window: str | None = None) -> int:
     return 0
 
 
-def _scan(paths):
+# What a directory is scanned for. A path named on the command line is read
+# whatever it is called -- being named is intent enough -- but a directory is
+# walked for these, so pointing the scanner at a checkout does not try to
+# lex every image and tarball in it.
+_PERL_SUFFIXES = (".pl", ".pm", ".t", ".cgi", ".perl", ".pod")
+
+
+def _perl_sources(paths):
+    """Each path as the files to read: a directory walked, a file as itself."""
+    for path in paths:
+        candidate = pathlib.Path(path)
+        if candidate.is_dir():
+            yield from sorted(
+                found
+                for found in candidate.rglob("*")
+                if found.is_file() and found.suffix.lower() in _PERL_SUFFIXES
+            )
+        else:
+            yield candidate
+
+
+def _line_numbers(source, pattern, fold=None):
+    """Where each name `pattern` matches appears, as {name: [line, ...]}.
+
+    Line-by-line rather than over the whole text, because a port is done by
+    opening the file at a line: a count alone says how much work there is
+    but not where any of it is. `fold` renames a match before it is counted,
+    which is how every XC_<shape> lands under one key.
+    """
+    found: dict[str, list[int]] = {}
+    for number, line in enumerate(source.splitlines(), start=1):
+        for name in pattern.findall(line):
+            found.setdefault(fold(name) if fold else name, []).append(number)
+    return found
+
+
+def _fold_cursor(name):
+    """Every XC_<shape> counted as the one `XC_*` row the table carries."""
+    return "XC_*" if name.startswith("XC_") else name
+
+
+def _format_lines(numbers):
+    """`line 9` or `lines 9, 14, 20`, truncated once it stops being useful."""
+    shown = ", ".join(str(number) for number in numbers[:8])
+    if len(numbers) > 8:
+        shown += f", +{len(numbers) - 8} more"
+    return f"{'line' if len(numbers) == 1 else 'lines'} {shown}"
+
+
+def _scan_data(per_file, per_file_consts, hits, const_hits):
+    """The scan as data, for a CI step that wants more than an exit status.
+
+    Carries what the printed report carries and nothing derived from the
+    live desktop: a scan is a lexical pass over sources, and its answer must
+    not change with the machine it runs on. `wayland_blocked` and `unported`
+    are the two lists the exit status is computed from, named so a caller can
+    act on them separately -- the first is a question about which target the
+    port is for, the second is work with no mechanical answer.
+    """
+    files = {}
+    for path, found in per_file.items():
+        files[path] = {
+            "calls": [
+                {
+                    "name": name,
+                    "lines": lines,
+                    "tier": int(LEGACY[name].tier),
+                    "tier_name": LEGACY[name].tier.name,
+                    "capability": (
+                        None
+                        if LEGACY[name].capability is None
+                        else LEGACY[name].capability.name
+                    ),
+                    "x11": LEGACY[name].x11,
+                    "replacement": LEGACY[name].replacement,
+                    "note": LEGACY[name].note or None,
+                }
+                for name, lines in sorted(found.items())
+            ],
+            "constants": [
+                {
+                    "name": name,
+                    "lines": lines,
+                    "replacement": CONSTANTS[name][0],
+                    "note": CONSTANTS[name][1],
+                }
+                for name, lines in sorted(per_file_consts[path].items())
+            ],
+        }
+    return {
+        "files": files,
+        "summary": {
+            "calls": sum(hits.values()),
+            "constants": sum(const_hits.values()),
+            "by_tier": {
+                tier.name: sum(
+                    count for n, count in hits.items() if LEGACY[n].tier is tier
+                )
+                for tier in Tier
+            },
+            "wayland_blocked": sorted(
+                n for n in hits if LEGACY[n].tier is Tier.NO_PATH
+            ),
+            "unported": sorted(n for n in hits if LEGACY[n].replacement is None),
+        },
+    }
+
+
+def _scan(paths, json_output=False):
     """Report the migration cost of each X11::GUITest call in `paths`."""
     hits: Counter[str] = Counter()
-    per_file: dict[str, Counter[str]] = {}
+    const_hits: Counter[str] = Counter()
+    per_file: dict[str, dict[str, list[int]]] = {}
+    per_file_consts: dict[str, dict[str, list[int]]] = {}
 
-    for path in paths:
+    for path in _perl_sources(paths):
         try:
-            with open(path, encoding="utf-8", errors="replace") as handle:
-                source = handle.read()
+            source = path.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
             print(f"{path}: {exc}", file=sys.stderr)
             continue
-        found = Counter(_CALL.findall(source))
-        if found:
-            per_file[path] = found
-            hits.update(found)
+        found = _line_numbers(source, _CALL)
+        consts = _line_numbers(source, _CONST, fold=_fold_cursor)
+        if found or consts:
+            per_file[str(path)] = found
+            per_file_consts[str(path)] = consts
+            hits.update({name: len(lines) for name, lines in found.items()})
+            const_hits.update({name: len(lines) for name, lines in consts.items()})
 
-    if not hits:
+    blocked = [n for n in hits if LEGACY[n].tier is Tier.NO_PATH]
+    unspelled = [n for n in hits if LEGACY[n].replacement is None]
+    status = 1 if blocked or unspelled else 0
+
+    if json_output:
+        print(
+            json.dumps(
+                _scan_data(per_file, per_file_consts, hits, const_hits), indent=2
+            )
+        )
+        return status
+
+    if not hits and not const_hits:
         print("No X11::GUITest calls found.")
         return 0
 
-    for path, found in per_file.items():
+    for path in per_file:
         print(f"\n{path}")
-        for name, count in sorted(found.items()):
-            fn = LEGACY[name]
-            label = name + (f" x{count}" if count > 1 else "")
-            arrow = fn.replacement or "(no replacement -- rethink this call)"
-            print(f"  T{int(fn.tier)}  {label:<26} -> {arrow}")
-            if fn.note:
-                print(f"      {fn.note}")
+        _print_file(per_file[path], per_file_consts[path])
+    _print_summary(hits, const_hits, blocked, unspelled)
+    return status
 
+
+def _print_file(found, consts):
+    """One file's calls and constants, each with the lines it appears on."""
+    for name, lines in sorted(found.items()):
+        fn = LEGACY[name]
+        label = name + (f" x{len(lines)}" if len(lines) > 1 else "")
+        arrow = fn.replacement or "(no spelling in pyguitest -- see the note)"
+        print(f"  T{int(fn.tier)}  {label:<26} -> {arrow}")
+        print(f"      {_format_lines(lines)}")
+        if fn.note:
+            print(f"      {fn.note}")
+    for name, lines in sorted(consts.items()):
+        spelling, note = CONSTANTS[name]
+        label = name + (f" x{len(lines)}" if len(lines) > 1 else "")
+        print(f"  --  {label:<26} -> {spelling}")
+        print(f"      {_format_lines(lines)}")
+        print(f"      {note}")
+
+
+def _print_summary(hits, const_hits, blocked, unspelled):
+    """The per-tier totals, and the two groups the exit status is built from.
+
+    Two different problems, reported separately because they need different
+    answers. A T6 name has a replacement that works on X11 and Windows (and
+    macOS for the pointer read) and raises on Wayland, so the question is
+    which target the port is for; an unported name has no spelling at all,
+    so the call itself has to change. Both fail the scan: `migrate` is meant
+    to gate a port in CI, and either one is a thing a human must decide
+    rather than translate.
+    """
     print("\nSummary")
     by_tier: Counter[Tier] = Counter()
     for name, count in hits.items():
@@ -505,15 +669,23 @@ def _scan(paths):
     for tier in Tier:
         if by_tier[tier]:
             print(f"  T{int(tier)} {tier.name:11} {by_tier[tier]:3}  {TIERS[tier]}")
+    if const_hits:
+        print(f"  -- {'CONSTANT':11} {sum(const_hits.values()):3}  Plain integers now")
 
-    blocked = [n for n in hits if LEGACY[n].tier is Tier.NO_PATH]
     if blocked:
         blocked_calls = sum(hits[n] for n in blocked)
         print(
-            f"\n{blocked_calls} call(s) across {len(blocked)} distinct name(s) have "
-            "no Wayland path and need rethinking: " + ", ".join(sorted(blocked))
+            f"\n{blocked_calls} call(s) across {len(blocked)} distinct name(s) port "
+            "to X11 and Windows (GetMousePos to macOS as well) but raise "
+            "CapabilityUnsupported on Wayland: " + ", ".join(sorted(blocked))
         )
-    return 1 if blocked else 0
+    if unspelled:
+        unspelled_calls = sum(hits[n] for n in unspelled)
+        print(
+            f"\n{unspelled_calls} call(s) across {len(unspelled)} distinct name(s) "
+            "have no pyguitest spelling at all and need rethinking: "
+            + ", ".join(sorted(unspelled))
+        )
 
 
 def _record(argv):
@@ -601,7 +773,10 @@ def main(argv=None):
         "--window", help="only windows whose title matches this regex"
     )
     migrate = sub.add_parser("migrate", help="scan Perl sources for X11::GUITest calls")
-    migrate.add_argument("paths", nargs="+")
+    migrate.add_argument(
+        "paths", nargs="+", help="Perl sources, or directories to walk for them"
+    )
+    migrate.add_argument("--json", action="store_true", help="machine-readable output")
     # Registered for the subcommand listing only -- main() dispatches `record`
     # before this parser runs, so nothing here ever parses it. Listed whether
     # or not the recorder is installed: help output that varies by machine is
@@ -613,7 +788,7 @@ def main(argv=None):
 
     args = parser.parse_args(argv)
     if args.command == "migrate":
-        return _scan(args.paths)
+        return _scan(args.paths, json_output=args.json)
     if args.command == "doctor":
         return _doctor()
     if args.command == "debug":

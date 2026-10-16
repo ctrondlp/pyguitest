@@ -7,6 +7,222 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **`pyguitest migrate` told users that six calls it has shipped for months
+  have no replacement.** The migration table in `pyguitest.compat` still
+  carried `replacement=None` for every `Tier.NO_PATH` function, so a scan of
+  a real Perl script printed
+
+      T6  GetMousePos  -> (no replacement -- rethink this call)
+          Track the position you last set
+
+  for `GetMousePos`, `IsKeyPressed`, `IsMouseButtonPressed`, `SetWindowName`,
+  `LowerWindow` and `IsWindowCursor` — all six of which are
+  `Session.pointer_position`, `is_key_pressed`, `is_button_pressed`,
+  `set_window_title`, `lower_window` and `is_window_cursor` today, on X11 and
+  `win32` plus macOS for the pointer read. `docs/recipes.md` already named
+  them, so the one tool a migrating user is told to trust disagreed with the
+  prose beside it, and sent anyone porting an X11 or Windows script away from
+  a call that works on their own desktop. `IsWindow` and `IsWindowViewable`
+  were stale the same way (`is_window_open`, `is_window_viewable`), as were
+  their notes. A tier is a statement about Wayland, not about availability:
+  `compat.unavailable()` keeps its six, now documented as "cannot be ported
+  to Wayland", and the new `compat.unported()` is the two calls with no
+  spelling anywhere — `GetScreenDepth` and `GetWindowsFromPid`. The scan
+  reports those two groups separately, since one is a question about which
+  target the port is for and the other is work with no mechanical answer.
+- **The cheat sheet's last row named platforms where it should have named
+  methods.** `docs/recipes.md` listed `IsKeyPressed` and four others against
+  a "pyguitest" column reading "X11 and Microsoft Windows", leaving the
+  actual replacements unwritten; `docs/developers/wayland-audit.md` still
+  concluded those six "should not exist", which the shipped API settled the
+  other way.
+
+### Added
+
+- **`pyguitest migrate` covers the other half of `qw(:ALL)`.** `@EXPORT_OK`
+  is 50 functions, but a script importing the module wholesale also gets the
+  `:CONST` tag — `DEF_WAIT`, the ten `M_*` button names and ~85 `XC_*`
+  cursor shapes — and the scanner was silent on all of them. They are
+  tabulated in `compat.CONSTANTS` (with `compat.constant()` folding every
+  cursor shape onto one row) and reported with the calls: `M_RIGHT` is
+  `click(3)`, `M_UP` is a `scroll(dy=1)` detent rather than button 4,
+  `DEF_WAIT` is the module's 10-second default against a pyguitest
+  `timeout=None` that waits forever, and an `XC_*` shape passes through to
+  `is_window_cursor()` unchanged.
+- **`pyguitest migrate` now reports line numbers, walks directories, and
+  speaks `--json`.** A count says how much work a port is; a line number
+  says where, so each call lists the lines it appears on. A path that is a
+  directory is walked for `.pl`, `.pm`, `.t`, `.cgi`, `.perl` and `.pod`
+  sources (a file named on the command line is still read whatever it is
+  called), and `--json` emits the per-file calls, constants, tiers and the
+  two blocked lists for a CI step that wants more than an exit status.
+
+## [0.17.1] — 2026-10-15
+
+### Fixed
+
+- **`extents()` answered `None` for an element whose window has no
+  position, and callers unpacking the rectangle got
+  `TypeError: cannot unpack non-iterable NoneType object`.** On a native
+  Wayland session an element's AT-SPI rectangle is window-relative, and
+  turning it into a screen one needs the window's position from a sibling
+  backend. niri reports no position at all for a tiled window
+  (`tile_pos_in_workspace_view` is null even with the window plainly on
+  screen -- measured on niri 26.04), so that lookup failed for every
+  element in the tree, and `extents()` folded "the window has no position"
+  into `None`, the answer reserved for "this element has no rectangle".
+  It now raises `CapabilityUnsupported` naming the real cause, the
+  element's (valid) size, and what to do instead: ask `is_window_viewable`
+  about the window, and drive the element through its accessible action
+  rather than a coordinate.
+- **Every window control on the `hyprland` backend was silently doing
+  nothing on current Hyprland.** `activate_window`, `move_window`,
+  `resize_window` and `minimize_window` all go through one dispatch helper,
+  which sent Hyprland's long-standing
+  `<command> <params>,address:0x...` syntax. Hyprland now parses a dispatch
+  as Lua and rejects that outright -- measured on Omarchy:
+
+      hyprctl dispatch focuswindow address:0x6284119cfb40
+      error: [string "return hl.dispatch(focuswindow address:0x6284..."]:1:
+             ')' expected near 'address'
+       -> Note: dispatch in lua is a shorthand for hl.dispatch(...), your
+          syntax might need to be updated.
+
+  The daemon answered with an error string, nothing happened, and nothing
+  raised, so a caller could not tell. The Lua spelling is sent instead --
+  `hl.dsp.focus({ window = "address:0x..." })`,
+  `hl.dsp.window.move({ x = ..., y = ..., window = ... })`,
+  `hl.dsp.window.resize({ x = ..., y = ..., window = ... })`, and
+  `hl.dsp.window.move({ workspace = "special:minimized", follow = false,
+  ... })` for minimize -- and which syntax a daemon wants is *discovered*
+  rather than assumed: the legacy form goes out once, and a Lua parse
+  complaint in the reply switches this backend over for the rest of the
+  session. A rejected legacy request changes nothing on the daemon, so
+  discovery costs one wasted request on a new Hyprland and none at all on an
+  older one, which keeps both working from the same code. Verified live
+  through pyguitest's own API afterwards: `move_window(w, 640, 480)` and
+  `resize_window(w, 1100, 820)` both took effect, where before the fix the
+  window did not move at all.
+
+  This is what broke a torture-test run on Omarchy that had passed the day
+  before: with `activate_window` failing quietly, no window ever held
+  focus, every key `wtype` sent went nowhere, and 27 interactions reported
+  nothing. Focus is still not obtainable on that particular session for a
+  separate reason that is not pyguitest's -- `hyprctl activewindow` answers
+  `Invalid` with one mapped, visible, `acceptsInput` window present, and
+  `hl.dsp.focus` is accepted and has no effect, while `move` and `resize`
+  through the same channel work -- so `wait_window_focus` correctly returns
+  False there, and a driver that ignores that answer is the thing to fix
+  next.
+
+- **A refused Hyprland dispatch now raises instead of returning quietly.**
+  The daemon answers an accepted dispatch with the single word `ok`, in
+  both syntaxes; anything else is its account of why it did nothing --
+  `warning: =[C]:-1: hl.focus: window not found` for a window that has gone,
+  `error: ...` for a request it would not take. The backend handed that
+  string back to callers that never read it, so after the syntax fix above
+  a refused request was still a silent no-op, and the first symptom was
+  still three layers away. Every dispatch reply is checked now: a "not
+  found" raises `WindowNotFound`, like every other lookup in the module,
+  and any other refusal raises `PyGUITestError` with the daemon's text in
+  it. Verified live on Omarchy: `activate_window` on a handle that no
+  longer exists raises `WindowNotFound` carrying the daemon's own words.
+
+- **`minimize_window()` on Hyprland opened the special workspace it was
+  hiding the window on.** The Lua spelling of "move silently" is
+  `follow = false` -- what Hyprland's and Omarchy's own bindings use. The
+  backend sent `silent = true`, which the Lua dispatcher does not know and
+  ignored, so the move *followed* the window: minimizing a focused window
+  put it on `special:minimized` and opened that workspace on the monitor,
+  window still on screen. Measured live on 0.56.2, where `follow = false`
+  leaves the monitor's `specialWorkspace` at id 0.
+
+- **`is_window_viewable()` and `window_at()` on Hyprland counted windows
+  that were not on screen.** Both read `mapped` and `hidden` alone. A
+  window moved to an inactive workspace, or minimized onto a closed special
+  one, reports `mapped=true hidden=false` and keeps its full rectangle --
+  `hidden` is Hyprland's flag for a window folded into a group's tabs, not
+  for "off screen" -- so a minimized window was viewable, and a point
+  inside its stale rectangle could be answered with it over the window the
+  user was actually looking at. Both now also require the window's
+  workspace to be one some monitor is displaying (its `activeWorkspace`,
+  or its `specialWorkspace` when one is open), and skip that test only
+  where the daemon reports no workspaces to compare against. Verified live
+  on Omarchy: False while minimized, `window_at()` no longer finds the
+  minimized window, True again after restore.
+
+- **`move_window()` and `resize_window()` on Hyprland did nothing to a
+  tiled window.** A tiled window's position and size belong to the layout,
+  and the daemon answers `ok` to a pixel move or resize of one without
+  changing anything -- measured live on 0.56.2, where a freshly opened
+  terminal stayed at (12, 38) through `window.move`. Both now float the
+  window first (`hl.dsp.window.float({ action = "on", ... })`, or
+  `setfloating` on an older daemon), exactly as the `sway` backend has
+  always chained `floating enable` in for the same reason, after which the
+  same requests land exactly: (100, 100) and 500x400 live. An already
+  floating window is unaffected.
+
+- **The `hyprctl` transport (`HyprlandCLI`) was unusable on a current
+  Hyprland.** `hyprctl dispatch` exits 7 with the daemon's refusal on
+  *stdout* and stderr empty; the transport raised `OSError` built from
+  stderr alone, so the syntax discovery above never saw the text it keys
+  off, and every window operation failed with `hyprctl dispatch ...
+  failed: ` and nothing after the colon. It also split the request on
+  whitespace, which a Lua expression survives only by luck. The request now
+  goes as one argument and a refusal comes back as the reply text, the way
+  the socket transport returns it; the shared runner names stdout when
+  stderr is empty, so any failure through it has a reason in it. Verified
+  live: the CLI transport discovers the Lua syntax and moves a window.
+
+- **`Element.click(via="pointer")` on `atspi` turned a hung extents lookup
+  into "cannot be clicked."** The pointer rung reads the element's
+  rectangle through the session, and its `except Exception` caught the new
+  `BackendCallTimeout` along with everything else, converting a stuck
+  AT-SPI call into `ElementNotActionable`. The timeout passes through now,
+  as it does in every other `except Exception` in the module, so a hang
+  and a refusal stay different facts. The rung's four cases -- session
+  pointer used, no pointer, no rectangle, hang -- each have a test now;
+  the comment that said they did was ahead of the code.
+
+- **`Element.click(via="pointer")` no longer refuses on every Linux and BSD
+  desktop that is not GNOME.** The `atspi` backend's pointer rung was
+  dogtail's own `Node.click()` alone, and modern dogtail injects through
+  GNOME's `gnome-ponytail-daemon`, so on GhostBSD/X11, KWin or sway it
+  refused outright -- `ElementNotActionable`, naming a daemon those desktops
+  have never had -- while the `x11`/`uinput`/compositor pointer the same
+  session was built with could click perfectly well. It now falls through to
+  `click_by_pointer`, the rung UI Automation and AX already end on, which
+  makes "three backends, one contract" true rather than nearly true.
+  dogtail's failure is kept as the `__cause__`, because it names the rung
+  that is actually missing; where the session has no pointer or the element
+  publishes no rectangle, the same typed refusal is raised as before. Found
+  replaying a recorded script on GhostBSD, in a session whose x11 pointer
+  had just served thousands of `gui.click()` calls; the roadmap had this
+  logged as a known, unfixed gap on KWin and sway.
+
+- **`is_window_viewable()` on the `niri` backend answered False for a window
+  that was plainly on screen.** It read `tile_pos_in_workspace_view`, on the
+  understanding that niri gives a tile a position within the workspace view
+  exactly when it is visible. The first live niri session this project has
+  ever reached disproved that: on niri 26.04 a kitty window that was
+  focused, alone on its output, on the active workspace and filling half the
+  screen reported that field as null, so the answer came back False for the
+  window the user was looking at -- wrong, rather than a refusal, which is
+  the failure this library cares most about avoiding. A tile position now
+  means visible; a null means hidden only where niri gave *some other window
+  on that workspace* a position, which proves the field is in use; and where
+  nothing on the workspace has one, the question falls back to whether that
+  workspace is the one being displayed. Both halves matter -- reading the
+  field alone is wrong on this niri, and reading the workspace alone would
+  call a window scrolled out of view visible, since it sits on an active
+  workspace just the same. `geometry()` still refuses when niri reports no
+  position, because there is nothing to compute one from, but it no longer
+  claims the window is scrolled away as the reason; `window_at()` can
+  likewise answer None over a visible window on such a session, which is now
+  documented where that is decided rather than left to be discovered.
+
 ## [0.17.0] — 2026-10-13
 
 ### Added
@@ -4516,7 +4732,13 @@ First public release.
 - A `pyguitest` command-line entry point.
 - PEP 561 type information (`py.typed`); no hard runtime dependencies.
 
-[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.17.1...HEAD
+[0.17.1]: https://github.com/ctrondlp/pyguitest/compare/v0.17.0...v0.17.1
+[0.17.0]: https://github.com/ctrondlp/pyguitest/compare/v0.16.3...v0.17.0
+[0.16.3]: https://github.com/ctrondlp/pyguitest/compare/v0.16.2...v0.16.3
+[0.16.2]: https://github.com/ctrondlp/pyguitest/compare/v0.16.1...v0.16.2
+[0.16.1]: https://github.com/ctrondlp/pyguitest/compare/v0.16.0...v0.16.1
+[0.16.0]: https://github.com/ctrondlp/pyguitest/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/ctrondlp/pyguitest/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/ctrondlp/pyguitest/compare/v0.12.0...v0.14.0
 [0.12.0]: https://github.com/ctrondlp/pyguitest/compare/v0.11.0...v0.12.0

@@ -36,6 +36,13 @@ been tried at all". The same record sorted that way instead:
   every window capability served by `hyprland` against a real compositor, a
   full torture-test pass, and no library change needed. niri is now the only
   supported desktop with no live run behind it.
+- **niri on KaOS, Wayland** — [the last compositor, met at
+  last](#niri-on-kaos-the-last-compositor-met-at-last-2026-10-14): the window
+  backend exercised live and one wrong answer fixed, with widgets still out of
+  reach on a distribution that packages no accessibility stack.
+- **Replaying what the recorder writes** — [three bugs in one
+  sitting](#replaying-a-recording-for-the-first-time-and-the-three-bugs-it-found-2026-10-14),
+  none of which recording or regeneration could have found.
 - **X11, properly** — [a real X11 session, Xfce under
   xfwm4, and Xvfb against GTK3 and GTK4](#run-live-on-a-real-x11-session):
   the whole API including tier 6, and the two caveats XWayland has that a
@@ -1210,8 +1217,9 @@ about *when it fires*, not about what it does.
 
 **What this run does not cover.** Hyprland and niri, which speak variants of
 the same IPC shape and stay in "Not run live" — neither is installed on this
-machine. (Hyprland has since been run, on Omarchy, 2026-10-13; see below.)
-Input on sway beyond the in-process uinput the composite selected.
+machine. (Both have since been run: Hyprland on Omarchy 2026-10-13, niri on
+KaOS 2026-10-14; see below.) Input on sway beyond the in-process uinput the
+composite selected.
 And recording: pyguitest-recorder needs XRecord, so a sway session with no
 XWayland is one it cannot record at all, by the same platform property
 described in that project's `architecture.md`.
@@ -1834,7 +1842,7 @@ row as a result, generated from the backend's own `capabilities`.
     since UIA publishes no per-application node to group by.
 
   A claim leaves this list only when a run puts its output beside it here.
-- **The wlroots compositor IPC backends** — ~~sway~~, ~~Hyprland~~, niri. Their
+- **The wlroots compositor IPC backends** — ~~sway~~, ~~Hyprland~~, ~~niri~~. Their
   tests replay recorded output and stand-ins, on a sandbox where none of
   those are available to test against. **sway left this list on 2026-09-22**:
   window listing, geometry, placement, resize, activation, minimize through
@@ -1843,9 +1851,13 @@ row as a result, generated from the backend's own `capabilities`.
   **Hyprland left it on 2026-10-13**, on Omarchy (Arch), against a real
   compositor rather than a headless one — every window capability the backend
   publishes, serving a full torture-test pass, with no library change; see the
-  dedicated section below. niri alone remains, speaking a variant of the same
-  IPC shape, and it is installed on none of the machines that closed the
-  other two. Two other names have
+  dedicated section below. **niri left it on 2026-10-14**, on KaOS, which
+  closes the family: window listing, activation, `active_window` and screen
+  info all answered from a real niri 26.04, and the run found a wrong answer
+  in `is_window_viewable` worth having (see the dedicated section below).
+  Its widget half is still untested, because KaOS packages no accessibility
+  stack, so the compositor backend is validated there and the `atspi` pairing
+  is not. Two other names have
   left this list: `KdotoolBackend` has since run live on KWin, and
   `UinputBackend` on both KWin and GNOME — above, and in the tier-6 caveat
   below, where a commanded move was read back off a real X client 1px out
@@ -2056,9 +2068,10 @@ The rest of the review's pyguitest half, in its own numbering:
   because it needs a live GNOME or KDE session with consent. Unchanged, and still the
   most valuable single live run nobody has made.
 - **Hyprland and niri remain unvalidated.** ~~Unchanged: sway has been run, its two
-  wlroots siblings have not~~ — **half-closed on 2026-10-13**: Hyprland has now been
-  run live on Omarchy. niri is still listed in the untested material rather than
-  claimed by the capability model.
+  wlroots siblings have not~~ — **closed**: Hyprland ran live on Omarchy on
+  2026-10-13 and niri on KaOS on 2026-10-14, so every compositor the capability
+  model claims has now answered from a real session. niri's widget half remains
+  untested for a packaging reason rather than a protocol one.
 - **`Environment.detect()` is heuristic, so "supported" means "worth attempting".**
   Agreed as a documentation matter rather than a defect; the doctor and the backend
   reasons are where the honesty lives, and both say *why* rather than "not supported".
@@ -4083,3 +4096,297 @@ than assumes.
 IPC shape and installed on none of these machines. Pointer input on Hyprland,
 for the permission reason above rather than any protocol one. `window_events()`
 was not subscribed to here; sway's live run is what covers that call.
+
+## niri on KaOS: the last compositor, met at last (2026-10-14)
+
+niri was the only desktop in the support list that had never met a live
+session: sway left "Not run live" on 2026-09-22 and Hyprland on 2026-10-13,
+and this closes the family. The box is KaOS, niri 26.04, Wayland.
+
+**The window backend works, and its tests had the shape right.** `connect()`
+composed `niri+uinput+clipboard:wl-copy+imagesearch:compare` unaided, and
+`pyguitest` with no subcommand printed `compositor wlroots (niri)` and listed
+`niri` among its tools without being taught anything. Exercised live:
+`windows()` (`title='~' app_id='kitty' pid=1189`), `activate_window()`,
+`active_window()`, `screens()` (`Screen(0, 1280x800 'Virtual-1')`). Until this
+run those code paths had only ever replayed recorded `niri msg` output against
+a sandbox where no niri existed; the shape that stand-in assumed was right.
+
+**One real bug, of the worst kind.** `is_window_viewable()` answered **False**
+for the kitty window that was focused, alone on its output, on the active
+workspace and filling half the screen -- a wrong answer rather than a
+refusal. It read `tile_pos_in_workspace_view`, on the stated assumption that
+"niri gives a tile a position within the workspace view exactly when it is on
+screen". niri 26.04 reports that field as null for an ordinary tiled window:
+
+    "layout": {"pos_in_scrolling_layout": [1, 1], "tile_size": [640.0, 772.0],
+               "window_size": [640, 772], "tile_pos_in_workspace_view": null,
+               "window_offset_in_tile": [0.0, 0.0]}
+
+Reading the workspace instead would get the opposite case wrong, because a
+window scrolled out of the view sits on an active workspace just the same.
+The fix uses both: a tile position means visible; a null means hidden only
+where niri gave some *other* window on that workspace a position, which
+proves the field is in use; and where nothing on the workspace has one, the
+answer comes from whether that workspace is being displayed. Verified live
+afterwards -- True, where it had been False.
+
+**`geometry()` still refuses here, and that is correct.** Without a pixel
+position there is nothing to compute one from. Only its explanation changed:
+it used to assert the window was scrolled out of the view, which was not what
+had happened. `window_at()` consequently answers None over a window that is
+visibly there on such a session, because a window with no rectangle cannot be
+hit-tested -- documented at `_rect`, where that is decided, rather than left
+to be discovered.
+
+**What this run does not cover.** Widgets. KaOS packages neither dogtail nor
+pyatspi and ships no at-spi2-core, wtype, grim or pip by default, so the
+accessibility half needed a root install that is the box owner's to make. A
+setup script was left at `~/setup-pyguitest-niri.sh` on that machine; the
+pacman half and the venv (dogtail 2.1.0, evdev 2.0.0) are in place, and
+`gtk3` is the last piece -- dogtail's `utils.py` runs
+`gi.require_version("Gtk", "3.0")` unconditionally at import, so without the
+Gtk-3.0 typelib `import dogtail.tree` raises "Namespace Gtk not available",
+pyguitest swallows that as a missing optional dependency, and the session
+composes without `atspi` at all: input worked, widgets were invisible. Worth
+knowing for any Qt-only distribution. Capture is also absent (no `grim`),
+though the Screenshot portal is offered as the route.
+
+**`/dev/uinput` is writable here through its ACL** (`crw-rw----+`, the account
+in `seat` but not `input`), so with `evdev` installed niri gets a real pointer
+*and* keyboard -- `POINTER_MOVE`, `POINTER_BUTTON`, `KEY_EVENT` and
+`TEXT_ENTRY` all true. That is a better input story than COSMIC or Debian,
+where no permission change helps.
+
+## Hyprland changed its dispatch syntax, and what was left after fixing it (2026-10-14)
+
+Omarchy had reached `all controls verified` on 2026-10-13. A day later the
+same fixture, same driver, failed with `STATUS CHECK FAILED: 27
+interaction(s) did not report` -- every one of them a control reached by
+Tab-seeking, each showing the status line of the *previous* control, meaning
+the interaction never happened at all.
+
+**One rung down, every window control had stopped working.** The backend
+sends `<command> <params>,address:0x...`, the syntax Hyprland has taken for
+years. Current Hyprland parses a dispatch as Lua:
+
+    hyprctl dispatch focuswindow address:0x6284119cfb40
+    error: [string "return hl.dispatch(focuswindow address:0x6284..."]:1:
+           ')' expected near 'address'
+     -> Note: dispatch in lua is a shorthand for hl.dispatch(...), your
+        syntax might need to be updated.
+
+The daemon answered with an error string, nothing happened, and nothing
+raised -- so `activate_window`, `move_window`, `resize_window` and
+`minimize_window` had all become silent no-ops. With no window ever focused,
+every key `wtype` sent went nowhere, which is the 27 failures.
+
+The Lua API was learned by asking the daemon rather than guessing, through
+`hyprctl repl`, whose error messages enumerate what each dispatcher accepts:
+
+    hl.dsp                 -> cursor, dpms, event, exec_cmd, ..., focus, window, workspace
+    hl.dsp.window          -> close, float, move, resize, set_prop, ...
+    hl.dsp.focus({...})    -> direction, monitor, window, urgent_or_last, last
+    hl.dsp.window.move     -> direction, x+y(+relative), workspace, into_group, out_of_group
+    hl.dsp.window.resize   -> positions (x & y) or keep_aspect_ratio
+
+`window = "address:0x..."` targets a specific window on any of them, which
+none of the error messages mention and all of them accept. Verified through
+pyguitest's own API after the fix: `move_window(w, 640, 480)` then
+`resize_window(w, 1100, 820)` produced `(640, 480, 900, 700)` and
+`(540, 420, 1100, 820)`, where before the fix the window did not move at all.
+Which syntax a daemon wants is discovered from its reply, so older Hyprland
+keeps working from the same code.
+
+**Focus still cannot be had on that session, and it is not pyguitest's.**
+Ruled out, in order: the dispatch syntax (fixed, and `move`/`resize` prove
+the channel works); a missing keyboard (`at-translated-set-2-keyboard`,
+`main: true`); a lock screen (no lock process, no session-lock layer);
+`noinitialfocus` window rules (none, and `misc:focus_on_activate` is true);
+the cursor sitting outside the window (moved to (900, 500), inside it, with
+`input:follow_mouse` at 1); and `hl.dsp.focus` being wrong (accepted, with
+every selector form, and ineffective).
+
+What remains is visible in the window's own record: with the fixture the only
+window on the workspace, Hyprland reports it at **`focusHistoryID: 1`**, not
+0. Something that is not a window holds position 0 -- a layer surface, of
+which this desktop has two, both owned by the shell (pid 1204:
+`omarchy-background` and `omarchy-bar`). While a layer surface holds keyboard
+focus, no window can take it, `activewindow` answers `Invalid`, and injected
+keys go to the shell. An Escape sent through `wtype` did not release it.
+
+Two things follow. `wait_window_focus` is right to return False there, and a
+driver that discards that answer turns one diagnosable condition into 27
+failures -- all six drivers now check it. And the way out on that box is a
+real pointer: `/dev/uinput` is `crw-------` root-only there, with no ACL and
+the account outside `input`, so `sudo usermod -aG input <user>` plus a
+re-login would let pyguitest click the window, which is how focus normally
+transfers away from a layer surface. On the niri box the same device carries
+an ACL and is writable without any group change, which is why niri got a
+pointer and Omarchy did not.
+
+## Replaying a recording for the first time, and the three bugs it found (2026-10-14)
+
+pyguitest-recorder has recorded and regenerated for a year; nothing had ever
+*replayed* what it wrote. Doing it on GhostBSD against the Qt torture-test
+fixture found three defects in one sitting, each of which made a generated
+script unreplayable, and none of which recording or regeneration could have
+revealed.
+
+**1. A scope anchored to a name that was not an identity.** The script opened
+with `gui.element(role="page tab list", name="Displays")` and died on
+`ElementNotFound` within seconds. Qt publishes a tab bar's accessible Name as
+its *selected tab's* label, with an empty description, so "Displays" was a
+reading of what happened to be selected while recording. Measured on the live
+fixture: three tab bars answered 'Alpha', 'One' and 'Buttons & Toggles', and
+selecting the Displays tab renamed the third to 'Displays'. The generator now
+refuses that role as a `within=` anchor, the way it already refused nameless
+ancestors.
+
+**2. Lookups that resolved into another application.** `gui.menu_item("Help")`
+was emitted unscoped, and the accessible tree on a real desktop spans every
+running process:
+
+    scoped to the fixture frame : pid 12037, extents (245, 61, 56, 31)
+    the script's unscoped call  : pid 1663, /usr/local/bin/mate-panel, no extents
+
+The replay was clicking the desktop panel's Help menu. The recorder rejects a
+wrong-pid hit-test while *recording* and says so in its notes; the script it
+wrote carried no such scoping. Every generated lookup is now scoped to the
+window-ish ancestor the recording saw, a dialog winning over the frame behind
+it, with the `gui.button`/`gui.checkbox` sugar kept since every element
+factory takes `within=`.
+
+**3. A window binding that silently reassigned a scope binding.** With every
+lookup scoped, the frame named "TortureTest" bound as `torturetest_2` and a
+later `expect_window("TortureTest")` chose the same identifier and overwrote
+it, so `within=torturetest_2` was handed a `Window`. pyguitest refuses that
+outright -- "within= takes an Element, not a Window" -- which is how it was
+caught. Latent for as long as the reservation ran one way only: the ancestor
+binder reserved window names, the window binder did not reserve ancestor
+names.
+
+**And one that is not a library bug: an action click on a modal control
+deadlocks.** The driver clicks with the pointer; the recorder watched a
+pointer click and emitted an accessible-action click, and for a control that
+opens a modal dialog those are not equivalent. `gui.button("About
+TortureTest").click()` never returned -- AT-SPI answered "Did not receive a
+reply", because Qt's bridge does not reply until the modal loop does. The
+same shape reproduced on Windows/UIA, where `gui.button("Save As").click()`
+returned `0x80131505`, a timeout. Regenerating with `--click-via pointer`
+replays the route that was actually recorded and avoids both. It is an
+argument that the `auto` default produces unreplayable scripts for any
+modal-opening control.
+
+**Where the replay got to.** From dying at line 56 to reaching line 576 of
+908 -- two thirds, through buttons, checkboxes, text fields, combo boxes,
+menus and dialogs. It does not finish, and the reason is outside pyguitest:
+dogtail's `_find_all_descendants` walked the fixture's 702-widget tree, wedged
+for over 90 seconds, and the process took `SIGSEGV`. An untraced run of the
+same script instead hung until `timeout` killed it at 30 minutes (exit 124).
+COSMIC showed the same class of failure the same day, a core dump inside
+`get_child_count`. `BackendCallTimeout` bounds a *hang*; nothing in-process
+survives a segfault in a native dependency, so this is recorded as a
+dependency fragility rather than fixed.
+
+**A performance note worth keeping.** 72 of the script's lines are
+`wait_for_idle(pid, timeout=10, interval=0.2)`, and on this box most of them
+burn the full ten seconds rather than returning early, because the fixture's
+Qt process rarely looks idle. A recording of six and a half minutes therefore
+replays far slower than it recorded, which is a property of the sync points
+the generator inserts rather than of any one call being slow.
+
+## Replaying on Windows, and why a machine-made recording replays badly (2026-10-14)
+
+The same loop on Windows 11/UIA, against the same fixture, with the three
+generator fixes and `--click-via pointer` in place. It got further each time
+something was fixed and never to the end, and the reasons are worth more than
+the distance.
+
+**A click on a *closed* combo box resolves to the item it displays.** The
+script carried five lines of the shape
+
+    gui.element(role=Role.LIST_ITEM, name="100%", within=torturetest_2).select()
+
+and died on the first one: `ElementNotFound`, because selecting a list item
+needs the popup open and at replay time it is not. What the recording
+actually saw was a click on the *combo box*, whose current value "100%" UIA
+publishes as a `LIST_ITEM` child, so the hit-test answered with the child.
+This is the same trap the fixture documents for combo boxes and that
+`Session.dropdown()` was fixed for in 0.17.0, arriving from the other
+direction. Telling, and the reason this is recorded rather than fixed: the
+recording *also* captured the `Down` and `Return` that actually changed the
+value, so those five `.select()` lines are redundant as well as wrong.
+Removing them let the replay continue, which is how the next finding was
+reached.
+
+**The timings a machine-driven recording produces are too tight to replay.**
+With those lines gone the script reached line 261 and failed on
+`expect_window("Open File")`. The trace shows why:
+
+    [  23.5s] line  256 (+  1.0s) gui.menu_item("File", ...).click(via="pointer")
+    [  23.5s] line  257 (+  0.0s) gui.move_mouse(torturetest_x + 203, ...)
+    [  23.5s] line  258 (+  0.0s) gui.click()
+
+The menu is opened and the item under it clicked in the same instant, so the
+coordinate click lands before the menu has rendered and selects nothing.
+Nothing is wrong with the generator's inference here: it inserts the waits it
+*observed*, and the recording it observed was a torture-test driver clicking
+at machine speed while the recorder ran several seconds behind. A human
+recording the same sequence leaves gaps to find. This is the sharpest thing
+the exercise taught: **a recorder is a fidelity instrument for human input,
+and recording a machine driving the same application produces a script that
+is accurate about what happened and not replayable as-is.** Both halves of
+that matter -- every name in all three recordings checked out (see below) --
+and neither is a defect to fix so much as a property to know.
+
+**What the recordings got right.** Checked against the fixture's own
+`EXPECTED_CONTROLS` and its source, across all three recorded platforms:
+
+| Recording | Distinct names | Verified controls | Other real widgets | Unexplained |
+|---|---|---|---|---|
+| GhostBSD (x11) | 29 | 11 | 13 | 1 |
+| Windows (win32) | 84 | 40 | 38 | 1 |
+| macOS (macos) | 70 | 49 | 14 | 3 |
+
+Not one fabricated name in any of them. The "unexplained" entries all resolve
+on inspection: a tab's own long description string, Windows' `System` window
+menu, two table-cell coordinates, and `Academy Engraved LET` -- a font the
+macOS font chooser offered, which exists on that machine and in no source
+file. Scoped lookups, from the fix above: 45, 184 and 57 respectively.
+
+**macOS is the third and last platform that can be recorded at all**, since
+capture exists only for `x11`, `win32` and `macos`. Its own run reached
+`all controls verified` bar one control, `Undo History`, which reported the
+previous control's status line -- the container route was right but it clicked
+the row the undo stack's index already sat on, so nothing moved and nothing
+was emitted. `drivers/linux.py` had learned that on the same control; the
+macOS driver now skips the selected row too.
+
+## A passing torture-test run can cover a fraction of the fixture (2026-10-14)
+
+Three platforms printed the same `all controls verified` on the same day over
+very different amounts of the fixture:
+
+| Desktop | Screen | Actable controls on the first tab |
+|---|---|---|
+| Omarchy / Hyprland | 1920x1080 | 17 |
+| Debian 13 / GNOME | 1920x1080 | 17 |
+| GhostBSD / X11 | 1024x768 | 13 |
+| Pop!_OS / COSMIC | 1280x800 | 7 |
+
+The drivers drop any expected control whose rectangle falls below the status
+bar, which is the right call -- a control that is not on screen cannot be
+clicked -- but they then verified what was left and printed a verdict that
+reads identically to a full pass. GhostBSD's X server offers no mode above
+1024x768 (`xrandr` lists 1024x768, 800x600, 640x480 and a maximum of
+1024x768), so raising it needs host-side VirtualBox work rather than anything
+inside the guest.
+
+Five of the six drivers now print `PARTIAL COVERAGE: N expected control(s)
+are outside the visible window` alongside the count they already printed, so
+a run over part of the fixture says so. The verdict line is deliberately
+unchanged: the controls that were driven really were verified, and treating
+"fewer controls" as a failure would make the drivers useless on a small
+screen rather than honest about one. `drivers/macos.py` structures the skip
+differently and was left untouched rather than patched blind.

@@ -14,7 +14,15 @@ from pyguitest.backends.atspi import Element
 from pyguitest.backends.base import GUIBackend
 from pyguitest.backends.composite import _DISPATCH
 from pyguitest.capabilities import Capability, Tier
-from pyguitest.compat import LEGACY, by_tier, portable, unavailable
+from pyguitest.compat import (
+    CONSTANTS,
+    LEGACY,
+    by_tier,
+    constant,
+    portable,
+    unavailable,
+    unported,
+)
 
 # The audit's distribution. If these change, docs/developers/wayland-audit.md
 # is stale.
@@ -50,17 +58,54 @@ class TestMigrationTable(unittest.TestCase):
                 if fn.capability is not None:
                     self.assertIsInstance(fn.capability, Capability)
 
-    def test_no_path_functions_have_no_replacement(self):
-        # The audit's instruction: leave them out rather than stub them.
+    def test_no_path_functions_are_served_off_wayland(self):
+        # The audit's instruction was to leave these out rather than stub
+        # them, and for a while the table recorded that as "no replacement".
+        # They are implemented now -- X11 and Windows, macOS for the pointer
+        # read -- and raise CapabilityUnsupported on Wayland, which is what
+        # the tier means. A None here would send a migrating user looking for
+        # a workaround for a call that works on their own desktop.
         for fn in unavailable():
             with self.subTest(name=fn.name):
-                self.assertIsNone(fn.replacement)
+                self.assertIsNotNone(fn.replacement)
         self.assertEqual(len(unavailable()), 6)
+
+    def test_only_two_functions_have_no_spelling_at_all(self):
+        self.assertEqual(
+            {fn.name for fn in unported()}, {"GetScreenDepth", "GetWindowsFromPid"}
+        )
+
+    def test_unported_and_unavailable_are_different_questions(self):
+        # Tier.NO_PATH is a statement about Wayland, not about availability:
+        # the two sets must not be conflated by a caller reading either name.
+        self.assertFalse(
+            {fn.name for fn in unported()} & {f.name for f in unavailable()}
+        )
 
     def test_portable_functions_all_have_replacements(self):
         for fn in portable():
             with self.subTest(name=fn.name):
                 self.assertIsNotNone(fn.replacement)
+
+    def test_constants_are_the_other_half_of_qw_all(self):
+        # `:CONST`, which @EXPORT_OK does not carry: the five mouse names,
+        # the five M_BTN aliases, the one wait default, and the cursor
+        # shapes as a single folded row.
+        self.assertEqual(len(CONSTANTS), 12)
+        self.assertNotIn("DEF_WAIT", LEGACY)  # a constant, not a function
+        for name, (replacement, note) in CONSTANTS.items():
+            with self.subTest(name=name):
+                self.assertTrue(replacement)
+                self.assertTrue(note)
+
+    def test_every_cursor_shape_folds_onto_one_row(self):
+        for name in ("XC_WATCH", "XC_XTERM", "XC_LEFT_PTR", "XC_SB_V_DOUBLE_ARROW"):
+            with self.subTest(name=name):
+                self.assertIs(constant(name), CONSTANTS["XC_*"])
+
+    def test_constant_lookup_rejects_a_non_constant(self):
+        self.assertIsNone(constant("GetMousePos"))
+        self.assertIsNone(constant("XCALIBUR"))
 
     def test_known_landmarks(self):
         self.assertEqual(LEGACY["GetMousePos"].tier, Tier.NO_PATH)

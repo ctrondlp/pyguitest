@@ -9,10 +9,15 @@ a developer re-reading the audit:
 
     from pyguitest.compat import LEGACY, unavailable
     LEGACY["GetMousePos"].tier          -> Tier.NO_PATH
-    [f.name for f in unavailable()]     -> the 6 to remove
+    [f.name for f in unavailable()]     -> the 6 Wayland refuses
 
-Nothing here is executable. `replacement` names the new API where one is
-planned, or None where the operation is being dropped.
+Nothing here is executable. `replacement` names the operation that serves the
+call now, or None where nothing in the package spells it -- which is only
+`GetScreenDepth` and `GetWindowsFromPid`. A tier is a statement about Wayland,
+not about availability: all six Tier.NO_PATH rows do have replacements, served
+on X11, Windows and (for `pointer_position`) macOS, and raise
+CapabilityUnsupported on Wayland. `unavailable()` is named for that tier, so
+read it as "cannot be ported to Wayland", not "does not exist".
 """
 
 from __future__ import annotations
@@ -22,7 +27,16 @@ from collections import namedtuple
 from .capabilities import Capability as C
 from .capabilities import Tier
 
-__all__ = ["LegacyFunction", "LEGACY", "by_tier", "unavailable", "portable"]
+__all__ = [
+    "LegacyFunction",
+    "LEGACY",
+    "CONSTANTS",
+    "by_tier",
+    "constant",
+    "unavailable",
+    "unported",
+    "portable",
+]
 
 LegacyFunction = namedtuple(
     "LegacyFunction", "name x11 capability tier replacement note"
@@ -107,7 +121,7 @@ _ALL = [
         C.SCREEN_INFO,
         Tier.DIRECT,
         None,
-        "Degenerate: every compositor is 8 bits per channel",
+        "Degenerate: every display server this package supports is 8 bits per channel",
     ),
     # -- T4: input injection -----------------------------------------------
     _f(
@@ -202,17 +216,19 @@ _ALL = [
         "XGetWindowAttributes",
         C.WINDOW_LIST,
         Tier.COMPOSITOR,
-        None,
-        "No replacement yet; check windows() for the handle, or catch "
-        "WindowNotFound from geometry()",
+        "is_window_open",
+        "Asked of windows() rather than of the handle, which does not know "
+        "it has died; refresh_window() answers the same question and hands "
+        "back the current title with it",
     ),
     _f(
         "IsWindowViewable",
         "IsViewable attribute",
         C.WINDOW_STATE,
         Tier.COMPOSITOR,
-        None,
-        "No replacement tracks a viewable flag yet",
+        "is_window_viewable",
+        "Minimized state, not X11's IsViewable attribute -- same caveat as "
+        "WaitWindowViewable, and kdotool refuses it outright",
     ),
     _f(
         "GetWindowPid",
@@ -339,51 +355,112 @@ _ALL = [
         "XQueryPointer",
         C.POINTER_QUERY,
         Tier.NO_PATH,
-        None,
-        "Track the position you last set",
+        "pointer_position",
+        "X11, Windows and macOS; no Wayland compositor reports it, and an "
+        "XWayland answer can be silently stale -- prefer window_at/element_at "
+        "to check where a click will land",
     ),
     _f(
         "IsKeyPressed",
         "XQueryKeymap",
         C.INPUT_STATE_QUERY,
         Tier.NO_PATH,
-        None,
-        "Global input state is not observable",
+        "is_key_pressed",
+        "X11 and Windows; global input state is what a keylogger reads, so no "
+        "Wayland compositor exposes it",
     ),
     _f(
         "IsMouseButtonPressed",
         "XQueryPointer mask",
         C.INPUT_STATE_QUERY,
         Tier.NO_PATH,
-        None,
+        "is_button_pressed",
+        "X11 and Windows, as above; same button numbering as click()",
     ),
     _f(
         "SetWindowName",
         "XSetWMName",
         C.WINDOW_TITLE_SET,
         Tier.NO_PATH,
-        None,
-        "A title belongs to the client that owns the surface",
+        "set_window_title",
+        "X11 and Windows; a title belongs to the client that owns the "
+        "surface, so no Wayland protocol offers it -- and the application may "
+        "rename it back",
     ),
     _f(
         "LowerWindow",
         "XLowerWindow",
         C.WINDOW_LOWER,
         Tier.NO_PATH,
-        None,
-        "No restack operation in any foreign-toplevel protocol",
+        "lower_window",
+        "X11 and Windows; no restack operation in any foreign-toplevel "
+        "protocol, which exposes activate and close only",
     ),
     _f(
         "IsWindowCursor",
         "XTestCompareCursorWithWindow",
         C.WINDOW_CURSOR_QUERY,
         Tier.NO_PATH,
-        None,
-        "No workaround anywhere",
+        "is_window_cursor",
+        "X11 and Windows; `shape` is the raw cursor-font number the XC_* "
+        "constants carried, which this package does not re-export. No "
+        "Wayland workaround anywhere",
     ),
 ]
 
 LEGACY = {f.name: f for f in _ALL}
+
+
+# The `:CONST` tag, which `@EXPORT_OK` does not carry and the table above
+# therefore does not cover. A script written against `qw(:ALL)` uses these
+# as freely as the functions, and every one of them is a plain integer with
+# no pyguitest spelling: the button numbers are passed to click() directly,
+# the cursor shapes to is_window_cursor(), and the one timeout became an
+# argument. Keyed by the name as written, except the ~85 cursor shapes,
+# which share the `XC_*` entry -- their values are X11 cursor-font offsets
+# and only X11 can compare one anyway.
+CONSTANTS = {
+    "DEF_WAIT": (
+        "an explicit timeout",
+        "The module's 10-second default for the WaitWindow* family. A "
+        "pyguitest `timeout=None` waits indefinitely instead, so pass the "
+        "number rather than relying on a default",
+    ),
+    "M_LEFT": ("1", "click(1) -- the default, so usually nothing to write"),
+    "M_MIDDLE": ("2", "click(2)"),
+    "M_RIGHT": ("3", "click(3)"),
+    "M_BTN1": ("1", "click(1)"),
+    "M_BTN2": ("2", "click(2)"),
+    "M_BTN3": ("3", "click(3)"),
+    "M_UP": (
+        "scroll(dy=1)",
+        "A wheel detent, not a button: X11 button 4 is now an axis event",
+    ),
+    "M_DOWN": (
+        "scroll(dy=-1)",
+        "A wheel detent, not a button: X11 button 5 is now an axis event",
+    ),
+    "M_BTN4": ("scroll(dy=1)", "As M_UP -- see the scroll() docstring on sign"),
+    "M_BTN5": ("scroll(dy=-1)", "As M_DOWN"),
+    "XC_*": (
+        "the same integer",
+        "Cursor-font shape numbers, passed through to is_window_cursor() "
+        "unchanged; this package does not re-export the ~85 names, so keep "
+        "the number (XC_WATCH is 150) or define your own constant",
+    ),
+}
+
+
+def constant(name: str) -> tuple[str, str] | None:
+    """What one `:CONST` symbol becomes, or None if it is not one of them.
+
+    Folds every `XC_<shape>` onto the single `XC_*` entry, which is how the
+    cursor shapes are tabulated -- there are ~85 of them, they differ only
+    in the integer, and the answer is the same for all.
+    """
+    if name.startswith("XC_"):
+        name = "XC_*"
+    return CONSTANTS.get(name)
 
 
 def by_tier(tier: Tier) -> list[LegacyFunction]:
@@ -392,8 +469,25 @@ def by_tier(tier: Tier) -> list[LegacyFunction]:
 
 
 def unavailable() -> list[LegacyFunction]:
-    """The functions with no Wayland path, which should not be reimplemented."""
+    """The functions with no Wayland path, X11 and Windows only.
+
+    Each one does have a replacement -- `pointer_position`, `is_key_pressed`,
+    `is_button_pressed`, `set_window_title`, `lower_window`,
+    `is_window_cursor` -- which raises CapabilityUnsupported on Wayland, by
+    design rather than for want of an implementation. For the calls with no
+    spelling at all, see `unported`.
+    """
     return by_tier(Tier.NO_PATH)
+
+
+def unported() -> list[LegacyFunction]:
+    """The functions this package does not spell at all, on any backend.
+
+    Two, and both for reasons the table records: `GetScreenDepth` asks a
+    question with one answer everywhere, and `GetWindowsFromPid` has no
+    `pid=` filter yet, though a comprehension over `windows()` does it.
+    """
+    return [f for f in _ALL if f.replacement is None]
 
 
 def portable() -> list[LegacyFunction]:

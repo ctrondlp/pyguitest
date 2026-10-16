@@ -6,6 +6,7 @@ here, `pyguitest debug` collects everything a bug report needs — see
 
 - [`gui.button("Save")` raises ElementNotFound](#guibuttonsave-raises-elementnotfound)
 - [No GTK3 or Qt application has any accessible elements](#no-gtk3-or-qt-application-has-any-accessible-elements)
+- [`connect()` gives me input and windows but no elements at all](#connect-gives-me-input-and-windows-but-no-elements-at-all)
 - [One application has no accessible elements at all](#one-application-has-no-accessible-elements-at-all)
 - [A call raises BackendCallTimeout, or the script hangs and ignores every timeout](#a-call-raises-backendcalltimeout-or-the-script-hangs-and-ignores-every-timeout)
 - [Nothing works on macOS: no elements, no input, black screenshots](#nothing-works-on-macos-no-elements-no-input-black-screenshots)
@@ -14,6 +15,7 @@ here, `pyguitest debug` collects everything a bug report needs — see
 - [Injected input vanishes on Windows](#injected-input-vanishes-on-windows)
 - [`wait_for_process` matches only the program name on Windows](#wait_for_process-matches-only-the-program-name-on-windows)
 - [A window will not come to the front on Windows](#a-window-will-not-come-to-the-front-on-windows)
+- [A window operation returns without error and nothing moves](#a-window-operation-returns-without-error-and-nothing-moves)
 - [CapabilityUnsupported on a window operation](#capabilityunsupported-on-a-window-operation)
 - [`geometry()` reports a position nowhere near the window](#geometry-reports-a-position-nowhere-near-the-window)
 - [`geometry()` is a few dozen pixels off between two sessions on GNOME](#geometry-is-a-few-dozen-pixels-off-between-two-sessions-on-gnome)
@@ -94,6 +96,44 @@ environment = {**os.environ}
 environment.pop("NO_AT_BRIDGE", None)
 subprocess.Popen(["gedit"], env=environment)
 ```
+
+## `connect()` gives me input and windows but no elements at all
+
+Not one application: *nothing* has elements, and `gui.supports(
+Capability.ELEMENT_TREE)` is False while the session otherwise looks
+healthy. The backend list is the tell — `niri+uinput+clipboard:wl-copy`
+rather than `niri+atspi+uinput+...`, with no `atspi` in it.
+
+The usual cause is dogtail failing to import, and the usual reason for
+*that* is a missing GTK 3 typelib. dogtail's `utils.py` runs
+
+```python
+gi.require_version("Gtk", "3.0")
+```
+
+at import time, whatever toolkit your application uses, so without that
+typelib the import raises *"Namespace Gtk not available"*. dogtail is an
+optional dependency, so pyguitest declines to treat its absence as an error
+and composes without the element backend — correct behaviour that is very
+hard to read from the outside. Confirm it directly:
+
+```sh
+python3 -c 'import gi; gi.require_version("Gtk", "3.0")'   # ValueError if missing
+python3 -c 'from dogtail import tree'                      # the real error, unswallowed
+```
+
+`pyguitest doctor` names your distribution's package; see
+[install.md](install.md#distribution-packages-pip-cannot-supply-these). A
+GNOME or KDE desktop has GTK 3 long before you get here, so this is a
+Qt-only or minimal-system problem — measured on KaOS, where everything else
+was installed and correct.
+
+Two neighbours worth ruling out while you are here: `NO_AT_BRIDGE` (above)
+stops GTK3 and Qt publishing in the first place, and on macOS a **locked or
+sleeping machine** produces the same shape — `gui.windows()` keeps listing
+windows from the window server while the accessibility tree answers nothing
+at all, and `AXIsProcessTrusted` stays true throughout, so it looks like a
+permissions or code problem rather than a screen that needs unlocking.
 
 ## One application has no accessible elements at all
 
@@ -342,6 +382,47 @@ the window route is `WINDOW_PID`'s own: a Store (UWP) application's toplevel
 belongs to `ApplicationFrameHost.exe`, so `window.pid` is the host's rather
 than the application's. Where that matters, ask the element tree instead —
 UI Automation reports the real process, so `element.pid` is right there.
+
+## A window operation returns without error and nothing moves
+
+Distinct from `CapabilityUnsupported` below: that is pyguitest refusing.
+This is the compositor accepting a request, answering, and doing nothing —
+so the call returns, no exception is raised, and the window stays where it
+was.
+
+The case this was written from: Hyprland changed `hyprctl dispatch` to be
+parsed as Lua, and the long-standing
+`focuswindow address:0x...` form became a syntax error. The daemon replied
+with an error *string* rather than failing the request, so
+`activate_window`, `move_window`, `resize_window` and `minimize_window` all
+became silent no-ops on an otherwise perfect session. Nothing held focus
+afterwards, which made every subsequent key press land somewhere else — the
+symptom looked like broken input, three layers away from the cause.
+
+pyguitest 0.17.1 and later send the Lua form
+(`hl.dsp.focus({ window = "address:0x..." })`), work out which syntax a
+daemon wants from its own reply, and raise on any reply that is not `ok` --
+`WindowNotFound` for a window the daemon cannot find, `PyGUITestError`
+carrying the daemon's text for anything else -- so on Hyprland this
+particular silence is gone. They also float a tiled window before moving or
+resizing it, since Hyprland answers `ok` to a pixel move of a tiled window
+and leaves it in the layout. If you are on an older pyguitest, or on a
+compositor that has made a similar change, ask it by hand and read the
+reply rather than the exit status:
+
+```sh
+hyprctl dispatch focuswindow address:0x...   # "')' expected near 'address'" = the Lua parser
+hyprctl activewindow                          # "Invalid" = nothing is focused at all
+```
+
+A compositor can also decline to focus anything *while being perfectly
+willing to move windows*: if `activewindow` says `Invalid` with a visible
+window present, and `hyprctl clients` shows that window at a
+`focusHistoryID` other than 0, something which is not a window — a layer
+surface such as a bar or launcher — holds keyboard focus, and no window can
+take it until that releases. `wait_window_focus` returns False in that
+state, and it is worth checking its return value rather than assuming the
+request was honoured.
 
 ## CapabilityUnsupported on a window operation
 

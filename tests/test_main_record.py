@@ -178,7 +178,7 @@ class TestRecordCommand(unittest.TestCase):
         """`pyguitest migrate record` is a path called record, not a handoff."""
         with mock.patch("pyguitest.__main__._scan", return_value=0) as scan:
             self.assertEqual(main(["migrate", "record"]), 0)
-        scan.assert_called_once_with(["record"])
+        scan.assert_called_once_with(["record"], json_output=False)
 
 
 if __name__ == "__main__":

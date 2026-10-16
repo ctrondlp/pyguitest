@@ -50,28 +50,43 @@ __all__ = ["Hint", "detect_distro", "hints_for", "advice"]
 _PACKAGES = {
     "fedora": {
         "install": "sudo dnf install",
-        "atspi": "python3-gobject python3-pyatspi at-spi2-core",
+        "atspi": "python3-gobject python3-pyatspi at-spi2-core gtk3",
         "capture": "gnome-screenshot",
         "input": "ydotool python3-evdev",
         "imagemagick": "ImageMagick",
     },
     "debian": {
         "install": "sudo apt install",
-        "atspi": "python3-gi python3-pyatspi gir1.2-atspi-2.0",
+        "atspi": "python3-gi python3-pyatspi gir1.2-atspi-2.0 gir1.2-gtk-3.0",
         "capture": "gnome-screenshot",
         "input": "ydotool python3-evdev",
         "imagemagick": "imagemagick",
     },
     "arch": {
         "install": "sudo pacman -S",
-        "atspi": "python-gobject python-atspi at-spi2-core",
+        "atspi": "python-gobject python-atspi at-spi2-core gtk3",
         "capture": "grim",
         "input": "ydotool python-evdev",
         "imagemagick": "imagemagick",
     },
+    # Names verified against the live KaOS box's own pacman catalogue, not
+    # inherited from Arch -- which would have been wrong on the first
+    # package name. KaOS uses python3- prefixes (`python3-gobject3`),
+    # packages no pyatspi at all (0.17.0 does not need it), and ships
+    # neither `grim` nor `wtype`; capture is KDE's `spectacle`, which this
+    # library already supports. Input is deliberately empty: nothing here
+    # packages ydotool or evdev, so `command()` returns None and the doctor
+    # names the upstream projects instead of a command that cannot work.
+    "kaos": {
+        "install": "sudo pacman -S",
+        "atspi": "python3-gobject3 at-spi2-core gtk3",
+        "capture": "spectacle",
+        "input": "",
+        "imagemagick": "imagemagick",
+    },
     "suse": {
         "install": "sudo zypper install",
-        "atspi": "python3-gobject python3-atspi at-spi2-core",
+        "atspi": "python3-gobject python3-atspi at-spi2-core typelib-1_0-Gtk-3_0",
         "capture": "gnome-screenshot",
         "input": "ydotool python3-evdev",
         "imagemagick": "ImageMagick",
@@ -86,7 +101,7 @@ _PACKAGES = {
     # actually load rather than what is installed.
     "freebsd": {
         "install": "sudo pkg install",
-        "atspi": "py312-pygobject py312-atspi at-spi2-core",
+        "atspi": "py312-pygobject py312-atspi at-spi2-core gtk3",
         "capture": "gnome-screenshot",
         "input": "ydotool py312-evdev",
         "imagemagick": "ImageMagick7",
@@ -131,6 +146,11 @@ _FAMILIES = {
     "ubuntu": "debian",
     "arch": "arch",
     "manjaro": "arch",
+    # KaOS names no parent -- ID=kaos, no ID_LIKE -- so like GhostBSD below
+    # it needs its own entry. It gets its own *packages* too rather than
+    # borrowing Arch's: it uses python3- prefixes, packages no pyatspi, and
+    # ships neither grim nor wtype. See `_PACKAGES["kaos"]`.
+    "kaos": "kaos",
     "opensuse": "suse",
     "suse": "suse",
     # The BSDs ship /etc/os-release too. GhostBSD needs its own entry
@@ -723,6 +743,15 @@ def _linux_hints(
                 packages=clipboard_package,
             )
     uinput_usable = environment.uinput_writable and environment.has_evdev
+    # A family that names no input packages at all is saying this
+    # distribution ships none -- measured on KaOS, which has neither
+    # wtype, xdotool, ydotool nor evdev in any repository. The branches
+    # below still name the right *tool* for the session, because that is
+    # what a reader goes looking for, but offering an install command for a
+    # package the repository has not got reads as authoritative and wastes
+    # their time. Distinguished from an *unrecognised* distribution, where
+    # `family` is empty and there is simply nothing known either way.
+    packages_no_input_tool = "input" in family and not family["input"]
     # ydotool is ranked last in tools.py precisely because it is
     # keymap-unsafe; recommending it unconditionally here contradicts
     # that ranking on any desktop that has a better option. xdotool
@@ -771,7 +800,9 @@ def _linux_hints(
     )
     if not already_adequate and not uinput_usable:
         input_command = (
-            f"{installer} {input_package}" if installer and input_package else None
+            f"{installer} {input_package}"
+            if installer and input_package and not packages_no_input_tool
+            else None
         )
         yield Hint(
             "input injection",

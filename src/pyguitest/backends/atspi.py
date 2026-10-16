@@ -36,7 +36,13 @@ from ..errors import (
 )
 from ..roles import Role, canonical_role, spellings
 from ..session import SessionType
-from .base import GUIBackend, Window, require_click_route, resolve_click_route
+from .base import (
+    GUIBackend,
+    Window,
+    click_by_pointer,
+    require_click_route,
+    resolve_click_route,
+)
 
 __all__ = [
     "AtspiBackend",
@@ -878,12 +884,33 @@ class Element:
         self._click_by_coordinate()
 
     def _click_by_coordinate(self):
-        """The pointer route: dogtail's own coordinate click.
+        """The pointer route: dogtail's coordinate click, then the session's.
 
         The step `click(via="auto")` falls to when the element offers no
-        Action interface, and the whole of `click(via="pointer")`. Its two
-        known failures -- needing GNOME's absent ponytail daemon, and AT-SPI's
-        INT_MIN "not showing" sentinel -- become `ElementNotActionable`.
+        Action interface, and the whole of `click(via="pointer")`.
+
+        dogtail is tried first because where it works it needs nothing of the
+        session, but it is not the only coordinate rung available and it is
+        not the session's own: modern dogtail injects through GNOME's
+        gnome-ponytail-daemon, so on a desktop without that daemon it refuses
+        outright -- GhostBSD/X11, KWin, sway -- while the `x11`, `uinput` or
+        compositor pointer the same session was built with is perfectly able
+        to click. `click_by_pointer` is the rung UI Automation and AX already
+        end on, and this now ends there too, which is what makes "three
+        backends, one contract" true rather than nearly true.
+
+        Measured live on GhostBSD, replaying a recording: a menu item that
+        publishes no click action raised `ElementNotActionable` naming a
+        daemon that platform has never had, in a session whose x11 pointer
+        had just served thousands of `gui.click()` calls. The second rung
+        turns that into the click the caller asked for; where it also has
+        nothing to work with -- no session, or no rectangle to aim at --
+        `click_by_pointer` raises the same typed refusal, so an element that
+        genuinely cannot be clicked still says so.
+
+        AT-SPI's INT_MIN "not showing" sentinel is handled the same way: the
+        element has no position dogtail can use, but the session may still
+        have extents for it.
         """
         try:
             _run_bounded(_DEFAULT_CALL_TIMEOUT, self.node.click)
@@ -896,7 +923,44 @@ class Element:
             # must surface as itself.
             if "ponytail" not in text and "negative coordinates" not in text:
                 raise
-            raise ElementNotActionable(self.role, self.name) from error
+            if "ponytail" in text:
+                reason = (
+                    "dogtail's coordinate click needs GNOME's "
+                    "gnome-ponytail-daemon, which this desktop does not have"
+                )
+            else:
+                reason = (
+                    "AT-SPI reports it as not showing, so dogtail had no "
+                    "position to click at"
+                )
+            session = getattr(self, "_session", None)
+            pointer = session is not None and all(
+                session.supports(capability)
+                for capability in (Capability.POINTER_MOVE, Capability.POINTER_BUTTON)
+            )
+            if not pointer:
+                # No second rung to try: refuse now, with dogtail's account
+                # of the first one, rather than paying for a lookup that
+                # cannot lead anywhere.
+                raise ElementNotActionable(self.role, self.name) from error
+            try:
+                click_by_pointer(self, reason)
+            except BackendCallTimeout:
+                # A hang in the session's own extents lookup is the same
+                # fact everywhere else in this file: not "cannot be
+                # clicked", but "stopped answering". Keep them apart.
+                raise
+            except ElementNotActionable as refusal:
+                # Chain dogtail's own failure underneath: the refusal says
+                # what the session could not do, the cause names the rung
+                # this desktop does not have. Tests pin the cause because
+                # without it a ponytail-less desktop reads as "no session".
+                raise refusal from error
+            except Exception:
+                # The session's pointer failed for a reason of its own --
+                # report dogtail's refusal, which is the one that describes
+                # the rung actually missing here.
+                raise ElementNotActionable(self.role, self.name) from error
 
     def double_click(self, via=None):
         """Double-click the element: locate it, then inject the gesture.
@@ -1753,7 +1817,30 @@ class AtspiBackend(GUIBackend):
             # is never silently skipped for one this method actually needed.
             offset = self._window_offset(node)
             if offset is None:
-                return None
+                # Not None: that answer means "this element has no
+                # rectangle", which a caller reads as a fact about the
+                # element. This is a different fact -- the element has a
+                # perfectly good window-relative rectangle and the *window*
+                # has no position to add, so nothing here can turn it into
+                # a screen one. Returning None conflates the two and lands
+                # in the caller as `TypeError: cannot unpack non-iterable
+                # NoneType object` from unpacking the result, which names
+                # neither cause. Confirmed live on niri 26.04, where
+                # `tile_pos_in_workspace_view` is null even for an
+                # on-screen tiled window (see NiriBackend._rect) and so
+                # every element in the tree hit this path.
+                raise CapabilityUnsupported(
+                    Capability.ELEMENT_GEOMETRY,
+                    self.name,
+                    "this element's AT-SPI rectangle is window-relative on "
+                    "a native Wayland session and the compositor reports no "
+                    "position for its window, so it cannot be made "
+                    "screen-absolute. The element itself is fine: its size "
+                    f"is {rect.width}x{rect.height}. Ask "
+                    "is_window_viewable whether the window is on screen, and "
+                    "drive the element through its accessible action rather "
+                    "than a coordinate",
+                )
             x, y = x + offset[0], y + offset[1]
         return (x, y, rect.width, rect.height)
 

@@ -168,9 +168,13 @@ def click_by_pointer(element: Element, reason: str) -> None:
     capabilities -- those belong to whichever input backend the session was
     built with, not to the accessibility one.
 
-    `AtspiBackend`'s ladder ends in the same step already, and does not call
-    this: dogtail's own `Node.click()` is coordinate-based even on X11, so
-    reaching here on Linux would be a second attempt at the same wall.
+    `AtspiBackend` reaches here too, as a second rung rather than a second
+    attempt at the same wall: it tries dogtail's own `Node.click()` first,
+    but modern dogtail injects through GNOME's gnome-ponytail-daemon, so on
+    a desktop without that daemon -- GhostBSD/X11, KWin, sway -- dogtail
+    refuses while this session's `x11`/`uinput`/compositor pointer clicks
+    perfectly well. The two rungs have different dependencies, which is why
+    trying the second one is worth doing.
 
     `reason` is the backend's own account of what it tried, in this
     platform's words; this appends the one thing the pointer route needs and

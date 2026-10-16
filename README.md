@@ -40,10 +40,10 @@ The desktop environments it can drive include, but may not be limited to:
 
 **Status:** beta. Every capability is implemented on every backend that can
 support it. Much of it has been run against real GNOME, KDE, COSMIC, sway,
-Hyprland, Xfce, X11, Debian, GhostBSD, Windows 11 and macOS sessions, and some
-of it has not yet — of the desktops listed above, **niri** is the one no live
-run has reached;
-[docs/validation.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/validation.md) records which.
+Hyprland, niri, Xfce, X11, Debian, GhostBSD, Windows 11 and macOS sessions —
+every desktop listed above has now met a live session, niri as of 2026-10-14.
+[docs/validation.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/validation.md) records what each
+run covered, including what it could *not* cover.
 
 Because desktops differ in what they permit, what a session can do is
 discovered at runtime rather than assumed — `gui.supports(...)` is how you
@@ -192,10 +192,15 @@ accessible name, and a status bar that reports each action so a test can
 prove an interaction *landed* rather than assume it. Its 105 uniquely-named
 controls are each driven and status-bar-verified, plus the whole menu bar, on
 six platforms: FreeBSD/GhostBSD, Pop!\_OS/COSMIC, Debian, Omarchy/Hyprland,
-Windows and macOS — the Hyprland run being the first time this library has
-been exercised against a wlroots compositor.
-Every real bug those runs turned up in pyguitest itself is written up in
-validation.md, and every one of them is fixed.
+Windows and macOS — the Hyprland run being the first time the fixture has
+been driven on a wlroots compositor, sway having been exercised earlier for
+window control alone. Four of the six are clean as of 2026-10-14. Neither
+exception is a pyguitest defect: macOS is one control short through a gap in
+the fixture's own driver, and Omarchy is held up by a compositor that grants
+no window keyboard focus — both written up in
+[validation.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/validation.md).
+Every real bug those runs turned up in pyguitest itself is written up there,
+and every one of them is fixed.
 
 ## Usage
 
@@ -338,9 +343,14 @@ writing a script first. `--window TITLE_REGEX` narrows it to one application;
 `--json` gives the same tree as machine-readable data, the same split
 `debug` uses.
 
-The migration scanner reports the tier of every call it recognizes in a Perl
-script and exits non-zero if any call has no Wayland path, so a port can be
-gated in CI.
+The migration scanner reports the tier, the replacement and the line numbers
+of every call it recognizes in a Perl script -- both halves of `qw(:ALL)`, so
+the `:CONST` integers (`M_RIGHT` is `click(3)`, `M_UP` a `scroll(dy=1)`
+detent) are explained alongside the 50 functions. Give it a directory and it
+walks the Perl sources under it; `--json` emits the same report as data. It
+exits non-zero on the two kinds of call a human has to decide about rather
+than translate -- the ones Wayland refuses, and the two with no replacement
+anywhere -- so a port can be gated in CI.
 
 `pyguitest record` is an alias for [pyguitest-recorder][recorder], which
 records desktop activity and writes the pyguitest script for it. That tool is

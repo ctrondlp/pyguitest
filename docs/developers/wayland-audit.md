@@ -127,6 +127,8 @@ This break is not new with Wayland. Client-side decorations and toolkit-drawn wi
 
 These are not awaiting a protocol. Each one is a capability Wayland removed on purpose, because it lets one client observe or impersonate another. Do not carry them into the new API with a stub that always fails — leave them out and document why.
 
+**What was settled since.** "Leave them out" held only as long as Wayland was the one target. All six are implemented now, on the backends that can serve them — X11 and `win32`, plus macOS for the pointer read — and raise `CapabilityUnsupported` everywhere else, which is the same contract every other capability-gated call has rather than the always-failing stub this section warned against. `Session.pointer_position`, `is_key_pressed`, `is_button_pressed`, `set_window_title`, `lower_window` and `is_window_cursor`; `compat.unavailable()` lists them, and the tier still reads as "cannot be ported to Wayland", not "does not exist". The reasoning below is unchanged and is why no Wayland backend will ever serve them.
+
 | Function | X11 implementation | Why it cannot work | Tier |
 |---|---|---|---|
 | GetMousePos | XQueryPointer | No protocol reports the global pointer position; a client learns coordinates only inside its own surface, only while pointed at. *Injection is possible, readback is not* — track the position you last set | T6 |
@@ -176,10 +178,10 @@ X11::GUITest avoided this with `XKeysymToKeycode` against the server's live map.
 ## What this implies for the new package
 
 - **Keep the X11 backend as a peer, not a legacy path.** It is the only backend that can serve FreeBSD and Solaris — libei and uinput are Linux interfaces, and neither of those systems runs a Wayland compositor you would target. The existing XS code keeps its value.
-- **Make capability negotiation part of the public API.** With 19 functions varying by compositor and 6 unavailable everywhere, a call that silently returns zero — the current failure convention — becomes untestable. Let callers ask what the active backend supports before they depend on it.
+- **Make capability negotiation part of the public API.** With 19 functions varying by compositor and 6 unavailable on every compositor, a call that silently returns zero — the current failure convention — becomes untestable. Let callers ask what the active backend supports before they depend on it.
 - **Lead with AT-SPI, not coordinates.** It is the only layer that answers the question the window-tree functions were really being used for, it is unaffected by the T3 and T6 gaps entirely, and it works identically under X11 and Wayland — which makes it the one part of the design that does not need a backend matrix.
-- **Do not reproduce the 1-to-1 API.** Of 50 functions, 13 port unchanged, 4 want new semantics, 6 should not exist, and the rest change shape. A faithful port would spend most of its effort on the parts worth redesigning.
+- **Do not reproduce the 1-to-1 API.** Of 50 functions, 13 port unchanged, 4 want new semantics, 6 cannot reach Wayland at all, and the rest change shape. A faithful port would spend most of its effort on the parts worth redesigning.
 
-Source of record: `GUITest.pm` (`@EXPORT_OK`, 50 symbols) and `GUITest.xs` (39 XS functions) at version 0.29.
+Source of record: `GUITest.pm` (`@EXPORT_OK`, 50 symbols) and `GUITest.xs` (39 XS functions) at version 0.29 — the current CPAN release, 2026-08-19, which added no functions over 0.28 and so left this table's inventory unchanged. `@EXPORT_OK` is only half of `qw(:ALL)`: the `:CONST` tag exports `DEF_WAIT`, the ten `M_*` button names and ~85 `XC_*` cursor shapes, all plain integers with no pyguitest spelling, tabulated in `compat.CONSTANTS` and reported by `pyguitest migrate` rather than carried here.
 
 Tier assignments reflect protocol availability as of the audit date; `ext-foreign-toplevel-list-v1` adoption in particular is still moving, and any Mutter change to it would move several T3 rows.
