@@ -7,6 +7,8 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.17.1] — 2026-10-15
+
 ### Fixed
 
 - **`pyguitest migrate` told users that six calls it has shipped for months
@@ -38,30 +40,6 @@ All notable changes to pyguitest are recorded here. The format follows
   actual replacements unwritten; `docs/developers/wayland-audit.md` still
   concluded those six "should not exist", which the shipped API settled the
   other way.
-
-### Added
-
-- **`pyguitest migrate` covers the other half of `qw(:ALL)`.** `@EXPORT_OK`
-  is 50 functions, but a script importing the module wholesale also gets the
-  `:CONST` tag — `DEF_WAIT`, the ten `M_*` button names and ~85 `XC_*`
-  cursor shapes — and the scanner was silent on all of them. They are
-  tabulated in `compat.CONSTANTS` (with `compat.constant()` folding every
-  cursor shape onto one row) and reported with the calls: `M_RIGHT` is
-  `click(3)`, `M_UP` is a `scroll(dy=1)` detent rather than button 4,
-  `DEF_WAIT` is the module's 10-second default against a pyguitest
-  `timeout=None` that waits forever, and an `XC_*` shape passes through to
-  `is_window_cursor()` unchanged.
-- **`pyguitest migrate` now reports line numbers, walks directories, and
-  speaks `--json`.** A count says how much work a port is; a line number
-  says where, so each call lists the lines it appears on. A path that is a
-  directory is walked for `.pl`, `.pm`, `.t`, `.cgi`, `.perl` and `.pod`
-  sources (a file named on the command line is still read whatever it is
-  called), and `--json` emits the per-file calls, constants, tiers and the
-  two blocked lists for a CI step that wants more than an exit status.
-
-## [0.17.1] — 2026-10-15
-
-### Fixed
 
 - **`extents()` answered `None` for an element whose window has no
   position, and callers unpacking the rectangle got
@@ -222,6 +200,26 @@ All notable changes to pyguitest are recorded here. The format follows
   claims the window is scrolled away as the reason; `window_at()` can
   likewise answer None over a visible window on such a session, which is now
   documented where that is decided rather than left to be discovered.
+
+### Added
+
+- **`pyguitest migrate` covers the other half of `qw(:ALL)`.** `@EXPORT_OK`
+  is 50 functions, but a script importing the module wholesale also gets the
+  `:CONST` tag — `DEF_WAIT`, the ten `M_*` button names and ~85 `XC_*`
+  cursor shapes — and the scanner was silent on all of them. They are
+  tabulated in `compat.CONSTANTS` (with `compat.constant()` folding every
+  cursor shape onto one row) and reported with the calls: `M_RIGHT` is
+  `click(3)`, `M_UP` is a `scroll(dy=1)` detent rather than button 4,
+  `DEF_WAIT` is the module's 10-second default against a pyguitest
+  `timeout=None` that waits forever, and an `XC_*` shape passes through to
+  `is_window_cursor()` unchanged.
+- **`pyguitest migrate` now reports line numbers, walks directories, and
+  speaks `--json`.** A count says how much work a port is; a line number
+  says where, so each call lists the lines it appears on. A path that is a
+  directory is walked for `.pl`, `.pm`, `.t`, `.cgi`, `.perl` and `.pod`
+  sources (a file named on the command line is still read whatever it is
+  called), and `--json` emits the per-file calls, constants, tiers and the
+  two blocked lists for a CI step that wants more than an exit status.
 
 ## [0.17.0] — 2026-10-13
 
