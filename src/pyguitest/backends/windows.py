@@ -308,6 +308,26 @@ class SwayBackend(_WindowBackend):
         ]
 
 
+_LUA_DISPATCH_REFUSALS = (
+    "hl.dispatch",
+    "non-legacy parsers",
+    "expected near",
+    "syntax might need to be updated",
+)
+"""Fragments of Hyprland's reply when it parsed a dispatch as Lua and failed.
+
+Matched as substrings of the daemon's own error text rather than against a
+version number: the two syntaxes are told apart by asking, which keeps
+working across whatever the next Hyprland does to its parser.
+"""
+
+
+def _refused_as_lua(reply):
+    """Whether `reply` is Hyprland complaining that a dispatch was not Lua."""
+    text = str(reply or "").lower()
+    return any(marker in text for marker in _LUA_DISPATCH_REFUSALS)
+
+
 class HyprlandBackend(_WindowBackend):
     """Hyprland, over its request socket."""
 
@@ -316,6 +336,12 @@ class HyprlandBackend(_WindowBackend):
     def __init__(self, transport):
         """Drive Hyprland through `transport`, a socket or CLI adapter."""
         self.transport = transport
+        self._lua_dispatch = None
+        """Whether this daemon wants dispatches as Lua: None until asked.
+
+        Set by the first `_dispatch`, from the daemon's own answer rather
+        than a version check. See `_dispatch`.
+        """
 
     def close(self):
         """Close the transport."""
@@ -352,26 +378,74 @@ class HyprlandBackend(_WindowBackend):
                 return (*client["at"], *client["size"])
         raise WindowNotFound(f"no window at address {handle!r}")
 
-    def is_window_viewable(self, window):
-        """Whether `window` is currently visible.
+    def _shown_workspaces(self):
+        """Ids of every workspace some monitor is displaying, or None.
 
-        Hyprland's own client fields: "mapped" false means invisible to the
-        user outright; "hidden" true means mapped but not currently shown
-        (e.g. on an inactive special workspace). Viewable needs both.
+        A monitor shows its `activeWorkspace` and, when one is open, a
+        `specialWorkspace`; a closed special reports id 0, which is no
+        workspace. None where no monitor reports a workspace at all -- an
+        older daemon, or a transport that does not carry the field -- so
+        the caller can tell "nothing is shown" from "nothing is known".
+        """
+        shown = set()
+        known = False
+        for monitor in self.transport.monitors() or []:
+            for key in ("activeWorkspace", "specialWorkspace"):
+                workspace = monitor.get(key)
+                if not isinstance(workspace, dict) or "id" not in workspace:
+                    continue
+                known = True
+                if workspace["id"]:
+                    shown.add(workspace["id"])
+        return shown if known else None
+
+    def _viewable(self, client, shown):
+        """Whether one client record is on screen right now.
+
+        `mapped` false is a window the user cannot see at all; `hidden` true
+        is Hyprland's flag for a window folded away inside a group's tabs.
+        Neither says anything about *workspaces*: measured live on 0.56.2, a
+        window moved to an inactive workspace, or minimized onto a closed
+        special workspace, reports mapped=true hidden=false and keeps its
+        full rectangle, so reading those two fields alone called a minimized
+        window viewable. The third test is whether some monitor is
+        displaying the window's workspace -- skipped only where the daemon
+        reports no workspaces to compare against.
+        """
+        if not client.get("mapped", True) or client.get("hidden", False):
+            return False
+        workspace = client.get("workspace")
+        if shown is None or not isinstance(workspace, dict) or "id" not in workspace:
+            return True
+        return workspace["id"] in shown
+
+    def is_window_viewable(self, window):
+        """Whether `window` is currently visible: mapped, not folded, shown.
+
+        See `_viewable` for what each of the three means and why the
+        workspace is part of it.
         """
         self.require(Capability.WINDOW_STATE)
         handle = self._handle(window)
+        shown = self._shown_workspaces()
         for client in self.transport.clients():
             if client["address"] == handle:
-                return bool(client.get("mapped", True)) and not client.get(
-                    "hidden", False
-                )
+                return self._viewable(client, shown)
         raise WindowNotFound(f"no window at address {handle!r}")
 
     def _windows_with_geometry(self):
-        """One clients() call, reused for the whole window list and rects."""
+        """One clients() call, reused for the whole window list and rects.
+
+        Only windows that are on screen take part in the hit-test: a window
+        minimized onto a special workspace, or sitting on an inactive one,
+        keeps its last rectangle in `clients`, and would otherwise be
+        answered for a point that visibly has a different window under it.
+        """
+        shown = self._shown_workspaces()
         return [
-            (self._window(c), (*c["at"], *c["size"])) for c in self.transport.clients()
+            (self._window(c), (*c["at"], *c["size"]))
+            for c in self.transport.clients()
+            if self._viewable(c, shown)
         ]
 
     def active_window(self):
@@ -382,29 +456,121 @@ class HyprlandBackend(_WindowBackend):
             return None
         return self._window(client)
 
-    def _dispatch(self, window, command, params=""):
-        """Send a dispatch request targeting one window.
+    def _dispatch(self, window, command, params="", lua=None):
+        """Send a dispatch request targeting one window, in this daemon's syntax.
 
-        Hyprland's syntax is `<command> <params>,address:0x...` with no space
+        The legacy syntax is `<command> <params>,address:0x...` with no space
         after the comma, so `params` must already end with one when present.
+        Current Hyprland parses a dispatch as Lua and rejects that form --
+        `focuswindow address:0x...` comes back as "')' expected near
+        'address'" -- so `lua` carries the same request as a Lua dispatcher
+        expression, built from the target selector.
+
+        Which one to send is discovered, not assumed. The legacy string goes
+        out first; if the reply is a Lua parse complaint
+        (`_refused_as_lua`), this daemon is Lua-based, that is remembered,
+        and the Lua form is sent instead and for every later call. A rejected
+        legacy request changes nothing on the daemon, so discovery costs one
+        wasted request on a modern Hyprland and nothing on an older one.
+
+        Found when a torture-test run that had passed the day before failed
+        with 27 interactions that never reported: `activate_window` was
+        answering with an error string instead of focusing, so no window had
+        focus and every injected key went nowhere.
         """
         target = f"address:{self._handle(window)}"
-        return self.transport.dispatch(f"{command} {params}{target}")
+        legacy = f"{command} {params}{target}"
+        if self._lua_dispatch is None:
+            reply = self.transport.dispatch(legacy)
+            if not _refused_as_lua(reply):
+                self._lua_dispatch = False
+                return self._checked(legacy, reply)
+            self._lua_dispatch = True
+        request = lua(target) if self._lua_dispatch and lua is not None else legacy
+        return self._checked(request, self.transport.dispatch(request))
+
+    @staticmethod
+    def _checked(request, reply):
+        """Return `reply` if the daemon accepted `request`, else raise.
+
+        Hyprland answers a dispatch with the single word "ok" when it did
+        what was asked, in both the legacy and the Lua syntax; anything
+        else is its account of why it did not -- "warning: =[C]:-1:
+        hl.focus: window not found", "error: ..." (measured live on
+        0.56.2), "Invalid dispatcher" on older daemons. Nothing above this
+        method reads the reply, so before this check a refused request was
+        a silent no-op: the call returned and the window stayed where it
+        was, and the first symptom was three layers away, as keys typed
+        into a window that had never been focused. A window the daemon
+        cannot find is `WindowNotFound`, as everywhere else in this module.
+        """
+        text = str(reply or "").strip()
+        if text.lower() == "ok":
+            return reply
+        if "not found" in text.lower():
+            raise WindowNotFound(f"hyprland: {text} (request: {request})")
+        raise PyGUITestError(f"hyprland refused {request!r}: {text or 'no reply'}")
 
     def activate_window(self, window):
         """Raise and focus a window."""
         self.require(Capability.WINDOW_ACTIVATE)
-        return self._dispatch(window, "focuswindow")
+        return self._dispatch(
+            window,
+            "focuswindow",
+            lua=lambda target: f'hl.dsp.focus({{ window = "{target}" }})',
+        )
+
+    def _float(self, window):
+        """Take a window out of the tiling layout so it can be placed.
+
+        A tiled window's position and size belong to the layout, and
+        Hyprland answers "ok" to a pixel move or resize of one without
+        changing anything -- measured live on 0.56.2, where a freshly
+        opened foot stayed at (12, 38) through `window.move` until it was
+        floated, then went exactly where it was told. Same fact and same
+        fix as `SwayBackend.move_window`'s `floating enable`. Already
+        floating windows are unaffected.
+        """
+        return self._dispatch(
+            window,
+            "setfloating",
+            lua=lambda target: (
+                f'hl.dsp.window.float({{ action = "on", window = "{target}" }})'
+            ),
+        )
 
     def move_window(self, window, x, y):
-        """Move a window's top-left corner to (x, y)."""
+        """Move a window's top-left corner to (x, y), floating it first."""
         self.require(Capability.WINDOW_PLACEMENT)
-        return self._dispatch(window, "movewindowpixel", f"exact {x} {y},")
+        self._float(window)
+        return self._dispatch(
+            window,
+            "movewindowpixel",
+            f"exact {x} {y},",
+            lua=lambda target: (
+                f'hl.dsp.window.move({{ x = {x}, y = {y}, window = "{target}" }})'
+            ),
+        )
 
     def resize_window(self, window, width, height):
-        """Resize a window to `width` by `height`."""
+        """Resize a window to `width` by `height`, floating it first.
+
+        `hl.dsp.window.resize` takes the *size* as x and y, which reads oddly
+        next to `move` taking a position in the same two names, but is what
+        the dispatcher accepts: "Expected positions (x & y) or
+        keep_aspect_ratio", verified live resizing to 900x700.
+        """
         self.require(Capability.WINDOW_RESIZE)
-        return self._dispatch(window, "resizewindowpixel", f"exact {width} {height},")
+        self._float(window)
+        return self._dispatch(
+            window,
+            "resizewindowpixel",
+            f"exact {width} {height},",
+            lua=lambda target: (
+                f"hl.dsp.window.resize({{ x = {width}, y = {height}, "
+                f'window = "{target}" }})'
+            ),
+        )
 
     def minimize_window(self, window, minimized=True):
         """Minimize by moving to a special workspace.
@@ -421,15 +587,47 @@ class HyprlandBackend(_WindowBackend):
         relative-next-empty-workspace selector, not "the current one".
         Falls back to that old form if activeworkspace is unavailable on an
         older Hyprland, rather than failing outright.
+
+        In the Lua syntax "silent" is spelled `follow = false`, which is
+        what Hyprland's own and Omarchy's own bindings use. It is not
+        `silent = true`: the dispatcher ignores a key it does not know, and
+        a move that is not told otherwise *follows* the window -- so with
+        the wrong key a focused window minimized straight into an open
+        special workspace, still on screen. Measured live on 0.56.2, where
+        `follow = false` leaves the monitor's specialWorkspace at id 0.
         """
         self.require(Capability.WINDOW_MINIMIZE)
         if minimized:
-            return self._dispatch(window, "movetoworkspacesilent", "special:minimized,")
+            return self._dispatch(
+                window,
+                "movetoworkspacesilent",
+                "special:minimized,",
+                lua=lambda target: (
+                    'hl.dsp.window.move({ workspace = "special:minimized", '
+                    f'follow = false, window = "{target}" }})'
+                ),
+            )
         try:
             workspace = self.transport.active_workspace()["id"]
         except (AttributeError, KeyError, TypeError):
-            return self._dispatch(window, "movetoworkspacesilent", "e+0,")
-        return self._dispatch(window, "movetoworkspace", f"{workspace},")
+            return self._dispatch(
+                window,
+                "movetoworkspacesilent",
+                "e+0,",
+                lua=lambda target: (
+                    'hl.dsp.window.move({ workspace = "e+0", follow = false, '
+                    f'window = "{target}" }})'
+                ),
+            )
+        return self._dispatch(
+            window,
+            "movetoworkspace",
+            f"{workspace},",
+            lua=lambda target: (
+                f'hl.dsp.window.move({{ workspace = "{workspace}", '
+                f'window = "{target}" }})'
+            ),
+        )
 
     def screens(self):
         """Every monitor, with size and scale."""
@@ -515,6 +713,14 @@ class NiriBackend(_WindowBackend):
         tile_pos_in_workspace_view is null for a window scrolled out of the
         current view or sitting on an inactive workspace -- niri genuinely
         does not have a position for it, so there is nothing to report.
+
+        It is also null for an ordinary tiled window that *is* on screen,
+        measured on niri 26.04, which is why `is_window_viewable` no longer
+        reads this field. The consequence for callers that need a rectangle
+        is unavoidable rather than hidden: `geometry` refuses with the
+        reason, and `window_at` can answer None over a window that is
+        visibly there, because a window with no rectangle cannot be
+        hit-tested. Nothing here invents one.
         """
         layout = record.get("layout") or {}
         tile = layout.get("tile_pos_in_workspace_view")
@@ -543,8 +749,14 @@ class NiriBackend(_WindowBackend):
                     raise CapabilityUnsupported(
                         Capability.WINDOW_GEOMETRY,
                         self.name,
-                        f"window {handle!r} is scrolled out of the workspace "
-                        "view, and niri reports no position for one",
+                        f"niri reports no position for window {handle!r} "
+                        "(tile_pos_in_workspace_view is null), so there is "
+                        "nothing to answer with. That happens for a window "
+                        "scrolled out of the view or on an inactive "
+                        "workspace -- and, measured on niri 26.04, for an "
+                        "ordinary tiled window that is on screen, so it does "
+                        "not by itself mean the window is hidden: ask "
+                        "is_window_viewable for that",
                     )
                 return rect
         raise WindowNotFound(f"no window with id {handle!r}")
@@ -552,22 +764,62 @@ class NiriBackend(_WindowBackend):
     def is_window_viewable(self, window):
         """Whether `window` is currently visible.
 
-        Read from the same field geometry depends on: niri gives a tile a
-        position within the workspace view exactly when it is on screen.
+        A tile position means visible. The absence of one is ambiguous, and
+        the two causes need opposite answers, so it is not read alone.
+
+        The assumption used to be that niri gives a tile a position within
+        the workspace view exactly when it is on screen. Live niri disproved
+        it: on 26.04 a kitty window that was focused, alone on its output,
+        on the active workspace and plainly visible reported
+        `tile_pos_in_workspace_view: null`, so reading that field answered
+        False for the window the user was looking at -- a wrong answer, not
+        a refusal. Reading the workspace instead gets the other case wrong,
+        because a window scrolled out of the view sits on an active
+        workspace just the same.
+
+        So a null is taken as "scrolled away" only where niri gave some
+        other window on that workspace a position, which shows the field is
+        in use; where nothing on the workspace has one, the field is telling
+        us nothing and the question becomes whether that workspace is the
+        one being displayed.
         """
         self.require(Capability.WINDOW_STATE)
         handle = self._handle(window)
-        for record in self.transport.windows():
-            if record["id"] == handle:
-                layout = record.get("layout") or {}
-                return layout.get("tile_pos_in_workspace_view") is not None
+        records = self.transport.windows()
+        for record in records:
+            if record["id"] != handle:
+                continue
+            layout = record.get("layout") or {}
+            if layout.get("tile_pos_in_workspace_view") is not None:
+                return True
+            workspace_id = record.get("workspace_id")
+            if any(
+                (other.get("layout") or {}).get("tile_pos_in_workspace_view")
+                is not None
+                for other in records
+                if other.get("workspace_id") == workspace_id
+            ):
+                # niri is populating the field on this workspace, so a null
+                # here means this window really is scrolled out of the view.
+                return False
+            # Nothing on the workspace has a position: the field is not in
+            # use on this niri, so it says nothing about this window. Fall
+            # back to whether the workspace is the one being displayed.
+            for workspace in self.transport.workspaces() or []:
+                if workspace.get("id") == workspace_id:
+                    return bool(workspace.get("is_active"))
+            return False
         raise WindowNotFound(f"no window with id {handle!r}")
 
     def _windows_with_geometry(self):
         """One windows() call and one origin lookup for the whole hit-test.
 
-        Off-view windows are dropped rather than given a fake rectangle:
-        they cannot be under the pointer.
+        Windows niri reports no position for are dropped rather than given a
+        fake rectangle. Usually that is because they cannot be under the
+        pointer, being scrolled away or on another workspace; on a niri that
+        reports no position for tiled windows in view (26.04, measured) it
+        means the hit-test has nothing to offer at all and answers None. A
+        wrong rectangle would be worse than no answer -- see `_rect`.
         """
         origins = self._output_origins()
         result = []

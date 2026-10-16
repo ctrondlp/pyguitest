@@ -390,6 +390,40 @@ class TestCLIFallback(unittest.TestCase):
         )
         self.assertEqual(transport.clients(), [{"address": "0x1"}])
 
+    def test_hyprland_cli_sends_a_dispatch_as_one_argument(self):
+        # A Lua dispatch split on whitespace survives hyprctl's rejoin only
+        # by luck; the request is what the backend built, verbatim.
+        seen = []
+
+        def runner(argv):
+            seen.append(argv)
+            return "ok"
+
+        transport = ipc.HyprlandCLI(runner=runner)
+        request = 'hl.dsp.focus({ window = "address:0x1" })'
+        self.assertEqual(transport.dispatch(request), "ok")
+        self.assertEqual(seen, [["hyprctl", "dispatch", request]])
+
+    def test_hyprland_cli_returns_a_refused_dispatch_as_the_reply(self):
+        # Measured on 0.56.2: hyprctl exits 7 with the daemon's complaint on
+        # stdout. The backend tells the Lua syntax from the legacy one by
+        # reading that text, so it has to come back as the reply the way the
+        # socket transport returns it, not vanish into an OSError.
+        refusal = "')' expected near 'address'"
+
+        def runner(argv):
+            raise OSError(f"{' '.join(argv)} failed: {refusal}")
+
+        transport = ipc.HyprlandCLI(runner=runner)
+        self.assertIn(refusal, transport.dispatch("focuswindow address:0x1"))
+
+    def test_run_names_stdout_when_stderr_is_empty(self):
+        # The same hyprctl behaviour, one layer down: the complaint is on
+        # stdout, and a failure message built from stderr alone was empty.
+        with self.assertRaises(OSError) as ctx:
+            ipc.SwayCLI._run(["sh", "-c", "echo the reason; exit 7"])
+        self.assertIn("the reason", str(ctx.exception))
+
     def test_sway_cli_subscribe_skips_malformed_lines(self):
         lines = ['{"change":"new"}\n', "\n", "garbage\n", '{"change":"close"}\n']
         transport = ipc.SwayCLI(streamer=lambda argv, deadline=None: iter(lines))

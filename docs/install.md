@@ -259,15 +259,26 @@ dependencies, and PyGObject and pyatspi do not build cleanly from source, so
 both come from your distribution. `pyguitest doctor` prints the command for
 yours; the table is the same information.
 
+The GTK 3 entry is there for a reason that surprises people: dogtail's own
+`utils.py` runs `gi.require_version("Gtk", "3.0")` when it is imported,
+whatever toolkit your application uses. Without that typelib
+`import dogtail.tree` raises *"Namespace Gtk not available"*, pyguitest
+treats dogtail as a missing optional dependency and composes **without the
+element backend at all** — leaving a session with input and windows and no
+elements. A GNOME or KDE desktop pulls GTK 3 in long before you read this, so
+it never comes up there; a Qt-only or minimal system is where it bites. On
+Debian the introspection data is a separate package, which is why that column
+names the typelib rather than the library.
+
 <!-- generated from pyguitest.hints._PACKAGES; tests/test_docs.py pins it -->
 
-| | Fedora | Debian / Ubuntu | Arch | openSUSE | FreeBSD |
-|---|---|---|---|---|---|
-| *install with* | `sudo dnf install` | `sudo apt install` | `sudo pacman -S` | `sudo zypper install` | `sudo pkg install` |
-| Elements (AT-SPI) | `python3-gobject python3-pyatspi at-spi2-core` | `python3-gi python3-pyatspi gir1.2-atspi-2.0` | `python-gobject python-atspi at-spi2-core` | `python3-gobject python3-atspi at-spi2-core` | `py312-pygobject py312-atspi at-spi2-core` |
-| Screenshots | `gnome-screenshot` | `gnome-screenshot` | `grim` | `gnome-screenshot` | `gnome-screenshot` |
-| Input injection | `ydotool python3-evdev` | `ydotool python3-evdev` | `ydotool python-evdev` | `ydotool python3-evdev` | `ydotool py312-evdev` |
-| Image search | `ImageMagick` | `imagemagick` | `imagemagick` | `ImageMagick` | `ImageMagick7` |
+| | Fedora | Debian / Ubuntu | Arch | KaOS | openSUSE | FreeBSD |
+|---|---|---|---|---|---|---|
+| *install with* | `sudo dnf install` | `sudo apt install` | `sudo pacman -S` | `sudo pacman -S` | `sudo zypper install` | `sudo pkg install` |
+| Elements (AT-SPI) | `python3-gobject python3-pyatspi at-spi2-core gtk3` | `python3-gi python3-pyatspi gir1.2-atspi-2.0 gir1.2-gtk-3.0` | `python-gobject python-atspi at-spi2-core gtk3` | `python3-gobject3 at-spi2-core gtk3` | `python3-gobject python3-atspi at-spi2-core typelib-1_0-Gtk-3_0` | `py312-pygobject py312-atspi at-spi2-core gtk3` |
+| Screenshots | `gnome-screenshot` | `gnome-screenshot` | `grim` | `spectacle` | `gnome-screenshot` | `gnome-screenshot` |
+| Input injection | `ydotool python3-evdev` | `ydotool python3-evdev` | `ydotool python-evdev` |  | `ydotool python3-evdev` | `ydotool py312-evdev` |
+| Image search | `ImageMagick` | `imagemagick` | `imagemagick` | `imagemagick` | `ImageMagick` | `ImageMagick7` |
 
 **A virtualenv needs `--system-site-packages`** to see these, since they are
 installed into the system Python:

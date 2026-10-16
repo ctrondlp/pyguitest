@@ -6,6 +6,7 @@ import subprocess
 import unittest
 from unittest import mock
 
+from pyguitest import hints
 from pyguitest.capabilities import Capability, CapabilitySet
 from pyguitest.hints import advice, detect_distro, hints_for
 from pyguitest.session import (
@@ -213,6 +214,18 @@ class TestDistroDetection(unittest.TestCase):
             detect_distro('NAME="GhostBSD"\nID="ghostbsd"\nVERSION_ID="26.1"'),
             "freebsd",
         )
+
+    def test_pacman_distributions_that_name_no_parent(self):
+        # KaOS sets ID=kaos and carries no ID_LIKE, so without an entry the
+        # doctor printed no install command at all -- confirmed on the live
+        # box. It resolves to its own family rather than onto arch, because
+        # its package names genuinely differ: python3-gobject3 rather than
+        # python-gobject, no pyatspi at all, and spectacle in place of grim.
+        # Borrowing Arch's names produced a command that failed on the
+        # first one.
+        self.assertEqual(detect_distro('NAME="KaOS"\nID=kaos'), "kaos")
+        self.assertIn("python3-gobject3", hints._PACKAGES["kaos"]["atspi"])
+        self.assertEqual(hints._PACKAGES["kaos"]["capture"], "spectacle")
 
     def test_id_like_is_used_when_the_id_is_unknown(self):
         # Derivatives name their parent, so Mint resolves through Ubuntu.

@@ -199,7 +199,11 @@ class SwayCLI:
         except subprocess.TimeoutExpired as exc:
             raise OSError(f"{' '.join(argv)} timed out") from exc
         if result.returncode != 0:
-            raise OSError(f"{' '.join(argv)} failed: {result.stderr.strip()}")
+            # hyprctl prints a refused dispatch to stdout and exits non-zero
+            # with stderr empty (0.56.2, measured), so a message built from
+            # stderr alone said "failed: " and nothing more.
+            detail = result.stderr.strip() or result.stdout.strip()
+            raise OSError(f"{' '.join(argv)} failed: {detail}")
         return result.stdout
 
     @staticmethod
@@ -351,8 +355,22 @@ class HyprlandCLI:
         return json.loads(self._runner(["hyprctl", "-j", command]) or "null")
 
     def dispatch(self, command):
-        """Run a dispatch command."""
-        return self._runner(["hyprctl", "dispatch", *command.split()])
+        """Run a dispatch command and return the daemon's reply text.
+
+        The request goes as one argument: hyprctl joins what it is given
+        with spaces regardless, and a Lua dispatch split on whitespace and
+        rejoined is only accidentally the same string. A non-zero exit is
+        not raised here: hyprctl exits 7 with the daemon's complaint on
+        stdout when a dispatch is refused (0.56.2, measured), and the socket
+        transport hands that same text back as the reply, which is what
+        `HyprlandBackend._dispatch` reads to tell the two syntaxes apart and
+        to refuse with a reason. Raising instead hid the text behind
+        "failed: " and made the CLI transport unusable on a modern daemon.
+        """
+        try:
+            return self._runner(["hyprctl", "dispatch", command])
+        except OSError as exc:
+            return str(exc)
 
     def clients(self):
         """Every open window."""

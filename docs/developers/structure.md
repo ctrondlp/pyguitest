@@ -389,14 +389,24 @@ dependency. Three techniques:
 PYTHONPATH=src python3 -m unittest discover -s tests
 ```
 
-**What is not tested:** the sway, Hyprland, niri and COSMIC backends have never
-run against a live session -- the sway and Hyprland JSON schemas are
-reconstructions from their documentation, niri's is transcribed from the
-`niri-ipc` crate's serde types, and COSMIC's is a hand-rolled Wayland client
-written from the `cosmic-protocols` XML, all unexercised against a real
-compositor.
-UinputBackend has not been driven live either. KWin's `KdotoolBackend` has
-since been run live -- see [validation.md](../validation.md).
+**What these tests do not cover:** a live compositor. The sway and Hyprland
+JSON schemas in the fixtures are reconstructions from their documentation,
+niri's is transcribed from the `niri-ipc` crate's serde types, and COSMIC's
+is a hand-rolled Wayland client written from the `cosmic-protocols` XML --
+so a passing suite says the code matches what those protocols were *believed*
+to say.
+
+Every one of them has since been checked against the real thing, which is
+what makes the reconstructions trustworthy rather than merely consistent:
+sway on 2026-09-22 (headless, 7/7), COSMIC on 2026-10-11, Hyprland on
+2026-10-13, niri on 2026-10-14. The live runs earned their keep -- Hyprland's
+dispatch syntax had changed under us and every window control was silently
+doing nothing, and niri reported a window as not viewable while it filled
+half the screen. `UinputBackend` has been driven live too (KWin and GNOME),
+as has KWin's `KdotoolBackend`. niri's widget half is the one gap left: that
+box packages no accessibility stack, so the compositor backend is validated
+there and the `atspi` pairing is not. See
+[validation.md](../validation.md).
 
 X11Backend largely has. On a real X11 session: whole-screen capture (the
 one capability real X11 has that XWayland does not), window control, and the

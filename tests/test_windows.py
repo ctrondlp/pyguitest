@@ -137,10 +137,33 @@ class FakeHyprland:
 
     def dispatch(self, command):
         self.dispatched.append(command)
-        return ""
+        return "ok"
 
     def close(self):
         pass
+
+
+class FakeHyprlandLua(FakeHyprland):
+    """A Hyprland that parses dispatches as Lua and rejects the old syntax.
+
+    The reply is the daemon's own, verbatim from Omarchy running Hyprland
+    0.56.2, because what the backend keys off is this text rather than any
+    version number.
+    """
+
+    REFUSAL = (
+        'error: [string "return hl.dispatch(focuswindow address:0x6284..."]:1: '
+        "')' expected near 'address'\n\n \u2192 Note: dispatch in lua is a "
+        "shorthand for hl.dispatch(...), your syntax might need to be updated."
+    )
+
+    reply = "ok"
+
+    def dispatch(self, command):
+        self.dispatched.append(command)
+        if command.startswith("hl.dsp."):
+            return self.reply
+        return self.REFUSAL
 
 
 NIRI_WINDOWS = [
@@ -210,8 +233,8 @@ NIRI_OUTPUTS = {
 }
 
 NIRI_WORKSPACES = [
-    {"id": 1, "idx": 1, "output": "HDMI-1"},
-    {"id": 2, "idx": 2, "output": "DP-2"},
+    {"id": 1, "idx": 1, "output": "HDMI-1", "is_active": True},
+    {"id": 2, "idx": 2, "output": "DP-2", "is_active": True},
 ]
 
 
@@ -304,6 +327,65 @@ class TestSway(unittest.TestCase):
         hidden_node["visible"] = False
         gui = SwayBackend(FakeSway(tree=tree))
         self.assertFalse(gui.is_window_viewable(gui.windows()[0]))
+
+    def test_viewable_falls_back_where_niri_reports_no_tile_positions(self):
+        # Measured on live niri 26.04, the first niri session this project
+        # reached: a focused kitty window, alone on its output and plainly
+        # visible, reported "tile_pos_in_workspace_view": null. Reading that
+        # field alone answered False for the window the user was looking at.
+        # Where *nothing* on the workspace has a position the field is not
+        # in use, so the answer comes from the workspace being displayed.
+        windows = [
+            {
+                "id": 4,
+                "title": "~",
+                "app_id": "kitty",
+                "pid": 1189,
+                "workspace_id": 1,
+                "is_focused": True,
+                "is_floating": False,
+                "layout": {
+                    "pos_in_scrolling_layout": [1, 1],
+                    "tile_size": [640.0, 772.0],
+                    "window_size": [640, 772],
+                    "tile_pos_in_workspace_view": None,
+                    "window_offset_in_tile": [0.0, 0.0],
+                },
+            },
+        ]
+        workspaces = [
+            {"id": 1, "idx": 1, "output": "HDMI-1", "is_active": True},
+            {"id": 2, "idx": 2, "output": "HDMI-1", "is_active": False},
+        ]
+        gui = NiriBackend(FakeNiri(windows=windows, workspaces=workspaces))
+        self.assertTrue(gui.is_window_viewable(4))
+        # Geometry still cannot be invented, and says why rather than
+        # claiming the window is hidden.
+        with self.assertRaises(CapabilityUnsupported) as ctx:
+            gui.geometry(4)
+        self.assertIn("no position", str(ctx.exception))
+
+    def test_a_window_on_an_inactive_workspace_is_not_viewable(self):
+        # The same fallback, answering the other way: no tile positions
+        # anywhere, and the workspace holding the window is not displayed.
+        windows = [
+            {
+                "id": 4,
+                "title": "~",
+                "app_id": "kitty",
+                "pid": 1189,
+                "workspace_id": 2,
+                "is_focused": False,
+                "is_floating": False,
+                "layout": {"tile_pos_in_workspace_view": None},
+            },
+        ]
+        workspaces = [
+            {"id": 1, "idx": 1, "output": "HDMI-1", "is_active": True},
+            {"id": 2, "idx": 2, "output": "HDMI-1", "is_active": False},
+        ]
+        gui = NiriBackend(FakeNiri(windows=windows, workspaces=workspaces))
+        self.assertFalse(gui.is_window_viewable(4))
 
     def test_viewable_for_unknown_handle(self):
         with self.assertRaises(WindowNotFound):
@@ -562,6 +644,64 @@ class TestHyprland(unittest.TestCase):
     def test_viewable_for_unknown_handle(self):
         with self.assertRaises(WindowNotFound):
             self.gui.is_window_viewable("0xdead")
+
+    def _on_workspaces(self, first, second, special=0):
+        # Two clients, each on a workspace of its own; monitor DP-1 displays
+        # workspace 1, with the special workspace `special` open (0 = none).
+        # Field shapes are hyprctl's own, read on 0.56.2.
+        clients = json.loads(json.dumps(HYPR_CLIENTS))
+        clients[0]["workspace"] = {"id": first, "name": str(first)}
+        clients[1]["workspace"] = {"id": second, "name": str(second)}
+        transport = FakeHyprland(clients=clients)
+        transport.monitors = lambda: [
+            {
+                "name": "DP-1",
+                "width": 2560,
+                "height": 1440,
+                "scale": 1.0,
+                "activeWorkspace": {"id": 1, "name": "1"},
+                "specialWorkspace": {
+                    "id": special,
+                    "name": "special:minimized" if special else "",
+                },
+            }
+        ]
+        return HyprlandBackend(transport)
+
+    def test_a_window_on_an_inactive_workspace_is_not_viewable(self):
+        # Measured live: moved to workspace 2 while 1 is displayed, the
+        # client still reports mapped=true hidden=false and its full
+        # rectangle. Only the workspace says it is off screen.
+        gui = self._on_workspaces(first=1, second=2)
+        vim, firefox = gui.windows()
+        self.assertTrue(gui.is_window_viewable(vim))
+        self.assertFalse(gui.is_window_viewable(firefox))
+
+    def test_a_minimized_window_is_not_viewable_until_its_special_opens(self):
+        # minimize_window parks a window on special:minimized (id -98 live).
+        # Closed, the monitor reports specialWorkspace id 0 and the window is
+        # off screen; open, the id is -98 and the window is showing.
+        gui = self._on_workspaces(first=1, second=-98)
+        self.assertFalse(gui.is_window_viewable(gui.windows()[1]))
+        gui = self._on_workspaces(first=1, second=-98, special=-98)
+        self.assertTrue(gui.is_window_viewable(gui.windows()[1]))
+
+    def test_hit_test_skips_windows_that_are_not_on_screen(self):
+        # The off-workspace Firefox keeps its rectangle at (960, 0); a point
+        # inside it has nothing under it that the user can see.
+        gui = self._on_workspaces(first=1, second=2)
+        self.assertIsNone(gui.window_at(1000, 100))
+        self.assertEqual(gui.window_at(100, 100).title, "vim")
+        gui = self._on_workspaces(first=1, second=1)
+        self.assertEqual(gui.window_at(1000, 100).title, "Firefox")
+
+    def test_viewable_without_workspace_fields_reads_mapped_and_hidden_only(self):
+        # A daemon or transport that reports no workspaces anywhere leaves
+        # nothing to compare against, and the answer is not invented.
+        clients = json.loads(json.dumps(HYPR_CLIENTS))
+        clients[0]["workspace"] = {"id": 5, "name": "5"}
+        gui = HyprlandBackend(FakeHyprland(clients=clients))
+        self.assertTrue(gui.is_window_viewable(gui.windows()[0]))
 
 
 class TestParsingFailures(unittest.TestCase):
@@ -880,3 +1020,122 @@ class TestKdotool(unittest.TestCase):
         # has to live here, not in withholding the whole capability.
         with self.assertRaises(CapabilityUnsupported):
             self.gui.is_window_viewable("{aaa-1}")
+
+
+class TestHyprlandLuaDispatch(unittest.TestCase):
+    """Hyprland 0.56 and later: a dispatch is Lua, and the old form is gone."""
+
+    def setUp(self):
+        self.transport = FakeHyprlandLua()
+        self.gui = HyprlandBackend(self.transport)
+
+    def test_activate_falls_through_to_the_lua_dispatcher(self):
+        # The legacy string is tried once -- that is the probe -- and the Lua
+        # form is what actually goes out.
+        self.gui.activate_window(HYPR_CLIENTS[0]["address"])
+        self.assertEqual(len(self.transport.dispatched), 2)
+        self.assertEqual(
+            self.transport.dispatched[0],
+            f"focuswindow address:{HYPR_CLIENTS[0]['address']}",
+        )
+        self.assertEqual(
+            self.transport.dispatched[1],
+            f'hl.dsp.focus({{ window = "address:{HYPR_CLIENTS[0]["address"]}" }})',
+        )
+
+    def test_the_syntax_is_discovered_once_not_per_call(self):
+        # Paying for the probe on every call would double every window
+        # operation on a modern Hyprland.
+        address = HYPR_CLIENTS[0]["address"]
+        self.gui.activate_window(address)
+        self.gui.activate_window(address)
+        self.gui.activate_window(address)
+        legacy = [c for c in self.transport.dispatched if not c.startswith("hl.dsp.")]
+        lua = [c for c in self.transport.dispatched if c.startswith("hl.dsp.")]
+        self.assertEqual(len(legacy), 1)
+        self.assertEqual(len(lua), 3)
+
+    def test_move_sends_a_position_as_x_and_y(self):
+        self.gui.move_window(HYPR_CLIENTS[0]["address"], 400, 300)
+        self.assertEqual(
+            self.transport.dispatched[-1],
+            "hl.dsp.window.move({ x = 400, y = 300, window = "
+            f'"address:{HYPR_CLIENTS[0]["address"]}" }})',
+        )
+
+    def test_resize_sends_the_size_as_x_and_y(self):
+        # Reads oddly beside move(), and is what the dispatcher accepts:
+        # "Expected positions (x & y) or keep_aspect_ratio".
+        self.gui.resize_window(HYPR_CLIENTS[0]["address"], 900, 700)
+        self.assertEqual(
+            self.transport.dispatched[-1],
+            "hl.dsp.window.resize({ x = 900, y = 700, window = "
+            f'"address:{HYPR_CLIENTS[0]["address"]}" }})',
+        )
+
+    def test_minimize_does_not_follow_the_window(self):
+        # Not following is the whole point of minimizing this way: the window
+        # goes to the special workspace without the view opening it there.
+        # Spelled `follow = false`, as Hyprland's own bindings do -- not
+        # `silent = true`, which the Lua dispatcher does not know and
+        # ignores, so that the move followed the window and a focused window
+        # minimized straight into an *open* special workspace. Measured live
+        # on 0.56.2: with `silent` the monitor's specialWorkspace came back
+        # as -98 "special:minimized"; with `follow = false` it stayed at 0.
+        self.gui.minimize_window(HYPR_CLIENTS[0]["address"], True)
+        self.assertIn("special:minimized", self.transport.dispatched[-1])
+        self.assertIn("follow = false", self.transport.dispatched[-1])
+        self.assertNotIn("silent", self.transport.dispatched[-1])
+
+    def test_restoring_targets_the_active_workspace_and_follows(self):
+        self.gui.minimize_window(HYPR_CLIENTS[0]["address"], False)
+        last = self.transport.dispatched[-1]
+        self.assertIn('workspace = "7"', last)
+        self.assertNotIn("follow", last)
+
+    def test_a_window_the_daemon_cannot_find_is_window_not_found(self):
+        # The Lua dispatcher's reply, verbatim: focus on a gone window is a
+        # warning string, not a failed request. Returned to a caller that
+        # never reads it, that was a silent no-op.
+        self.transport.reply = "warning: =[C]:-1: hl.focus: window not found"
+        with self.assertRaises(WindowNotFound) as ctx:
+            self.gui.activate_window(HYPR_CLIENTS[0]["address"])
+        self.assertIn("window not found", str(ctx.exception))
+
+    def test_any_other_refusal_is_a_typed_error_not_a_silent_return(self):
+        self.transport.reply = "error: something the daemon did not like"
+        with self.assertRaises(PyGUITestError) as ctx:
+            self.gui.move_window(HYPR_CLIENTS[0]["address"], 1, 2)
+        self.assertIn("did not like", str(ctx.exception))
+
+    def test_a_legacy_hyprland_never_sees_the_lua_form(self):
+        # The same backend against a daemon that accepts the old syntax must
+        # not switch: discovery keys off the refusal, not off the version.
+        transport = FakeHyprland()
+        gui = HyprlandBackend(transport)
+        gui.activate_window(HYPR_CLIENTS[0]["address"])
+        gui.move_window(HYPR_CLIENTS[0]["address"], 1, 2)
+        self.assertEqual(
+            transport.dispatched,
+            [
+                f"focuswindow address:{HYPR_CLIENTS[0]['address']}",
+                f"setfloating address:{HYPR_CLIENTS[0]['address']}",
+                f"movewindowpixel exact 1 2,address:{HYPR_CLIENTS[0]['address']}",
+            ],
+        )
+
+    def test_move_and_resize_float_the_window_first(self):
+        # Measured live on 0.56.2: a tiled window's position and size belong
+        # to the layout, and the daemon answers "ok" to a pixel move of one
+        # without moving it. Floated first, the same request lands exactly.
+        # The same fact sway's backend already works around.
+        address = HYPR_CLIENTS[0]["address"]
+        self.gui.move_window(address, 100, 100)
+        self.assertEqual(
+            self.transport.dispatched[-2],
+            f'hl.dsp.window.float({{ action = "on", window = "address:{address}" }})',
+        )
+        self.assertIn("window.move", self.transport.dispatched[-1])
+        self.gui.resize_window(address, 500, 400)
+        self.assertIn("window.float", self.transport.dispatched[-2])
+        self.assertIn("window.resize", self.transport.dispatched[-1])
