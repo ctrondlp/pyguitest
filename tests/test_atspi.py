@@ -2148,3 +2148,161 @@ class TestRoleSpellings(unittest.TestCase):
         # A toolkit may publish a role this table has never heard of, and
         # asking for it has to keep working.
         self.assertEqual(spellings("gadget"), frozenset({"gadget"}))
+
+
+class _RoleCountingNode(FakeNode):
+    """A FakeNode that counts how many times roleName is actually read.
+
+    Pins the round-trip reduction in Element.role: role is one AT-SPI round
+    trip, and before the fix a single `.role` read fetched it twice (once
+    directly, once inside the entry-as-text check) with no memoization.
+    """
+
+    def __init__(self, role="push button"):
+        super().__init__(role=role)
+        self._role_reads = 0
+
+    @property
+    def roleName(self):
+        self._role_reads += 1
+        return self._rolename
+
+    @roleName.setter
+    def roleName(self, value):
+        self._rolename = value
+
+
+class TestRoleIsReadOnce(unittest.TestCase):
+    def test_role_reads_rolename_once_and_memoizes(self):
+        from pyguitest.backends.atspi import Element
+
+        node = _RoleCountingNode(role="push button")
+        el = Element(node)
+        self.assertEqual(el.role, "push button")
+        self.assertEqual(
+            node._role_reads, 1, "one .role read should be one roleName fetch"
+        )
+        # Memoized: further reads cost nothing.
+        _ = el.role
+        _ = el.role
+        self.assertEqual(
+            node._role_reads, 1, ".role must be memoized, role is immutable"
+        )
+
+
+try:
+    import gi as _gi_probe
+
+    _gi_probe.require_version("Atspi", "2.0")
+    from gi.repository import Atspi as _RealAtspi  # noqa: F401
+
+    _HAVE_ATSPI = True
+except Exception:
+    _HAVE_ATSPI = False
+
+
+class _CollectionRoot(FakeNode):
+    """A root that answers an AT-SPI Collection query instead of a tree walk.
+
+    Advertises the Collection interface and returns a fixed match list from
+    get_matches, so find_elements takes the fast path. findChildren sets a
+    flag, so a test can prove the walk was *not* used.
+    """
+
+    def __init__(self, matches=(), **kw):
+        kw.setdefault("role", "application")
+        super().__init__(**kw)
+        self._matches = list(matches)
+        self.walked = False
+
+    def get_interfaces(self):
+        return ["Accessible", "Action", "Collection", "Component"]
+
+    def get_matches(self, rule, order, count, traverse):
+        return list(self._matches)
+
+    def findChildren(self, pred):
+        self.walked = True
+        return super().findChildren(pred)
+
+
+class TestCollectionFastPath(AtspiTestCase):
+    """find_elements uses the AT-SPI Collection interface where available.
+
+    It applies the same predicate to the candidates, and falls back to the
+    node-by-node walk everywhere else -- never losing a match.
+    """
+
+    def _gui_with_root(self, root):
+        gui = self.backend()
+        gui._tree.root = root
+        return gui
+
+    @unittest.skipUnless(_HAVE_ATSPI, "needs the real Atspi typelib")
+    def test_uses_collection_and_not_the_walk(self):
+        ok = FakeNode("OK", "push button")
+        cancel = FakeNode("Cancel", "push button")
+        root = _CollectionRoot(matches=[ok, cancel])
+        gui = self._gui_with_root(root)
+        found = gui.find_elements(role="push button")
+        self.assertEqual(sorted(e.name for e in found), ["Cancel", "OK"])
+        self.assertFalse(root.walked, "fast path must not fall back to the walk")
+
+    @unittest.skipUnless(_HAVE_ATSPI, "needs the real Atspi typelib")
+    def test_the_predicate_still_filters_collection_candidates(self):
+        # Collection applies the role filter server-side; name/visible/etc.
+        # are still applied to the candidates, identically to the walk.
+        ok = FakeNode("OK", "push button")
+        cancel = FakeNode("Cancel", "push button")
+        hidden = FakeNode("Ghost", "push button")
+        hidden.showing = False
+        root = _CollectionRoot(matches=[ok, cancel, hidden])
+        gui = self._gui_with_root(root)
+        self.assertEqual(
+            [e.name for e in gui.find_elements(role="push button", name="OK")], ["OK"]
+        )
+        self.assertEqual(
+            sorted(e.name for e in gui.find_elements(role="push button", visible=True)),
+            ["Cancel", "OK"],
+        )
+
+    @unittest.skipUnless(_HAVE_ATSPI, "needs the real Atspi typelib")
+    def test_entry_role_pulls_in_text_for_old_at_spi(self):
+        from pyguitest.backends.atspi import _atspi_role_ids
+
+        ids = _atspi_role_ids("entry")
+        self.assertIn(_RealAtspi.Role.ENTRY, ids)
+        self.assertIn(_RealAtspi.Role.TEXT, ids)
+
+    @unittest.skipUnless(_HAVE_ATSPI, "needs the real Atspi typelib")
+    def test_unmappable_role_declines_the_fast_path(self):
+        from pyguitest.backends.atspi import _atspi_role_ids
+
+        self.assertIsNone(_atspi_role_ids("no such role"))
+
+    def test_falls_back_to_the_walk_without_a_collection_interface(self):
+        # Plain FakeNodes have no get_interfaces -> the walk, everywhere
+        # (this one must pass in the bare-stdlib CI job too).
+        root, _frame, _button = build_tree()
+        gui = self._gui_with_root(root)
+        names = [e.name for e in gui.find_elements(role="push button")]
+        self.assertIn("OK", names)
+
+    def test_falls_back_to_the_walk_when_the_collection_query_cannot_run(self):
+        # get_matches raising (real Atspi) OR the typelib being absent (bare
+        # CI) both land on the walk with the right result -- the observable
+        # behaviour this asserts is identical either way.
+        class _Raising(_CollectionRoot):
+            def get_matches(self, *a):
+                raise RuntimeError("broken Collection")
+
+        ok = FakeNode("OK", "push button")
+        root = _Raising(matches=[], children=[ok])
+        gui = self._gui_with_root(root)
+        found = gui.find_elements(role="push button")
+        self.assertEqual([e.name for e in found], ["OK"])
+        self.assertTrue(root.walked)
+
+
+if __name__ == "__main__":
+    unittest.main()

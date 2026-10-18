@@ -49,6 +49,19 @@ It should report `State: ACTIVE`. If it reports `ERROR`, GNOME Shell's log
 says why: `journalctl -f /usr/bin/gnome-shell`, or Looking Glass
 (`Alt+F2`, then `lg`).
 
+If it reports `State: INACTIVE` with `Enabled: Yes`, the shell has **not
+loaded it yet** — which is exactly what happens when you copy the files and
+run `gnome-extensions enable` in the same session without the relogin the
+step above calls for. GNOME activates extensions only at login, and GNOME
+45+ removed every runtime reload (`ReloadExtension` is deprecated and `Eval`
+is locked), so re-running `enable` changes nothing. Log out and back in (on
+X11, `Alt+F2`, `r`). This state is easy to miss because it is **not** an
+error and nothing warns about it: pyguitest's AT-SPI clicks still land, so
+buttons and checkboxes work, while everything that needs real keyboard focus
+— typing into a field, Tab navigation — silently does nothing. `pyguitest
+doctor` now names this case and tells you to log out and back in rather than
+to reinstall.
+
 **After updating the extension, log out and back in again.** On Wayland the
 shell keeps running the code it loaded at login, so a copy you have just
 overwritten still reports `ACTIVE` while behaving like the old one. The usual

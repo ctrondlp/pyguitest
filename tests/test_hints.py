@@ -884,6 +884,54 @@ class TestGnomeShellExtensionHint(unittest.TestCase):
         self.assertIn("gnome-extensions enable", text)
         self.assertNotIn("install it through your distribution", text)
 
+    def test_inactive_extension_advises_a_relogin_not_a_reinstall(self):
+        # The state that cost a full debugging session on Ubuntu .88: the
+        # extension installed and enabled but not loaded, so clicks worked
+        # while every keyboard-focus control silently failed. The advice must
+        # say "log out and back in", not "install it by hand".
+        env = self._complete()
+        caps = CapabilitySet({Capability.WINDOW_LIST})
+        found = list(hints_for(env, capabilities=caps, extension_state="inactive"))
+        self.assertEqual(
+            [h.component for h in found],
+            ["window control extension (installed but not loaded)"],
+        )
+        hint = found[0]
+        self.assertIsNone(hint.command)
+        self.assertFalse(hint.installable)
+        self.assertIn("Log out and back in", hint.why)
+        self.assertNotIn("Install it by hand", hint.why)
+
+    def test_errored_extension_points_at_the_shell_log(self):
+        env = self._complete()
+        caps = CapabilitySet({Capability.WINDOW_LIST})
+        found = list(hints_for(env, capabilities=caps, extension_state="error"))
+        self.assertEqual(
+            [h.component for h in found],
+            ["window control extension (failed to load)"],
+        )
+        self.assertIn("journalctl", found[0].why)
+
+    def test_unknown_state_keeps_the_plain_install_wording(self):
+        # None is the default and the honest answer when the probe could not
+        # run or the extension is genuinely absent -- the plain advice is
+        # correct there, so the wording must not change.
+        env = self._complete()
+        caps = CapabilitySet({Capability.WINDOW_LIST})
+        found = list(hints_for(env, capabilities=caps, extension_state=None))
+        self.assertEqual([h.component for h in found], ["window control extension"])
+        self.assertIn("Install it by hand", found[0].why)
+
+    def test_an_active_state_does_not_invent_a_second_hint(self):
+        # extension_state only refines the wording; it never manufactures or
+        # suppresses the hint, which is driven solely by WINDOW_PLACEMENT.
+        # (A live session reporting "active" here would be contradictory, but
+        # the function must not crash or invent a second hint if it happens.)
+        env = self._complete()
+        caps = CapabilitySet({Capability.WINDOW_LIST})
+        found = list(hints_for(env, capabilities=caps, extension_state="active"))
+        self.assertEqual([h.component for h in found], ["window control extension"])
+
 
 class TestTierSixHint(unittest.TestCase):
     """Whether python-xlib is worth recommending for tier-6 queries.

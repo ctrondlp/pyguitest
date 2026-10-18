@@ -490,7 +490,11 @@ class TestUnavailable(unittest.TestCase):
 
         with self.assertRaises(BackendUnavailable) as ctx:
             gnomeshell.GnomeShellBackend(proxy=BrokenProxy())
-        self.assertIn("not installed or not enabled", str(ctx.exception))
+        message = str(ctx.exception)
+        self.assertIn("not installed", message)
+        self.assertIn("not enabled", message)
+        # The third, easily-missed case: enabled but not loaded this session.
+        self.assertIn("log out and back in", message)
 
 
 class TestCallFailsAfterConstruction(GnomeShellTestCase):

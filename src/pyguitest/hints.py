@@ -512,6 +512,7 @@ def hints_for(
     distro: str | None = None,
     capabilities: CapabilitySet | None = None,
     toolkit_accessibility: bool | None = None,
+    extension_state: str | None = None,
 ) -> Iterator[Hint]:
     """Yield a Hint for each capability the environment is missing.
 
@@ -546,6 +547,12 @@ def hints_for(
     `capabilities` reaches `_darwin_hints` for the reason it is read below:
     one row there is about what this session *is* rather than about what is
     installed, and only a live connection can say it.
+
+    `extension_state` is `gnome_extension_state()`'s answer, passed in for the
+    same purity reason as the two above -- probing it runs a subprocess. It
+    only refines the window-control-extension hint (installed-but-inactive
+    needs a relogin, not a reinstall); None leaves that hint's wording as it
+    was.
     """
     from .session import SessionType
 
@@ -553,7 +560,64 @@ def hints_for(
         return _windows_hints(environment)
     if environment.session_type is SessionType.DARWIN:
         return _darwin_hints(environment, capabilities)
-    return _linux_hints(environment, distro, capabilities, toolkit_accessibility)
+    return _linux_hints(
+        environment, distro, capabilities, toolkit_accessibility, extension_state
+    )
+
+
+def _window_control_hint(extension_state: str | None) -> Hint:
+    """The window-control-extension hint, worded for what `extension_state` says.
+
+    The fired-ness is decided by the caller (WINDOW_PLACEMENT missing on
+    Mutter); this only picks the remedy. `"inactive"` and `"error"` mean the
+    extension is already there, so the advice is "log out" or "read the log",
+    not "install it". Any other value -- including None, the honest "could
+    not ask" answer and the genuinely-absent case -- keeps the plain
+    install-by-hand wording.
+    """
+    if extension_state == "inactive":
+        # Installed, usually enabled, but not loaded in this session.
+        # Re-running `gnome-extensions enable` does nothing on GNOME 45+
+        # (ReloadExtension is deprecated, Eval is locked), so the old
+        # "install it by hand" advice sends someone reinstalling what is
+        # already there. The remedy is a fresh login -- and until then clicks
+        # land while every keyboard-focus-dependent control silently fails,
+        # which reads as broken input, not a missing extension.
+        return Hint(
+            "window control extension (installed but not loaded)",
+            "the pyguitest-window-control GNOME Shell extension is "
+            "installed but not active in this session -- GNOME loads "
+            "extensions only at login, and `gnome-extensions enable` does "
+            "not activate one in a running session (GNOME 45+ removed the "
+            "runtime reload). Log out and back in (on X11, restart the "
+            "shell: Alt+F2, r), then confirm with `gnome-extensions info "
+            "pyguitest-window-control@pyguitest.local` -- it should read "
+            "State: ACTIVE. Until it does, clicks still work but anything "
+            "needing keyboard focus silently fails",
+            None,
+            installable=False,
+        )
+    if extension_state == "error":
+        return Hint(
+            "window control extension (failed to load)",
+            "the pyguitest-window-control GNOME Shell extension is "
+            "installed but GNOME Shell could not load it (State: ERROR). "
+            "Its log says why: `journalctl --user -b /usr/bin/gnome-shell`, "
+            "or Looking Glass (Alt+F2, then lg)",
+            None,
+            installable=False,
+        )
+    return Hint(
+        "window control extension",
+        "moving, resizing, minimizing or hit-testing a window, and "
+        "mapping one to its pid -- Mutter implements no foreign-toplevel "
+        "protocol, so only the pyguitest-window-control GNOME Shell "
+        "extension can reach this. Install it by hand: "
+        "see gnome-shell-extension/README.md, then "
+        "`gnome-extensions enable pyguitest-window-control@pyguitest.local`",
+        None,
+        installable=False,
+    )
 
 
 def _linux_hints(
@@ -561,6 +625,7 @@ def _linux_hints(
     distro: str | None = None,
     capabilities: CapabilitySet | None = None,
     toolkit_accessibility: bool | None = None,
+    extension_state: str | None = None,
 ) -> Iterator[Hint]:
     """Every hint that is about Linux, which is every one there used to be.
 
@@ -644,17 +709,7 @@ def _linux_hints(
         and capabilities is not None
         and Capability.WINDOW_PLACEMENT not in capabilities
     ):
-        yield Hint(
-            "window control extension",
-            "moving, resizing, minimizing or hit-testing a window, and "
-            "mapping one to its pid -- Mutter implements no foreign-toplevel "
-            "protocol, so only the pyguitest-window-control GNOME Shell "
-            "extension can reach this. Install it by hand: "
-            "see gnome-shell-extension/README.md, then "
-            "`gnome-extensions enable pyguitest-window-control@pyguitest.local`",
-            None,
-            installable=False,
-        )
+        yield _window_control_hint(extension_state)
     # Capture has three routes and the advice differs sharply between them.
     # can_capture, not capture_tools: python-xlib on a real X session and
     # the Screenshot portal both capture with no tool installed, and
@@ -878,10 +933,12 @@ def advice(
     distro: str | None = None,
     capabilities: CapabilitySet | None = None,
     toolkit_accessibility: bool | None = None,
+    extension_state: str | None = None,
 ) -> str:
     """Render the hints as text, or say that nothing is missing.
 
-    `toolkit_accessibility` is threaded through rather than probed -- see hints_for.
+    `toolkit_accessibility` and `extension_state` are threaded through rather
+    than probed -- see hints_for.
     """
     found = list(
         hints_for(
@@ -889,6 +946,7 @@ def advice(
             distro,
             capabilities=capabilities,
             toolkit_accessibility=toolkit_accessibility,
+            extension_state=extension_state,
         )
     )
     if not found:

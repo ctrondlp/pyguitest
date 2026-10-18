@@ -293,6 +293,66 @@ class TestAssistiveTechnologyProbe(unittest.TestCase):
         )
 
 
+class TestGnomeExtensionStateProbe(unittest.TestCase):
+    """Telling "not installed" from "installed but not loaded this session".
+
+    The second is the state that reads as broken input on GNOME, and the fix
+    (log out and back in) is nothing like the fix for the first (install it).
+    """
+
+    def _answer(self, **kwargs):
+        with mock.patch.object(session.subprocess, "run", **kwargs):
+            return session.gnome_extension_state()
+
+    def _info(self, state):
+        # `gnome-extensions info` prints a block of "Key: Value" lines.
+        return mock.Mock(
+            returncode=0,
+            stdout=(
+                "pyguitest window control\n"
+                "  Name: pyguitest window control\n"
+                "  Enabled: Yes\n"
+                f"  State: {state}\n"
+            ),
+        )
+
+    def test_active_inactive_and_error_are_read_from_the_state_line(self):
+        self.assertEqual(self._answer(return_value=self._info("ACTIVE")), "active")
+        self.assertEqual(self._answer(return_value=self._info("INACTIVE")), "inactive")
+        self.assertEqual(self._answer(return_value=self._info("ERROR")), "error")
+
+    def test_other_not_running_states_all_collapse_to_inactive(self):
+        # OUT OF DATE / INITIALIZED / DISABLING all mean "not running this
+        # session's code", and the remedy for every one is a fresh login.
+        self.assertEqual(
+            self._answer(return_value=self._info("INITIALIZED")), "inactive"
+        )
+        self.assertEqual(
+            self._answer(return_value=self._info("OUT OF DATE")), "inactive"
+        )
+
+    def test_not_installed_answers_none(self):
+        # `gnome-extensions info` exits non-zero for an unknown UUID.
+        self.assertIsNone(
+            self._answer(return_value=mock.Mock(returncode=2, stdout="", stderr="no"))
+        )
+
+    def test_a_missing_gnome_extensions_binary_answers_none(self):
+        self.assertIsNone(self._answer(side_effect=OSError))
+
+    def test_a_hang_answers_none_rather_than_raising(self):
+        self.assertIsNone(
+            self._answer(
+                side_effect=subprocess.TimeoutExpired(cmd="gnome-extensions", timeout=5)
+            )
+        )
+
+    def test_output_without_a_state_line_answers_none(self):
+        self.assertIsNone(
+            self._answer(return_value=mock.Mock(returncode=0, stdout="Name: x\n"))
+        )
+
+
 class TestInputPreference(unittest.TestCase):
     def setUp(self):
         self.wayland = linux_detect(env(WAYLAND_DISPLAY="wayland-0"))

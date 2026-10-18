@@ -298,6 +298,34 @@ say which at setup time rather than discovering it mid-assertion:
   missing capability, which is the better failure when the environment was
   supposed to be guaranteed.
 
+## Pinning a minimum pyguitest version
+
+A script that uses a method added in a recent release will, on a box with an
+older pyguitest, fail *mid-run* with an `AttributeError` deep inside whatever
+it was doing — a confusing failure that looks like a bug in the script. This
+bites most when a script travels: copied to a test machine, a CI image, or a
+colleague's checkout that has a different version installed.
+
+Declare the floor at the top instead, so it fails on the first line with a
+message naming both versions:
+
+```python
+import pyguitest
+
+pyguitest.require_version("0.18.0")
+gui = pyguitest.connect()
+# or, equivalently, once connected: gui.require_version("0.18.0")
+```
+
+If the installed pyguitest is older, this raises `VersionTooOld` immediately
+(`pyguitest.VersionTooOld`), saying what the script needs and what is
+installed. The module-level `pyguitest.require_version()` and the session
+method `gui.require_version()` do the same check; put the module-level one
+first so it fails before `connect()` even runs. It is off by default — a
+script that does not call it runs against whatever is present, as before — and
+it checks only pyguitest's own version, not the capabilities of the desktop,
+which is what `supports()` and `require()` above are for.
+
 ## Running in CI
 
 Most of a GUI test suite needs a display server, and a CI runner usually
