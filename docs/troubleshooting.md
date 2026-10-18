@@ -593,6 +593,36 @@ if gui.focus_tracking_works():
 `pyguitest debug` reports the same probe. Note this does not affect
 `active_window()`, which reads a different mechanism and stays correct.
 
+## On GNOME, clicks work but typing and Tab do nothing
+
+The signature: on a GNOME (Mutter) Wayland session, buttons and checkboxes
+respond, but typing into a field, `tap_key("Tab")` and anything that needs a
+specific widget to hold keyboard focus silently has no effect — no
+exception, the field just stays empty. It reads as broken input, and the
+keyboard layout is a red herring (it happens on a plain `us` layout).
+
+The cause is almost always that the **pyguitest-window-control GNOME Shell
+extension is installed and enabled but not loaded in this session**. Without
+it, pyguitest cannot activate a native-Wayland window, so the window never
+takes real keyboard focus and keys land nowhere, while clicks keep working
+because those go through AT-SPI actions, which need no focus. (Measured on
+Ubuntu 26.10 / GNOME Shell 51, 2026-10-17.)
+
+Confirm it:
+
+```sh
+gnome-extensions info pyguitest-window-control@pyguitest.local
+```
+
+`State: INACTIVE` with `Enabled: Yes` is this problem. GNOME activates
+extensions only at login and GNOME 45+ removed the runtime reload, so
+`gnome-extensions enable` does nothing until you **log out and back in** (on
+X11, restart the shell: `Alt+F2`, `r`). After the relogin it should read
+`State: ACTIVE`. `pyguitest doctor` names this case directly and tells you to
+log out rather than to reinstall. The extension's own
+[README](../gnome-shell-extension/README.md) has the install and activation
+detail.
+
 ## The clipboard reads back empty
 
 The failure mode worth knowing: on the portal backend, `set_clipboard()`

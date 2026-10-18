@@ -7,6 +7,36 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **`find_elements` now answers a role-filtered search through the AT-SPI
+  Collection interface instead of walking the tree node by node.** Where the
+  search root advertises Collection (checked, never assumed; anything else
+  falls back to the old walk with no change in results), one query replaces
+  the thousands of per-node round trips dogtail's descendant walk made. Live
+  on the torture fixture (Qt/at-spi2 2.61): the structural query dropped from
+  ~3,500 AT-SPI round trips to one, and a full-fixture `find_elements` from
+  ~3.5s to ~0.2s, with byte-identical results across 24 role/name/visible
+  queries. The same predicate still runs over the returned candidates, so
+  every non-role filter and the entry-reported-as-text nuance are unchanged.
+  Beyond speed this sharply cuts the bus pressure behind the
+  `BackendCallTimeout` hangs. `Element.role` is also memoized and no longer
+  reads `roleName` twice per call (it is immutable for an accessible).
+
+- **`pyguitest doctor` now tells apart a window-control extension that is
+  missing from one that is installed but not loaded this session.** On GNOME
+  the extension can be enabled yet `INACTIVE` — GNOME activates extensions
+  only at login, and GNOME 45+ removed the runtime reload, so `gnome-extensions
+  enable` over SSH leaves it inactive until a relogin. That state reads as
+  broken input (clicks land via AT-SPI actions while every keyboard-focus
+  control silently fails), and the doctor previously said "install it by
+  hand", sending people to reinstall what was already there. A new
+  `session.gnome_extension_state()` probe (subprocess, like
+  `toolkit_accessibility()` and for the same bus-caching reason) feeds the
+  advice, which now says to log out and back in; the `GnomeShellBackend`
+  unavailable message names the same case. Found live on Ubuntu 26.10 /
+  GNOME Shell 51.
+
 ## [0.18.0] — 2026-10-16
 
 ### Added

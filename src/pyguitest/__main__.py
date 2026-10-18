@@ -41,9 +41,26 @@ from .capabilities import TIERS, Tier
 from .compat import CONSTANTS, LEGACY
 from .hints import advice, detect_distro, hints_for
 from .inspect import format_tree, tree_data
-from .session import assistive_technology_enabled, toolkit_accessibility
+from .session import (
+    Compositor,
+    assistive_technology_enabled,
+    gnome_extension_state,
+    toolkit_accessibility,
+)
 
 _CALL = re.compile(r"\b(" + "|".join(sorted(LEGACY, key=len, reverse=True)) + r")\b")
+
+
+def _extension_state(environment) -> str | None:
+    """Probe the extension state, but only on Mutter where its hint can fire.
+
+    Everywhere else `gnome_extension_state()` would just run a subprocess to
+    learn nothing, so skip it and leave the state None.
+    """
+    if environment.compositor is Compositor.MUTTER:
+        return gnome_extension_state()
+    return None
+
 
 # The `:CONST` half of `qw(:ALL)`, which the function table does not carry.
 # `XC_*` stands for the ~85 cursor shapes, matched by prefix rather than
@@ -95,11 +112,13 @@ def _report() -> int:
         # by advice() truthfully saying nothing installable is missing.
         # hints_for() is what actually reasons about installed components.
         bridge = toolkit_accessibility()
+        ext_state = _extension_state(gui.environment)
         if list(
             hints_for(
                 gui.environment,
                 capabilities=gui.capabilities,
                 toolkit_accessibility=bridge,
+                extension_state=ext_state,
             )
         ):
             print()
@@ -108,6 +127,7 @@ def _report() -> int:
                     gui.environment,
                     capabilities=gui.capabilities,
                     toolkit_accessibility=bridge,
+                    extension_state=ext_state,
                 )
             )
         else:
@@ -134,6 +154,7 @@ def _doctor() -> int:
                 gui.environment,
                 capabilities=gui.capabilities,
                 toolkit_accessibility=toolkit_accessibility(),
+                extension_state=_extension_state(gui.environment),
             )
         )
     return 0
@@ -473,6 +494,7 @@ def _inspect(json_output: bool = False, window: str | None = None) -> int:
                     gui.environment,
                     capabilities=gui.capabilities,
                     toolkit_accessibility=toolkit_accessibility(),
+                    extension_state=_extension_state(gui.environment),
                 )
             )
             return 1

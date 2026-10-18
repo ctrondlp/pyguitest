@@ -1640,6 +1640,70 @@ def toolkit_accessibility() -> bool | None:
     return None
 
 
+WINDOW_CONTROL_UUID = "pyguitest-window-control@pyguitest.local"
+"""The pyguitest-window-control GNOME Shell extension's UUID."""
+
+
+def gnome_extension_state(uuid: str = WINDOW_CONTROL_UUID) -> str | None:
+    """A GNOME Shell extension's load state, or None if the question can't be asked.
+
+    Four answers worth telling apart when window control is missing on
+    Mutter, because the fix differs completely between them:
+
+    * ``"active"`` -- loaded and running (the hint should not even fire).
+    * ``"inactive"`` -- installed, and usually enabled, but **not loaded in
+      this session**. GNOME activates extensions only at login, and GNOME
+      45+ removed every runtime reload (`ReloadExtension` is deprecated,
+      `Eval` is locked), so `gnome-extensions enable` over SSH changes
+      nothing until the session is logged out and back in. This is the state
+      that masquerades as broken input: clicks (AT-SPI actions) still land
+      while anything needing real keyboard focus silently fails.
+    * ``"error"`` -- installed but GNOME Shell could not load it; its own log
+      says why.
+    * ``None`` -- the question could not be asked (no `gnome-extensions`
+      binary, not a GNOME session, or the extension is not installed at all).
+      The caller falls back to the plain "install it by hand" advice, which
+      is correct for a genuinely absent extension.
+
+    Read by running `gnome-extensions`, not by importing Gio and asking over
+    D-Bus in this process, and for the same reason `toolkit_accessibility`
+    uses a subprocess: an in-process GDBus call caches the session bus for
+    the life of the process and breaks tests/test_portal_dbusmock.py (see
+    that function's docstring). A subprocess has no such reach. Deliberately
+    a function, not an `Environment` field, so `detect()` never pays for it.
+    """
+    try:
+        result = subprocess.run(
+            ["gnome-extensions", "info", uuid],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=_GSETTINGS_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        # No `gnome-extensions` binary: not a GNOME session, or a minimal
+        # one. "Cannot ask", not a fault -- exactly like toolkit_accessibility.
+        return None
+    if result.returncode != 0:
+        # The commonest cause is "no installed extension with that UUID",
+        # i.e. genuinely not installed. Nothing to distinguish from the plain
+        # absent case, so let the caller use its default advice.
+        return None
+    for line in (result.stdout or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("State:"):
+            state = stripped.split(":", 1)[1].strip().upper()
+            if state == "ACTIVE":
+                return "active"
+            if state == "ERROR":
+                return "error"
+            # INACTIVE, OUT OF DATE, INITIALIZED, DISABLING, ENABLING: all
+            # "installed but not currently running this session's code", and
+            # the remedy for every one of them is a fresh login.
+            return "inactive"
+    return None
+
+
 def assistive_technology_enabled() -> bool | None:
     """Whether an assistive technology is announced, or None if unknowable.
 

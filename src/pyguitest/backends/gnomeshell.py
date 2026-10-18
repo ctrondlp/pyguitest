@@ -129,7 +129,12 @@ class GnomeShellBackend(GUIBackend):
         except Exception as exc:
             raise BackendUnavailable(
                 "the pyguitest-window-control GNOME Shell extension is not "
-                f"installed or not enabled: {exc}"
+                "installed, not enabled, or installed-and-enabled but not yet "
+                "loaded in this session (GNOME activates extensions only at "
+                "login, so one just enabled stays inactive until you log out "
+                "and back in -- `gnome-extensions info "
+                "pyguitest-window-control@pyguitest.local` shows which, and "
+                f"`pyguitest doctor` spells out the fix): {exc}"
             ) from exc
         self._can_capture, self._capture_note = self._probe_capture()
 
