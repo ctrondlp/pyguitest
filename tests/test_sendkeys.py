@@ -269,6 +269,50 @@ class TestCombination(unittest.TestCase):
         self.assertNotIn("type", [kind for kind, _ in gui.backend.events])
 
 
+class TestUnwinding(unittest.TestCase):
+    """A send that dies must not leave keys held or mask its own cause."""
+
+    def test_a_failing_tap_still_releases_the_automatic_shift(self):
+        # The auto-Shift of a shifted literal is not in `held`, so send()'s
+        # own cleanup cannot release it -- press_literal has to pair it
+        # even when the tap raises, or Shift outlives the script on the
+        # real keyboard, silently shift-modifying everything typed next.
+        class TapDies(RecordingBackend):
+            def press_key(self, key):
+                if key != "Shift_L":
+                    raise pyguitest.PyGUITestError("backend died on the tap")
+                super().press_key(key)
+
+        gui = pyguitest.Session(TapDies(), pyguitest.detect())
+        with self.assertRaises(pyguitest.PyGUITestError) as caught:
+            gui.send_keys("A")
+        self.assertEqual(str(caught.exception), "backend died on the tap")
+        self.assertEqual(gui.backend.events[-1], ("release", "Shift_L"))
+
+    def test_a_failing_cleanup_release_does_not_mask_the_cause(self):
+        # A chord that died usually means the backend died, so the cleanup
+        # release of the held modifier fails too -- and the caller must
+        # still see which keystroke never arrived, not "release failed".
+        class DiesMidChord(RecordingBackend):
+            def __init__(self):
+                super().__init__()
+                self.presses = 0
+
+            def press_key(self, key):
+                self.presses += 1
+                if self.presses > 1:
+                    raise pyguitest.PyGUITestError("the backend died mid-chord")
+                super().press_key(key)
+
+            def release_key(self, key):
+                raise pyguitest.PyGUITestError("release failed")
+
+        gui = pyguitest.Session(DiesMidChord(), pyguitest.detect())
+        with self.assertRaises(pyguitest.PyGUITestError) as caught:
+            gui.send_keys("^(s)")
+        self.assertEqual(str(caught.exception), "the backend died mid-chord")
+
+
 class TestQuoteForType(unittest.TestCase):
     def test_meta_is_now_escaped(self):
         # Regression: X11::GUITest's QuoteStringForSendKeys omitted # despite

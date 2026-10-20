@@ -1076,17 +1076,29 @@ class TestCapture(X11TestCase):
 
     def test_a_region_outside_the_screen_says_so_instead_of_badmatch(self):
         # X answers BadMatch and names none of the numbers involved, so it
-        # cannot tell you which side was wrong.
-        with self.assertRaises(CapabilityUnsupported) as caught:
+        # cannot tell you which side was wrong. ValueError rather than a
+        # typed capability error, deliberately: a bad region is the
+        # caller's geometry, not this installation's mechanism, and the
+        # composite caches mechanism failures for the whole session.
+        with self.assertRaises(ValueError) as caught:
             self.gui.capture(region=(1900, 0, 200, 100))
         message = str(caught.exception)
-        self.assertIn("200x100+1900+0", message)
+        self.assertIn("200x100", message)
+        self.assertIn("(1900, 0)", message)
         self.assertIn("1920x1080", message)
         self.assertEqual(self.gui._display.root.image_requests, [])
 
     def test_a_negative_origin_is_refused_too(self):
-        with self.assertRaises(CapabilityUnsupported):
+        with self.assertRaises(ValueError):
             self.gui.capture(region=(-10, 0, 100, 100))
+
+    def test_one_pixel_of_covering_overhang_is_fitted(self):
+        # check_region covers fractional coordinates outward, so an
+        # edge-flush region legitimately lands one pixel past the drawable;
+        # the shared fit reads the rectangle that exists instead of
+        # refusing the capture the covering exists to serve.
+        width, height, _ = self._decode(self._capture(region=(1820, 0, 101, 100)))
+        self.assertEqual((width, height), (100, 100))
 
     def test_a_region_exactly_filling_the_screen_is_allowed(self):
         # The boundary must not be off by one.

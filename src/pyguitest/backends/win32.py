@@ -113,7 +113,7 @@ from ..errors import (
     WindowNotFound,
 )
 from . import _winapi
-from .base import GUIBackend, Screen, Window, check_region
+from .base import GUIBackend, Screen, Window, check_region, fit_region
 from .windows import WindowEvent
 
 __all__ = [
@@ -2362,7 +2362,26 @@ class Win32Backend(GUIBackend):
             width, height, rows = self._print_window(self._hwnd(window))
         else:
             self.require(Capability.SCREEN_CAPTURE)
-            x, y, width, height = region or self._virtual_screen()
+            if region is not None:
+                # Fit in virtual-desktop-relative space: the virtual origin
+                # is not (0,0) with a monitor left of or above the primary,
+                # and fit_region's bounds start at zero. The fit matters
+                # because BitBlt does not refuse an out-of-bounds source --
+                # the uncovered pixels come back black under a success
+                # return, a plausible image of the wrong thing -- and
+                # check_region's covering can legitimately reach one pixel
+                # past the edge for an edge-flush fractional region.
+                v_left, v_top, v_width, v_height = self._virtual_screen()
+                rx, ry, rw, rh = region
+                fitted = fit_region(
+                    (rx - v_left, ry - v_top, rw, rh),
+                    (v_width, v_height),
+                    "virtual desktop",
+                )
+                x, y = fitted[0] + v_left, fitted[1] + v_top
+                width, height = fitted[2], fitted[3]
+            else:
+                x, y, width, height = self._virtual_screen()
             rows = self._blit(x, y, width, height)
         if path is None:
             # The same convention the tool-driven capture backends use: a

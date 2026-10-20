@@ -78,6 +78,12 @@ been tried at all". The same record sorted that way instead:
   activated](#macos-267-two-window-bugs-found-by-driving-a-qt-fixture-2026-10-13):
   why "is my window focused" and "where will my keystrokes land" are
   different questions on a Mac.
+- **The drag-release and region-rounding fixes, across ten real
+  environments** — [one day's sweep](#the-drag-release-and-region-rounding-fixes-run-everywhere-2026-10-19):
+  the covered-region policy through seven real capture pipelines, and the
+  mid-drag release verified by the OS's own button state on X11 (three
+  servers), Windows (two) and macOS — including the first runs ever on
+  Windows 10 and on a Fedora 19 museum piece.
 - **[Not run live](#not-run-live)** is the half worth reading first: it is
   what stops anything above being a promise about your desktop.
 
@@ -1728,6 +1734,92 @@ probe is part of the measurement.
 
 `docs/api.md`'s capability table gained `Win32Backend` on the `WINDOW_CAPTURE`
 row as a result, generated from the backend's own `capabilities`.
+
+## The drag-release and region-rounding fixes, run everywhere (2026-10-19)
+
+Two fixes from the same review — `drag()` releasing its button even when the
+glide between press and release raises, and `check_region()` covering
+fractional regions (floor the origin, ceil the far edge) instead of silently
+truncating them — validated live in one day across ten environments. The
+same four checks everywhere: a fractional region `(10.5, 20.5, 100, 50)`
+must come back as a 101×51 image, an integer region unchanged, a drag must
+land, and a drag whose glide is killed mid-flight must propagate the
+original error while the OS's own idea of the button state reads *released*.
+
+**The release, against ground truth.** The point of the fix is what the
+*server* believes after a failed drag, so the verification reads it back
+from the OS, never from pyguitest: the X server's button mask via
+`query_pointer` (clean on Xvfb, on Linux Mint's real Xorg, and on
+GhostBSD's), `GetAsyncKeyState` on Windows (clean on Windows 10 22H2 and
+Windows 11 26200, run in the interactive session through a Scheduled Task),
+and `CGEventSourceButtonState` on macOS 26.7. On the Wayland sessions
+(GNOME 51, COSMIC, Fedora 44 KDE) there is no equivalent readback, so those
+runs verify propagation of the original error and a clean drag afterwards —
+on KDE through `eiinput` over libei, whose RemoteDesktop portal is opt-in
+and prompts for consent on first use (a human clicked Allow on the box).
+
+**The region policy, through real pipelines.** The covered geometry was
+watched reach eight real capture stacks: ImageMagick `import` on X11, `grim`
+on a headless sway (the `-g 10,20 101x51` argument is the policy, visible in
+the tool's own command line), the capture-then-crop fallback through a real
+ImageMagick crop, COSMIC's own path, `win32` GDI capture on both Windows,
+`screencapture -R` on macOS, and `spectacle` on Fedora 44 KDE / Plasma 6
+native Wayland. GNOME Wayland's region capture is portal-only and the
+Screenshot portal on the box tried did **not** remember consent — the
+request sat the full 60s in `PortalTimeout` behind a dialog — so that one
+path remains consent-gated rather than verified.
+
+**The covering overhang, fitted across every bounds-aware backend
+(2026-10-19 review follow-up).** A review of the region change found that
+covering a fractional region outward can legitimately land one pixel past a
+screen edge — and that only the capture-then-crop tools absorbed that, while
+X11 `GetImage` and COSMIC refused it outright (turning the very HiDPI-edge
+capture the covering serves into a hard failure, and as typed capability
+errors they could permanently blacklist the backend inside a composite),
+the Screenshot portal silently returned a smaller image, and Windows GDI
+blitted past the virtual desktop into black pixels. One shared
+`fit_region` now carries the policy — up to one pixel fitted back, anything
+further refused with a `ValueError` (not a capability error) — through all
+of them. Live afterwards: the X11 `GetImage` fit on Linux Mint's real Xorg
+(edge-flush region captured, a 100px-off region refused as `ValueError`),
+the COSMIC output fit on Pop!_OS, and the spectacle crop fit on Fedora 44
+KDE all captured the edge-flush region correctly against the real
+screenshot bounds, and the Windows GDI fit passed live on Windows 11's
+interactive desktop — the edge-flush fractional region came back as 51x50
+of real pixels rather than gaining a black column, a negative-fraction
+origin fitted to the screen edge, and a 50px-off-screen region was refused
+with the ValueError naming both rectangles. The portal crop fit shares the
+consent gate above.
+
+**Two platforms met for the first time.**
+
+- *Windows 10 22H2 (build 19045)*: no Python on the box at all — python.org
+  3.12.10 installed quietly over SSH (winget does not exist in an SSH
+  session, and `Invoke-WebRequest` needs `$ProgressPreference` silenced or
+  it dies reading a console that is not there). The changed test files pass,
+  and the live interactive-session run came back green on the first try —
+  `win32` composed, captured, dragged and released.
+- *Fedora 19 (2013: GNOME 3.8, Xorg 1.14, glibc 2.17, system Python 3.3)*:
+  the oldest system pyguitest has ever touched. The package cannot run on
+  the system interpreter — `requires-python = ">=3.10"` is the honest floor
+  — but a portable python-build-standalone CPython 3.12 runs unmodified on
+  glibc 2.17, `pip install python-xlib` into it works (its OpenSSL is its
+  own, so the distro's 1.0.1-era TLS never matters), and with that the x11
+  backend composed against the 2013 server: both changed test files OK,
+  drag landed, induced mid-glide death propagated, button mask clean.
+  `pyguitest doctor` diagnosed the box correctly end to end — session x11,
+  compositor mutter, XTest present, uinput unwritable with no `input` group
+  to join, and per-gap install advice — thirteen years downhill from
+  anything it was written against. Region capture stayed unverified there
+  for want of ImageMagick (the crop fallback's one requirement), the same
+  gap on the same day as Linux Mint 22 — both boxes' captures end at a
+  missing `convert`, not at a pyguitest fault.
+
+The sweep also recovered two box erosions worth naming because they imitate
+code bugs: the macOS box's python.org 3.13 had lost its pyobjc frameworks
+(reinstalling `pyguitest[macos]`'s two wheels fixed it), and input on macOS
+is `opt_in` by design — a plain `connect()` composes no pointer there, which
+is the doctor's first line of advice on that platform, not a regression.
 
 ## Not run live
 

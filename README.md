@@ -40,8 +40,9 @@ The desktop environments it can drive include, but may not be limited to:
 
 **Status:** beta. Every capability is implemented on every backend that can
 support it. Much of it has been run against real GNOME, KDE, COSMIC, sway,
-Hyprland, niri, Xfce, X11, Debian, GhostBSD, Windows 11 and macOS sessions —
-every desktop listed above has now met a live session, niri as of 2026-10-14.
+Hyprland, niri, Xfce, X11, Debian, GhostBSD, Windows 10 and 11 and macOS
+sessions — every desktop listed above has now met a live session, niri as
+of 2026-10-14.
 [docs/validation.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/validation.md) records what each
 run covered, including what it could *not* cover.
 
@@ -177,9 +178,10 @@ its accessibility layer is up to the application; [testable-guis.md][testable-gu
 is written for its developers. And which of these paths has been run against a
 real desktop, on which versions, is recorded in
 [docs/validation.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/validation.md).
-The Windows and macOS rows in particular have each been exercised on one
-machine so far — one Windows 11 desktop, one macOS 26 machine — so read the
-table as what is implemented and validation.md as what has been measured.
+The Windows and macOS rows in particular have been exercised on few machines
+so far — one Windows 10 and one Windows 11 desktop, one macOS 26 machine —
+so read the table as what is implemented and validation.md as what has been
+measured.
 [ADR 003](https://github.com/ctrondlp/pyguitest/blob/main/docs/developers/adr-003-windows.md) and
 [ADR 004](https://github.com/ctrondlp/pyguitest/blob/main/docs/developers/adr-004-macos.md)
 record each platform's design.

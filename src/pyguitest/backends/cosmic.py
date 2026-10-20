@@ -45,7 +45,7 @@ from ..capabilities import Capability, CapabilitySet
 from ..errors import CapabilityUnsupported, WindowNotFound
 from ..ipc import DEFAULT_TIMEOUT
 from ..png import write_rgb
-from .base import Screen, Window, check_region
+from .base import Screen, Window, check_region, fit_region
 from .windows import WindowEvent, _WindowBackend
 
 __all__ = ["CosmicBackend", "connect_cosmic"]
@@ -1002,8 +1002,10 @@ class CosmicBackend(_WindowBackend):
         opcode = _ZTM_SET_MINIMIZED if minimized else _ZTM_UNSET_MINIMIZED
         self._conn._send(self._conn._manager, opcode, [("o", cosmic)])
 
-    def _output_for_region(self, region: tuple[int, int, int, int]) -> int | None:
-        """The bound output id whose bounds fully contain `region`, or None.
+    def _output_for_region(
+        self, region: tuple[int, int, int, int]
+    ) -> tuple[int, tuple[int, int, int, int]] | None:
+        """The output serving `region`, with the region fitted to it, or None.
 
         A region can land on any output, not just the first one `capture()`
         would otherwise default to -- cropping it out of the wrong output's
@@ -1011,6 +1013,13 @@ class CosmicBackend(_WindowBackend):
         multi-output desktop where the region would actually fit on a
         *different* output, or, worse, silently returns pixels from the
         wrong screen if the coordinates happen to overlap by chance.
+
+        An output containing the region exactly wins, unchanged. Failing
+        that, one pixel of overhang -- what `check_region`'s covering can
+        add to an edge-flush fractional region -- is fitted to whichever
+        output comes within a pixel of containing it, via the shared
+        `fit_region` policy. Anything further outside every output is
+        None, refused by the caller as before.
         """
         x, y, width, height = region
         for output_id, output in self._conn._outputs.items():
@@ -1020,7 +1029,19 @@ class CosmicBackend(_WindowBackend):
                 and x + width <= output.x + output.width
                 and y + height <= output.y + output.height
             ):
-                return output_id
+                return output_id, region
+        for output_id, output in self._conn._outputs.items():
+            relative = (x - output.x, y - output.y, width, height)
+            try:
+                fitted = fit_region(relative, (output.width, output.height), "output")
+            except ValueError:
+                continue
+            return output_id, (
+                fitted[0] + output.x,
+                fitted[1] + output.y,
+                fitted[2],
+                fitted[3],
+            )
         return None
 
     def capture(self, window=None, path=None, region=None):
@@ -1047,14 +1068,15 @@ class CosmicBackend(_WindowBackend):
             width, height, raw = self._conn._capture_frame(source)
         else:
             if region is not None:
-                output_id = self._output_for_region(region)
-                if output_id is None:
+                match = self._output_for_region(region)
+                if match is None:
                     raise CapabilityUnsupported(
                         Capability.SCREEN_CAPTURE,
                         self.name,
                         f"region {tuple(region)} is not fully contained in "
                         "any single bound output",
                     )
+                output_id, region = match
             else:
                 output_id = next(iter(self._conn._outputs))
             source = self._conn._create_output_source(output_id)

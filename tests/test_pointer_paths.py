@@ -107,6 +107,43 @@ class RecordingBackend(GUIBackend):
         return [when for _, when in self.events]
 
 
+class DyingBackend(RecordingBackend):
+    """Fails like a backend whose compositor connection dropped mid-gesture.
+
+    `moves_before_death` counts pointer moves served before every further
+    one raises (None never raises); `release_raises` makes release_button
+    fail too, the way a dead connection fails every call after the first.
+    `death_exc` is what the dying move raises -- a plain Exception by
+    default, but settable to a BaseException (KeyboardInterrupt) to prove
+    the release survives even those.
+    """
+
+    name = "dying"
+
+    def __init__(
+        self,
+        moves_before_death=None,
+        release_raises=False,
+        death_exc=None,
+    ):
+        super().__init__()
+        self._moves_before_death = moves_before_death
+        self._release_raises = release_raises
+        self._death_exc = death_exc or PyGUITestError("the backend died mid-glide")
+
+    def move_mouse(self, x, y, screen=0):
+        if self._moves_before_death is not None:
+            if self._moves_before_death <= 0:
+                raise self._death_exc
+            self._moves_before_death -= 1
+        super().move_mouse(x, y, screen)
+
+    def release_button(self, button):
+        if self._release_raises:
+            raise PyGUITestError("release failed")
+        super().release_button(button)
+
+
 class QueryingBackend(RecordingBackend):
     """An X11-shaped backend: injection *and* readback."""
 
@@ -369,6 +406,75 @@ class TestDrag(unittest.TestCase):
         gui = session()
         gui.drag((0, 0), (100, 0), via=[(50, 60)], duration=0.02, rate=400, settle=0)
         self.assertTrue(any(y > 30 for _, y in gui.backend.moves))
+
+    def test_a_glide_that_dies_still_releases_the_button(self):
+        # A button left virtually down outlives the script: every pointer
+        # move the *user* then makes is a drag, with nothing on screen to
+        # say why. The glide's failure must not leave the press unpaired.
+        gui = session(DyingBackend(moves_before_death=3))
+        with self.assertRaises(PyGUITestError):
+            gui.drag((0, 0), (100, 100), duration=0.02, rate=400, settle=0)
+        kinds = gui.backend.kinds
+        self.assertIn("press", kinds)
+        self.assertEqual(kinds[-1], "release")
+
+    def test_a_failing_release_does_not_mask_the_glide_error(self):
+        # A glide that died usually means the backend died, so the cleanup
+        # release is likely to fail too -- and the caller must still see
+        # the error that explains what happened, not the cleanup's.
+        gui = session(DyingBackend(moves_before_death=3, release_raises=True))
+        with self.assertRaises(PyGUITestError) as caught:
+            gui.drag((0, 0), (100, 100), duration=0.02, rate=400, settle=0)
+        self.assertEqual(str(caught.exception), "the backend died mid-glide")
+
+    def test_a_release_failure_after_a_clean_glide_still_surfaces(self):
+        # Best-effort suppression is for the unwinding path only: when the
+        # drag itself succeeded, a failed release is the whole story and
+        # must not be swallowed.
+        gui = session(DyingBackend(moves_before_death=None, release_raises=True))
+        with self.assertRaises(PyGUITestError) as caught:
+            gui.drag((0, 0), (100, 100), duration=0.02, rate=400, settle=0)
+        self.assertEqual(str(caught.exception), "release failed")
+
+    def test_a_keyboard_interrupt_mid_glide_still_releases_the_button(self):
+        # The release path catches BaseException, not just Exception, on
+        # purpose: a Ctrl-C or a timeout's SystemExit between press and
+        # release is exactly when a stuck button is most harmful and least
+        # expected. Narrowing the catch to Exception would pass every other
+        # test in this class and silently reintroduce that leak.
+        gui = session(DyingBackend(moves_before_death=3, death_exc=KeyboardInterrupt()))
+        with self.assertRaises(KeyboardInterrupt):
+            gui.drag((0, 0), (100, 100), duration=0.02, rate=400, settle=0)
+        self.assertEqual(gui.backend.kinds[-1], "release")
+
+    def test_a_press_that_dies_still_attempts_the_release(self):
+        # press_button sleeps event_delay after the backend call, so an
+        # interrupt can land after the button is physically down but before
+        # the glide begins. The press lives inside the protected block:
+        # the cleanup releases best-effort, and a release for a press that
+        # never completed is one spurious event every backend ignores.
+        class PressDies(DyingBackend):
+            def press_button(self, button):
+                super().press_button(button)
+                raise KeyboardInterrupt
+
+        gui = session(PressDies())
+        with self.assertRaises(KeyboardInterrupt):
+            gui.drag((0, 0), (100, 100), duration=0.02, rate=400, settle=0)
+        self.assertEqual(gui.backend.kinds[-1], "release")
+
+    def test_an_interrupt_during_the_cleanup_release_still_propagates(self):
+        # The cleanup suppresses Exception, not BaseException, on purpose:
+        # a backend failing its release is the masking case the suppression
+        # exists for, but a Ctrl-C arriving during the cleanup is the user
+        # aborting, and must win over preserving the glide's diagnosis.
+        class InterruptedRelease(DyingBackend):
+            def release_button(self, button):
+                raise KeyboardInterrupt
+
+        gui = session(InterruptedRelease(moves_before_death=3))
+        with self.assertRaises(KeyboardInterrupt):
+            gui.drag((0, 0), (100, 100), duration=0.02, rate=400, settle=0)
 
 
 class TestArgumentChecking(unittest.TestCase):

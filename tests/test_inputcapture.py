@@ -103,6 +103,8 @@ class FakeInputCaptureSession:
         self.calls.append(("wait_for_activation", timeout))
         if self._timeout_on_wait:
             raise FakePortalTimeoutError("Activated", timeout or 0)
+        if getattr(self, "_protocol_error_on_wait", False):
+            raise FakePortalError("Activated arrived with a malformed payload")
         return self._activation
 
     def close(self):
@@ -365,6 +367,19 @@ class TestWaitForPointerActivation(InputCaptureTestCase):
         self.assertEqual(position, (960.0, 540.0))
         names = [call[0] for call in self.session.calls]
         self.assertIn("enable", names)
+
+    def test_any_other_portal_error_mid_wait_is_wrapped_and_disables(self):
+        # A malformed signal (python-libei's PortalProtocolError) or the
+        # session closing mid-wait: the raw libei exception is not part of
+        # this package's API, and the pointer barriers must not stay armed
+        # past the failure.
+        self.session._protocol_error_on_wait = True
+        with self.assertRaises(PyGUITestError) as ctx:
+            self.gui.wait_for_pointer_activation(timeout=5.0)
+        self.assertIn("malformed", str(ctx.exception))
+        names = [call[0] for call in self.session.calls]
+        self.assertIn("disable", names)
+        self.assertNotIn("release", names)
 
     def test_a_timeout_disables_but_never_releases(self):
         # Nothing was ever activated, so there is nothing to hand back --
