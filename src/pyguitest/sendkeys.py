@@ -19,6 +19,7 @@ delays, and skipping them would make a refactor silently change timing.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -54,14 +55,29 @@ class KeySender:
         self.grouped = False
 
     def press_literal(self, char: str) -> None:
-        """Type one character, adding Shift only when it is not already held."""
+        """Type one character, adding Shift only when it is not already held.
+
+        The auto-Shift is not in `self.held` -- it belongs to this one
+        character, not to a group `send`'s cleanup should know about -- so
+        its release has to be paired here: a tap that raises (an unmapped
+        key, a backend dying, an interrupt) must not leave Shift physically
+        held on the real keyboard, silently shift-modifying everything the
+        *user* types next. Same unwinding shape as Session.drag, for the
+        same reason: a failed tap usually means the release fails too, and
+        the tap's own error is the one that must reach the caller.
+        """
         name, needs_shift = self.session.backend.resolve_char_key(char)
-        auto_shift = needs_shift and self.shift_name not in self.held
-        if auto_shift:
-            self.session.press_key(self.shift_name)
-        self.session.tap_key(name)
-        if auto_shift:
-            self.session.release_key(self.shift_name)
+        if not (needs_shift and self.shift_name not in self.held):
+            self.session.tap_key(name)
+            return
+        self.session.press_key(self.shift_name)
+        try:
+            self.session.tap_key(name)
+        except BaseException:
+            with contextlib.suppress(Exception):
+                self.session.release_key(self.shift_name)
+            raise
+        self.session.release_key(self.shift_name)
 
     @staticmethod
     def scan_brace(keys: str, start: int) -> tuple[str, int]:
@@ -134,12 +150,20 @@ class KeySender:
         """Walk `keys`, acting on each character of the grammar.
 
         Releases any modifier still held on the way out, success or not.
-        Without the `finally`, an exception raised mid-group -- an
+        Without the unwinding release, an exception raised mid-group -- an
         unmapped character inside `%(...)`, say -- left that modifier
         held on the real keyboard with nothing left in this call to
         release it; same for `keys` itself ending before its own closing
         `)`. On a well-formed string that runs to completion, `held` is
         already empty by the time this runs, so it is a no-op there.
+
+        Not a plain `finally`, for Session.drag's reason: a send that died
+        usually means the backend died, so the cleanup release is likely
+        to raise too, and in a `finally` that second error would *replace*
+        the first -- the caller would see "release failed" and never learn
+        which keystroke never arrived. The cleanup's own error is
+        suppressed on the unwinding path only; a release failure after a
+        clean run still surfaces.
         """
         try:
             i, n = 0, len(keys)
@@ -160,8 +184,11 @@ class KeySender:
                 i += 1
                 if not self.grouped:
                     self.release_held()
-        finally:
-            self.release_held()
+        except BaseException:
+            with contextlib.suppress(Exception):
+                self.release_held()
+            raise
+        self.release_held()
 
     def character(self, char: str, keys: str, i: int, n: int) -> int | None:
         """Act on one ordinary character.

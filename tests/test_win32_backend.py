@@ -1778,6 +1778,35 @@ class TestCapture(Win32TestCase):
         _dc, x, y, width, height = self.gdi32.arg_for("BitBlt")[:5]
         self.assertEqual((x, y, width, height), (0, 0, 2, 1))
 
+    def test_one_pixel_of_covering_overhang_is_fitted_before_the_blit(self):
+        # BitBlt does not refuse an out-of-bounds source -- the uncovered
+        # column comes back black under a success return -- so the shared
+        # fit runs first: one pixel past the edge (what check_region's
+        # covering adds for an edge-flush fractional region) blits the
+        # rectangle that exists.
+        self.small_desktop()
+        self.gui.capture(region=(0, 0, 3, 2), path=self.temporary_path())
+        _dc, x, y, width, height = self.gdi32.arg_for("BitBlt")[:5]
+        self.assertEqual((x, y, width, height), (0, 0, 2, 2))
+
+    def test_two_pixels_of_overhang_is_refused_before_the_blit(self):
+        self.small_desktop()
+        with self.assertRaises(ValueError):
+            self.gui.capture(region=(0, 0, 4, 2))
+        self.assertFalse(self.gdi32.was_called("BitBlt"))
+
+    def test_the_fit_respects_a_negative_virtual_origin(self):
+        # The virtual desktop's origin is not (0,0) with a monitor left of
+        # the primary; the fit happens in virtual-relative space, so a
+        # region one pixel left of the leftmost monitor clamps to that
+        # monitor's edge instead of being measured against (0,0).
+        self.small_desktop()
+        self.metrics[_winapi.SM_XVIRTUALSCREEN] = -2
+        self.gui.capture(region=(-3, 0, 3, 2), path=self.temporary_path())
+        args = self.gdi32.arg_for("BitBlt")
+        self.assertEqual((args[3], args[4]), (2, 2), "fitted size")
+        self.assertEqual((args[6], args[7]), (-2, 0), "source origin")
+
     def test_the_gdi_objects_are_released_afterwards(self):
         self.small_desktop()
         self.gui.capture(path=self.temporary_path())

@@ -41,7 +41,7 @@ from typing import Literal
 from .. import png as _png
 from ..capabilities import Capability, CapabilitySet
 from ..errors import BackendUnavailable, CapabilityUnsupported, WindowNotFound
-from .base import GUIBackend, Screen, Window, check_region
+from .base import GUIBackend, Screen, Window, check_region, fit_region
 
 __all__ = ["X11Backend", "available"]
 
@@ -972,24 +972,27 @@ class X11Backend(GUIBackend):
             ) from exc
         return (geometry.width, geometry.height)
 
-    def _check_within(self, x, y, width, height, bounds):
-        """Reject a rectangle the drawable does not wholly contain.
+    def _fit_within(self, region, bounds):
+        """Fit a region into the drawable, refusing one genuinely outside.
 
         X requires the requested rectangle to lie entirely inside the
         drawable; anything else is BadMatch, an error that names none of
         the numbers involved and so says nothing about which side was
-        wrong. Checking here turns it into a message with both rectangles
-        in it.
+        wrong. The shared `fit_region` turns that into either a fitted
+        rectangle (one pixel of covering overhang, the legitimate HiDPI
+        edge case) or a ValueError with both rectangles in it. ValueError,
+        not CapabilityUnsupported, on purpose: a bad region is the
+        caller's geometry, not this installation's mechanism, and the
+        composite's capture fallback caches mechanism failures for the
+        whole session -- a typed capability error here would blacklist
+        this backend over one stale rectangle.
         """
         limit_width, limit_height = bounds
-        if x < 0 or y < 0 or x + width > limit_width or y + height > limit_height:
-            raise CapabilityUnsupported(
-                Capability.SCREEN_CAPTURE,
-                self.name,
-                f"the requested rectangle {width}x{height}+{x}+{y} is not "
-                f"wholly inside the {limit_width}x{limit_height} drawable; "
-                "X refuses a GetImage that reaches outside it",
-            )
+        return fit_region(
+            region,
+            (limit_width, limit_height),
+            "drawable (X refuses a GetImage that reaches outside it)",
+        )
 
     def capture(self, window=None, path=None, region=None):
         """Screenshot the root window, one window, or one rectangle.
@@ -1022,15 +1025,13 @@ class X11Backend(GUIBackend):
             drawable = self._display.screen().root
         bounds = self._drawable_size(drawable, window)
 
-        if window is not None:
-            x, y = 0, 0
-            width, height = bounds
-        elif region is not None:
-            x, y, width, height = region
+        if region is not None:
+            x, y, width, height = self._fit_within(region, bounds)
         else:
+            # A window or whole-root capture is exactly the drawable's own
+            # rectangle, which cannot be out of bounds.
             x, y = 0, 0
             width, height = bounds
-        self._check_within(x, y, width, height, bounds)
 
         data = self._read_image(drawable, x, y, width, height)
         rows = self._to_rgb_rows(data, width, height)

@@ -12,6 +12,7 @@ backend is a valid backend -- which is the normal case, not the exception.
 
 from __future__ import annotations
 
+import math
 import re
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol, TypeVar
@@ -59,6 +60,16 @@ def check_region(
     caller who asked for an empty rectangle and got back a full-screen
     shot has the worst possible outcome: a plausible-looking image of the
     wrong thing.
+
+    Fractional coordinates are *covered*, not truncated: the origin is
+    floored and the far edge ceiled, so every pixel the caller named is in
+    the capture. Fractions arrive honestly -- element extents on a 150%
+    display, a midpoint of an odd width -- and `int()` here used to drop
+    them silently, shaving the right and bottom edges off exactly the
+    HiDPI captures that already had the least room for error (and rounding
+    *toward zero*, so a region at x=-0.5 on a monitor left of the primary
+    moved right while every positive one moved left). Integer regions pass
+    through unchanged.
     """
     if region is None:
         return None
@@ -69,16 +80,83 @@ def check_region(
             "mean one thing or the other"
         )
     try:
-        x, y, width, height = (int(value) for value in region)
-    except (TypeError, ValueError) as exc:
+        # OverflowError too: float() raises it for a Python int beyond
+        # double range (10**400), which int() used to accept silently.
+        x, y, width, height = (float(value) for value in region)
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError(
             f"region must be four numbers (x, y, width, height), got {region!r}"
         ) from exc
+    # NaN slips past the size check below (every comparison with it is
+    # False) and infinity passes it outright; both would then blow up in
+    # floor/ceil with an error naming neither the argument nor the caller.
+    # The far edges are checked too: two finite halves can still sum to
+    # infinity (x = width = 1e308), and ceil(inf) is the same bare blow-up.
+    if not all(map(math.isfinite, (x, y, width, height, x + width, y + height))):
+        raise ValueError(
+            f"region must be four finite numbers (x, y, width, height), got {region!r}"
+        )
     if width <= 0 or height <= 0:
         raise ValueError(
             f"region must have a positive width and height, got {width}x{height}"
         )
-    return (x, y, width, height)
+    left = math.floor(x)
+    top = math.floor(y)
+    covered = (left, top, math.ceil(x + width) - left, math.ceil(y + height) - top)
+    if covered[2] <= 0 or covered[3] <= 0:
+        # An origin past 2**53 swallows the width in float addition
+        # (x + width == x), collapsing the covered size to zero -- which
+        # would hand ImageMagick a `-crop 0x...` that quietly yields the
+        # *whole* image, the exact outcome the size check above refuses.
+        raise ValueError(
+            f"region {region!r} is too large to resolve to pixels: its "
+            "origin is beyond float precision, so its size collapses to zero"
+        )
+    return covered
+
+
+def fit_region(
+    region: tuple[int, int, int, int],
+    size: tuple[int, int],
+    source: str = "screen",
+) -> tuple[int, int, int, int]:
+    """Fit a covered region into `size`, refusing one genuinely outside.
+
+    `check_region` covers fractional coordinates outward -- floor the
+    origin, ceil the far edge -- so a region computed from extents flush
+    with a screen edge legitimately lands one pixel past it. One pixel per
+    side is exactly as much as covering can add, so up to that much is
+    fitted back in; anything further out cannot be rounding, and is
+    refused with a ValueError naming both rectangles, because capturing it
+    anyway returns a smaller or shifted image under a success exit -- a
+    plausible-looking picture of the wrong thing.
+
+    Every capture path that knows its bounds applies this same policy, so
+    one region means one outcome across backends. The fit cannot tell a
+    covering artifact from an integer caller error exactly one pixel out
+    -- the fraction is gone by the time this runs -- and chooses to serve
+    the HiDPI edge case; a caller needing the strict answer can compare
+    the returned region with the one it passed.
+    """
+    width_limit, height_limit = size
+    x, y, width, height = region
+    left, top = max(x, 0), max(y, 0)
+    right = min(x + width, width_limit)
+    bottom = min(y + height, height_limit)
+    past_covering = (
+        left - x > 1
+        or top - y > 1
+        or (x + width) - right > 1
+        or (y + height) - bottom > 1
+    )
+    if past_covering or right <= left or bottom <= top:
+        raise ValueError(
+            f"region {width}x{height} at ({x}, {y}) is not inside the "
+            f"{width_limit}x{height_limit} {source}: capturing it would "
+            "return a smaller or empty image instead of the rectangle "
+            "asked for"
+        )
+    return (left, top, right - left, bottom - top)
 
 
 class Screen:

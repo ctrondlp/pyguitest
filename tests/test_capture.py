@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from pyguitest import tools
+from pyguitest.backends.base import check_region, fit_region
 from pyguitest.backends.capture import (
     _SUBPROCESS_TIMEOUT,
     ToolCaptureBackend,
@@ -150,13 +151,17 @@ class TestRegionIsNormalized(unittest.TestCase):
             ],
         )
 
-    def test_floats_are_accepted_and_truncated(self):
+    def test_floats_are_covered_not_truncated(self):
         # geometry() is documented as returning ints, but a caller computing
-        # a rectangle (a midpoint, a scale factor) easily produces floats,
-        # and every tool's command line needs integers.
+        # a rectangle (a midpoint, a scale factor, element extents on a 150%
+        # display) easily produces floats, and every tool's command line
+        # needs integers. The origin floors and the far edge ceils, so every
+        # pixel the caller named is inside the capture: y=20.9 starts the
+        # row that contains 20.9, and the bottom edge at 70.9 is kept by the
+        # taller height, not shaved off as int() used to.
         gui = self._backend("grim")
         gui.capture(path=SHOT, region=(10.0, 20.9, 100.0, 50.0))
-        self.assertEqual(self.runner.calls[0][2], "10,20 100x50")
+        self.assertEqual(self.runner.calls[0][2], "10,20 100x51")
 
     def test_a_malformed_region_is_rejected(self):
         gui = self._backend("grim")
@@ -173,6 +178,84 @@ class TestRegionIsNormalized(unittest.TestCase):
             with self.subTest(region=bad), self.assertRaises(ValueError):
                 gui.capture(path=SHOT, region=bad)
         self.assertEqual(self.runner.calls, [])
+
+
+class TestCheckRegion(unittest.TestCase):
+    """The rounding policy itself, pinned where every backend shares it."""
+
+    def test_an_integer_region_passes_through_unchanged(self):
+        self.assertEqual(check_region((10, 20, 100, 50)), (10, 20, 100, 50))
+
+    def test_a_fractional_region_is_covered(self):
+        # Floor the origin, ceil the far edge: (0.5, 0.5, 1.0, 1.0) spans
+        # pixel rows 0-1 and columns 0-1, so covering it is 2x2 at (0, 0).
+        self.assertEqual(check_region((0.5, 0.5, 1.0, 1.0)), (0, 0, 2, 2))
+
+    def test_a_negative_fractional_origin_floors_leftward(self):
+        # int() rounds toward zero, so x=-0.5 on a monitor left of the
+        # primary used to move *right* while every positive x moved left.
+        # Flooring moves every origin the same way.
+        self.assertEqual(check_region((-0.5, -0.5, 1.0, 1.0)), (-1, -1, 2, 2))
+
+    def test_a_non_finite_region_is_rejected(self):
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=bad), self.assertRaises(ValueError):
+                check_region((bad, 0, 10, 10))
+            with self.subTest(size=bad), self.assertRaises(ValueError):
+                check_region((0, 0, bad, 10))
+
+    def test_an_overflowing_far_edge_is_rejected_not_a_bare_overflow(self):
+        # Each value is finite on its own, but x + width is infinity, and
+        # ceil(inf) would raise a bare OverflowError naming neither the
+        # argument nor the caller -- the same hole the NaN check closes.
+        with self.assertRaises(ValueError):
+            check_region((1e308, 0, 1e308, 10))
+        with self.assertRaises(ValueError):
+            check_region((0, 1e308, 10, 1e308))
+
+    def test_an_int_beyond_double_range_is_rejected_as_a_value_error(self):
+        # float(10**400) raises OverflowError, which the old int() path
+        # never did -- it must come out as the same "four numbers" error,
+        # not escape bare.
+        with self.assertRaises(ValueError):
+            check_region((10**400, 0, 10, 10))
+
+    def test_an_origin_beyond_float_precision_is_rejected(self):
+        # At 2**60 the float spacing exceeds the width, so x + width == x
+        # and the covered size collapses to zero -- which would hand
+        # ImageMagick a `-crop 0x...` that quietly yields the whole image.
+        with self.assertRaises(ValueError):
+            check_region((2**60, 0, 10, 10))
+        with self.assertRaises(ValueError):
+            check_region((0, 2**60, 10, 10))
+
+
+class TestFitRegion(unittest.TestCase):
+    """The shared bounds-fit every capture path applies: see fit_region."""
+
+    def test_a_region_inside_passes_through_unchanged(self):
+        self.assertEqual(fit_region((10, 20, 50, 30), (200, 100)), (10, 20, 50, 30))
+
+    def test_one_pixel_of_overhang_is_fitted_per_side(self):
+        self.assertEqual(fit_region((-1, 0, 50, 50), (200, 100)), (0, 0, 49, 50))
+        self.assertEqual(fit_region((0, -1, 50, 50), (200, 100)), (0, 0, 50, 49))
+        self.assertEqual(fit_region((151, 0, 50, 50), (200, 100)), (151, 0, 49, 50))
+        self.assertEqual(fit_region((0, 51, 50, 50), (200, 100)), (0, 51, 50, 49))
+
+    def test_two_pixels_of_overhang_is_refused(self):
+        for region in ((-2, 0, 50, 50), (0, 0, 202, 50), (0, 0, 50, 102)):
+            with self.subTest(region=region), self.assertRaises(ValueError):
+                fit_region(region, (200, 100))
+
+    def test_a_region_wholly_outside_is_refused(self):
+        with self.assertRaises(ValueError):
+            fit_region((300, 0, 50, 50), (200, 100))
+
+    def test_the_error_names_both_rectangles(self):
+        with self.assertRaises(ValueError) as caught:
+            fit_region((300, 0, 50, 50), (200, 100), "drawable")
+        self.assertIn("200x100", str(caught.exception))
+        self.assertIn("drawable", str(caught.exception))
 
 
 class TestCropFallback(unittest.TestCase):
@@ -312,6 +395,41 @@ class TestCropRefusesARegionTheScreenshotDoesNotContain(unittest.TestCase):
         gui = self._backend()
         gui.capture(path=SHOT, region=(0, 0, 200, 100))
         self.assertEqual(len(self.calls), 2)
+
+    def test_one_pixel_of_overhang_is_clamped_not_refused(self):
+        # check_region covers fractional coordinates outward, so an element
+        # flush against the screen edge on a fractional-scale display
+        # legitimately produces a region one pixel past it -- one pixel is
+        # exactly as much as covering can add, so exactly that much is
+        # fitted back instead of failing the capture it was computed for.
+        gui = self._backend()
+        gui.capture(path=SHOT, region=(160, 10, 41, 50))  # right edge at 201
+        self.assertEqual(len(self.calls), 2, "the crop must have run")
+        self.assertIn("40x50+160+10", self.calls[1])
+
+    def test_a_fractional_region_flush_with_the_edge_is_captured(self):
+        # End to end through check_region: the covering ceils 160.5 + 39.9
+        # = 200.4 to 201, one past the 200-wide screen, and the clamp hands
+        # the crop the visible 40 columns -- the exact HiDPI-edge case the
+        # covering exists to serve, which the old int() truncation served
+        # only by silently shaving every other fractional region.
+        gui = self._backend()
+        gui.capture(path=SHOT, region=(160.5, 10.0, 39.9, 50.0))
+        self.assertEqual(len(self.calls), 2)
+        self.assertIn("40x50+160+10", self.calls[1])
+
+    def test_a_single_negative_pixel_of_origin_is_clamped(self):
+        # floor(-0.4) is -1: an element poking a fraction off the left edge
+        # covers to origin -1, and the visible part starts at 0.
+        gui = self._backend()
+        gui.capture(path=SHOT, region=(-1, 5, 50, 50))
+        self.assertEqual(len(self.calls), 2)
+        self.assertIn("49x50+0+5", self.calls[1])
+
+    def test_two_pixels_of_overhang_is_still_refused(self):
+        # Two pixels cannot be covering -- it adds at most one per side --
+        # so past one pixel the region is a caller error, refused as before.
+        self._refused((160, 10, 42, 50))
 
     def test_the_intermediate_is_cleaned_up_after_a_refusal(self):
         gui = self._backend()

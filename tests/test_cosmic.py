@@ -7,6 +7,7 @@ bug in the client's encoder would not be masked by a matching bug in the test
 -- the test's bytes are written independently and the client must parse them.
 """
 
+import os
 import sys
 import unittest
 
@@ -30,6 +31,7 @@ from pyguitest.backends.cosmic import (
 from pyguitest.backends.windows import for_compositor
 from pyguitest.capabilities import Capability
 from pyguitest.errors import CapabilityUnsupported, WindowNotFound
+from pyguitest.png import png_size
 from pyguitest.session import Compositor
 
 # Object ids, traced through the client's deterministic allocation order:
@@ -315,8 +317,30 @@ class TestOutputForRegion(unittest.TestCase):
             }
         )
         backend = CosmicBackend(conn)
-        self.assertEqual(backend._output_for_region((1280, 10, 100, 100)), 2)
-        self.assertEqual(backend._output_for_region((10, 10, 100, 100)), 1)
+        self.assertEqual(
+            backend._output_for_region((1280, 10, 100, 100)),
+            (2, (1280, 10, 100, 100)),
+        )
+        self.assertEqual(
+            backend._output_for_region((10, 10, 100, 100)),
+            (1, (10, 10, 100, 100)),
+        )
+
+    def test_one_pixel_of_covering_overhang_is_fitted_to_the_output(self):
+        # check_region covers fractional coordinates outward, so an
+        # edge-flush region legitimately lands one pixel past the output;
+        # the shared fit hands back the visible rectangle instead of
+        # refusing the capture the covering exists to serve.
+        conn = mock.Mock(_outputs={1: _output(0, 0, 1280, 800)})
+        backend = CosmicBackend(conn)
+        self.assertEqual(
+            backend._output_for_region((1200, 10, 81, 50)),
+            (1, (1200, 10, 80, 50)),
+        )
+        self.assertEqual(
+            backend._output_for_region((-1, 5, 50, 50)),
+            (1, (0, 5, 49, 50)),
+        )
 
     def test_a_region_crossing_two_outputs_matches_neither(self):
         conn = mock.Mock(
@@ -363,6 +387,19 @@ class TestCaptureSelectsTheRightOutput(unittest.TestCase):
         backend, conn = self._backend()
         backend.capture()
         conn._create_output_source.assert_called_once_with(1)
+
+    def test_an_edge_flush_covered_region_is_captured_fitted(self):
+        # One pixel past the output's far edge -- what covering adds for a
+        # fractional edge-flush region -- is fitted and captured rather
+        # than refused.
+        conn = mock.Mock(_outputs={1: _output(0, 0, 100, 100)})
+        conn._create_output_source.return_value = 99
+        conn._capture_frame.return_value = (100, 100, b"\0" * (100 * 100 * 4))
+        backend = CosmicBackend(conn)
+        path = backend.capture(region=(60, 10, 41, 50))
+        conn._create_output_source.assert_called_once_with(1)
+        self.assertEqual(png_size(path), (40, 50))
+        os.unlink(path)
 
 
 class TestScreens(unittest.TestCase):

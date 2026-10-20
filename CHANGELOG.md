@@ -7,6 +7,62 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **`Session.drag()` no longer leaves the button virtually held when the
+  drag dies between press and release.** The release is now attempted even
+  when the press's own post-event delay or the motion in between raises —
+  best-effort, with the original error the one that propagates (a dead
+  backend fails the cleanup release too, and that second error used to be
+  the kind that masks the first; an interrupt arriving *during* the
+  cleanup still wins, deliberately). A button left down outlives the
+  script: every pointer move the *user* then makes is a drag, with nothing
+  on screen to say why.
+
+- **`send_keys()` cleanup follows the same rule.** The modifier release on
+  the way out of a failed send no longer masks the keystroke error that
+  caused the unwind, and a shifted literal whose tap fails now releases
+  its automatic Shift — previously that Shift was held outside the
+  grammar's own bookkeeping, so nothing could ever release it and it
+  silently shift-modified everything the user typed next.
+
+- **A portal error during `wait_for_pointer_activation()` no longer leaks
+  a raw `libei` exception or leaves pointer barriers armed.** Only the
+  timeout was caught; python-libei's new `PortalProtocolError` (a
+  malformed compositor signal) and a session closed mid-wait now disable
+  the capture session best-effort and surface as this package's own
+  `PyGUITestError`, like every other portal failure in that backend.
+
+- **Fractional capture regions are now covered instead of silently
+  truncated.** `region=` coordinates arrive fractional honestly — element
+  extents on a 150% display, the midpoint of an odd width — and the shared
+  validation used `int()`, which shaved the right and bottom edges off and
+  rounded *toward zero*, so an origin at x=-0.5 on a monitor left of the
+  primary moved right while every positive one moved left. The origin now
+  floors and the far edge ceils, so every pixel the caller named is in the
+  capture; integer regions pass through unchanged, and a NaN or infinite
+  value — or a pair of finite values whose far edge overflows, an integer
+  beyond double range, or an origin so large float precision collapses the
+  size to zero — is rejected with a `ValueError` naming the region instead
+  of surfacing as a bare `floor()`/`ceil()`/`float()` error. Because
+  covering can legitimately land one pixel past a screen edge for an
+  edge-flush region, every capture path that knows its bounds now applies
+  one shared fit (`fit_region`): up to one pixel of overhang per side —
+  exactly as much as covering can add — is fitted back, and anything
+  further outside is refused with a `ValueError` naming both rectangles.
+  That one policy now covers the capture-then-crop tools
+  (gnome-screenshot, spectacle), the Screenshot-portal crop (which
+  previously had no bounds check at all and silently returned a smaller
+  image), X11 `GetImage` and COSMIC (which previously refused the covered
+  edge region outright — and, being typed capability errors, could
+  permanently blacklist the backend in a composite over one stale
+  rectangle; a bad region is now a `ValueError`, which the composite
+  propagates instead of caching), and Windows GDI (which previously
+  blitted past the virtual desktop and returned black pixels under a
+  success exit). The direct-geometry tools (grim, `import`,
+  `screencapture`) have no bounds to fit against and keep each tool's own
+  edge behaviour.
+
 ### Changed
 
 - **`find_elements` now answers a role-filtered search through the AT-SPI

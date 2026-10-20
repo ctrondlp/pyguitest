@@ -36,9 +36,10 @@ from urllib.parse import unquote, urlparse
 
 from ..capabilities import Capability, CapabilitySet
 from ..errors import BackendUnavailable, PermissionRequired, PyGUITestError
+from ..png import png_size
 from . import crop as _crop
 from . import portalrequest as _portalrequest
-from .base import GUIBackend, check_region
+from .base import GUIBackend, check_region, fit_region
 
 __all__ = ["PortalCaptureBackend", "available"]
 
@@ -176,6 +177,16 @@ class PortalCaptureBackend(GUIBackend):
             if region is None:
                 shutil.copyfile(produced, path)
             else:
+                # The same fit every bounds-knowing capture path applies:
+                # without it, ImageMagick crops an overhanging rectangle to
+                # a silently smaller image on a zero exit -- and the
+                # covering in check_region can legitimately overhang by one
+                # pixel for an edge-flush fractional region. A portal
+                # screenshot that is somehow not a readable PNG falls
+                # through to the crop unchanged, as the tool path does.
+                size = png_size(produced)
+                if size is not None:
+                    region = fit_region(region, size, "screenshot the portal took")
                 _crop.crop(produced, region, path)
         finally:
             # The portal's own copy is ours to clean up -- it writes one

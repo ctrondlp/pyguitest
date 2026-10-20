@@ -24,6 +24,7 @@ identically under X11 and Wayland -- the one layer with no backend matrix.
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import json
 import math
@@ -1547,6 +1548,14 @@ class Session:
         a release in the same compositor frame as the last motion is read by
         some drop targets as a click on the target instead of a drop onto it.
 
+        A glide that raises does not leave the button held: the release is
+        still attempted, best-effort, and the glide's own error is the one
+        that propagates. A button left virtually down outlives the script --
+        every pointer move the *user* then makes is a drag, with nothing on
+        screen to say why -- which is the same stuck-state hazard
+        release_button documents, except here no caller wrote the press, so
+        no caller would think to pair it.
+
         Every other argument is glide()'s, and means the same thing there.
         """
         if settle < 0:
@@ -1554,20 +1563,42 @@ class Session:
         self.move_mouse(int(start[0]), int(start[1]), screen)
         if settle:
             time.sleep(settle)
-        self.press_button(button)
-        if settle:
-            time.sleep(settle)
-        self.glide(
-            int(end[0]),
-            int(end[1]),
-            duration=duration,
-            rate=rate,
-            via=via,
-            ease=ease,
-            screen=screen,
-        )
-        if settle:
-            time.sleep(settle)
+        try:
+            # The press is *inside* the protected block: press_button also
+            # sleeps event_delay after the backend call, and an interrupt
+            # landing in that sleep -- after the button went down -- would
+            # otherwise propagate before the cleanup exists. A release for
+            # a press that never completed is one spurious release event,
+            # which every backend treats as a no-op.
+            self.press_button(button)
+            if settle:
+                time.sleep(settle)
+            self.glide(
+                int(end[0]),
+                int(end[1]),
+                duration=duration,
+                rate=rate,
+                via=via,
+                ease=ease,
+                screen=screen,
+            )
+            if settle:
+                time.sleep(settle)
+        except BaseException:
+            # Not a plain `finally`: a glide that died usually means the
+            # backend died, so the release here is likely to raise too, and
+            # in a `finally` that second error would *replace* the first --
+            # the caller would see "release failed" and never learn the drag
+            # never arrived. Suppress the cleanup's error, keep the cause.
+            # Exception, not BaseException, on purpose: a backend failing
+            # its release raises an ordinary error and is the masking case
+            # above, while a KeyboardInterrupt arriving *during* the cleanup
+            # is the user aborting and must still win -- swallowing it to
+            # preserve a diagnosis would trade an exit the user asked for
+            # for an error message they didn't.
+            with contextlib.suppress(Exception):
+                self.release_button(button)
+            raise
         self.release_button(button)
 
     # -- keyboard ----------------------------------------------------------

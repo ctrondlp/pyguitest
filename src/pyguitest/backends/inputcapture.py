@@ -29,6 +29,8 @@ as well; see `tests/test_inputcapture.py`.
 
 from __future__ import annotations
 
+import contextlib
+
 from ..capabilities import Capability, CapabilitySet
 from ..errors import BackendUnavailable, PermissionRequired, PyGUITestError
 from .base import GUIBackend
@@ -212,6 +214,16 @@ class InputCaptureBackend(GUIBackend):
         except self._portal.PortalTimeoutError:
             self._session.disable()
             return None
+        except self._portal.PortalError as exc:
+            # A malformed signal (PortalProtocolError) or the compositor
+            # closing the session mid-wait. Disable best-effort so the
+            # pointer barriers do not stay armed past the failure, and
+            # surface it as this package's own error -- a raw libei
+            # exception is not part of this API, same as negotiate()'s
+            # wrapping above.
+            with contextlib.suppress(Exception):
+                self._session.disable()
+            raise PyGUITestError(str(exc)) from exc
         self._session.release(activation.activation_id, activation.cursor_position)
         self._session.disable()
         if activation.cursor_position is None:
