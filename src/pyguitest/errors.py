@@ -114,6 +114,25 @@ class PermissionRequired(CapabilityUnsupported):
         )
 
 
+class CaptureRegionUnsupported(PyGUITestError):
+    """A valid capture region this backend's mechanism cannot serve alone.
+
+    The third capture outcome, distinct from the two `CompositeBackend._grab`
+    already knows. A broken *mechanism* (a tool that hangs) is a
+    `PyGUITestError` the composite caches, so a dead member is skipped for
+    the session. A *malformed* region -- one outside every screen -- is a
+    `ValueError` the composite lets propagate, since it would fail
+    identically on every member. This is neither: the region is well formed
+    and on-screen, but this particular backend cannot capture it -- a
+    per-output backend like `cosmic` cannot crop a rectangle that straddles
+    two outputs, where a whole-desktop member (`portalcapture`, which shoots
+    the whole screen and crops) can. The composite therefore tries the next
+    member *without* caching this one: the failure is the region's shape
+    against this mechanism, not the mechanism being broken, so the backend
+    stays available for every region it can serve.
+    """
+
+
 class PortalTimeout(PyGUITestError):
     """A portal request was accepted but never answered.
 

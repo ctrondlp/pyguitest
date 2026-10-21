@@ -28,7 +28,7 @@ below instead of generated.
 import warnings
 
 from ..capabilities import Capability, CapabilitySet
-from ..errors import CapabilityUnsupported, PyGUITestError
+from ..errors import CapabilityUnsupported, CaptureRegionUnsupported, PyGUITestError
 from .base import GUIBackend, check_region
 
 __all__ = ["CompositeBackend", "CaptureFallbackWarning"]
@@ -465,11 +465,21 @@ class CompositeBackend(GUIBackend):
                 continue
             try:
                 return member.capture(path=path, region=region)
+            except CaptureRegionUnsupported as exc:
+                # A valid, on-screen region this member cannot serve on its
+                # own (a rectangle spanning two outputs on a per-output
+                # backend) -- but another member might (portalcapture shoots
+                # the whole desktop and crops). Try the next WITHOUT caching:
+                # the member is fine for every region it can serve, so
+                # blacklisting it would wrongly take the whole session's
+                # capture down over one awkward rectangle.
+                errors.append((member, exc))
+                continue
             except PyGUITestError as exc:
-                # Only a failure of the *mechanism* falls through. A
-                # ValueError from a malformed region is the caller's
-                # mistake and would fail identically on every member, so
-                # it is left to propagate rather than retried four times.
+                # Only a failure of the *mechanism* is cached. A ValueError
+                # from a malformed region is the caller's mistake and would
+                # fail identically on every member, so it is left to
+                # propagate rather than retried four times.
                 self._capture_failed[id(member)] = exc
                 errors.append((member, exc))
                 if member is not candidates[-1]:

@@ -47,22 +47,33 @@ after every edit.
 
 ## Backend conventions
 
-**A caller's bad argument raises `ValueError`, not a `PyGUITestError`.** When
-a backend method rejects something the *caller* got wrong — a malformed or
-out-of-bounds capture region, most commonly — raise `ValueError`, never
-`CapabilityUnsupported` or another `PyGUITestError`. The reason is
-`CompositeBackend`: it catches a `PyGUITestError` from a member and *caches*
-it, skipping that member for the rest of the session, because that is how a
-genuine mechanism failure (a dead tool, a missing permission) is meant to
-fall back to another member. A `ValueError` is left to propagate uncached —
-a bad argument would fail identically on every member, so there is nothing to
-fall back to. Get this backwards and one bad call permanently disables the
-backend: it bit `cosmic.py`'s capture, where a single out-of-bounds region
-blacklisted COSMIC capture for the whole session, while `x11.py` — already
-raising `ValueError` for the same case — was fine. `check_region` and
-`fit_region` in `backends/base.py` are the shared region validators and
-already raise `ValueError`; route region handling through them rather than
-re-deciding it per backend.
+**A capture failure is one of three kinds, and the exception type is how
+`CompositeBackend._grab` tells them apart — get it wrong and one bad call
+disables a backend for the session.** When a member's `capture()` cannot
+return the rectangle asked for, which of three things happened decides the
+type to raise:
+
+- **The mechanism is broken** (a tool that hangs, a missing permission) →
+  a `PyGUITestError` (`CapabilityUnsupported` and friends). `_grab` *caches*
+  it and skips that member for the rest of the session, which is the whole
+  point of the fallback: a dead tool must not be retried on every capture.
+- **The region is malformed** — off every screen, so no member could serve
+  it → a plain `ValueError`. `_grab` lets it propagate uncached, since it
+  would fail identically on every member.
+- **The region is valid but this member can't serve it** — on-screen but
+  spanning two outputs on a per-output backend, where a whole-desktop
+  member (`portalcapture`) can → the typed `CaptureRegionUnsupported`.
+  `_grab` tries the next member *without* caching, because the member is
+  fine for every region it can serve.
+
+Conflating the first with either of the others is the trap: it bit
+`cosmic.py`, where an out-of-bounds region raised a `PyGUITestError` and
+blacklisted COSMIC capture for the whole session after one bad call, while
+`x11.py` — a plain `ValueError` — was fine. `check_region`/`fit_region` in
+`backends/base.py` are the shared region validators and already raise
+`ValueError` for the malformed case; route region handling through them, and
+reach for `CaptureRegionUnsupported` only for a region a sibling member could
+still serve.
 
 ## Docs and changelog
 

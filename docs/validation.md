@@ -1853,13 +1853,16 @@ release held with the death at second-monitor coordinates and the button
 mask clean; a region capture on the second monitor came back at its exact
 size; the edge-flush fit at the virtual desktop's right came back 51x50 of
 real pixels; and a region 100px past the desktop was refused naming both
-rectangles. With the monitors first placed side by
-side (second on the right) the desktop origin stayed at (0,0). The second
-monitor was then dragged to the *left* of the primary, moving the virtual
-desktop origin to **(-1024, 0)** (size 2944x955, the second monitor
-vertically offset too), and the suite re-run against it — the one layout
-that produces a **negative** virtual-screen coordinate, which X11 and
-Wayland never do because they normalise the layout to (0,0). Every check
+rectangles. That first run placed the two 1024x768 monitors side by side,
+second on the right, so the virtual desktop was 2048x768 at origin (0,0). The
+layout was then changed for the negative-origin case: the primary was set to
+1920x955 and the (still 1024x768) second monitor dragged to its *left*, so
+the virtual desktop became **2944x955** — 1920 + 1024 wide — at origin
+**(-1024, 0)**, the shorter second monitor vertically offset within it
+(`EnumDisplayMonitors` reported `(0,0,1920,955)` and `(-1024,182,0,950)`).
+The suite was re-run against that — the one layout that produces a
+**negative** virtual-screen coordinate, which X11 and Wayland never do
+because they normalise the layout to (0,0). Every check
 passed again at negative coordinates: the pointer reached (-512, 566)
 confirmed by `GetCursorPos`, the drag and the release-on-death held there,
 and — the case that until now had only ever been a unit test — a region

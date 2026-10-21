@@ -166,6 +166,37 @@ class TestComposite(unittest.TestCase):
             composite.capture()
         self.assertIs(ctx.exception.capability, Capability.SCREEN_CAPTURE)
 
+    def test_capture_region_unsupported_tries_the_next_member_without_caching(self):
+        # The third capture outcome, distinct from a cached mechanism failure
+        # and a propagated malformed-region ValueError: a valid, on-screen
+        # region one member cannot serve (a per-output backend cannot crop
+        # across two outputs) but another can (a whole-desktop capturer shoots
+        # everything and crops). The composite falls through to the next
+        # member and does NOT blacklist the one that declined -- it is still
+        # fine for every region it can serve.
+        from pyguitest.errors import CaptureRegionUnsupported
+
+        spanning = (100, 100, 50, 50)
+
+        class PerOutput(Fake):
+            def capture(self, window=None, path=None, region=None):
+                if region == spanning:
+                    raise CaptureRegionUnsupported("spans two outputs")
+                return "per-output"
+
+        class WholeDesktop(Fake):
+            def capture(self, window=None, path=None, region=None):
+                return "whole-desktop"
+
+        first = PerOutput("per-output", {Capability.SCREEN_CAPTURE}, marker="po")
+        second = WholeDesktop("whole-desktop", {Capability.SCREEN_CAPTURE}, marker="wd")
+        composite = CompositeBackend([first, second])
+        # The spanning region is served by the whole-desktop member.
+        self.assertEqual(composite.capture(region=spanning), "whole-desktop")
+        # The first member was not blacklisted: a region it can serve still
+        # reaches it, ahead of the whole-desktop member in precedence.
+        self.assertEqual(composite.capture(region=(10, 10, 20, 20)), "per-output")
+
 
 class FakeUinput(GUIBackend):
     """A KEY_EVENT provider with evdev-style names, standing in for uinput."""

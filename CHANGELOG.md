@@ -63,7 +63,14 @@ All notable changes to pyguitest are recorded here. The format follows
   blitted past the virtual desktop and returned black pixels under a
   success exit). The direct-geometry tools (grim, `import`,
   `screencapture`) have no bounds to fit against and keep each tool's own
-  edge behaviour.
+  edge behaviour. A third capture outcome joins the two above: a region that
+  is on-screen but spans two outputs, which COSMIC cannot crop across its
+  per-output buffers yet a whole-desktop member (`portalcapture`, which
+  shoots the whole screen and crops) can, now raises the new typed
+  `CaptureRegionUnsupported` rather than a `ValueError`, so the composite
+  tries the next capture member without either blacklisting COSMIC or
+  hard-failing the caller. The `ValueError` is reserved for a region off
+  every screen, which no member can serve.
 
 ### Changed
 

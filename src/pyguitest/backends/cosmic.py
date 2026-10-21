@@ -42,7 +42,7 @@ from collections.abc import Iterator
 from typing import cast
 
 from ..capabilities import Capability, CapabilitySet
-from ..errors import CapabilityUnsupported, WindowNotFound
+from ..errors import CapabilityUnsupported, CaptureRegionUnsupported, WindowNotFound
 from ..ipc import DEFAULT_TIMEOUT
 from ..png import write_rgb
 from .base import Screen, Window, check_region, fit_region
@@ -1080,20 +1080,39 @@ class CosmicBackend(_WindowBackend):
             if region is not None:
                 match = self._output_for_region(region)
                 if match is None:
-                    # ValueError, not CapabilityUnsupported: a region outside
-                    # every output is the caller's mistake, not a failure of
-                    # this backend's mechanism, and it would fail identically
-                    # on every capture member. CompositeBackend._capture
-                    # caches a PyGUITestError and blacklists the member that
-                    # raised it for the rest of the session, so raising one
-                    # here would let a single out-of-bounds region
-                    # permanently disable COSMIC capture; a ValueError
-                    # propagates uncached, exactly as the x11 fit does.
+                    # A region not inside any single output is one of two
+                    # different things, and they must fail differently so
+                    # CompositeBackend._grab treats them right (it caches a
+                    # PyGUITestError and skips that member for the session,
+                    # but lets a ValueError propagate).
+                    x, y, w, h = region
+                    outs = self._conn._outputs.values()
+                    left = min(o.x for o in outs)
+                    top = min(o.y for o in outs)
+                    right = max(o.x + o.width for o in outs)
+                    bottom = max(o.y + o.height for o in outs)
+                    if left <= x and top <= y and x + w <= right and y + h <= bottom:
+                        # On-screen but straddling the seam between outputs
+                        # (or in a non-uniform layout's dead zone): a valid
+                        # region COSMIC cannot serve, because it captures one
+                        # output's buffer and cannot crop across two. A
+                        # whole-desktop member (portalcapture) can, so signal
+                        # "try the next member" rather than blacklisting
+                        # COSMIC or hard-failing the caller.
+                        raise CaptureRegionUnsupported(
+                            f"region {tuple(region)} spans more than one output; "
+                            "COSMIC captures per-output and cannot crop a "
+                            "rectangle that crosses two -- a whole-desktop "
+                            'capture member (connect(backend="portalcapture")) '
+                            "can"
+                        )
+                    # Off every screen: a malformed region that would fail
+                    # identically on every member, so it propagates uncached,
+                    # exactly as the x11 fit's ValueError does.
                     raise ValueError(
-                        f"region {tuple(region)} is not fully contained in any "
-                        "single bound output: capturing it would return pixels "
-                        "from the wrong screen or a smaller image instead of "
-                        "the rectangle asked for"
+                        f"region {tuple(region)} is not within any output: "
+                        "capturing it would return a smaller or empty image "
+                        "instead of the rectangle asked for"
                     )
                 output_id, region = match
             else:
