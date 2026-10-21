@@ -378,10 +378,31 @@ class TestCaptureSelectsTheRightOutput(unittest.TestCase):
         conn._create_output_source.assert_called_once_with(2)
 
     def test_a_region_spanning_no_single_output_is_refused(self):
+        # ValueError, not CapabilityUnsupported: a region outside every
+        # output is the caller's malformed-rectangle mistake. It must not be
+        # a PyGUITestError, because CompositeBackend._capture caches one and
+        # blacklists the member that raised it for the rest of the session --
+        # see test_an_out_of_bounds_region_does_not_blacklist_the_backend.
         backend, conn = self._backend()
-        with self.assertRaises(CapabilityUnsupported):
+        with self.assertRaises(ValueError):
             backend.capture(region=(1200, 10, 200, 50))
         conn._create_output_source.assert_not_called()
+
+    def test_an_out_of_bounds_region_does_not_blacklist_the_backend(self):
+        # The regression this guards: an out-of-bounds region used to raise
+        # CapabilityUnsupported (a PyGUITestError), which the composite
+        # caches -- so one bad region permanently disabled COSMIC capture.
+        # A ValueError is the caller's mistake and is not an error of the
+        # capture mechanism, so a later valid capture must still work.
+        from pyguitest.backends.composite import CompositeBackend
+
+        member, conn = self._backend()
+        composite = CompositeBackend([member])
+        with self.assertRaises(ValueError):
+            composite.capture(region=(1200, 10, 200, 50))
+        # A valid region afterwards is served, not refused by a stale blacklist.
+        composite.capture(region=(1280, 10, 50, 50))
+        conn._create_output_source.assert_called_once_with(2)
 
     def test_no_region_still_defaults_to_the_first_output(self):
         backend, conn = self._backend()

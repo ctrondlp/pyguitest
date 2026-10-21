@@ -1020,6 +1020,16 @@ class CosmicBackend(_WindowBackend):
         output comes within a pixel of containing it, via the shared
         `fit_region` policy. Anything further outside every output is
         None, refused by the caller as before.
+
+        One honest consequence on a multi-output desktop: a region that
+        genuinely straddles an output boundary by up to a pixel resolves to
+        one of the two outputs rather than being refused, dropping that
+        pixel of the other. The fraction is gone by the time this runs, so a
+        one-pixel straddle and a one-pixel covering overhang are the same
+        integer rectangle -- the indistinguishability `fit_region` documents,
+        here against a neighbour that has content rather than a screen edge
+        that does not. It is bounded to that one pixel, and is the same
+        tradeoff the single-output edge case already makes.
         """
         x, y, width, height = region
         for output_id, output in self._conn._outputs.items():
@@ -1070,11 +1080,20 @@ class CosmicBackend(_WindowBackend):
             if region is not None:
                 match = self._output_for_region(region)
                 if match is None:
-                    raise CapabilityUnsupported(
-                        Capability.SCREEN_CAPTURE,
-                        self.name,
-                        f"region {tuple(region)} is not fully contained in "
-                        "any single bound output",
+                    # ValueError, not CapabilityUnsupported: a region outside
+                    # every output is the caller's mistake, not a failure of
+                    # this backend's mechanism, and it would fail identically
+                    # on every capture member. CompositeBackend._capture
+                    # caches a PyGUITestError and blacklists the member that
+                    # raised it for the rest of the session, so raising one
+                    # here would let a single out-of-bounds region
+                    # permanently disable COSMIC capture; a ValueError
+                    # propagates uncached, exactly as the x11 fit does.
+                    raise ValueError(
+                        f"region {tuple(region)} is not fully contained in any "
+                        "single bound output: capturing it would return pixels "
+                        "from the wrong screen or a smaller image instead of "
+                        "the rectangle asked for"
                     )
                 output_id, region = match
             else:

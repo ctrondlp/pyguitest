@@ -7,6 +7,8 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.19.0] — 2026-10-20
+
 ### Fixed
 
 - **`Session.drag()` no longer leaves the button virtually held when the
@@ -4831,7 +4833,8 @@ First public release.
 - A `pyguitest` command-line entry point.
 - PEP 561 type information (`py.typed`); no hard runtime dependencies.
 
-[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/ctrondlp/pyguitest/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/ctrondlp/pyguitest/compare/v0.17.1...v0.18.0
 [0.17.1]: https://github.com/ctrondlp/pyguitest/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/ctrondlp/pyguitest/compare/v0.16.3...v0.17.0

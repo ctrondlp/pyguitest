@@ -45,6 +45,25 @@ Fix lint/format/type issues right the first time rather than looping
 edit-check-edit-check; run the full gate once near the end of a change, not
 after every edit.
 
+## Backend conventions
+
+**A caller's bad argument raises `ValueError`, not a `PyGUITestError`.** When
+a backend method rejects something the *caller* got wrong — a malformed or
+out-of-bounds capture region, most commonly — raise `ValueError`, never
+`CapabilityUnsupported` or another `PyGUITestError`. The reason is
+`CompositeBackend`: it catches a `PyGUITestError` from a member and *caches*
+it, skipping that member for the rest of the session, because that is how a
+genuine mechanism failure (a dead tool, a missing permission) is meant to
+fall back to another member. A `ValueError` is left to propagate uncached —
+a bad argument would fail identically on every member, so there is nothing to
+fall back to. Get this backwards and one bad call permanently disables the
+backend: it bit `cosmic.py`'s capture, where a single out-of-bounds region
+blacklisted COSMIC capture for the whole session, while `x11.py` — already
+raising `ValueError` for the same case — was fine. `check_region` and
+`fit_region` in `backends/base.py` are the shared region validators and
+already raise `ValueError`; route region handling through them rather than
+re-deciding it per backend.
+
 ## Docs and changelog
 
 `CHANGELOG.md`'s `[Unreleased]` section gets an entry for any user-facing
