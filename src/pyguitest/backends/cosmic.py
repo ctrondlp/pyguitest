@@ -42,7 +42,7 @@ from collections.abc import Iterator
 from typing import cast
 
 from ..capabilities import Capability, CapabilitySet
-from ..errors import CapabilityUnsupported, WindowNotFound
+from ..errors import CapabilityUnsupported, CaptureRegionUnsupported, WindowNotFound
 from ..ipc import DEFAULT_TIMEOUT
 from ..png import write_rgb
 from .base import Screen, Window, check_region, fit_region
@@ -1020,6 +1020,16 @@ class CosmicBackend(_WindowBackend):
         output comes within a pixel of containing it, via the shared
         `fit_region` policy. Anything further outside every output is
         None, refused by the caller as before.
+
+        One honest consequence on a multi-output desktop: a region that
+        genuinely straddles an output boundary by up to a pixel resolves to
+        one of the two outputs rather than being refused, dropping that
+        pixel of the other. The fraction is gone by the time this runs, so a
+        one-pixel straddle and a one-pixel covering overhang are the same
+        integer rectangle -- the indistinguishability `fit_region` documents,
+        here against a neighbour that has content rather than a screen edge
+        that does not. It is bounded to that one pixel, and is the same
+        tradeoff the single-output edge case already makes.
         """
         x, y, width, height = region
         for output_id, output in self._conn._outputs.items():
@@ -1070,11 +1080,39 @@ class CosmicBackend(_WindowBackend):
             if region is not None:
                 match = self._output_for_region(region)
                 if match is None:
-                    raise CapabilityUnsupported(
-                        Capability.SCREEN_CAPTURE,
-                        self.name,
-                        f"region {tuple(region)} is not fully contained in "
-                        "any single bound output",
+                    # A region not inside any single output is one of two
+                    # different things, and they must fail differently so
+                    # CompositeBackend._grab treats them right (it caches a
+                    # PyGUITestError and skips that member for the session,
+                    # but lets a ValueError propagate).
+                    x, y, w, h = region
+                    outs = self._conn._outputs.values()
+                    left = min(o.x for o in outs)
+                    top = min(o.y for o in outs)
+                    right = max(o.x + o.width for o in outs)
+                    bottom = max(o.y + o.height for o in outs)
+                    if left <= x and top <= y and x + w <= right and y + h <= bottom:
+                        # On-screen but straddling the seam between outputs
+                        # (or in a non-uniform layout's dead zone): a valid
+                        # region COSMIC cannot serve, because it captures one
+                        # output's buffer and cannot crop across two. A
+                        # whole-desktop member (portalcapture) can, so signal
+                        # "try the next member" rather than blacklisting
+                        # COSMIC or hard-failing the caller.
+                        raise CaptureRegionUnsupported(
+                            f"region {tuple(region)} spans more than one output; "
+                            "COSMIC captures per-output and cannot crop a "
+                            "rectangle that crosses two -- a whole-desktop "
+                            'capture member (connect(backend="portalcapture")) '
+                            "can"
+                        )
+                    # Off every screen: a malformed region that would fail
+                    # identically on every member, so it propagates uncached,
+                    # exactly as the x11 fit's ValueError does.
+                    raise ValueError(
+                        f"region {tuple(region)} is not within any output: "
+                        "capturing it would return a smaller or empty image "
+                        "instead of the rectangle asked for"
                     )
                 output_id, region = match
             else:

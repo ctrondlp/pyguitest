@@ -192,16 +192,18 @@ built as the worst case for this library — 61 distinct widget classes and 95
 menu and toolbar actions across nine tabs, every control carrying a stable
 accessible name, and a status bar that reports each action so a test can
 prove an interaction *landed* rather than assume it. Its 105 uniquely-named
-controls are each driven and status-bar-verified, plus the whole menu bar, on
-six platforms: FreeBSD/GhostBSD, Pop!\_OS/COSMIC, Debian, Omarchy/Hyprland,
-Windows and macOS — the Hyprland run being the first time the fixture has
-been driven on a wlroots compositor, sway having been exercised earlier for
-window control alone. Four of the six are clean as of 2026-10-14. Neither
-exception is a pyguitest defect: macOS is one control short through a gap in
-the fixture's own driver, and Omarchy is held up by a compositor that grants
-no window keyboard focus — both written up in
-[validation.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/validation.md).
-Every real bug those runs turned up in pyguitest itself is written up there,
+controls are each driven and status-bar-verified, plus the whole menu bar,
+across the Linux, BSD and Windows fleet — including the first widget-level
+drives on wlroots (Hyprland) and niri, sway having been exercised earlier for
+window control alone. The one dedicated target short of a clean drive is
+macOS, by a single control, through a gap in the fixture's own driver rather
+than a pyguitest defect. The torture repo's
+[VALIDATION.md](https://github.com/ctrondlp/pyguitest-torture-test/blob/main/VALIDATION.md)
+holds the current per-platform matrix — the authoritative list of what is
+clean where, so this paragraph does not restate a count that would rot as the
+fleet grows. Every real bug those runs turned up in pyguitest itself is
+written up in
+[validation.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/validation.md),
 and every one of them is fixed.
 
 ## Usage

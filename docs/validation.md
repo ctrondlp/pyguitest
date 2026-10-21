@@ -1791,6 +1791,90 @@ origin fitted to the screen edge, and a 50px-off-screen region was refused
 with the ValueError naming both rectangles. The portal crop fit shares the
 consent gate above.
 
+**A second monitor, for the first time anywhere (2026-10-20).** A second
+virtual monitor on the Fedora 19 box made a 1600x600 extended desktop
+(two 800x600 outputs side by side) — the first multi-monitor session any
+of this has run against. On it, live: pointer moves and drags cross the
+seam with exact readback, the release-on-mid-glide-death guarantee holds
+with the death at monitor-2 coordinates (X button mask clean), a
+full-desktop capture spans both outputs, and `move_window` plus geometry
+readback place and find a window on the second monitor. One honest note:
+`screens()` there answers with the single 1600x600 X screen rather than
+two outputs — Xorg 1.14 predates RANDR 1.5's monitor objects, so
+per-output enumeration on a server that old would need crtc walking; the
+mixed-DPI and per-output half of the multi-monitor matrix still has no
+live run behind it.
+
+Two things the second monitor did close that the single-output history
+could not. The **recorder** was run record→generate→replay across the same
+extended desktop: a click and some typing against a gedit moved onto
+monitor 2 (origin x=949) recorded clean, generated a window-relative script
+with no absolute monitor-2 origin baked in, and replayed exit 0 with the
+text landing on monitor 2 — so the recorder's coordinate handling is
+correct for an action that is not on the primary monitor. And the
+**per-output `screens()` enumeration** that Xorg 1.14 cannot give was
+confirmed on a modern server the same day: on the maintainer's own GNOME
+Shell / Wayland desktop with two virtual outputs, `screens()` returned two
+distinct, correctly-named entries (`Virtual-1`, `Virtual-2`) rather than
+one merged rectangle. Multi-monitor *region capture* was then run on that same two-output Wayland
+desktop through `portalcapture` (one consent click): a region fully on the
+second monitor came back at its exact size, and an edge-flush region whose
+covered far edge lands one pixel past the combined desktop was clamped to
+the real width rather than refused or black-padded — the same `fit_region`
+policy the single-monitor boxes proved, now on a 2720-wide canvas. Two
+honest notes came out of it. The Screenshot portal returns the **bounding
+box** of the outputs (here 2720x955, a 1920x955 monitor beside an 800x600
+one), so a region in the L-shaped notch below the shorter monitor is inside
+the image's bounds and passes the fit yet is backed by no monitor — a
+property of bounding-box capture, not of the fit. And multi-monitor *input*
+was not driven to a verdict here: the pointer read-back on this
+XWayland-over-Wayland session is the stale one documented under "pointer and
+key state reads look stale" (XWayland sees no pointer events while the
+cursor is over native-Wayland content), so there is no trustworthy way to
+confirm where an injected move landed without watching the screen — that
+half is covered by the Fedora 19 X11 run above, which has a real
+`query_pointer`. What was confirmed statically on this two-output layout is
+the piece that actually could be multi-monitor-wrong: the uinput device's
+absolute axes are declared for the whole-layout bounding box (2720x955 here,
+from `displayconfig.layout_size()`'s `max(x+width)`), not the primary
+monitor, so a `move_mouse` to a monitor-2 coordinate is in range rather than
+clamped at the primary's right edge.
+
+**Windows, two monitors, with trustworthy read-back (2026-10-20).** The one
+platform where input verification does not depend on a cooperative
+compositor: Windows 10 22H2 with a second monitor enabled (1024x768 each,
+side by side, virtual desktop 2048x768). Run in the interactive session
+through a Scheduled Task, every move confirmed by `GetCursorPos` and every
+button by `GetAsyncKeyState` rather than by a read-back that might be stale.
+`screens()` enumerated both (`\\.\DISPLAY1`, `\\.\DISPLAY2`) matching
+`EnumDisplayMonitors`; the pointer reached the second monitor's centre
+exactly; a drag crossed the seam and landed exactly; the mid-glide-death
+release held with the death at second-monitor coordinates and the button
+mask clean; a region capture on the second monitor came back at its exact
+size; the edge-flush fit at the virtual desktop's right came back 51x50 of
+real pixels; and a region 100px past the desktop was refused naming both
+rectangles. That first run placed the two 1024x768 monitors side by side,
+second on the right, so the virtual desktop was 2048x768 at origin (0,0). The
+layout was then changed for the negative-origin case: the primary was set to
+1920x955 and the (still 1024x768) second monitor dragged to its *left*, so
+the virtual desktop became **2944x955** — 1920 + 1024 wide — at origin
+**(-1024, 0)**, the shorter second monitor vertically offset within it
+(`EnumDisplayMonitors` reported `(0,0,1920,955)` and `(-1024,182,0,950)`).
+The suite was re-run against that — the one layout that produces a
+**negative** virtual-screen coordinate, which X11 and Wayland never do
+because they normalise the layout to (0,0). Every check
+passed again at negative coordinates: the pointer reached (-512, 566)
+confirmed by `GetCursorPos`, the drag and the release-on-death held there,
+and — the case that until now had only ever been a unit test — a region
+with a **negative fractional origin**, `(-1023.5, 192, 100, 60)`, captured
+as 101x60. That is the exact branch the fix was written for: `int(-1023.5)`
+truncates toward zero to -1023 and shifts the rectangle right, dropping its
+leftmost column, where `math.floor(-1023.5)` is -1024 and covers the pixel
+the caller named. It is now proven against a real negative coordinate
+rather than a constructed one. The remaining untested axis anywhere is
+mixed-DPI — one monitor scaled differently from another — which this same
+Windows box could close through per-monitor scaling.
+
 **Two platforms met for the first time.**
 
 - *Windows 10 22H2 (build 19045)*: no Python on the box at all — python.org

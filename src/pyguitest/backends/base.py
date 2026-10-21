@@ -34,6 +34,7 @@ __all__ = [
     "ImageMatch",
     "Element",
     "check_region",
+    "fit_region",
     "identity_scope",
     "click_by_pointer",
     "resolve_click_route",
