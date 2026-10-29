@@ -30,7 +30,6 @@ import json
 import os
 import pathlib
 import platform
-import re
 import sys
 from collections import Counter
 from enum import Enum
@@ -41,14 +40,13 @@ from .capabilities import TIERS, Tier
 from .compat import CONSTANTS, LEGACY
 from .hints import advice, detect_distro, hints_for
 from .inspect import format_tree, tree_data
+from .perlscan import PerlScan, scan
 from .session import (
     Compositor,
     assistive_technology_enabled,
     gnome_extension_state,
     toolkit_accessibility,
 )
-
-_CALL = re.compile(r"\b(" + "|".join(sorted(LEGACY, key=len, reverse=True)) + r")\b")
 
 
 def _extension_state(environment) -> str | None:
@@ -61,16 +59,6 @@ def _extension_state(environment) -> str | None:
         return gnome_extension_state()
     return None
 
-
-# The `:CONST` half of `qw(:ALL)`, which the function table does not carry.
-# `XC_*` stands for the ~85 cursor shapes, matched by prefix rather than
-# listed; the rest are matched by name, longest first for the same reason
-# _CALL is (M_BTN1 must not win over a longer name sharing its prefix).
-_CONST = re.compile(
-    r"\b(XC_[A-Z0-9_]+|"
-    + "|".join(sorted((n for n in CONSTANTS if n != "XC_*"), key=len, reverse=True))
-    + r")\b"
-)
 
 # Env vars the desktop-detection logic in session.py actually reads
 # (session_type/compositor classification, plus the sway/Hyprland IPC
@@ -506,8 +494,9 @@ def _inspect(json_output: bool = False, window: str | None = None) -> int:
 # What a directory is scanned for. A path named on the command line is read
 # whatever it is called -- being named is intent enough -- but a directory is
 # walked for these, so pointing the scanner at a checkout does not try to
-# lex every image and tarball in it.
-_PERL_SUFFIXES = (".pl", ".pm", ".t", ".cgi", ".perl", ".pod")
+# lex every image and tarball in it. `.pod` is not among them: a file of
+# pure documentation has no code in it to port.
+_PERL_SUFFIXES = (".pl", ".pm", ".t", ".cgi", ".perl")
 
 
 def _perl_sources(paths):
@@ -524,26 +513,6 @@ def _perl_sources(paths):
             yield candidate
 
 
-def _line_numbers(source, pattern, fold=None):
-    """Where each name `pattern` matches appears, as {name: [line, ...]}.
-
-    Line-by-line rather than over the whole text, because a port is done by
-    opening the file at a line: a count alone says how much work there is
-    but not where any of it is. `fold` renames a match before it is counted,
-    which is how every XC_<shape> lands under one key.
-    """
-    found: dict[str, list[int]] = {}
-    for number, line in enumerate(source.splitlines(), start=1):
-        for name in pattern.findall(line):
-            found.setdefault(fold(name) if fold else name, []).append(number)
-    return found
-
-
-def _fold_cursor(name):
-    """Every XC_<shape> counted as the one `XC_*` row the table carries."""
-    return "XC_*" if name.startswith("XC_") else name
-
-
 def _format_lines(numbers):
     """`line 9` or `lines 9, 14, 20`, truncated once it stops being useful."""
     shown = ", ".join(str(number) for number in numbers[:8])
@@ -552,7 +521,7 @@ def _format_lines(numbers):
     return f"{'line' if len(numbers) == 1 else 'lines'} {shown}"
 
 
-def _scan_data(per_file, per_file_consts, hits, const_hits):
+def _scan_data(per_file, hits, const_hits):
     """The scan as data, for a CI step that wants more than an exit status.
 
     Carries what the printed report carries and nothing derived from the
@@ -565,6 +534,8 @@ def _scan_data(per_file, per_file_consts, hits, const_hits):
     files = {}
     for path, found in per_file.items():
         files[path] = {
+            "imports_guitest": found.imports_guitest,
+            "shadowed": found.shadowed,
             "calls": [
                 {
                     "name": name,
@@ -580,7 +551,7 @@ def _scan_data(per_file, per_file_consts, hits, const_hits):
                     "replacement": LEGACY[name].replacement,
                     "note": LEGACY[name].note or None,
                 }
-                for name, lines in sorted(found.items())
+                for name, lines in sorted(found.calls.items())
             ],
             "constants": [
                 {
@@ -589,7 +560,7 @@ def _scan_data(per_file, per_file_consts, hits, const_hits):
                     "replacement": CONSTANTS[name][0],
                     "note": CONSTANTS[name][1],
                 }
-                for name, lines in sorted(per_file_consts[path].items())
+                for name, lines in sorted(found.constants.items())
             ],
         }
     return {
@@ -615,8 +586,7 @@ def _scan(paths, json_output=False):
     """Report the migration cost of each X11::GUITest call in `paths`."""
     hits: Counter[str] = Counter()
     const_hits: Counter[str] = Counter()
-    per_file: dict[str, dict[str, list[int]]] = {}
-    per_file_consts: dict[str, dict[str, list[int]]] = {}
+    per_file: dict[str, PerlScan] = {}
 
     for path in _perl_sources(paths):
         try:
@@ -624,40 +594,46 @@ def _scan(paths, json_output=False):
         except OSError as exc:
             print(f"{path}: {exc}", file=sys.stderr)
             continue
-        found = _line_numbers(source, _CALL)
-        consts = _line_numbers(source, _CONST, fold=_fold_cursor)
-        if found or consts:
+        found = scan(source)
+        if found.calls or found.constants:
             per_file[str(path)] = found
-            per_file_consts[str(path)] = consts
-            hits.update({name: len(lines) for name, lines in found.items()})
-            const_hits.update({name: len(lines) for name, lines in consts.items()})
+            hits.update({name: len(lines) for name, lines in found.calls.items()})
+            const_hits.update(
+                {name: len(lines) for name, lines in found.constants.items()}
+            )
 
     blocked = [n for n in hits if LEGACY[n].tier is Tier.NO_PATH]
     unspelled = [n for n in hits if LEGACY[n].replacement is None]
     status = 1 if blocked or unspelled else 0
 
     if json_output:
-        print(
-            json.dumps(
-                _scan_data(per_file, per_file_consts, hits, const_hits), indent=2
-            )
-        )
+        print(json.dumps(_scan_data(per_file, hits, const_hits), indent=2))
         return status
 
     if not hits and not const_hits:
         print("No X11::GUITest calls found.")
         return 0
 
-    for path in per_file:
+    for path, found in per_file.items():
         print(f"\n{path}")
-        _print_file(per_file[path], per_file_consts[path])
+        _print_file(found)
     _print_summary(hits, const_hits, blocked, unspelled)
     return status
 
 
-def _print_file(found, consts):
+def _print_file(found):
     """One file's calls and constants, each with the lines it appears on."""
-    for name, lines in sorted(found.items()):
+    if not found.imports_guitest:
+        print(
+            "  note: this file never names X11::GUITest (no `use`, no qualified "
+            "call), so these are matched on spelling alone"
+        )
+    if found.shadowed:
+        print(
+            f"  note: this file defines its own {', '.join(found.shadowed)}; "
+            "unqualified calls to them are not counted"
+        )
+    for name, lines in sorted(found.calls.items()):
         fn = LEGACY[name]
         label = name + (f" x{len(lines)}" if len(lines) > 1 else "")
         arrow = fn.replacement or "(no spelling in pyguitest -- see the note)"
@@ -665,7 +641,7 @@ def _print_file(found, consts):
         print(f"      {_format_lines(lines)}")
         if fn.note:
             print(f"      {fn.note}")
-    for name, lines in sorted(consts.items()):
+    for name, lines in sorted(found.constants.items()):
         spelling, note = CONSTANTS[name]
         label = name + (f" x{len(lines)}" if len(lines) > 1 else "")
         print(f"  --  {label:<26} -> {spelling}")

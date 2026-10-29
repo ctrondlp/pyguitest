@@ -48,15 +48,15 @@ These never touched the X server. They are the free half of the port, and the on
 
 | Function | X11 implementation | Wayland path | Tier |
 |---|---|---|---|
-| StartApp | fork / exec | *subprocess.Popen* — unchanged | T1 |
-| RunApp | system() | *subprocess.run* — unchanged | T1 |
+| StartApp | fork / exec | *subprocess.Popen* — unchanged, though `start_app` wraps it in an `Application` and returns that, where StartApp slept 1 s and returned the pid only if the child was still running | T1 |
+| RunApp | system() | *subprocess.run* — unchanged, though `system()` returned the wait status (exit code × 256) and `CompletedProcess.returncode` is the plain exit code | T1 |
 | WaitSeconds | sleep() | *time.sleep* — unchanged | T1 |
 | QuoteStringForSendKeys | string substitution | Pure string handling. Keep only if the `{}` SendKeys grammar is kept | T1 |
 | QSfSK | alias | Alias of the above. Drop the abbreviation in a new API | T1 |
-| SetEventSendDelay | module global | Module state. Better expressed as a constructor argument | T1 |
-| GetEventSendDelay | module global | Module state | T1 |
-| SetKeySendDelay | module global | Module state | T1 |
-| GetKeySendDelay | module global | Module state | T1 |
+| SetEventSendDelay | module global | Module state. Better expressed as a constructor argument — in seconds, where this took milliseconds | T1 |
+| GetEventSendDelay | module global | Module state (milliseconds here, seconds in pyguitest) | T1 |
+| SetKeySendDelay | module global | Module state (milliseconds here, seconds in pyguitest) | T1 |
+| GetKeySendDelay | module global | Module state (milliseconds here, seconds in pyguitest) | T1 |
 
 ## Screen properties
 

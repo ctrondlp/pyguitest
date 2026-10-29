@@ -6,6 +6,7 @@ real API rather than trusted to have been right when it was written.
 """
 
 import inspect
+import re
 import unittest
 
 import pyguitest
@@ -113,6 +114,80 @@ class TestMigrationTable(unittest.TestCase):
         self.assertEqual(LEGACY["SendKeys"].capability, Capability.KEY_EVENT)
         self.assertEqual(LEGACY["GetChildWindows"].capability, Capability.ELEMENT_TREE)
         self.assertEqual(LEGACY["GetWindowPos"].tier, Tier.COMPOSITOR)
+
+
+class TestNotesWarnAboutSilentSemanticChanges(unittest.TestCase):
+    """Where a port compiles and runs but means something different.
+
+    Each case pins the pyguitest side of the difference to the live API, so
+    a note cannot go on warning about behaviour the package no longer has,
+    and checks the note still says it.
+    """
+
+    def _note(self, name):
+        return LEGACY[name].note
+
+    def test_send_delays_are_seconds_here_and_milliseconds_there(self):
+        params = inspect.signature(Session.__init__).parameters
+        self.assertEqual(params["event_delay"].default, 0.0)
+        self.assertEqual(params["key_delay"].default, 0.0)
+        for name in (
+            "SetEventSendDelay",
+            "SetKeySendDelay",
+            "GetEventSendDelay",
+            "GetKeySendDelay",
+        ):
+            with self.subTest(name):
+                note = self._note(name)
+                self.assertIn("seconds", note.lower())
+                self.assertIn("milliseconds", note.lower())
+
+    def test_window_title_matching_is_case_sensitive_and_literal(self):
+        match = pyguitest._title_pattern
+        self.assertIsNone(match("gedit").search("GEDIT"))
+        self.assertIsNone(match("a.c").search("abc"))
+        self.assertIsNotNone(match(re.compile("gedit", re.I)).search("GEDIT"))
+        note = self._note("FindWindowLike")
+        self.assertIn("case-INsensitive", note)
+        self.assertIn("re.I", note)
+
+    def test_wait_functions_default_to_forever_not_ten_seconds(self):
+        for method in (Session.wait_for_window, Session.wait_window_close):
+            with self.subTest(method.__name__):
+                default = inspect.signature(method).parameters["timeout"].default
+                self.assertIsNone(default)
+        for name in ("WaitWindowLike", "WaitWindowClose"):
+            with self.subTest(name):
+                self.assertIn("10 s", self._note(name))
+                self.assertIn("forever", self._note(name))
+
+    def test_wait_window_viewable_is_not_a_wait(self):
+        self.assertNotIn(
+            "timeout", inspect.signature(Session.is_window_viewable).parameters
+        )
+        self.assertIn("waited", self._note("WaitWindowViewable"))
+
+    def test_app_launchers_return_objects_not_pids_or_wait_statuses(self):
+        self.assertIn(
+            "Application", str(inspect.signature(Session.start_app).return_annotation)
+        )
+        self.assertIn(
+            "CompletedProcess",
+            str(inspect.signature(Session.run_app).return_annotation),
+        )
+        self.assertIn("pid", self._note("StartApp"))
+        self.assertIn("x 256", self._note("RunApp"))
+
+    def test_click_window_note_gives_the_port(self):
+        note = self._note("ClickWindow")
+        self.assertIn("geometry", note)
+        self.assertIn("M_LEFT", note)
+
+    def test_ampersand_is_still_not_quoted(self):
+        self.assertEqual(pyguitest.quote_for_type("&"), "&")
+        for name in ("QuoteStringForSendKeys", "QSfSK"):
+            with self.subTest(name):
+                self.assertIn("&", self._note(name))
 
 
 # The one namespace a "Name.attr"-shaped replacement can point into.

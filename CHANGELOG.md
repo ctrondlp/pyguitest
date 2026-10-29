@@ -7,6 +7,75 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.19.1] — 2026-10-29
+
+### Fixed
+
+- **`pyguitest migrate` now reads Perl instead of searching it for
+  spellings.** The scanner was one regular expression over the raw text, so
+  a name counted wherever its letters appeared: in a comment, in POD, in a
+  string or a heredoc, as a hash key, as `$GetMousePos`, as a method on some
+  other object, as another module's function of the same name. Each of
+  those inflated the cost of a port, and the worst of them was visible in
+  CI — a script that merely *mentioned* `GetMousePos` in a comment, one of
+  the six calls with no Wayland path, exited 1. A new tokenizer
+  (`pyguitest.perlscan`) walks the source and counts only what Perl would
+  call: a bare `name`, `&name`, `\&name`, and `X11::GUITest::name`. It sees
+  through comments, POD, `__END__`, every quote form (`q qq qw qr m s tr y`
+  with any delimiter), heredocs (stacked, `<<~`, quoted), the sigil
+  variables, `->name` and `name->`, `Other::name`, `name =>`, `$h{name}` and
+  `$h{-name}`, labels and `goto name`, and it settles the two things Perl
+  settles by context — `/` as divide or pattern, `%` and `*` as operator or
+  sigil — from the token before. A construct it cannot close (an
+  unterminated quote, a heredoc with no terminator) falls back to ordinary
+  characters, so a wrong guess costs a span, never the rest of the file, and
+  a file made of them cannot cost quadratic time. Validated differentially
+  against Perl's own compiler over 150 real files: on the X11::GUITest
+  distribution's scripts, every call the compiler resolves is found and none
+  is invented. The cost is that **counts go down, and an exit code can
+  change from 1 to 0** — correctly, but a CI step that was red because of a
+  comment will turn green. Strings are not searched, so a call hidden in
+  `eval "..."` or `"@{[ ... ]}"` is not seen either.
+
+  Two new per-file notes say where the count cannot be trusted. A file that
+  never names `X11::GUITest` (no `use`, no `require`, no qualified call) is
+  matched on spelling alone, and says so; a file that defines its own sub or
+  `use constant` of an export's name (`sub WaitSeconds`) has its unqualified
+  calls to it set aside as the file's own, and says so, while the qualified
+  `X11::GUITest::WaitSeconds` still counts. `--json` carries both as
+  `imports_guitest` and `shadowed`. `.pod` files are no longer walked in a
+  directory scan, being documentation.
+
+- **The migration table now warns about every call that ports without an
+  error and means something else.** These compile, run and do the wrong
+  thing, so a rename that looks complete is not. `SetEventSendDelay` and
+  `SetKeySendDelay` took **milliseconds**, returned the old value and
+  started at 10 and 0 — `Session(event_delay=, key_delay=)` take **seconds**,
+  so a copied `10` waits ten seconds per event. `FindWindowLike` and
+  `WaitWindowLike` matched `/pattern/i` — case-insensitive, unanchored, a
+  regex — where `find_windows("text")` is a case-sensitive literal
+  substring; `re.compile(..., re.I)` restores it. The `WaitWindow*` family
+  gave up after ten seconds and returned lists or 1/0, where
+  `wait_for_window` and `wait_window_close` wait forever by default and
+  return a `Window | None` and a `bool`. `WaitWindowViewable` waited;
+  `is_window_viewable` reads once. `ClickWindow` clicked the top-left corner
+  plus offsets, default left button, returning 1 or 0. `StartApp` returned
+  the pid only if the child outlived a one-second sleep, and `RunApp`
+  returned `system()`'s wait status (the exit code times 256), where
+  `start_app` and `run_app` return an `Application` and a `CompletedProcess`.
+  Each is in the row's note, so `pyguitest migrate` prints it beside the
+  call, and in a new "Where a straight port changes meaning" section of
+  [recipes.md](docs/recipes.md), which also gains the missing
+  `WaitWindowViewable` row. Tests pin the pyguitest side of each difference
+  to the live API, so a note cannot outlive the behaviour it warns about.
+
+- **`quote_for_type` documents why it leaves `&` alone.** It matches
+  `QuoteStringForSendKeys` in not escaping `&` (AltGr), so a quoted `&` is
+  still read by `send_keys` as a modifier; write `{&}` for a literal one. The
+  behaviour is unchanged and pinned by an existing test — what was missing
+  was the sentence saying so, and a test that `{&}` really does type an
+  ampersand.
+
 ## [0.19.0] — 2026-10-20
 
 ### Fixed

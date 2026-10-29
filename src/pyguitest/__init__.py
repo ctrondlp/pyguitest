@@ -83,7 +83,7 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T")
 
-__version__ = "0.19.0"
+__version__ = "0.19.1"
 
 __all__ = [
     "connect",
@@ -128,7 +128,9 @@ __all__ = [
 # existing scripts' quoted strings keep working -- with one fix: the original
 # QuoteStringForSendKeys omitted # (Meta) despite it being a modifier there
 # too, so a literal # slipped through unescaped. & (AltGr) is excluded on
-# purpose, matching upstream: escape it manually with "{&}" if you need one.
+# purpose, matching upstream. Braces are escaped, so "{&}" cannot be fed
+# *through* here -- it comes back as "{{}&{}}" with the & still live. It goes
+# into the quoted result instead: see quote_for_type's docstring.
 _SENDKEYS_SPECIAL = re.compile(r"([\^%+~#(){}])")
 
 
@@ -138,6 +140,14 @@ def quote_for_type(text: str | None) -> str | None:
     Replaces X11::GUITest's QuoteStringForSendKeys, with the same behaviour
     plus the # fix noted above: each of ^ % + ~ # ( ) { } is wrapped in
     braces, so send_keys(quote_for_type(text)) sends `text` literally.
+
+    One exception, deliberately kept from upstream: `&` (AltGr) is not
+    escaped, so a `&` in `text` is read as the modifier. `{&}` is the literal
+    spelling, but it cannot be passed *in*: braces are escaped too, so
+    `quote_for_type("{&}")` returns `{{}&{}}` and the `&` is a modifier
+    again. Apply it to the result:
+
+        gui.send_keys(quote_for_type(text).replace("&", "{&}"))
     """
     if text is None:
         return None

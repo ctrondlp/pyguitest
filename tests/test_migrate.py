@@ -105,6 +105,71 @@ class TestMigrationScanner(unittest.TestCase):
         self.assertNotIn("-> XC_WATCH", output)
         self.assertEqual(output.count("the same integer"), 1)
 
+    def test_a_blocked_name_in_a_comment_or_string_does_not_fail_the_scan(self):
+        # The regression this scanner exists for: GetMousePos mentioned in
+        # prose used to turn the CI exit status red for a script that never
+        # calls it.
+        source = (
+            "# GetMousePos() cannot be ported -- see the audit\n"
+            "my $why = 'GetMousePos is a no-path call';\n"
+            "SendKeys('a');\n"
+            "\n"
+            "=head1 BUGS\n"
+            "\n"
+            "IsKeyPressed and GetScreenDepth are not supported.\n"
+            "\n"
+            "=cut\n"
+        )
+        self.assertEqual(self._scan(source), 0)
+        self.assertNotIn("GetMousePos", self.output.getvalue())
+        self.assertIn("SendKeys", self.output.getvalue())
+
+    def test_a_method_or_foreign_function_of_the_same_name_is_not_ours(self):
+        source = "$mouse->GetMousePos();\nMyApp::Input::GetMousePos();\n"
+        self.assertEqual(self._scan(source), 0)
+        self.assertIn("No X11::GUITest calls found", self.output.getvalue())
+
+    def test_a_call_after_a_heredoc_is_still_found_on_the_right_line(self):
+        source = "print <<EOT;\nGetMousePos();\nEOT\nGetMousePos();\n"
+        self.assertEqual(self._scan(source), 1)
+        self.assertIn("line 4", self.output.getvalue())
+        self.assertNotIn("line 2", self.output.getvalue())
+
+    def test_a_file_that_never_names_the_module_says_so(self):
+        self._scan("SendKeys('a');\n")
+        self.assertIn("never names X11::GUITest", self.output.getvalue())
+
+    def test_a_file_that_uses_the_module_does_not_say_so(self):
+        self._scan("use X11::GUITest qw(SendKeys);\nSendKeys('a');\n")
+        self.assertNotIn("never names", self.output.getvalue())
+
+    def test_a_fully_qualified_call_counts_as_naming_the_module(self):
+        self._scan("X11::GUITest::SendKeys('a');\n")
+        self.assertNotIn("never names", self.output.getvalue())
+
+    def test_a_sub_of_the_same_name_is_reported_as_shadowing(self):
+        source = (
+            "use X11::GUITest;\n"
+            "sub WaitSeconds { sleep 1 }\n"
+            "WaitSeconds(1);\n"
+            "SendKeys('a');\n"
+        )
+        self.assertEqual(self._scan(source), 0)
+        output = self.output.getvalue()
+        self.assertIn("defines its own WaitSeconds", output)
+        self.assertNotIn("T1  WaitSeconds", output)
+        self.assertIn("SendKeys", output)
+
+    def test_a_blocked_name_the_file_defines_itself_does_not_fail_the_scan(self):
+        source = (
+            "use X11::GUITest;\nsub GetMousePos { return (0, 0) }\nGetMousePos();\n"
+        )
+        self.assertEqual(self._scan(source), 0)
+
+    def test_the_qualified_name_still_fails_the_scan_when_shadowed(self):
+        source = "sub GetMousePos { (0, 0) }\nX11::GUITest::GetMousePos();\n"
+        self.assertEqual(self._scan(source), 1)
+
 
 class TestScanInputs(unittest.TestCase):
     """What the scanner accepts: files, directories, and --json."""
@@ -154,6 +219,36 @@ class TestScanInputs(unittest.TestCase):
         self.assertIsNone(calls["GetScreenDepth"]["replacement"])
         constants = data["files"][str(path)]["constants"]
         self.assertEqual([c["name"] for c in constants], ["M_LEFT"])
+
+    def test_json_carries_the_per_file_notes_as_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "script.pl"
+            path.write_text("sub WaitSeconds { 1 }\nWaitSeconds(1);\nSendKeys('a');\n")
+            self.assertEqual(self._run(["--json", str(path)]), 0)
+        entry = json.loads(self.output.getvalue())["files"][str(path)]
+        self.assertFalse(entry["imports_guitest"])
+        self.assertEqual(entry["shadowed"], ["WaitSeconds"])
+        self.assertEqual([call["name"] for call in entry["calls"]], ["SendKeys"])
+
+    def test_pod_files_are_not_walked(self):
+        # A .pod is documentation: every name in it is prose, and it is not
+        # something a port edits.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "Guide.pod").write_text("GetMousePos();\n")
+            (root / "run.pl").write_text("SendKeys('a');\n")
+            self.assertEqual(self._run([str(root)]), 0)
+        self.assertNotIn("Guide.pod", self.output.getvalue())
+
+    def test_every_perl_suffix_is_walked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ("a.pl", "b.pm", "c.t", "d.cgi", "e.perl", "UPPER.PL"):
+                (root / name).write_text("SendKeys('a');\n")
+            self.assertEqual(self._run([str(root)]), 0)
+        for name in ("a.pl", "b.pm", "c.t", "d.cgi", "e.perl", "UPPER.PL"):
+            with self.subTest(name):
+                self.assertIn(name, self.output.getvalue())
 
 
 if __name__ == "__main__":

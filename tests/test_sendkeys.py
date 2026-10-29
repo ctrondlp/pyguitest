@@ -324,6 +324,41 @@ class TestQuoteForType(unittest.TestCase):
         # Matches upstream: & is the one modifier this helper does not quote.
         self.assertEqual(pyguitest.quote_for_type("&"), "&")
 
+    def test_the_documented_escape_for_altgr_types_a_literal_ampersand(self):
+        # The docstring tells callers to write {&} by hand; that spelling
+        # has to reach the screen as the character itself, with no modifier.
+        gui = session()
+        gui.send_keys("{&}")
+
+        name, needs_shift = gui.backend.resolve_char_key("&")
+        expected = [("press", "Shift_L")] if needs_shift else []
+        expected += tap(name)
+        expected += [("release", "Shift_L")] if needs_shift else []
+        self.assertEqual(gui.backend.events, expected)
+
+    def test_the_escape_cannot_be_fed_through_the_helper(self):
+        # Why the docstring's order matters: braces are escaped too, so
+        # quoting "{&}" hands back "{{}&{}}" -- a literal brace, a live AltGr
+        # modifier, a literal brace. Documented as the wrong way round once.
+        self.assertEqual(pyguitest.quote_for_type("{&}"), "{{}&{}}")
+
+    def test_the_documented_recipe_types_the_ampersand_literally(self):
+        # quote_for_type(text).replace("&", "{&}") -- the order the docstring
+        # gives. Every character must arrive as itself, modifying nothing.
+        gui = session()
+        gui.send_keys(pyguitest.quote_for_type("a&b").replace("&", "{&}"))
+
+        backend = RecordingBackend()
+        expected = []
+        for char in "a&b":
+            name, needs_shift = backend.resolve_char_key(char)
+            if needs_shift:
+                expected += [("press", "Shift_L")]
+            expected += tap(name)
+            if needs_shift:
+                expected += [("release", "Shift_L")]
+        self.assertEqual(gui.backend.events, expected)
+
     def test_round_trips_through_send_keys_as_literal_text(self):
         # Every character that needs quoting also has a static key mapping,
         # so quote_for_type's output is fully consumable -- none of it is

@@ -51,6 +51,7 @@ pyguitest/
 │   ├── hints.py                what to install, per distribution
 │   ├── py.typed                PEP 561 marker
 │   ├── compat.py               the X11::GUITest exports, as data
+│   ├── perlscan.py             a lexical pass over Perl, for `migrate`
 │   ├── errors.py               typed failures
 │   ├── session.py              the Environment: which session this is
 │   ├── app.py                  a launched program, and stopping it again
