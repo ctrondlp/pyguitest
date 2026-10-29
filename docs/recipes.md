@@ -352,31 +352,41 @@ difference between a hypothesis and an answer.
 The most-used half of the module. `pyguitest migrate script.pl` reports the
 tier, replacement and line numbers of every call in a real file — give it a
 directory and it walks the Perl sources under it, `--json` for a CI step that
-wants more than an exit status. It exits non-zero on the two kinds of call a
-human has to decide about: the ones Wayland refuses, and the two with no
+wants more than an exit status. It reads the code as Perl would, so a name in
+a comment, POD, a string, a heredoc, a hash key, a method call or another
+module's namespace is not a call and is not counted, and a sub of your own
+that shares a name with an export (`sub WaitSeconds`) is reported as
+shadowing it rather than as a use. It exits non-zero on the two kinds of call
+a human has to decide about: the ones Wayland refuses, and the two with no
 replacement anywhere (`GetScreenDepth`, `GetWindowsFromPid`). The full
 50-export table lives in `pyguitest.compat`, alongside the `:CONST` integers
 in `compat.CONSTANTS`, and is explained in
 [developers/wayland-audit.md](developers/wayland-audit.md).
 
+Most rows below port by renaming. The ones that do not are the ones where the
+call still runs and quietly means something else, and `migrate` prints the
+note for each — they are collected under the table.
+
 | X11::GUITest | pyguitest | Note |
 |---|---|---|
-| `StartApp` / `RunApp` | `start_app` / `run_app` | `start_app` returns an `Application` |
+| `StartApp` / `RunApp` | `start_app` / `run_app` | `start_app` returns an `Application`, not a pid; `run_app` a `CompletedProcess`, not a wait status |
 | `WaitSeconds` | `wait` | Prefer a `wait_for_*` |
 | `SendKeys` | `send_keys` | Same grammar |
-| `QuoteStringForSendKeys` | `quote_for_type` | Also escapes `#` (Meta), which the original missed |
+| `QuoteStringForSendKeys` | `quote_for_type` | Also escapes `#` (Meta), which the original missed. Like it, leaves `&` (AltGr) alone: write `{&}` |
 | `PressKey` / `ReleaseKey` / `PressReleaseKey` | `press_key` / `release_key` / `tap_key` | |
 | `MoveMouseAbs` | `move_mouse` | |
 | `ClickMouseButton` | `click` | Buttons 4/5 are now `scroll()` |
-| `FindWindowLike` | `find_windows` | Toplevels only, no recursive descent. A string is a literal substring; wrap a Perl regex in `re.compile()` |
-| `WaitWindowLike` / `WaitWindowClose` | `wait_for_window` / `wait_window_close` | Event-driven where the compositor allows |
+| `SetEventSendDelay` / `SetKeySendDelay` | `Session(event_delay=, key_delay=)` | **Seconds, not milliseconds** |
+| `FindWindowLike` | `find_windows` | Toplevels only, no recursive descent. A string is a case-sensitive literal substring; the original was a case-insensitive regex, so use `re.compile(..., re.I)` |
+| `WaitWindowLike` / `WaitWindowClose` | `wait_for_window` / `wait_window_close` | Event-driven where the compositor allows. `timeout=None` waits forever; the originals gave up after 10 s |
+| `WaitWindowViewable` | `wait_for_window`, then `is_window_viewable` | The original waited; `is_window_viewable` reads once |
 | `GetWindowName` | `Window.title` | |
 | `GetWindowPos` | `geometry` | |
 | `MoveWindow` / `ResizeWindow` | `move_window` / `resize_window` | |
 | `RaiseWindow` / `SetInputFocus` | `activate_window` | Raising and focusing are one operation now |
 | `IconifyWindow` / `UnIconifyWindow` | `minimize_window(w)` / `minimize_window(w, minimized=False)` | |
 | `GetWindowFromPoint` | `window_at` | |
-| `ClickWindow` | `Element.click` | Prefer `gui.button(...).click()` |
+| `ClickWindow` | `Element.click` | Prefer `gui.button(...).click()`. The original clicked the window's top-left corner plus an offset, see below |
 | `GetRootWindow` / `GetChildWindows` / `GetParentWindow` | `root_element` / `Element.children` / `Element.parent` | The accessible tree, not the window tree |
 | `GetScreenRes` / `ScreenCount` | `Screen.size` / `len(gui.screens())` | |
 | `IsWindow` / `IsWindowViewable` | `is_window_open` / `is_window_viewable` | The second reads minimized state, not X11's `IsViewable` |
@@ -384,6 +394,45 @@ in `compat.CONSTANTS`, and is explained in
 | `IsKeyPressed` / `IsMouseButtonPressed` | `is_key_pressed` / `is_button_pressed` | X11 and Windows only; deliberately prevented on Wayland, where they raise |
 | `SetWindowName` / `LowerWindow` / `IsWindowCursor` | `set_window_title` / `lower_window` / `is_window_cursor` | As above. `is_window_cursor` takes the integer the `XC_*` constants carried |
 | `DEF_WAIT`, `M_LEFT`, `M_BTN1`…`M_BTN5`, `XC_*` | plain integers | `:CONST` exports nothing needing a pyguitest name: buttons go to `click()`, `M_UP`/`M_DOWN` become `scroll(dy=±1)`, cursor shapes pass through unchanged |
+
+### Where a straight port changes meaning
+
+None of these raise. Each runs and does something slightly different.
+
+- **Delays are seconds.** `SetEventSendDelay(10)` and `SetKeySendDelay(50)`
+  took milliseconds, returned the value they replaced, and started at 10 and
+  0. `Session(event_delay=0.01, key_delay=0.05)` is the same thing, with both
+  starting at `0.0`; leaving the numbers as they were makes every event
+  wait ten *seconds* and every key fifty.
+- **Window titles are not regexes.** `FindWindowLike('gedit')` matched the
+  pattern `/gedit/i` against every title, so `Gedit` and `Untitled - gedit`
+  both hit, and `FindWindowLike('foo.*bar')` meant what it looked like.
+  `find_windows('gedit')` is a case-sensitive literal substring. Port a
+  pattern as `re.compile('gedit', re.I)`; plain strings stay plain.
+- **Waits return one window, or nothing.** The originals returned a list (an
+  empty one on timeout) and gave up after `DEF_WAIT`, ten seconds.
+  `wait_for_window` returns a `Window` or `None`, `wait_window_close` a
+  `bool`, and both wait forever unless you pass `timeout=`, so a script that
+  relied on the default needs `timeout=10`. `WaitWindowViewable` has no
+  one-call spelling: `window = gui.wait_for_window(title, timeout=10)`, then
+  poll `gui.is_window_viewable(window)` until it is true.
+- **`ClickWindow` is a corner click.** It moved to the window's top-left from
+  `GetWindowPos`, added the x/y offsets, clicked `M_LEFT` unless told
+  otherwise and returned 1 or 0. The same thing is
+  `x, y, _, _ = gui.geometry(window)`, then `gui.move_mouse(x + dx, y + dy)`
+  and `gui.click()`. The corner is the decoration's, which on most desktops
+  is not content, so where the control has an accessible name
+  `gui.button("Save").click()` is both shorter and sturdier.
+- **`StartApp` returned a pid or nothing.** It forked, slept one second and
+  returned the pid only if the child was still alive. `start_app` returns at
+  once with an `Application`; `app.pid` is the pid, and `app.poll() is None`
+  after a pause is the survival check. `RunApp` returned `system()`'s wait
+  status — the exit code times 256, or -1 when it could not start — so
+  `run_app(...).returncode == 0` replaces `RunApp(...) == 0`, and any other
+  comparison against a specific status needs the division.
+- **`&` is not quoted.** `quote_for_type` keeps the original's omission of
+  `&` (AltGr), so a `&` inside quoted text is still read as a modifier. Write
+  it as `{&}` yourself where it must reach the screen as itself.
 
 The `IsKeyPressed` row is the one that decides whether a port is possible at
 all. If a script depends on reading global input state, it can be ported to

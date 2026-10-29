@@ -324,6 +324,18 @@ class TestQuoteForType(unittest.TestCase):
         # Matches upstream: & is the one modifier this helper does not quote.
         self.assertEqual(pyguitest.quote_for_type("&"), "&")
 
+    def test_the_documented_escape_for_altgr_types_a_literal_ampersand(self):
+        # The docstring tells callers to write {&} by hand; that spelling
+        # has to reach the screen as the character itself, with no modifier.
+        gui = session()
+        gui.send_keys("{&}")
+
+        name, needs_shift = gui.backend.resolve_char_key("&")
+        expected = [("press", "Shift_L")] if needs_shift else []
+        expected += tap(name)
+        expected += [("release", "Shift_L")] if needs_shift else []
+        self.assertEqual(gui.backend.events, expected)
+
     def test_round_trips_through_send_keys_as_literal_text(self):
         # Every character that needs quoting also has a static key mapping,
         # so quote_for_type's output is fully consumable -- none of it is

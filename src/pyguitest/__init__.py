@@ -83,7 +83,7 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T")
 
-__version__ = "0.19.0"
+__version__ = "0.19.1"
 
 __all__ = [
     "connect",
@@ -138,6 +138,10 @@ def quote_for_type(text: str | None) -> str | None:
     Replaces X11::GUITest's QuoteStringForSendKeys, with the same behaviour
     plus the # fix noted above: each of ^ % + ~ # ( ) { } is wrapped in
     braces, so send_keys(quote_for_type(text)) sends `text` literally.
+
+    One exception, deliberately kept from upstream: `&` (AltGr) is not
+    escaped, so a `&` in `text` is read as the modifier. Write it as `{&}`
+    where one must reach the screen as itself.
     """
     if text is None:
         return None

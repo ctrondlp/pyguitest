@@ -50,8 +50,28 @@ def _f(name, x11, capability, tier, replacement, note=""):
 
 _ALL = [
     # -- T1: no display server involved ------------------------------------
-    _f("StartApp", "fork/exec", C.PROCESS_LAUNCH, Tier.PORTABLE, "start_app"),
-    _f("RunApp", "system()", C.PROCESS_LAUNCH, Tier.PORTABLE, "run_app"),
+    _f(
+        "StartApp",
+        "fork/exec",
+        C.PROCESS_LAUNCH,
+        Tier.PORTABLE,
+        "start_app",
+        "Returns an Application (a Popen wrapper), not a pid, and does not "
+        "sleep. The original slept 1 s and returned the pid only if the "
+        "child was still running, else undef: `app.poll() is None` after a "
+        "wait is the same check. A list command that cannot start raises "
+        "OSError rather than returning nothing",
+    ),
+    _f(
+        "RunApp",
+        "system()",
+        C.PROCESS_LAUNCH,
+        Tier.PORTABLE,
+        "run_app",
+        "Returns a subprocess.CompletedProcess. system() returned the wait "
+        "status (exit code x 256, -1 if it could not start), so `== 0` "
+        "becomes `.returncode == 0`, which is already the plain exit code",
+    ),
     _f("WaitSeconds", "sleep()", C.TIMING, Tier.PORTABLE, "wait"),
     _f(
         "SetEventSendDelay",
@@ -59,7 +79,9 @@ _ALL = [
         C.TIMING,
         Tier.PORTABLE,
         "Session(event_delay=)",
-        "Better as a constructor argument",
+        "SECONDS, not milliseconds: SetEventSendDelay(10) is event_delay=0.01. "
+        "The original returned the old value and defaulted to 10 ms; the "
+        "Session attribute defaults to 0.0 and the setter returns nothing",
     ),
     _f(
         "GetEventSendDelay",
@@ -67,6 +89,8 @@ _ALL = [
         C.TIMING,
         Tier.PORTABLE,
         "Session.event_delay",
+        "Reads seconds, where the original returned milliseconds -- "
+        "multiply by 1000 to compare",
     ),
     _f(
         "SetKeySendDelay",
@@ -74,9 +98,17 @@ _ALL = [
         C.TIMING,
         Tier.PORTABLE,
         "Session(key_delay=)",
+        "SECONDS, not milliseconds: SetKeySendDelay(50) is key_delay=0.05. "
+        "The original returned the old value; the default is 0 in both",
     ),
     _f(
-        "GetKeySendDelay", "module global", C.TIMING, Tier.PORTABLE, "Session.key_delay"
+        "GetKeySendDelay",
+        "module global",
+        C.TIMING,
+        Tier.PORTABLE,
+        "Session.key_delay",
+        "Reads seconds, where the original returned milliseconds -- "
+        "multiply by 1000 to compare",
     ),
     _f(
         "QuoteStringForSendKeys",
@@ -85,10 +117,16 @@ _ALL = [
         Tier.PORTABLE,
         "quote_for_type",
         "The {} grammar was kept; also now escapes # (Meta), which the "
-        "original omitted",
+        "original omitted. & (AltGr) is still not escaped, as upstream: "
+        "write {&} yourself for a literal one",
     ),
     _f(
-        "QSfSK", "alias", None, Tier.PORTABLE, "quote_for_type", "Drop the abbreviation"
+        "QSfSK",
+        "alias",
+        None,
+        Tier.PORTABLE,
+        "quote_for_type",
+        "Drop the abbreviation; same & caveat as QuoteStringForSendKeys",
     ),
     # -- T2: core Wayland protocol -----------------------------------------
     _f(
@@ -180,7 +218,11 @@ _ALL = [
         C.WINDOW_LIST,
         Tier.COMPOSITOR,
         "find_windows",
-        "Returns only toplevels; no recursive descent",
+        "Returns only toplevels; no recursive descent. The pattern was a Perl "
+        "regex matched with /i: unanchored and case-INsensitive, and the "
+        "result a list. A pyguitest string is a case-sensitive literal "
+        "substring, so a ported pattern needs re.compile(pattern, re.I) -- "
+        "and a regex metacharacter in it now needs the compiled form too",
     ),
     _f(
         "WaitWindowLike",
@@ -190,7 +232,11 @@ _ALL = [
         "wait_for_window",
         "Session.wait_for_window works everywhere WINDOW_LIST does, polling "
         "find_windows; it only uses real event notification -- faster, "
-        "race-free -- where WINDOW_EVENTS is also available",
+        "race-free -- where WINDOW_EVENTS is also available. Same pattern "
+        "caveat as FindWindowLike (literal, case-sensitive). The original "
+        "returned a list, empty on timeout, and waited 10 s by default; "
+        "this returns the Window or None, and timeout=None (the default) "
+        "waits forever",
     ),
     _f(
         "WaitWindowClose",
@@ -199,7 +245,9 @@ _ALL = [
         Tier.COMPOSITOR,
         "wait_window_close",
         "Matches by Window.handle, not title; event-driven only where "
-        "WINDOW_EVENTS is available, polling windows() otherwise",
+        "WINDOW_EVENTS is available, polling windows() otherwise. Returns "
+        "bool for the original's 1/0, but the original timed out after 10 s "
+        "by default where timeout=None here waits forever",
     ),
     _f(
         "WaitWindowViewable",
@@ -207,9 +255,11 @@ _ALL = [
         C.WINDOW_STATE,
         Tier.COMPOSITOR,
         "is_window_viewable",
-        "A one-shot state read rather than a wait -- pair it with your own "
-        "poll loop, or with wait_for_window/wait_window_close. kdotool has "
-        "no mapped/visibility query and refuses this one specifically",
+        "A one-shot state read rather than a wait: the original waited (10 s "
+        "by default) for a matching window that was viewable and returned a "
+        "list of them. Port it as wait_for_window followed by a poll of "
+        "is_window_viewable on the result, or a loop of your own. kdotool "
+        "has no mapped/visibility query and refuses this one specifically",
     ),
     _f(
         "IsWindow",
@@ -316,7 +366,11 @@ _ALL = [
         C.WINDOW_GEOMETRY,
         Tier.COMPOSITOR,
         "Element.click",
-        "Prefer element(...).click(); inherits both gaps, AT-SPI needs neither",
+        "Prefer element(...).click(); inherits both gaps, AT-SPI needs neither. "
+        "The original clicked the window's top-left corner (GetWindowPos) "
+        "plus the x/y offsets, M_LEFT by default, and returned 1 or 0; the "
+        "port is `x, y, _, _ = gui.geometry(w); gui.move_mouse(x + dx, y + "
+        "dy); gui.click()`. That corner can be a decoration, not the content",
     ),
     # -- T5: served by AT-SPI instead --------------------------------------
     _f(
