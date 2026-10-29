@@ -117,8 +117,10 @@ _ALL = [
         Tier.PORTABLE,
         "quote_for_type",
         "The {} grammar was kept; also now escapes # (Meta), which the "
-        "original omitted. & (AltGr) is still not escaped, as upstream: "
-        "write {&} yourself for a literal one",
+        "original omitted. & (AltGr) is still not escaped, as upstream. Put "
+        "the literal {&} into the quoted *result* -- "
+        'quote_for_type(text).replace("&", "{&}") -- since passing {&} in '
+        "escapes its braces and leaves the & a modifier",
     ),
     _f(
         "QSfSK",
@@ -257,8 +259,11 @@ _ALL = [
         "is_window_viewable",
         "A one-shot state read rather than a wait: the original waited (10 s "
         "by default) for a matching window that was viewable and returned a "
-        "list of them. Port it as wait_for_window followed by a poll of "
-        "is_window_viewable on the result, or a loop of your own. kdotool "
+        "list of them. Port it as wait_for_window with an explicit timeout, "
+        "check the None it returns on expiry before asking about it, then "
+        "poll is_window_viewable under a deadline of your own -- re-running "
+        "find_windows each turn if a later match may become viewable first, "
+        "as the original did. kdotool "
         "has no mapped/visibility query and refuses this one specifically",
     ),
     _f(
@@ -370,7 +375,9 @@ _ALL = [
         "The original clicked the window's top-left corner (GetWindowPos) "
         "plus the x/y offsets, M_LEFT by default, and returned 1 or 0; the "
         "port is `x, y, _, _ = gui.geometry(w); gui.move_mouse(x + dx, y + "
-        "dy); gui.click()`. That corner can be a decoration, not the content",
+        "dy); gui.click(button)` -- pass the button on, because click() alone "
+        "is always the left one. That corner can be a decoration, not the "
+        "content",
     ),
     # -- T5: served by AT-SPI instead --------------------------------------
     _f(

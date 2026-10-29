@@ -352,11 +352,14 @@ difference between a hypothesis and an answer.
 The most-used half of the module. `pyguitest migrate script.pl` reports the
 tier, replacement and line numbers of every call in a real file — give it a
 directory and it walks the Perl sources under it, `--json` for a CI step that
-wants more than an exit status. It reads the code as Perl would, so a name in
-a comment, POD, a string, a heredoc, a hash key, a method call or another
-module's namespace is not a call and is not counted, and a sub of your own
-that shares a name with an export (`sub WaitSeconds`) is reported as
-shadowing it rather than as a use. It exits non-zero on the two kinds of call
+wants more than an exit status. It reads the code the way Perl would, so a
+name in a comment, POD, a string, a heredoc, a hash key, a method call or
+another module's namespace is not a call and is not counted, and a sub of your
+own that shares a name with an export (`sub WaitSeconds`) is reported as
+shadowing it rather than as a use. It is a heuristic lexer rather than Perl
+itself, and it does not look inside interpolated strings or `eval "..."`, so a
+call built at run time is one it cannot see: read a clean report as "nothing
+found here", not as proof that a file is free of them. It exits non-zero on the two kinds of call
 a human has to decide about: the ones Wayland refuses, and the two with no
 replacement anywhere (`GetScreenDepth`, `GetWindowsFromPid`). The full
 50-export table lives in `pyguitest.compat`, alongside the `:CONST` integers
@@ -372,7 +375,7 @@ note for each — they are collected under the table.
 | `StartApp` / `RunApp` | `start_app` / `run_app` | `start_app` returns an `Application`, not a pid; `run_app` a `CompletedProcess`, not a wait status |
 | `WaitSeconds` | `wait` | Prefer a `wait_for_*` |
 | `SendKeys` | `send_keys` | Same grammar |
-| `QuoteStringForSendKeys` | `quote_for_type` | Also escapes `#` (Meta), which the original missed. Like it, leaves `&` (AltGr) alone: write `{&}` |
+| `QuoteStringForSendKeys` | `quote_for_type` | Also escapes `#` (Meta), which the original missed. Like it, leaves `&` (AltGr) alone — `.replace("&", "{&}")` the result, not the input |
 | `PressKey` / `ReleaseKey` / `PressReleaseKey` | `press_key` / `release_key` / `tap_key` | |
 | `MoveMouseAbs` | `move_mouse` | |
 | `ClickMouseButton` | `click` | Buttons 4/5 are now `scroll()` |
@@ -409,18 +412,23 @@ None of these raise. Each runs and does something slightly different.
   both hit, and `FindWindowLike('foo.*bar')` meant what it looked like.
   `find_windows('gedit')` is a case-sensitive literal substring. Port a
   pattern as `re.compile('gedit', re.I)`; plain strings stay plain.
-- **Waits return one window, or nothing.** The originals returned a list (an
-  empty one on timeout) and gave up after `DEF_WAIT`, ten seconds.
+- **Waits return one window, or nothing.** `WaitWindowLike` and
+  `WaitWindowViewable` returned a list, empty on timeout; `WaitWindowClose`
+  returned 1 or 0. All three gave up after `DEF_WAIT`, ten seconds.
   `wait_for_window` returns a `Window` or `None`, `wait_window_close` a
   `bool`, and both wait forever unless you pass `timeout=`, so a script that
   relied on the default needs `timeout=10`. `WaitWindowViewable` has no
-  one-call spelling: `window = gui.wait_for_window(title, timeout=10)`, then
-  poll `gui.is_window_viewable(window)` until it is true.
+  one-call spelling: `wait_for_window(title, timeout=10)` hands back `None`
+  on expiry, so check for that before asking, then poll
+  `gui.is_window_viewable(window)` under a deadline of your own rather than
+  forever. The original re-ran its search every turn, so recheck
+  `find_windows` too where a later match may become viewable first.
 - **`ClickWindow` is a corner click.** It moved to the window's top-left from
   `GetWindowPos`, added the x/y offsets, clicked `M_LEFT` unless told
   otherwise and returned 1 or 0. The same thing is
   `x, y, _, _ = gui.geometry(window)`, then `gui.move_mouse(x + dx, y + dy)`
-  and `gui.click()`. The corner is the decoration's, which on most desktops
+  and `gui.click(button)` — pass the button on, since `gui.click()` alone is
+  always the left one. The corner is the decoration's, which on most desktops
   is not content, so where the control has an accessible name
   `gui.button("Save").click()` is both shorter and sturdier.
 - **`StartApp` returned a pid or nothing.** It forked, slept one second and
@@ -431,8 +439,14 @@ None of these raise. Each runs and does something slightly different.
   `run_app(...).returncode == 0` replaces `RunApp(...) == 0`, and any other
   comparison against a specific status needs the division.
 - **`&` is not quoted.** `quote_for_type` keeps the original's omission of
-  `&` (AltGr), so a `&` inside quoted text is still read as a modifier. Write
-  it as `{&}` yourself where it must reach the screen as itself.
+  `&` (AltGr), so a `&` inside quoted text is still read as a modifier. The
+  literal spelling is `{&}`, but it has to go into the *result* rather than
+  the input — braces are escaped, so `quote_for_type("{&}")` hands back
+  `{{}&{}}` and the `&` is live again:
+
+  ```python
+  gui.send_keys(quote_for_type(text).replace("&", "{&}"))
+  ```
 
 The `IsKeyPressed` row is the one that decides whether a port is possible at
 all. If a script depends on reading global input state, it can be ported to
