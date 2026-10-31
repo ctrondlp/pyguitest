@@ -41,12 +41,15 @@ from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypeVar
 from . import backends, compat, inspect
 from .app import Application
 from .backends import Element, GUIBackend, ImageMatch, NullBackend, Screen, Window
+from .backends.composite import CaptureFallbackWarning
+from .backends.input import KeymapWarning
 from .capabilities import TIERS, Capability, CapabilitySet, Tier
 from .errors import (
     AccessibilityViolation,
     BackendCallTimeout,
     BackendUnavailable,
     CapabilityUnsupported,
+    CaptureRegionUnsupported,
     ClipboardMismatch,
     ElementNotActionable,
     ElementNotFound,
@@ -83,7 +86,7 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T")
 
-__version__ = "0.19.1"
+__version__ = "0.20.0"
 
 __all__ = [
     "connect",
@@ -110,11 +113,14 @@ __all__ = [
     "BackendCallTimeout",
     "BackendUnavailable",
     "CapabilityUnsupported",
+    "CaptureFallbackWarning",
+    "CaptureRegionUnsupported",
     "ClipboardMismatch",
     "ElementNotActionable",
     "ElementNotFound",
     "FocusMismatch",
     "ImageNotFound",
+    "KeymapWarning",
     "PermissionRequired",
     "PortalTimeout",
     "VersionTooOld",
@@ -2146,6 +2152,14 @@ class Session:
         them while changing no window-manager focus, so this still reports
         True. See `active_window()` for the measured case and for what to
         check instead when input is vanishing.
+
+        `attempts` bounds the retry, and the two ways an attempt can fail are
+        treated differently. A `CapabilityUnsupported` means asking is
+        impossible, so it reports False at once rather than paying for
+        `attempts` identical refusals. Anything else is this attempt failing
+        -- a dropped request, a window-manager call that hung into a
+        `BackendCallTimeout` -- and the next attempt is made, which is what
+        the parameter is for.
         """
         try:
             last = self.geometry(window)
@@ -2162,8 +2176,22 @@ class Session:
                 self.activate_window(window)
                 if self.wait_window_focus(window, timeout=0.1):
                     return True
-            except Exception:
+            except CapabilityUnsupported:
+                # Asking is impossible, so no number of attempts changes the
+                # answer: report it once rather than paying for `attempts`
+                # identical refusals. This is the case the capability test
+                # below covers.
                 return False
+            except Exception:
+                # Any other failure is *this attempt* failing rather than the
+                # operation being unavailable -- a compositor that dropped
+                # the request, a BackendCallTimeout from a window-manager
+                # call that hung. Retrying those is exactly what `attempts`
+                # is for, and returning False here defeated it: one
+                # transient failure on the first pass abandoned the
+                # remaining four, on the one call whose whole purpose is to
+                # out-wait a window manager that grants focus late.
+                continue
         return False
 
     def is_window_open(self, window: Window) -> bool:
@@ -2346,6 +2374,11 @@ class Session:
         right after the action it verifies would otherwise race the
         application, which has not necessarily finished redrawing by the
         time the click returns.
+
+        `timeout` is spent twice over in the worst case -- once waiting for
+        the element to exist, where its absence raises `ElementNotFound`,
+        and again waiting for the text to match, where a mismatch raises
+        `AssertionError` naming both sides.
         """
         element = self.expect_element(
             role=role, name=name, within=within, timeout=timeout
@@ -2365,7 +2398,19 @@ class Session:
         timeout: float = 5.0,
         within: Element | None = None,
     ) -> None:
-        """Fail unless the named checkbox, radio button or toggle is `checked`."""
+        """Fail unless the named checkbox, radio button or toggle is `checked`.
+
+        Two waits, not one: `expect_element` first, which raises
+        `ElementNotFound` if the control never appears, then the state is
+        re-read until the deadline. So "no such control" and "the wrong
+        state" are different exceptions, and the worst case is twice
+        `timeout` rather than once.
+
+        A control whose toolkit publishes no checked state at all reports
+        `Element.checked` as None, which equals neither True nor False -- so
+        this times out and then says "but it is unchecked", because None is
+        falsey. Read `Element.checkable` first on a widget you do not know.
+        """
         element = self.expect_element(
             role=role, name=name, within=within, timeout=timeout
         )
@@ -2382,7 +2427,20 @@ class Session:
         timeout: float = 5.0,
         within: Element | None = None,
     ) -> None:
-        """Fail unless the named element is present and visible."""
+        """Fail unless the named element is present and visible.
+
+        Two waits, as in `expect_checked`: `expect_element` raises
+        `ElementNotFound` where the control never appears, and only then is
+        `Element.visible` re-read until the deadline, raising
+        `AssertionError`. The worst case is twice `timeout`.
+
+        `Element.visible` means something slightly different on each
+        platform, and on Windows and macOS it answers True rather than admit
+        it could not tell -- its own docstring has the three definitions and
+        says which backend is lenient. So a pass here is weaker evidence on
+        those two than it looks; where it matters, the stronger check is that
+        the action the element exists for actually worked.
+        """
         element = self.expect_element(
             role=role, name=name, within=within, timeout=timeout
         )

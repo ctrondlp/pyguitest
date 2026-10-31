@@ -73,7 +73,18 @@ class Application:
     # -- lifecycle ---------------------------------------------------------
 
     def is_running(self) -> bool:
-        """Whether the program is still running."""
+        """Whether the program is still running.
+
+        A `poll()` underneath, so calling this is also what reaps an exited
+        process and fills in `returncode`.
+
+        This is the launched process's state, which is not always the
+        application's: a launcher that spawns the real program and exits --
+        macOS `open -a`, a wrapper script -- reads as *not* running while the
+        window it opened is still on screen. Where that matters, wait on the
+        window or an element rather than on this. See `pid` for the same
+        distinction.
+        """
         return self.process.poll() is None
 
     def stop(self, timeout: float = 5.0) -> int | None:
@@ -147,47 +158,124 @@ class Application:
 
     @property
     def pid(self) -> int:
-        """The process id -- what `wait_for_idle` and friends take."""
+        """The process id -- what `wait_for_idle` and friends take.
+
+        The process `start_app` started, which is not always the process that
+        draws the window. A launcher that spawns the real application and
+        exits -- macOS `open -a`, a wrapper shell script, a `.desktop`
+        handler -- leaves this pointing at the launcher, so it will not match
+        the `Element.pid` or `Window.pid` of the application on screen. Check
+        with `pyguitest inspect` when a pid-scoped element query comes back
+        empty for an application that is plainly running.
+
+        The string form of `command` is *not* the usual cause: the shell
+        `exec`s a simple command, so `start_app("editor file")` and
+        `start_app(["editor", "file"])` both report the editor's own pid.
+        Only a string the shell cannot finish with an exec -- a background
+        job, a pipeline, a trap -- leaves the shell itself here, with the
+        program as its child. Measured both ways on Linux.
+        """
         return self.process.pid
 
     @property
     def returncode(self) -> int | None:
-        """The exit status, or None while it is still running."""
+        """The exit status, or None if nothing has reaped the process yet.
+
+        Read straight off the `Popen`, which means it is None both while the
+        program is running *and* after it has exited but before anything
+        asked -- `returncode` is filled in by `poll()`, `wait()`, `stop()` or
+        `is_running()`, not by the process exiting. So a bare read right
+        after the program quits still answers None; call `poll()` first, or
+        read what `stop()` returns.
+        """
         return self.process.returncode
 
     @property
     def stdin(self) -> IO[Any] | None:
-        """The process's stdin, if it was piped."""
+        """The process's stdin, or None unless `start_app` was given a pipe.
+
+        None is the ordinary answer: `start_app` passes `**kwargs` to
+        `subprocess.Popen`, so a stream exists only where the caller asked
+        for one with `stdin=subprocess.PIPE`.
+        """
         return self.process.stdin
 
     @property
     def stdout(self) -> IO[Any] | None:
-        """The process's stdout, if it was piped."""
+        """The process's stdout, or None unless `start_app` was given a pipe.
+
+        None unless the caller passed `stdout=subprocess.PIPE`, and a GUI
+        program often writes nothing useful there anyway. Read it before
+        calling `restart()`, which closes the old process's pipes.
+        """
         return self.process.stdout
 
     @property
     def stderr(self) -> IO[Any] | None:
-        """The process's stderr, if it was piped."""
+        """The process's stderr, or None unless `start_app` was given a pipe.
+
+        None unless the caller passed `stderr=subprocess.PIPE`. Worth piping
+        when an application fails to appear at all: the reason is usually on
+        this stream, and `restart()` closes it, so read it first.
+        """
         return self.process.stderr
 
     def poll(self) -> int | None:
-        """The exit status if it has finished, or None. Does not block."""
+        """The exit status if it has finished, or None. Does not block.
+
+        Also the call that fills in `returncode`, so this is the one to reach
+        for in a loop that is waiting without committing to a deadline.
+        """
         return self.process.poll()
 
     def wait(self, timeout: float | None = None) -> int:
-        """Block until it exits, or raise `subprocess.TimeoutExpired`."""
+        """Block until it exits, or raise `subprocess.TimeoutExpired`.
+
+        Unbounded with no `timeout`, which on a GUI program is a real risk
+        rather than a theoretical one: an editor holding unsaved text answers
+        a quit request by opening a "Save changes?" dialog and waits for a
+        human. `stop()` is the bounded version and the one a test wants.
+        """
         return self.process.wait(timeout=timeout)
 
     def terminate(self) -> None:
-        """Send SIGTERM. See `stop()` for the bounded version."""
+        """Ask the program to quit -- SIGTERM on Unix. Returns immediately.
+
+        Does not wait, and does not escalate: a program that answers the
+        request with a "Save changes?" dialog simply stays up. `stop()` is
+        the bounded four-step version, and the one to use in cleanup.
+
+        On Windows there are no POSIX signals -- this calls
+        `TerminateProcess`, which the program cannot decline or handle, so
+        there is no save-your-state courtesy there and no difference between
+        this and `kill()`. Both also return silently once `returncode` has
+        been filled in.
+        """
         self.process.terminate()
 
     def kill(self) -> None:
-        """Send SIGKILL."""
+        """Stop the program outright -- SIGKILL on Unix. Not declinable.
+
+        No chance to save state, and no cleanup. `stop()` already escalates
+        to this when a polite request goes unanswered within its timeout,
+        which is usually the call to reach for instead.
+
+        On Windows this *is* `terminate()` -- `subprocess` maps both to
+        `TerminateProcess` -- so a script that tries one and then the other
+        is doing the same thing twice there.
+        """
         self.process.kill()
 
     def send_signal(self, signal: int) -> None:
-        """Send an arbitrary signal."""
+        """Send one signal to the process, by number.
+
+        Unix only in any real sense. On Windows `subprocess` accepts just
+        `SIGTERM` (which it turns into `TerminateProcess`), `CTRL_C_EVENT`
+        and `CTRL_BREAK_EVENT`, and raises `ValueError` for anything else --
+        so a suite that signals a process needs a platform branch rather
+        than a portable call. Signalling a process already known to have
+        exited returns silently on both platforms.
+        """
         self.process.send_signal(signal)
 
     def __getattr__(self, attr: str) -> Any:

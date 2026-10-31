@@ -81,7 +81,7 @@ the Screenshot and Clipboard portals need only PyGObject.
 | Desktop | What you install |
 |---|---|
 | sway / Hyprland / niri | `pip install pyguitest` — nothing else |
-| COSMIC | `pip install 'pyguitest[uinput]'` + `wtype` — windows, capture and screens need nothing; `wtype` adds keymap-safe typing, and the pointer comes from uinput, since COSMIC implements no unprivileged virtual-pointer protocol |
+| COSMIC | `pip install 'pyguitest[uinput]'` + `wtype` — windows, capture and screens need nothing; `wtype` adds keymap-safe typing, and uinput adds keyboard input. **Do not count on a pointer here** — see [the note below](#the-pointer-on-wayland-measured-rather-than-assumed) |
 | GNOME | `pip install 'pyguitest[atspi]'` + three distribution packages |
 | GNOME, pure Wayland (no XWayland) | as GNOME, plus the [pyguitest-window-control extension](../gnome-shell-extension/README.md) for window placement/minimize |
 | KDE | as GNOME, plus `kdotool` for windows, and `gsettings set org.gnome.desktop.interface toolkit-accessibility true` or no application publishes any elements — [see below](#on-kde-one-more-step-that-is-not-a-package) |
@@ -96,6 +96,44 @@ including the GNOME Shell extension. The opt-in rows are different:
 it is the sole route (`portalcapture`, on a GNOME session with no other
 capture path) — see [Backend registry](developers/structure.md#backend-registry)
 for why they are opt-in.
+
+### The pointer on Wayland, measured rather than assumed
+
+This row used to say that on COSMIC "the pointer comes from uinput". The
+first half of the reasoning still holds — COSMIC implements no unprivileged
+virtual-pointer protocol, so uinput is the only thing left to try — but the
+conclusion did not survive being measured. On **four** Wayland sessions,
+`uinput` pointer events are accepted by the kernel and then dropped before
+the compositor ever sees them, while keyboard injection through the very same
+device works:
+
+| Session | Measured | Where |
+|---|---|---|
+| Pop!_OS / COSMIC | pointer dropped, keyboard fine | torture-test `AGENTS.md` |
+| Debian 13 / GNOME | pointer dropped, keyboard fine | torture-test `AGENTS.md` |
+| A local GNOME desktop | pointer dropped, keyboard fine | torture-test `AGENTS.md` |
+| Fedora KDE / KWin | `gui.click()` changed nothing; the AT-SPI action click did | pyguitest-recorder `docs/developers/status.md`, 2026-10-27 |
+
+So on a Wayland session, plan for keyboard and accessible actions and treat a
+working synthetic pointer as something to verify, not to assume:
+
+- `Element.click()` activates through the accessible action and needs no
+  pointer at all. It is what every pointer-free driver in the torture fleet
+  uses, on five compositors.
+- Reach keyboard-only controls by moving focus (Tab-seeking until
+  `Element.focused`), not by clicking into them.
+- Where you genuinely need pointer *motion*, `connect(backend="eiinput")`
+  sends over libei through the portal, which the compositor consumes
+  because it asked for consent first. It is opt-in for that reason, and the
+  consent dialog cannot be answered unattended — which is why it is not the
+  default and why CI runs tend to end up on the keyboard path anyway.
+
+One trap when diagnosing this: two different faults produce the same silence.
+The one above is pointer-only, with the keyboard still working. The other is
+a `KEY_POWER`/udev `uaccess` misclassification, fixed in the uinput backend
+([backends/uinput.py](../src/pyguitest/backends/uinput.py)), which took out
+pointer **and** keyboard together and survived reboots. If keystrokes are
+landing, you are looking at the first one.
 
 ## Worked examples: what one extra alone actually gets you
 

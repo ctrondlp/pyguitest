@@ -40,6 +40,7 @@ from .base import (
     GUIBackend,
     Window,
     click_by_pointer,
+    numeric_value,
     require_click_route,
     resolve_click_route,
 )
@@ -658,8 +659,22 @@ class Element:
 
     @property
     def value(self):
-        """The numeric value of a slider, spinner, or progress bar."""
-        return _node_attr(self.node, "value", None)
+        """The numeric value of a slider, spinner, or progress bar, or None.
+
+        The platform fact this has to survive: dogtail's `value` answers
+        `False` on anything with no Value interface -- not None, and not an
+        error -- so the raw read gave a *bool* for every push button, label
+        and window on the desktop. Measured live before the fix: of nineteen
+        roles on a GNOME tree and twenty-eight on a KDE one, only `slider`,
+        `level bar` and `scroll bar` gave a float and every other role gave
+        `False`, while uia and macos both gave None. `value is not None` --
+        the guard the `float | None` annotation invites -- was therefore true
+        for a push button here and false for one everywhere else.
+
+        The read is this backend's; the shaping is `base.numeric_value`,
+        which all three share so that this cannot drift again.
+        """
+        return numeric_value(_node_attr(self.node, "value", None))
 
     @property
     def checked(self):

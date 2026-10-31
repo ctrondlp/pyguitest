@@ -90,9 +90,11 @@ class FakeNode:
         actions=None,
         click_raises=None,
         state_set=(),
+        value=False,
     ):
         self.name = name
         self.text = None
+        self.value = value
         self._combovalue = None
         self.roleName = role
         self.children = list(children)
@@ -2306,3 +2308,60 @@ class TestCollectionFastPath(AtspiTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestElementValue(unittest.TestCase):
+    """`value` is a number or None -- never dogtail's raw `False`.
+
+    dogtail answers `False` for anything with no Value interface, which is
+    neither of the two shapes the `float | None` annotation promises. Measured
+    live on GNOME and KDE before the fix: every role but `slider`, `level bar`
+    and `scroll bar` came back a bool, so `value is not None` was true for a
+    push button on Linux and false for one on Windows and macOS.
+    """
+
+    def setUp(self):
+        patcher, self.frame, self.button = install_fake_dogtail()
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        from pyguitest.backends import atspi
+
+        self.atspi = atspi
+
+    def test_a_control_with_no_value_interface_answers_none(self):
+        """The regression: dogtail's `False` must not reach a caller."""
+        node = FakeNode(name="Save", role="push button", value=False)
+        self.assertIsNone(self.atspi.Element(node).value)
+
+    def test_a_slider_answers_a_float(self):
+        """The case that must keep working."""
+        node = FakeNode(name="Volume", role="slider", value=0.4)
+        self.assertEqual(self.atspi.Element(node).value, 0.4)
+        self.assertIsInstance(self.atspi.Element(node).value, float)
+
+    def test_an_integer_value_is_widened_to_float(self):
+        """So the type is the annotation's, whatever the toolkit sent."""
+        node = FakeNode(name="Pages", role="spin button", value=7)
+        value = self.atspi.Element(node).value
+        self.assertEqual(value, 7.0)
+        self.assertIsInstance(value, float)
+
+    def test_true_is_not_mistaken_for_the_number_one(self):
+        """A bool is excluded even though Python counts it as an int.
+
+        Without the isinstance check, `True` would widen to 1.0 and a ticked
+        check box would read as a position of 1.0 -- which is exactly how a
+        tick gets compared against a slider's range by accident.
+        """
+        node = FakeNode(name="Bold", role="check box", value=True)
+        self.assertIsNone(self.atspi.Element(node).value)
+
+    def test_a_string_value_is_not_a_number(self):
+        """A toolkit putting text there is answering a different question."""
+        node = FakeNode(name="Name", role="entry", value="Ada")
+        self.assertIsNone(self.atspi.Element(node).value)
+
+    def test_an_unparseable_value_is_none_rather_than_an_error(self):
+        """Reading a property should not be the thing that raises."""
+        node = FakeNode(name="Odd", role="slider", value=object())
+        self.assertIsNone(self.atspi.Element(node).value)

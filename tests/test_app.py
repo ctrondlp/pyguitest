@@ -10,6 +10,7 @@ die politely, and a mock would only ever confirm which methods were called.
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -145,6 +146,62 @@ class TestState(unittest.TestCase):
         finally:
             app.stop()
         self.assertFalse(app.is_running())
+
+    @unittest.skipUnless(
+        hasattr(os, "waitid"), "needs os.waitid to await an exit without reaping"
+    )
+    def test_returncode_stays_none_until_something_reaps_the_process(self):
+        """The documented trap: exiting does not fill `returncode` in.
+
+        `subprocess` sets the attribute from `poll()`/`wait()`, not from the
+        exit, so a bare read straight after a program quits still answers
+        None -- which reads as "still running" to a caller that tests it that
+        way. Waited for with `WNOWAIT`, which is what makes this deterministic
+        rather than a sleep: it blocks until the child has exited and leaves
+        it reapable, so the read below is provably *after* the exit.
+        """
+        gui = session()
+        app = gui.start_app(EXITS)
+        os.waitid(os.P_PID, app.pid, os.WEXITED | os.WNOWAIT)
+
+        self.assertIsNone(
+            app.returncode, "the exit itself should not have filled returncode in"
+        )
+        self.assertEqual(app.poll(), 0)
+        self.assertEqual(app.returncode, 0, "poll() should have filled it in")
+
+    @unittest.skipUnless(
+        hasattr(os, "waitid"), "needs os.waitid to await an exit without reaping"
+    )
+    def test_is_running_reaps_the_process_as_a_side_effect(self):
+        """`is_running()` is a `poll()` underneath, so it also fills returncode.
+
+        Worth pinning because it is why the assertions in this file can read
+        `returncode` at all after calling `is_running()` -- and why a caller
+        who never calls either sees None forever.
+        """
+        gui = session()
+        app = gui.start_app(EXITS)
+        os.waitid(os.P_PID, app.pid, os.WEXITED | os.WNOWAIT)
+
+        self.assertIsNone(app.returncode)
+        self.assertFalse(app.is_running())
+        self.assertEqual(app.returncode, 0)
+
+    def test_signalling_an_exited_process_is_silent_on_both_platforms(self):
+        """terminate/kill/send_signal on a finished process do not raise.
+
+        `subprocess` guards all three on `returncode` being set, which is what
+        makes `stop()` idempotent and what lets a cleanup path call them
+        without checking first.
+        """
+        gui = session()
+        app = gui.start_app(EXITS)
+        app.wait(timeout=10)
+
+        app.terminate()
+        app.kill()
+        app.send_signal(signal.SIGTERM)
 
     def test_repr_says_which_program_and_whether_it_is_alive(self):
         gui = session()

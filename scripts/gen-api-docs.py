@@ -61,7 +61,9 @@ TYPES = ("Element", "Window", "Screen", "ImageMatch", "Application", "Environmen
 GROUPS: list[tuple[str, str, list[str]]] = [
     (
         "Session control",
-        "",
+        "A session is the handle on one desktop. `supports` and `require` are how a "
+        "script asks what this desktop allows before depending on it, rather than "
+        "discovering it from a traceback halfway through a run.",
         ["supports", "require", "capabilities", "report", "close"],
     ),
     (
@@ -85,7 +87,11 @@ GROUPS: list[tuple[str, str, list[str]]] = [
     ),
     (
         "Pointer",
-        "",
+        "Coordinates are absolute screen pixels, and `screen=` selects the monitor. "
+        "Prefer driving a named element over clicking a point where you can: a "
+        "coordinate goes stale the moment a window moves. `glide` and "
+        "`move_mouse_naturally` exist for applications that only react to real "
+        "movement, such as hover menus.",
         [
             "move_mouse",
             "glide",
@@ -99,7 +105,10 @@ GROUPS: list[tuple[str, str, list[str]]] = [
     ),
     (
         "Keyboard",
-        "",
+        "`type_text` is for literal text and `send_keys` for chords and named keys. "
+        "Both go to whatever holds focus, so focus a window or element first -- see "
+        "`focus_window` -- or the keystrokes land somewhere else. Typed text depends "
+        "on the session keymap; [input.md](input.md) covers when that matters.",
         [
             "type_text",
             "send_keys",
@@ -111,7 +120,10 @@ GROUPS: list[tuple[str, str, list[str]]] = [
     ),
     (
         "Windows",
-        "",
+        "A `Window` is a handle, not a snapshot: keep it and re-read through it. "
+        "Finding one by title is the usual way in, and a window that the list already "
+        "carries may still not be placed on screen -- check `is_window_viewable` "
+        "before acting on a position.",
         [
             "windows",
             "find_window",
@@ -131,11 +143,25 @@ GROUPS: list[tuple[str, str, list[str]]] = [
     ),
     (
         "Screen and capture",
-        "",
+        "Capture is the one area where desktops differ most in what they permit; "
+        "`screenshot` reports rather than guesses when a session will not serve it. "
+        "`capture_on_failure` is the one to reach for in a test suite, and `locate` "
+        "finds a known image on screen when nothing publishes an accessible element.",
         ["screens", "screenshot", "capture_on_failure", "locate", "locate_image"],
     ),
-    ("Clipboard", "", ["get_clipboard", "set_clipboard"]),
-    ("Processes", "", ["start_app", "run_app"]),
+    (
+        "Clipboard",
+        "Text only, and the selection a desktop calls the clipboard rather than the "
+        "X11 primary selection.",
+        ["get_clipboard", "set_clipboard"],
+    ),
+    (
+        "Processes",
+        "`start_app` launches and hands back an `Application` to wait on and tear "
+        "down; `run_app` is the fire-and-forget form. Launching the application under "
+        "test from the script is what makes a run repeatable.",
+        ["start_app", "run_app"],
+    ),
     (
         "Waiting",
         "Every `wait_*` call polls on an interval unless the backend can do "
@@ -220,6 +246,52 @@ def first_line(obj) -> str:
         return ""
     doc = inspect.getdoc(target) or ""
     return re.sub(r"\s+", " ", doc.split("\n\n")[0].strip())
+
+
+def body(obj) -> list[str]:
+    """Everything after a docstring's summary line, as markdown paragraphs.
+
+    The reason this page grew past a table. `first_line` publishes the
+    summary and nothing else, and ruff's D205 holds that summary to a single
+    line -- so every call in the reference was described in a median of eight
+    words while the docstring under it carried the part a reader actually
+    needs: that `button()` is push buttons *only* and a toolbar item
+    publishes a different role, that `scroll()` counts wheel detents rather
+    than pixels, that `wait_for_window` can return a window the window
+    manager has not placed yet. Measured before writing this: 92 of 92
+    documented `Session` members had more docstring than reached the page,
+    1170 lines of it, against a 476-line reference.
+
+    Borrowed docstrings are excluded for the same reason `first_line`
+    excludes them -- a value with no `__doc__` of its own reports its type's,
+    which is stdlib text that is reworded between interpreters, and this file
+    is byte-compared on every version CI runs.
+
+    Paragraph wrapping is left exactly as written. Markdown reflows a
+    paragraph anyway, and rewrapping here would churn the whole page every
+    time a docstring was rewrapped by a formatter.
+    """
+    target = obj.fget if isinstance(obj, property) else obj
+    if borrowed_docstring(target):
+        return []
+    doc = inspect.getdoc(target) or ""
+    paragraphs = [p.strip() for p in doc.split("\n\n")[1:] if p.strip()]
+    lines: list[str] = []
+    for paragraph in paragraphs:
+        lines += [textwrap.dedent(paragraph), ""]
+    return lines
+
+
+def borrowed_docstring(obj) -> bool:
+    """Whether `obj`'s docstring is really its type's, not its own.
+
+    `getattr_static` on a dataclass field hands back the default *value*, and
+    a value reports its type's `__doc__` -- so `has_dogtail: bool = False`
+    documented itself with `bool`'s docstring. Compared by equality rather
+    than identity because a C type rebuilds `__doc__` on each access.
+    """
+    doc = getattr(obj, "__doc__", None)
+    return bool(doc) and doc == getattr(type(obj), "__doc__", None)
 
 
 def attribute_note(source: str, name: str) -> str:
@@ -494,17 +566,36 @@ def member_row(cls, name: str, types: dict[str, str]) -> str:
     return f"| `{cell(label)}` |  |"
 
 
+def needs_cell(required, optional, x11_only: set[str]) -> str:
+    """The *Needs* cell: the capabilities, and the caveats on reaching them.
+
+    The X11-only mark lives here rather than in a column of its own. It
+    applies to nothing today -- every tier-6 capability is served by Windows
+    too -- so as a column it was 95 blank cells across fifteen tables, and a
+    reader scanning for the call they want paid for it in every one. Inline,
+    it costs nothing until it applies and appears next to the capability it
+    qualifies when it does. It is also how the Capabilities table has always
+    rendered the same fact, so the three tables now agree.
+    """
+    cell_text = ", ".join(f"`{c}`" for c in sorted(required))
+    notes = []
+    if optional:
+        extra = ", ".join(f"`{c}`" for c in sorted(optional))
+        notes.append(f"uses {extra} if present")
+    if any(c in x11_only for c in required):
+        notes.append("**X11 only**")
+    if notes:
+        cell_text += (" — " if cell_text else "") + "; ".join(notes)
+    return cell_text
+
+
 def session_row(name: str, x11_only: set[str]) -> str:
     """One Session method as a table row."""
     required, optional = method_capabilities(pyguitest.Session, name)
-    needs = ", ".join(f"`{c}`" for c in sorted(required))
-    if optional:
-        extra = ", ".join(f"`{c}`" for c in sorted(optional))
-        needs += (" — " if needs else "") + f"uses {extra} if present"
-    mark = "X11" if any(c in x11_only for c in required) else ""
+    needs = needs_cell(required, optional, x11_only)
     doc = first_line(inspect.getattr_static(pyguitest.Session, name))
     sig = cell(signature(pyguitest.Session, name))
-    return f"| `{sig}` | {needs} | {mark} | {cell(doc)} |"
+    return f"| `{sig}` | {needs} | {cell(doc)} |"
 
 
 HEADER = """# API reference
@@ -512,29 +603,58 @@ HEADER = """# API reference
 Every public name in `pyguitest`, with the capability each one needs.
 Generated by `scripts/gen-api-docs.py` — edit the docstrings, not this page.
 
+New to the library? [getting-started.md](getting-started.md) goes from an
+empty file to a working script; this page is the lookup you want once you
+know roughly what to reach for. [recipes.md](recipes.md) answers the
+task-shaped questions — waiting properly, filling a form, screenshots, CI —
+and [troubleshooting.md](troubleshooting.md) starts from the symptom when a
+call finds nothing, types nothing or captures nothing.
+
 **Reading the tables.** *Needs* is the `Capability` a call requires; ask
 `gui.supports(...)` before depending on it, or let the call raise
 `CapabilityUnsupported`. A blank means the call works on any session, and
 "uses X if present" means the call adapts rather than fails when X is
-missing. **X11** marks a call whose capability nothing but `X11Backend`
-provides -- the tier-6 rows, which no Wayland compositor can serve by design.
-None of them carries the mark today, because Windows provides every one and
-macOS serves `pointer_position()`: the capability model working, not an
-annotation gone missing. See
+missing. A few calls can also be marked **X11 only** — a capability nothing
+but `X11Backend` provides. Nothing carries that mark today, because Windows
+provides every tier-6 capability and macOS serves `pointer_position()`: the
+capability model working, not an annotation gone missing. See
 [wayland-audit.md](developers/wayland-audit.md) for why.
 
 ## Getting a session
+
+Most scripts have the same shape — open a session, find the window, work
+through named elements, and assert on what the application did:
 
 ```python
 import pyguitest
 
 gui = pyguitest.connect()
+window = gui.wait_for_window("Preferences", timeout=10)
+gui.focus_window(window)
+
+gui.text_field("Name").set_text("Ada")
+gui.checkbox("Subscribe").click()
+gui.button("Save").click()
+
+gui.expect_text(name="Status", equals="Saved")
+gui.close()
 ```
+
+`connect()` picks the backends for the session it finds; name them yourself
+only when you need a specific one. The call raises if nothing can drive this
+desktop at all, so there is no "did it work" check to write here.
+
+Two forks a first script meets. `Element.set_text` writes through the
+accessibility interface and sends no key events, which is what you want when
+the value is the point; `Session.type_text` sends real keystrokes, which is
+what you want when the application's own key handling is under test. And
+`expect_*` raises on failure for use directly in a test, where `wait_*`
+returns a value for you to branch on.
 """
 
 TABLE_HEAD = [
-    "| Call | Needs | | What it does |",
-    "|------|-------|---|--------------|",
+    "| Call | Needs | What it does |",
+    "|------|-------|--------------|",
 ]
 
 
@@ -553,11 +673,39 @@ def render_session(out: list[str], x11_only: set[str]) -> None:
         out += TABLE_HEAD
         out += [session_row(n, x11_only) for n in present]
         out.append("")
+        out += session_details(present)
     leftover = sorted(members - {n for _, _, names in GROUPS for n in names})
     if leftover:
         out += ["## Other", ""] + TABLE_HEAD
         out += [session_row(n, x11_only) for n in leftover]
         out.append("")
+        out += session_details(leftover)
+
+
+def session_details(names: list[str]) -> list[str]:
+    """The per-call detail that follows a group's index table.
+
+    The table stays the way in: signature, capability and the summary line,
+    so "which call do I want" is still one scan. What follows is the rest of
+    each docstring, which is where the caveat that saves an afternoon lives.
+    The summary is deliberately not repeated here -- the table above has
+    already given it, and a reference that says the same sentence twice per
+    call reads like filler.
+    """
+    out: list[str] = []
+    for name in names:
+        static = inspect.getattr_static(pyguitest.Session, name)
+        detail = body(static)
+        if not detail:
+            continue
+        # The name alone, not the signature. The table above carries the
+        # full one, and several run past 300 characters -- `elements()` takes
+        # seven keyword filters -- which makes an unreadable heading and an
+        # unusable anchor. A bare name also gives every call a stable
+        # `#name` link that survives a signature change.
+        out += [f"### `{name}`", ""]
+        out += detail
+    return out
 
 
 def forwarded_definition(attr: str):
@@ -615,16 +763,16 @@ def render_forwarded(out: list[str], x11_only: set[str]) -> None:
         "prevents by design lives here — on a Wayland session they raise",
         "`CapabilityUnsupported`, and `gui.supports(...)` answers in advance.",
         "",
-        "| Call | Needs | | What it does |",
-        "|------|-------|---|--------------|",
+        "| Call | Needs | What it does |",
+        "|------|-------|--------------|",
     ]
     for attr in missing:
         cap = _DISPATCH[attr]
         owner, obj = forwarded_definition(attr)
         doc = first_line(obj) if obj is not None else ""
         sig = cell(signature(owner, attr)) if owner is not None else f"{attr}(...)"
-        mark = "X11" if cap.name in x11_only else ""
-        out.append(f"| `{sig}` | `{cap.name}` | {mark} | {cell(doc)} |")
+        needs = needs_cell([cap.name], (), x11_only)
+        out.append(f"| `{sig}` | {needs} | {cell(doc)} |")
     out.append("")
 
 
@@ -647,6 +795,22 @@ def render_types(out: list[str]) -> None:
         out += ["| Member | What it does |", "|--------|--------------|"]
         out += [member_row(cls, m, types) for m in members]
         out.append("")
+        # `Element` is the type most end-user code actually touches --
+        # `gui.button("Save").click()` is an Element call -- and its members
+        # carried the same eight-word summaries the Session tables did, while
+        # the docstrings held the per-platform behaviour that decides whether
+        # a script works: what `value` answers for a check box on each
+        # backend, what `click(via=...)` falls back to, which toolkits
+        # publish `expanded` at all.
+        for member in members:
+            static = inspect.getattr_static(cls, member, None)
+            if static is None:
+                continue
+            detail = body(static)
+            if not detail:
+                continue
+            out += [f"#### `{member}`", ""]
+            out += detail
 
 
 def render_capabilities(out: list[str], prov, x11_only: set[str]) -> None:
