@@ -5,7 +5,190 @@ All notable changes to pyguitest are recorded here. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html) — with the usual
 0.x caveat that the API may still change between minor versions.
 
-## [Unreleased]
+## [0.20.0] — 2026-10-30
+
+### Fixed
+
+- **The two warning categories the package emits were not exported either.**
+  `CaptureFallbackWarning` (a capture tool that is installed, was selected
+  and does not work) and `KeymapWarning` (typed text that will not survive
+  the session's keyboard layout) are both described in `docs/install.md` as
+  things a reader will see, and both carry something a suite would want to
+  escalate -- but doing that needs `simplefilter("error", ...)` or
+  `-W error::...`, which needs the class, and they were reachable only by
+  importing `backends.composite` and `backends.input` directly. Now exported
+  and documented, with the same invariant asserted generically for warnings
+  as for errors.
+
+- **`focus_window()` abandoned its own retry on the first failure.** The
+  retry loop caught every exception and returned False, so one transient
+  failure on the first pass consumed the remaining `attempts` -- on the one
+  call whose entire purpose is to out-wait a window manager that grants focus
+  late. A `BackendCallTimeout` is the real-world instance: a window-manager
+  call that hung and was abandoned, which this package has a dedicated
+  exception type for precisely because it is worth retrying.
+
+  The two failures are now distinguished. `CapabilityUnsupported` still
+  reports False immediately -- asking is impossible, so no number of attempts
+  changes the answer, and retrying it would only cost `attempts` identical
+  refusals. Everything else continues to the next attempt. The contract is
+  unchanged: it still never raises, and still returns False once the attempts
+  are exhausted.
+
+- **`CaptureRegionUnsupported` was raised by the library but unreachable by
+  callers.** `cosmic` raises it for a well-formed on-screen region its
+  per-output capture cannot serve, and the only handler is inside
+  `CompositeBackend` -- so a session built on that backend *alone*
+  propagated it to a caller who could neither
+  `from pyguitest import CaptureRegionUnsupported` nor catch it as
+  `CapabilityUnsupported`, since it descends straight from `PyGUITestError`.
+  It was also missing from docs/api.md, which builds its Exceptions table
+  from `__all__`. Now exported and documented.
+
+  Measured on the COSMIC box rather than inferred, which corrected the
+  spelling: `cosmic` is **not** a nameable backend, so
+  `connect(backend="cosmic")` raises `BackendUnavailable`. The route in is
+  the nameable compositor-window-control family -- `connect(backend=
+  "windows")` on a COSMIC session returns a bare `CosmicBackend`, not a
+  composite, so nothing sits above it to catch. Triggering the raise itself
+  additionally needs a region straddling two outputs, which a single-output
+  VM cannot produce; the propagation path is what was measured.
+
+  `tests/test_api.py::TestPublicExports` had three hand-written cases for
+  exactly this failure, one per exception previously found missing; naming
+  them individually is what let the fourth through. It now asserts the
+  invariant generically -- every exception class defined in `pyguitest.errors`
+  appears in `pyguitest.__all__` -- so the next one cannot slip.
+
+- **`Element.value` answered dogtail's raw `False` on Linux for every
+  control without a Value interface**, where the annotation promises
+  `float | None` and the other two backends deliver it. The read passed
+  dogtail's answer straight through, and dogtail reports `False` -- not None,
+  and not an error -- for anything with no Value interface. Measured on live
+  trees on two boxes before the fix: of nineteen roles on a GNOME desktop and
+  twenty-eight on a KDE one, only `slider`, `level bar` and `scroll bar` gave
+  a float and **every other role gave a bool**, while `uia` and `macos` both
+  gave None. The practical cost is that `if element.value is not None:` --
+  the guard the annotation invites -- was true for a push button on Linux and
+  false for the same button on Windows and macOS, so a portable check for
+  "does this control have a position" quietly did the opposite thing per
+  platform. Now coerced the way `macos.Element.value` already was: a float
+  where the toolkit sent a number, None otherwise, with bools and strings
+  excluded even though Python counts `True` as an int -- a ticked check box
+  must not read as a position of 1.0.
+
+  **Behaviour change for Linux callers** who relied on the falsey value: the
+  answer is now None rather than `False`. Both are falsey, so `if not
+  element.value` is unaffected; `element.value == False` and
+  `isinstance(element.value, bool)` are not. Nothing inside pyguitest,
+  pyguitest-recorder or the torture-test suite reads `Element.value`, so the
+  blast radius is external callers only.
+
+  The rule now lives once, as `backends.base.numeric_value`, and all three
+  `Element.value` reads go through it. It had been written out separately in
+  each backend, which is how they came to differ: the bool exclusion was in
+  `atspi` and `macos` but **not in `uia`**, so a provider answering
+  `CurrentValue` with a boolean would have had Windows report a position
+  where the other two reported None. Unreachable on real UIA data -- the
+  pattern's value is a `double` -- but it was a live drift vector in a
+  contract the three are supposed to share, and it is closed.
+
+  One platform difference survives on purpose, because it is AX's data and
+  not this package's shape: macOS reports a number for a *tick* as well as
+  for a position, so a check box there answers `value == 0.0` beside
+  `checked is False` where Linux and Windows answer None. `isinstance(value,
+  float)` therefore still does not mean "this is a slider" -- the role does.
+
+### Documentation
+
+- **The install guide no longer promises a working pointer on Wayland, and
+  this contradicts what 0.17.0 recorded.** `docs/install.md`'s COSMIC row
+  used to say "the pointer comes from uinput". The reasoning behind it still
+  holds — COSMIC implements no unprivileged virtual-pointer protocol, so
+  uinput is the only thing left to try — but on four Wayland sessions
+  (Pop!_OS/COSMIC, Debian 13/GNOME, a local GNOME desktop, Fedora KDE/KWin)
+  `uinput` pointer events were measured as accepted by the kernel and
+  dropped before the compositor saw them, while keyboard injection through
+  the very same device worked.
+
+  That is the opposite of what 0.17.0's entry below reports for the same
+  compositor: "a uinput pointer click landing on the exact pixel requested
+  (confirmed by screenshot, and by clicking a real button)" on Pop!_OS
+  24.04. Both were live runs, and **what differed between them is not
+  recorded** — neither the COSMIC release nor which member the `pointer`
+  backend chose (it can serve uinput *or* ydotool, and only one of those is
+  the path measured as dropped). Re-measuring on the current Pop!_OS box
+  could not settle it either: `POINTER_QUERY` is unavailable on both COSMIC
+  and GNOME there, so the library cannot read the cursor back to confirm a
+  move, and only driving a real widget end to end would. Until that is run,
+  the guide tells readers to treat a working synthetic pointer on Wayland as
+  something to verify on their own session rather than to assume, which is
+  true under either result.
+
+- **The thin docstrings across the public `Element` and `Application`
+  surfaces are now thorough**, finishing the pass 0.17.0 did for `Session`.
+  They were the two that pass left behind, and the asymmetry showed:
+  `Element` had 24 of its 32 members on a single line and `Application` 11
+  of 13, and since `docs/api.md` publishes the first paragraph of each
+  docstring, that one line *was* the entire public reference for them.
+  `Element` is a Protocol with three implementations, so what it was missing
+  was exactly what no single backend's own docstring could say -- where the
+  three agree and where they do not. Now recorded: `role` answers in
+  at-spi's spelling on every platform (UIA control types and macOS AX roles
+  are both translated on the way out, which is what makes one
+  `Role.PUSH_BUTTON` locator match everywhere, and `unknown` is the
+  no-mapping answer); `visible` means three different things and is lenient
+  on Windows and macOS but not on Linux, with UIA counting a row scrolled
+  out of a list as hidden where AX cannot see that at all; `actions` comes
+  back sorted on Linux and Windows but in AX's preference order on macOS, so
+  it is a set and not a sequence; `do_action`, `set_text`, `select` and
+  `collapse` raise typed refusals on Windows and macOS where Linux passes
+  the request to the toolkit as given; `find`/`child` search descendants at
+  any depth and report no match rather than raising; `is_ancestor_of` is
+  strict and compares by the platform's own element equality, not Python
+  identity; `text` and `value` are the nullable pair, and which elements
+  answer `text` is a platform answer (an at-spi label reports None where a
+  macOS static text answers); `checkable`/`selectable`/`expandable` are the
+  reads that gate `checked`/`selected`/`expanded`, and on Windows and macOS
+  are the same signal the matching action acts on.
+- **Two `Application` docstrings were wrong, not merely thin.**
+  `returncode` said "or None while it is still running"; it is also None
+  *after* the program has exited and before anything has reaped it, because
+  `subprocess` fills the attribute in from `poll()`/`wait()` rather than
+  from the exit itself -- so a bare read straight after a program quits
+  still answers None. And `terminate`/`kill`/`send_signal` were documented
+  as "Send SIGTERM"/"Send SIGKILL"/"Send an arbitrary signal" on a library
+  that supports Windows, where there are no POSIX signals: both of the
+  first two map to `TerminateProcess` (so `kill()` is not more forceful
+  than `terminate()` there, and neither can be declined or handled), and
+  `send_signal` accepts only `SIGTERM`, `CTRL_C_EVENT` and
+  `CTRL_BREAK_EVENT`, raising `ValueError` for anything else. Also now
+  recorded: `pid` and `is_running()` describe the process `start_app`
+  started, which is not always the one that draws the window -- a launcher
+  that spawns the application and exits (macOS `open -a`, a wrapper script)
+  leaves `pid` pointing at the launcher, so it will not match an
+  `Element.pid` or `Window.pid`, and `is_running()` reads False while the
+  window is still up. The string form of `command` is explicitly *not* the
+  usual cause, measured both ways: the shell `exec`s a simple command, so
+  the string and list forms report the same pid, and only a string the
+  shell cannot finish with an exec (a background job, a pipeline) leaves
+  the shell itself there.
+- **`Element.value`'s docstring now records the measured per-platform
+  shapes** behind the fix above, including the surviving macOS difference and
+  the reason `isinstance(value, float)` is not a test for "this is a slider".
+- **`Element.name`, `.role` and `.description` are a `str` subclass on
+  macOS**, not `str` itself -- PyObjC's `pyobjc_unicode`. `isinstance(x,
+  str)` holds and equality and concatenation behave, but `type(x) is str`
+  does not, which is now noted so an exact-type check is not written against
+  it.
+- **`expect_text`, `expect_checked` and `expect_showing` now say that they
+  spend `timeout` twice.** Each waits for the element and then waits for the
+  state, passing the same `timeout` to both, so the worst case is double
+  what the argument reads as -- and the two phases fail differently, with a
+  missing control raising `ElementNotFound` and a wrong state raising
+  `AssertionError`. `expect_checked` additionally records the trap that a
+  control whose toolkit publishes no checked state compares `None` against
+  the wanted bool, times out, and then reports "but it is unchecked".
 
 ## [0.19.1] — 2026-10-29
 
@@ -4909,7 +5092,9 @@ First public release.
 - A `pyguitest` command-line entry point.
 - PEP 561 type information (`py.typed`); no hard runtime dependencies.
 
-[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.19.0...HEAD
+[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.20.0...HEAD
+[0.20.0]: https://github.com/ctrondlp/pyguitest/compare/v0.19.1...v0.20.0
+[0.19.1]: https://github.com/ctrondlp/pyguitest/compare/v0.19.0...v0.19.1
 [0.19.0]: https://github.com/ctrondlp/pyguitest/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/ctrondlp/pyguitest/compare/v0.17.1...v0.18.0
 [0.17.1]: https://github.com/ctrondlp/pyguitest/compare/v0.17.0...v0.17.1

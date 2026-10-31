@@ -135,6 +135,7 @@ from .base import (
     Window,
     check_region,
     click_by_pointer,
+    numeric_value,
     require_click_route,
     resolve_click_route,
 )
@@ -807,21 +808,22 @@ class Element:
         The same attribute as `text`, read the other way: AX puts a number there
         for a slider and a progress indicator, and a string for anything holding
         text, so which one a caller gets is decided by what the element
-        published. A bool is excluded even though Python counts it as an int --
-        a check box's 0/1 is `checked`'s answer, not a number to compare against
-        a slider's.
+        published. The shaping is `base.numeric_value`, shared with the other
+        two backends.
+
+        What is this platform's alone: AX keeps a *tick* in the same attribute
+        as a position, so a check box here answers `value == 0.0` beside
+        `checked is False`, where Linux and Windows both answer None.
+        Measured live -- `check box`, `radio button`, `separator`,
+        `ruler marker` and `dock item` all answered a float. It follows that
+        `isinstance(element.value, float)` is not a test for "this is a
+        slider" on a Mac; the role is.
 
         Fresh for `text`'s reason, and it is the sharper case of the two: a
         slider is a control a script drags and then reads, so a remembered
         number would report the position from before the drag.
         """
-        raw = self._state(self._ax.kAXValueAttribute, None)
-        if isinstance(raw, (bool, str)):
-            return None
-        try:
-            return None if raw is None else float(raw)
-        except (TypeError, ValueError):
-            return None
+        return numeric_value(self._state(self._ax.kAXValueAttribute, None))
 
     @property
     def checked(self):

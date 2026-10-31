@@ -17,6 +17,7 @@ from unittest import mock
 import pyguitest
 from pyguitest import (
     AccessibilityViolation,
+    BackendCallTimeout,
     Capability,
     CapabilityUnsupported,
     ClipboardMismatch,
@@ -833,6 +834,35 @@ class TestExpectWindow(unittest.TestCase):
         self.assertEqual(backend.activate_calls, 0)
 
 
+class FlakyActivationBackend(SettlingBackend):
+    """Activation that raises on its first `fail_times` attempts, then works.
+
+    The shape `focus_window`'s retry exists for: a window manager that drops
+    or mishandles the first request rather than one that cannot honour it at
+    all. `BackendCallTimeout` because it is the real-world instance -- a
+    window-manager call that hung and was abandoned -- and because it is a
+    `PyGUITestError` rather than a capability refusal, which is the
+    distinction `focus_window` now draws.
+    """
+
+    def __init__(self, fail_times=1, activations_needed=1):
+        super().__init__(activations_needed=activations_needed)
+        self.fail_times = fail_times
+        self.failures = 0
+
+    def activate_window(self, window):
+        if self.failures < self.fail_times:
+            self.failures += 1
+            self.activate_calls += 1
+            # Both arguments, or this constructs nothing: BackendCallTimeout
+            # takes (what, timeout), so the one-argument form raised
+            # TypeError instead -- which focus_window's broad `except` also
+            # catches, so these tests passed while never once exercising the
+            # backend-timeout path they exist for.
+            raise BackendCallTimeout("activate_window", 5.0)
+        return super().activate_window(window)
+
+
 class TestFocusWindow(unittest.TestCase):
     """focus_window: the activation expect_window deliberately does not do."""
 
@@ -855,6 +885,48 @@ class TestFocusWindow(unittest.TestCase):
         # take", and must not become an exception out of a best-effort call.
         gui = session()
         self.assertFalse(gui.focus_window(gui.find_window("Editor")))
+
+    def test_a_transient_activation_failure_does_not_abandon_the_retry(self):
+        """One failed attempt must not consume the other four.
+
+        Regression: the retry loop caught every exception and returned False,
+        so a `BackendCallTimeout` on the first pass -- a window-manager call
+        that hung and was abandoned, the archetypal transient failure -- gave
+        up immediately on the one call whose whole purpose is to out-wait a
+        window manager that grants focus late.
+        """
+        backend = FlakyActivationBackend(fail_times=1)
+        gui = pyguitest.Session(backend, pyguitest.detect())
+        self.assertTrue(gui.focus_window(backend._windows[0], attempts=3))
+        self.assertEqual(backend.failures, 1)
+
+    def test_a_capability_refusal_still_gives_up_at_once(self):
+        """The other half: retrying what cannot be asked is wasted work.
+
+        FakeBackend declares no WINDOW_ACTIVATE, so `activate_window` refuses
+        identically every time. That must cost one refusal, not `attempts` of
+        them -- which is what separates it from the transient case above.
+        """
+        calls = []
+        gui = session()
+        window = gui.find_window("Editor")
+
+        def refuse(_window):
+            calls.append(_window)
+            raise CapabilityUnsupported(
+                Capability.WINDOW_ACTIVATE, "fake", "no activation here"
+            )
+
+        with mock.patch.object(gui, "activate_window", refuse):
+            self.assertFalse(gui.focus_window(window, attempts=5))
+        self.assertEqual(len(calls), 1, "a refusal should not be retried")
+
+    def test_returns_false_when_every_attempt_fails_transiently(self):
+        """Exhausting the retries is still a False, never a raised error."""
+        backend = FlakyActivationBackend(fail_times=99)
+        gui = pyguitest.Session(backend, pyguitest.detect())
+        self.assertFalse(gui.focus_window(backend._windows[0], attempts=3))
+        self.assertEqual(backend.failures, 3, "should have used every attempt")
 
 
 class TestWaitWindowClose(unittest.TestCase):
@@ -1073,6 +1145,104 @@ class TestExpectShowing(unittest.TestCase):
         gui = session()
         with self.assertRaisesRegex(AssertionError, "expected .* to be showing"):
             gui.expect_showing(role=Role.PUSH_BUTTON, name="Save", timeout=0.05)
+
+
+class TestTheTwoPhaseExpectations(unittest.TestCase):
+    """What `expect_text`/`expect_checked`/`expect_showing` share.
+
+    Each is two sequential waits -- find the element, then watch its state --
+    and both are handed the same `timeout`. That is documented on all three
+    because it surprises people twice: the budget is twice what the argument
+    reads as, and the two phases fail with different exception types.
+    """
+
+    CALLS = (
+        ("expect_text", {"name": "Name", "equals": "nope"}),
+        ("expect_checked", {"name": "Remember me", "checked": True}),
+        ("expect_showing", {"role": Role.PUSH_BUTTON, "name": "Save"}),
+    )
+
+    def test_both_phases_are_given_the_whole_timeout(self):
+        """So the worst case is 2x `timeout`, not `timeout`."""
+
+        class Recorder:
+            """Stands in for both phases, noting the timeout each was handed."""
+
+            def __init__(self, element):
+                self.element = element
+                self.handed = []
+
+            def expect_element(self, **kwargs):
+                self.handed.append(("expect_element", kwargs.get("timeout")))
+                return self.element
+
+            def wait_until(self, predicate, timeout=None):
+                self.handed.append(("wait_until", timeout))
+                return False
+
+        for method, kwargs in self.CALLS:
+            with self.subTest(method=method):
+                gui = session()
+                found = FakeElement(Role.PUSH_BUTTON, "Save", visible=False)
+                found.checked = False
+                found.text = "actual"
+                recorder = Recorder(found)
+                with (
+                    mock.patch.object(
+                        pyguitest.Session,
+                        "expect_element",
+                        side_effect=recorder.expect_element,
+                    ),
+                    mock.patch.object(
+                        pyguitest.Session,
+                        "wait_until",
+                        side_effect=recorder.wait_until,
+                    ),
+                    self.assertRaises(AssertionError),
+                ):
+                    getattr(gui, method)(timeout=7, **kwargs)
+                self.assertEqual(
+                    recorder.handed,
+                    [("expect_element", 7), ("wait_until", 7)],
+                    method,
+                )
+
+    def test_a_missing_element_fails_differently_from_a_wrong_state(self):
+        """Phase 1 raises ElementNotFound; only phase 2 asserts.
+
+        The distinction a suite acts on: "there is no such control" is a
+        locator or a bridge problem, where "the control never reached that
+        state" is the application's.
+        """
+        for method, kwargs in self.CALLS:
+            with self.subTest(method=method):
+                gui = session()
+                with self.assertRaises(ElementNotFound):
+                    getattr(gui, method)(
+                        timeout=0.05,
+                        **{**kwargs, "name": "NoSuchElementAnywhere"},
+                    )
+
+    def test_expect_checked_on_a_state_free_control_reports_unchecked(self):
+        """The documented trap, pinned so the message cannot quietly improve.
+
+        `Element.checked` is None where the toolkit publishes no such state,
+        which equals neither True nor False -- so the wait runs to its
+        deadline and the message then calls None "unchecked", because None is
+        falsey. A reader who does not know that reads it as a real state.
+        `Element.checkable` is the read that tells them apart.
+        """
+        gui = session()
+        stateless = FakeElement(Role.CHECK_BOX, "Remember me")
+        stateless.checked = None
+        with mock.patch.object(
+            pyguitest.Session, "expect_element", return_value=stateless
+        ):
+            with self.assertRaisesRegex(
+                AssertionError,
+                "expected 'Remember me' to be checked, but it is unchecked",
+            ):
+                gui.expect_checked(name="Remember me", checked=True, timeout=0.05)
 
 
 class TestWaitUntilGone(unittest.TestCase):
@@ -3091,6 +3261,99 @@ class TestPublicExports(unittest.TestCase):
         # request path when an accepted call is never answered.
         self.assertIn("ElementNotActionable", pyguitest.__all__)
         self.assertIn("PortalTimeout", pyguitest.__all__)
+
+    def test_every_exception_in_errors_is_exported(self):
+        """The invariant behind the three hand-written cases above.
+
+        Those name `ElementNotFound`, `ElementNotActionable` and
+        `PortalTimeout` because each was found missing one at a time. Naming
+        them is what let the *next* one through: `CaptureRegionUnsupported`
+        was raised by `cosmic` and caught only inside `CompositeBackend`, so
+        a session built on that backend alone propagated it to a caller who
+        could neither import it nor catch it as `CapabilityUnsupported`,
+        since it descends straight from `PyGUITestError`. Measured on the
+        COSMIC box: `cosmic` is not itself nameable, but
+        `connect(backend="windows")` there returns a bare `CosmicBackend`
+        rather than a composite, so nothing sits above it to catch. It was
+        also absent from docs/api.md, which builds its Exceptions table from
+        `__all__`.
+
+        So this asks the question generically instead: anything in
+        `pyguitest.errors` that a caller can be handed is a name a caller
+        can reach.
+        """
+        import inspect
+
+        from pyguitest import errors
+
+        defined_here = {
+            name
+            for name, obj in vars(errors).items()
+            if not name.startswith("_")
+            and inspect.isclass(obj)
+            and issubclass(obj, BaseException)
+            and obj.__module__ == errors.__name__
+        }
+        self.assertTrue(defined_here, "found no exceptions to check")
+        missing = sorted(defined_here - set(pyguitest.__all__))
+        self.assertEqual(
+            missing,
+            [],
+            f"raised by the package but unimportable from it: {missing}",
+        )
+
+    def test_every_warning_the_package_emits_is_exported(self):
+        """A warning category is only useful if a caller can name it.
+
+        The same invariant as above, for the half that is not an error.
+        `CaptureFallbackWarning` and `KeymapWarning` are both described in
+        `docs/install.md` as things a reader will see, and both carry
+        something a suite would want to escalate -- a capture tool that is
+        installed and broken, and text that will not survive the session's
+        keyboard layout. Doing that means `simplefilter("error", ...)` or
+        `-W error::...`, which needs the class; before this they lived in
+        `backends.composite` and `backends.input`, reachable only by
+        importing a backend module directly.
+
+        A warning genuinely internal to the package should be named with a
+        leading underscore rather than left out of `__all__`.
+        """
+        import importlib
+        import inspect
+        import pkgutil
+        import warnings as _warnings
+
+        import pyguitest.backends as backends_pkg
+
+        found = {}
+        for mod_info in pkgutil.walk_packages(
+            backends_pkg.__path__, backends_pkg.__name__ + "."
+        ):
+            try:
+                mod = importlib.import_module(mod_info.name)
+            except Exception:  # noqa: BLE001 - a backend whose deps are absent
+                continue
+            for name, obj in vars(mod).items():
+                if (
+                    not name.startswith("_")
+                    and inspect.isclass(obj)
+                    and issubclass(obj, Warning)
+                    and obj.__module__ == mod.__name__
+                ):
+                    found[name] = mod_info.name
+        self.assertTrue(found, "found no warning categories to check")
+        missing = sorted(set(found) - set(pyguitest.__all__))
+        self.assertEqual(
+            missing,
+            [],
+            f"emitted by the package but unimportable from it: "
+            f"{ {n: found[n] for n in missing} }",
+        )
+        # And the point of exporting them: escalation has to actually work.
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("error", pyguitest.KeymapWarning)
+            with self.assertRaises(pyguitest.KeymapWarning):
+                _warnings.warn("layout", pyguitest.KeymapWarning, stacklevel=1)
 
     def test_both_stay_catchable_as_pyguitesterror(self):
         # Why those two are worth exporting rather than being documented as

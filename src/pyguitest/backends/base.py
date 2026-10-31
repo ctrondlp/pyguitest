@@ -15,7 +15,7 @@ from __future__ import annotations
 import math
 import re
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Protocol, TypeVar
 
 from ..capabilities import Capability, CapabilitySet
 from ..errors import CapabilityUnsupported, ElementNotActionable
@@ -39,6 +39,7 @@ __all__ = [
     "click_by_pointer",
     "resolve_click_route",
     "require_click_route",
+    "numeric_value",
 ]
 
 _Backend = TypeVar("_Backend", bound="GUIBackend")
@@ -232,6 +233,50 @@ def identity_scope(backend: GUIBackend | None) -> object:
     its own keeps the strict per-backend rule it always had.
     """
     return getattr(backend, "_identity_scope", None) or backend
+
+
+def numeric_value(raw: Any) -> float | None:
+    """What `Element.value` reports for whatever the toolkit published.
+
+    One rule in one place, because all three toolkits answer this question
+    with a different shape and each backend used to decide for itself what
+    counted as a number -- which is how they came to disagree. AT-SPI's
+    `value` is `False` on anything with no Value interface (dogtail's own
+    answer, measured on live GNOME and KDE trees: every role but `slider`,
+    `level bar` and `scroll bar`), UIA answers only where the RangeValue
+    pattern exists, and AX puts a slider's position and a check box's tick
+    in the same attribute. The property is annotated `float | None`, so this
+    is where everything that is not a float becomes None.
+
+    A bool is excluded even though Python counts it as an int: `True` would
+    otherwise widen to 1.0 and a ticked check box would read as a position
+    of 1.0, which is exactly how a tick gets compared against a slider's
+    range by accident. A string is excluded because a toolkit putting text
+    there is answering `text`'s question, not this one.
+
+    `raw` is `Any` rather than `object` deliberately: it is whatever a
+    D-Bus, COM or Objective-C bridge handed back, and the point of this
+    function is to duck-type it with `float()` and catch the failure. Typing
+    it `object` only moves that cast to a `type: ignore` at the one line that
+    does the work.
+
+    Not given the bounded-call treatment the backends wrap their own reads
+    in: this is pure arithmetic on a value already in hand, so the caller
+    does the `_run_bounded`/`_current` read and hands the result here --
+    which is also what keeps a `BackendCallTimeout` propagating rather than
+    being flattened into "no value".
+    """
+    if isinstance(raw, (bool, str)) or raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError is the one a reader does not expect: an int too large
+        # for a float raises it rather than ValueError, so a bridge handing
+        # back a huge integer escaped this function entirely and broke the
+        # `float | None` contract it exists to guarantee. `check_region`
+        # already catches it on the same conversion.
+        return None
 
 
 def click_by_pointer(element: Element, reason: str) -> None:
@@ -438,61 +483,170 @@ class Element(Protocol):
 
     @property
     def name(self) -> str:
-        """The element's accessible name, such as a button's label."""
+        """The element's accessible name, such as a button's label.
+
+        Always a string on every backend, never None. On Windows and macOS
+        that is enforced on the way out: an application is free to put a
+        non-string there, and coercing it is what stops a `TypeError`
+        surfacing from inside somebody's search instead. On macOS what comes
+        back is PyObjC's own `str` subclass, so `isinstance(name, str)` holds
+        but `type(name) is str` does not -- compare and concatenate freely,
+        and do not test the concrete type. An empty name is the
+        commonest reason a locator finds nothing -- an icon-only button whose
+        developer never set one -- and `description` is where the label went
+        in that case, which makes it the second thing a locator should try.
+        """
         ...
 
     @property
     def role(self) -> str:
-        """The element's accessible role, such as 'push button'."""
+        """The element's accessible role, in at-spi's spelling everywhere.
+
+        The spelling is at-spi's on every platform, not the native layer's:
+        UIA control types and macOS AX roles are both translated on the way
+        out, which is what makes one `Role.PUSH_BUTTON` locator match on all
+        three. at-spi2's own disagreements are folded in too -- a push button
+        reads back the same whether the bridge calls it `"button"` or `"push
+        button"`.
+
+        What an *untranslated* role reads as differs, and only one of the two
+        is `unknown`: Windows reports `unknown` for a control type outside
+        the documented range, while macOS spells an unmapped AX role out into
+        words instead, keeping `unknown` for the case where no role could be
+        read at all. Either way it is a prompt to run `pyguitest inspect`
+        rather than to guess.
+        """
         ...
 
     @property
     def parent(self) -> Element | None:
-        """The containing element, or None at the root."""
+        """The containing element, or None at the root.
+
+        The direct parent only, and on Windows the parent in UIA's control
+        view rather than its raw tree. The element handed back carries the
+        same session this one did, so a walk upwards can still click.
+        """
         ...
 
     @property
     def children(self) -> list[Element]:
-        """The elements directly inside this one."""
+        """The elements directly inside this one, in the toolkit's order.
+
+        One level only: `find` and `child` are the recursive pair. The order
+        is whatever the toolkit publishes rather than anything sorted here,
+        so position within this list is a locator of last resort -- it breaks
+        the first time someone inserts a widget.
+        """
         ...
 
     @property
     def visible(self) -> bool:
-        """Whether the element is currently showing."""
+        """Whether the element is currently showing, as far as it can be known.
+
+        The one property whose meaning genuinely differs by platform, because
+        no two of these layers answer the same question. at-spi has a
+        `showing` state. UIA answers `IsOffscreen`, which counts a row
+        scrolled out of a long list as hidden. macOS publishes no such state
+        at all, so it is inferred from three things -- the element reports a
+        rectangle, it is not marked hidden, and its window is in the window
+        server's on-screen list -- and cannot see a scrolling ancestor having
+        moved it out of view.
+
+        Lenient on Windows and macOS, where a read the toolkit refuses and a
+        join that cannot decide both answer True: a caller about to act on
+        the element is better served by the optimistic answer than by a
+        confident "it is hidden" that is wrong. Linux has no such default and
+        lets the failed read surface instead. Either way this is a hint, and
+        the action itself is the better proof.
+        """
         ...
 
     @property
     def enabled(self) -> bool:
-        """Whether the element accepts input, rather than being greyed out."""
+        """Whether the element accepts input, rather than being greyed out.
+
+        True where the toolkit will not say, on all three backends -- the same
+        leniency `visible` documents. Worth waiting on rather than asserting
+        once: a Save button is disabled until the document is modified, which
+        is `Session.wait_until(lambda: save.enabled)`, not a single read.
+        """
         ...
 
     @property
     def description(self) -> str:
-        """The element's longer accessible description, often a tooltip."""
+        """The element's longer accessible description, often a tooltip.
+
+        Always a string, empty where there is none. Where a control publishes
+        no `name`, this is usually where its label went, which makes it the
+        second thing to try in a locator. On macOS it falls back to the same
+        attribute `name` does, so the two can come back identical there.
+        """
         ...
 
     @property
     def text(self) -> str | None:
-        """The element's text content, for text boxes and labels."""
+        """The element's text content, for text boxes and labels, or None.
+
+        None where the element holds no text at all -- and which elements
+        those are is a platform answer, not a universal one: an at-spi label
+        reports None while a macOS static text answers with its visible
+        string, because on a Mac the label's string lives in the one
+        attribute that holds text. On Windows the read tries UIA's Text
+        pattern first (a document or a read-only body) and then its Value
+        pattern (an editable field), which is one property at-spi splits
+        differently. `value` is the numeric sibling, not this.
+        """
         ...
 
     @property
     def value(self) -> float | None:
-        """The numeric value of a slider, spinner, or progress bar."""
+        """The numeric value of a slider, spinner, or progress bar, or None.
+
+        A float where the control publishes a value, None where it does not,
+        on every backend. Linux used to answer dogtail's raw `False` for
+        anything with no Value interface, which made `value is not None`
+        true for a push button there and false for one everywhere else; it
+        is coerced now, so the annotation and the behaviour agree.
+
+        One platform difference survives, because it is the toolkit's data
+        rather than this package's shape: **macOS reports a number for a
+        tick as well as for a position**, since AX keeps both in the same
+        attribute. A check box there reads `value == 0.0` alongside
+        `checked is False`, where Linux and Windows both answer None.
+        Measured on live trees -- `check box`, `radio button`, `separator`,
+        `ruler marker` and `dock item` all answered a float on macOS.
+
+        So `isinstance(element.value, float)` still does not mean "this is a
+        slider". Branch on the role: `checked` is the read for a tick and
+        `text` for an editable field's contents, and `value` is meaningful
+        only once the role says the control has a position.
+        """
         ...
 
     @property
     def checked(self) -> bool | None:
         """Whether a check box, radio button, or toggle is set.
 
-        A real boolean everywhere, not only where `checkable` is true --
-        read that first to know whether this value means anything.
+        `None` is a real answer, not a failure, and the annotation means it:
+        on Windows an element with no Toggle pattern and no radio-selection
+        state has nothing to be checked, and an *indeterminate* control --
+        a mixed-state check box -- has not said "set" or "not set" either.
+        Read `checkable` first to know whether the value means anything,
+        and treat `None` as "it did not say" rather than as False.
         """
         ...
 
     @property
     def checkable(self) -> bool:
-        """Whether the element has a check box, radio button, or toggle."""
+        """Whether the element has a check box, radio button, or toggle.
+
+        Read this before trusting `checked`, which has no state to report on
+        an element that has none -- and answers `None` where the platform
+        says so rather than inventing a False. How it is decided is the
+        platform's business -- a Toggle pattern on Windows, an at-spi state,
+        the role plus a menu item's mark character on macOS -- but the
+        question it answers is the same one everywhere.
+        """
         ...
 
     @property
@@ -505,7 +659,12 @@ class Element(Protocol):
 
     @property
     def selectable(self) -> bool:
-        """Whether the element can be a list item, tab, or menu selection."""
+        """Whether the element can be a list item, tab, or menu selection.
+
+        Read this before trusting `selected`, for `checkable`'s reason. On
+        Windows and macOS it is the same signal `select()` acts on, so a
+        False here is also the reason that call would refuse.
+        """
         ...
 
     @property
@@ -518,17 +677,37 @@ class Element(Protocol):
 
     @property
     def expandable(self) -> bool:
-        """Whether the element can be expanded or collapsed, like a tree item."""
+        """Whether the element can be expanded or collapsed, like a tree item.
+
+        Read this before trusting `expanded`. On Windows and macOS it is the
+        same signal `expand()` and `collapse()` act on. A collapsed branch's
+        rows are not in the tree at all until something opens it, which is
+        what `Session.tree_items` walks the tree expanding as it goes.
+        """
         ...
 
     @property
     def focused(self) -> bool:
-        """Whether the element currently has keyboard focus."""
+        """Whether the element currently has keyboard focus.
+
+        Not every desktop publishes per-widget focus, and one that does not
+        reports False for everything rather than saying so -- which reads as
+        a test failure when it is an unsupported desktop. Ask
+        `Session.focus_tracking_works()` first on a machine you do not know.
+        """
         ...
 
     @property
     def actions(self) -> list[str]:
-        """The names of the actions this element offers, e.g. 'click'."""
+        """The names of the actions this element offers, e.g. 'click'.
+
+        The names `do_action` takes. Treat it as a set, not a sequence: it
+        comes back sorted on Linux and Windows but in AX's own preference
+        order on macOS, so indexing into it means something different per
+        platform. Print it before reaching for a toolkit-specific action
+        name -- what a widget publishes is the toolkit's choice, and an
+        element that publishes none at all is why `click` has a pointer rung.
+        """
         ...
 
     @property
@@ -614,19 +793,53 @@ class Element(Protocol):
         ...
 
     def focus(self) -> None:
-        """Give the element keyboard focus."""
+        """Give the element keyboard focus -- a request, not a guarantee.
+
+        On Windows and macOS a toolkit that will not focus the element says
+        so with a typed error naming what was attempted, rather than
+        returning quietly. Either way the grant is the toolkit's to make, so
+        read `focused` or call `Session.assert_focused` afterwards wherever
+        the next step depends on it.
+        """
         ...
 
     def set_text(self, text: str) -> None:
-        """Replace the element's text content."""
+        """Replace the element's text content through the accessible interface.
+
+        Not typing: no key events are sent, so autocomplete, input masks and
+        per-keystroke validation are never exercised. That is the right call
+        when the value is the point, and the wrong one when the application's
+        key handling is what is under test -- `Session.type_text` is that.
+
+        On Windows and macOS a control with no way in -- a read-only label, a
+        document, something that merely looks like a field -- raises
+        `CapabilityUnsupported`, because "there is no route" is the useful
+        half of the answer.
+        """
         ...
 
     def do_action(self, name: str) -> None:
-        """Perform a named accessible action, such as "click" or "activate"."""
+        """Perform a named accessible action, such as "click" or "activate".
+
+        The names are the ones `actions` publishes. Windows and macOS also
+        accept at-spi's spellings, so `click`, `press` and `activate` all
+        mean the native invoke there and a script written against Linux keeps
+        working. Both raise `ValueError` listing what the element does offer
+        when the name is unknown, and `ElementNotActionable` when it is a
+        real action this element does not publish -- which is what tells a
+        typo apart from a widget that cannot. On Linux the name is passed to
+        the toolkit as given, so the refusal is the toolkit's own.
+        """
         ...
 
     def select(self) -> None:
-        """Select this element, for a list item, tab, or menu entry."""
+        """Select this element, for a list item, tab, or menu entry.
+
+        On Windows and macOS an element that publishes no selection raises
+        `CapabilityUnsupported` rather than returning quietly: a caller who
+        asked for a selection and got silence cannot tell that apart from a
+        selection that happened. `selectable` is the question asked first.
+        """
         ...
 
     def expand(self) -> None:
@@ -639,27 +852,83 @@ class Element(Protocol):
         ...
 
     def collapse(self) -> None:
-        """Close a tree item or similar disclosure control. See `expand`."""
+        """Close a tree item or similar disclosure control. See `expand`.
+
+        A no-op where `expanded` already reads False, for the reason `expand`
+        gives. On Windows and macOS an element with nothing to collapse
+        raises `CapabilityUnsupported` rather than doing nothing silently.
+        """
         ...
 
     def choose(self, option: str) -> None:
-        """Pick `option` from this dropdown by its visible text."""
+        """Pick `option` from this dropdown by its visible text.
+
+        Through the control's own accessibility interface, which is why it
+        keeps working when the list is long enough to scroll. The mechanics
+        differ underneath: Windows and macOS open the popup first, because a
+        combo box's items often do not exist in the tree until it is open,
+        and then look for the item inside the control and beside the whole
+        window in turn -- the two kinds of combo box put it in different
+        places. When the text does not match, `options()` is what to print.
+        """
         ...
 
     def options(self) -> list[Element]:
-        """The choices this dropdown or list offers, as Elements."""
+        """The choices this dropdown or list offers, as Elements.
+
+        Menu items first, then list items, on every backend. An empty list is
+        a truthful answer about a popup nobody has opened yet rather than a
+        failure, so this is the diagnostic to reach for when `choose` cannot
+        find an option -- it prints what the control actually offers.
+        """
         ...
 
     def find(self, role: str | None = None, name: str | None = None) -> list[Element]:
-        """Search this element's descendants by role and/or name."""
+        """Search this element's whole subtree, not just its children.
+
+        The recursive search, where `children` is one level. An empty list is
+        how it reports no match, rather than raising. The elements it hands
+        back carry this one's session, so a result can be clicked and
+        double-clicked like one the session found itself. For anything beyond
+        role and name -- a state, a description, a predicate --
+        `Session.elements(within=...)` is the fuller filter.
+
+        Unbounded on Linux and Windows, where the toolkit does the searching.
+        macOS has no tree search to ask, so the walk is this package's own and
+        carries a budget: 24 levels deep and 20,000 nodes, past which the
+        answer is what was found so far rather than an error. Deep enough for
+        any ordinary interface, and reachable by a large Electron document.
+        """
         ...
 
     def child(self, role: str | None = None, name: str | None = None) -> Element | None:
-        """Return the first descendant matching role and/or name, or None."""
+        """Return the first descendant matching role and/or name, or None.
+
+        `find`'s first match, with the same recursive reach, and None rather
+        than an exception where nothing matches -- the opposite convention
+        from `Session.element`, which raises. Useful for a local lookup
+        inside an element already in hand.
+        """
         ...
 
     def is_ancestor_of(self, other: Element) -> bool:
-        """Whether `other` sits somewhere inside this element."""
+        """Whether `other` sits somewhere inside this element.
+
+        Strictly inside: an element is not its own ancestor. Answered by
+        walking upwards from `other` rather than descending, since the
+        question is about one path and descending would visit the whole tree.
+
+        How the comparison at each step is made is the platform's: Windows
+        asks `CompareElements` and macOS asks CoreFoundation, because two
+        references to one element are distinct objects there as often as not,
+        while on Linux PyGObject hands back the same wrapper for the same
+        accessible and `==` is already the right question. The walk is
+        depth-bounded on Windows and macOS, so a toolkit reporting a cycle
+        cannot make it spin; on Linux it is not, so a cyclic tree would.
+
+        Its use is confirming that a control really belongs to the dialog a
+        test thinks it scoped the search to.
+        """
         ...
 
 

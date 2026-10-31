@@ -7,6 +7,7 @@ what they raise when nothing in the session can serve them.
 
 import dataclasses
 import json
+import math
 import sys
 import types
 import unittest
@@ -15,6 +16,7 @@ from unittest import mock
 
 from pyguitest import Capability, backends, connect, tools
 from pyguitest.backends import NullBackend, available, select
+from pyguitest.backends.base import numeric_value
 from pyguitest.errors import (
     BackendUnavailable,
     CapabilityUnsupported,
@@ -1169,3 +1171,55 @@ class TestXlibSize(unittest.TestCase):
     def test_python_xlib_not_installed_is_none(self):
         with mock.patch.dict(sys.modules, {"Xlib": None, "Xlib.display": None}):
             self.assertIsNone(backends._xlib_size())
+
+
+class TestNumericValue(unittest.TestCase):
+    """`base.numeric_value` -- the one rule all three `Element.value` reads share.
+
+    It exists because each backend used to decide for itself what counted as
+    a number, and they came to disagree: the bool exclusion was written into
+    `atspi` and `macos` but not `uia`. Tested here rather than three times
+    over, which is the point of having moved it.
+    """
+
+    def test_a_number_becomes_a_float(self):
+        """Whatever the toolkit sent, the annotation says float."""
+        self.assertEqual(numeric_value(0.4), 0.4)
+        self.assertEqual(numeric_value(7), 7.0)
+        self.assertIsInstance(numeric_value(7), float)
+        self.assertEqual(numeric_value(-1.0), -1.0)
+        self.assertEqual(numeric_value(0), 0.0)
+
+    def test_nothing_becomes_none(self):
+        """The absent case, which every backend can produce."""
+        self.assertIsNone(numeric_value(None))
+
+    def test_a_bool_is_not_a_number(self):
+        """`True` must not widen to 1.0 and read as a slider at full travel.
+
+        dogtail answers `False` for any control with no Value interface, so
+        without this the whole Linux desktop reported a position.
+        """
+        self.assertIsNone(numeric_value(False))
+        self.assertIsNone(numeric_value(True))
+
+    def test_a_string_is_not_a_number(self):
+        """A toolkit putting text there is answering `text`'s question."""
+        self.assertIsNone(numeric_value("Ada"))
+        self.assertIsNone(numeric_value(""))
+        self.assertIsNone(numeric_value("0.4"))
+
+    def test_something_unparseable_is_none_rather_than_an_error(self):
+        """Reading a property must not be the thing that raises."""
+        self.assertIsNone(numeric_value(object()))
+        self.assertIsNone(numeric_value([1, 2]))
+
+    def test_a_non_finite_number_is_passed_through_as_a_float(self):
+        """Deliberately not filtered: a toolkit reporting inf is reporting it.
+
+        `check_region` rejects non-finite input because it has to produce
+        pixels; this only has to report what a control published, and
+        inventing None for it would hide a real answer.
+        """
+        self.assertEqual(numeric_value(float("inf")), float("inf"))
+        self.assertTrue(math.isnan(numeric_value(float("nan"))))

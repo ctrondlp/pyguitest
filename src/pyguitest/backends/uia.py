@@ -103,7 +103,13 @@ from ..errors import (
 )
 from ..roles import Role, spellings
 from . import _winapi
-from .base import GUIBackend, click_by_pointer, require_click_route, resolve_click_route
+from .base import (
+    GUIBackend,
+    click_by_pointer,
+    numeric_value,
+    require_click_route,
+    resolve_click_route,
+)
 
 if TYPE_CHECKING:
     # Imported for annotations only: Session.element and the widget finders are
@@ -812,16 +818,20 @@ class Element:
 
         Only the RangeValue pattern has one: an editable field's Value pattern
         holds text, and reading a float out of that would be inventing a
-        number.
+        number. No pattern means None, which is the answer for a check box
+        here -- UIA keeps a tick in the Toggle pattern, where AX keeps it in
+        the same attribute as a slider's position.
+
+        The shaping is `base.numeric_value`, shared with the other two
+        backends. That is also where this gained a guard it was missing: the
+        bool exclusion was written into `atspi` and `macos` and not here, so
+        the three agreed on real data and would have disagreed the moment a
+        provider answered `CurrentValue` with a boolean.
         """
         pattern = self._pattern("range value")
         if pattern is None:
             return None
-        raw = _current(pattern, "CurrentValue", None)
-        try:
-            return None if raw is None else float(raw)
-        except (TypeError, ValueError):
-            return None
+        return numeric_value(_current(pattern, "CurrentValue", None))
 
     @property
     def checked(self):
