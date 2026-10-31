@@ -120,10 +120,12 @@ GROUPS: list[tuple[str, str, list[str]]] = [
     ),
     (
         "Windows",
-        "A `Window` is a handle, not a snapshot: keep it and re-read through it. "
-        "Finding one by title is the usual way in, and a window that the list already "
-        "carries may still not be placed on screen -- check `is_window_viewable` "
-        "before acting on a position.",
+        "A `Window` stays usable as a handle, but its `title`, `app_id` and `pid` "
+        "are read when it is created and do not update themselves -- call "
+        "`refresh_window` for current values rather than comparing against a title "
+        "the application has since changed. Finding one by title is the usual way "
+        "in, and a window the list already carries may still not be placed on "
+        "screen: check `is_window_viewable` before acting on a position.",
         [
             "windows",
             "find_window",
@@ -158,8 +160,11 @@ GROUPS: list[tuple[str, str, list[str]]] = [
     (
         "Processes",
         "`start_app` launches and hands back an `Application` to wait on and tear "
-        "down; `run_app` is the fire-and-forget form. Launching the application under "
-        "test from the script is what makes a run repeatable.",
+        "down, and is what a GUI test wants. `run_app` **blocks until the program "
+        "exits** -- it is `subprocess.run` underneath, so pointing it at an "
+        "application hangs the script until someone closes the window. Launching "
+        "the application under test from the script is what makes a run "
+        "repeatable.",
         ["start_app", "run_app"],
     ),
     (
@@ -275,10 +280,19 @@ def body(obj) -> list[str]:
     if borrowed_docstring(target):
         return []
     doc = inspect.getdoc(target) or ""
-    paragraphs = [p.strip() for p in doc.split("\n\n")[1:] if p.strip()]
+    # `rstrip`, never `strip`: `getdoc` has already dedented the docstring
+    # uniformly, so a paragraph that is *still* indented is an indented code
+    # example and markdown renders it as a code block. Stripping removed the
+    # leading whitespace of the paragraph's first line only, which left
+    # `with gui.capture_on_failure("artifacts"):` flush against the prose
+    # while the lines under it stayed indented -- the opening line rendered
+    # as a sentence and the body as a code block. `dedent` could not undo it
+    # either: with the first line already at column 0 the common prefix is
+    # empty, so it had nothing to remove.
+    paragraphs = [p.rstrip() for p in doc.split("\n\n")[1:] if p.strip()]
     lines: list[str] = []
     for paragraph in paragraphs:
-        lines += [textwrap.dedent(paragraph), ""]
+        lines += [paragraph, ""]
     return lines
 
 
@@ -629,8 +643,11 @@ through named elements, and assert on what the application did:
 import pyguitest
 
 gui = pyguitest.connect()
+gui.require(pyguitest.Capability.ELEMENT_TREE, pyguitest.Capability.POINTER_BUTTON)
+
 window = gui.wait_for_window("Preferences", timeout=10)
-gui.focus_window(window)
+if not gui.focus_window(window):
+    raise AssertionError("the window manager would not focus Preferences")
 
 gui.text_field("Name").set_text("Ada")
 gui.checkbox("Subscribe").click()
@@ -641,8 +658,14 @@ gui.close()
 ```
 
 `connect()` picks the backends for the session it finds; name them yourself
-only when you need a specific one. The call raises if nothing can drive this
-desktop at all, so there is no "did it work" check to write here.
+only when you need a specific one. It does **not** raise when nothing can
+drive this desktop -- automatic selection falls back to a `NullBackend` and
+you still get a session, which then refuses each call individually. That is
+why the second line is there: `require` is the check that fails early and
+names what is missing, rather than letting a script run on into a refusal.
+`focus_window` is checked for the same reason -- it returns False rather
+than raising when a window manager declines, and typing into an unfocused
+window sends the keystrokes somewhere else.
 
 Two forks a first script meets. `Element.set_text` writes through the
 accessibility interface and sends no key events, which is what you want when

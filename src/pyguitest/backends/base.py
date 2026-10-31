@@ -270,7 +270,12 @@ def numeric_value(raw: Any) -> float | None:
         return None
     try:
         return float(raw)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError is the one a reader does not expect: an int too large
+        # for a float raises it rather than ValueError, so a bridge handing
+        # back a huge integer escaped this function entirely and broke the
+        # `float | None` contract it exists to guarantee. `check_region`
+        # already catches it on the same conversion.
         return None
 
 
@@ -622,8 +627,12 @@ class Element(Protocol):
     def checked(self) -> bool | None:
         """Whether a check box, radio button, or toggle is set.
 
-        A real boolean everywhere, not only where `checkable` is true --
-        read that first to know whether this value means anything.
+        `None` is a real answer, not a failure, and the annotation means it:
+        on Windows an element with no Toggle pattern and no radio-selection
+        state has nothing to be checked, and an *indeterminate* control --
+        a mixed-state check box -- has not said "set" or "not set" either.
+        Read `checkable` first to know whether the value means anything,
+        and treat `None` as "it did not say" rather than as False.
         """
         ...
 
@@ -631,8 +640,9 @@ class Element(Protocol):
     def checkable(self) -> bool:
         """Whether the element has a check box, radio button, or toggle.
 
-        Read this before trusting `checked`, which reports a plain bool on
-        elements that have no such state to report. How it is decided is the
+        Read this before trusting `checked`, which has no state to report on
+        an element that has none -- and answers `None` where the platform
+        says so rather than inventing a False. How it is decided is the
         platform's business -- a Toggle pattern on Windows, an at-spi state,
         the role plus a menu item's mark character on macOS -- but the
         question it answers is the same one everywhere.

@@ -101,6 +101,30 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ### Documentation
 
+- **The install guide no longer promises a working pointer on Wayland, and
+  this contradicts what 0.17.0 recorded.** `docs/install.md`'s COSMIC row
+  used to say "the pointer comes from uinput". The reasoning behind it still
+  holds — COSMIC implements no unprivileged virtual-pointer protocol, so
+  uinput is the only thing left to try — but on four Wayland sessions
+  (Pop!_OS/COSMIC, Debian 13/GNOME, a local GNOME desktop, Fedora KDE/KWin)
+  `uinput` pointer events were measured as accepted by the kernel and
+  dropped before the compositor saw them, while keyboard injection through
+  the very same device worked.
+
+  That is the opposite of what 0.17.0's entry below reports for the same
+  compositor: "a uinput pointer click landing on the exact pixel requested
+  (confirmed by screenshot, and by clicking a real button)" on Pop!_OS
+  24.04. Both were live runs, and **what differed between them is not
+  recorded** — neither the COSMIC release nor which member the `pointer`
+  backend chose (it can serve uinput *or* ydotool, and only one of those is
+  the path measured as dropped). Re-measuring on the current Pop!_OS box
+  could not settle it either: `POINTER_QUERY` is unavailable on both COSMIC
+  and GNOME there, so the library cannot read the cursor back to confirm a
+  move, and only driving a real widget end to end would. Until that is run,
+  the guide tells readers to treat a working synthetic pointer on Wayland as
+  something to verify on their own session rather than to assume, which is
+  true under either result.
+
 - **The thin docstrings across the public `Element` and `Application`
   surfaces are now thorough**, finishing the pass 0.17.0 did for `Session`.
   They were the two that pass left behind, and the asymmetry showed:

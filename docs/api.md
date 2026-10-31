@@ -29,8 +29,11 @@ through named elements, and assert on what the application did:
 import pyguitest
 
 gui = pyguitest.connect()
+gui.require(pyguitest.Capability.ELEMENT_TREE, pyguitest.Capability.POINTER_BUTTON)
+
 window = gui.wait_for_window("Preferences", timeout=10)
-gui.focus_window(window)
+if not gui.focus_window(window):
+    raise AssertionError("the window manager would not focus Preferences")
 
 gui.text_field("Name").set_text("Ada")
 gui.checkbox("Subscribe").click()
@@ -41,8 +44,14 @@ gui.close()
 ```
 
 `connect()` picks the backends for the session it finds; name them yourself
-only when you need a specific one. The call raises if nothing can drive this
-desktop at all, so there is no "did it work" check to write here.
+only when you need a specific one. It does **not** raise when nothing can
+drive this desktop -- automatic selection falls back to a `NullBackend` and
+you still get a session, which then refuses each call individually. That is
+why the second line is there: `require` is the check that fails early and
+names what is missing, rather than letting a script run on into a refusal.
+`focus_window` is checked for the same reason -- it returns False rather
+than raising when a window manager declines, and typing into an unfocused
+window sends the keystrokes somewhere else.
 
 Two forks a first script meets. `Element.set_text` writes through the
 accessibility interface and sends no key events, which is what you want when
@@ -104,7 +113,7 @@ Closes display connections, virtual input devices and any portal or
 libei session the backend opened. Prefer the context-manager form,
 which closes on the way out even if the body raises:
 
-with pyguitest.connect() as gui:
+    with pyguitest.connect() as gui:
         ...
 
 What this does *not* do is undo input state: a key or button left
@@ -195,13 +204,13 @@ each filter accepts.
 regex, matched with `.search()` -- the same convention find_window
 uses for titles:
 
-gui.elements(role=Role.PUSH_BUTTON, enabled=True)
+    gui.elements(role=Role.PUSH_BUTTON, enabled=True)
     gui.elements(name=re.compile(r"^Save"))
 
 `predicate` is an escape hatch for anything the named filters do not
 cover, such as an ancestor/descendant relationship:
 
-gui.elements(predicate=lambda e: some_label.is_ancestor_of(e))
+    gui.elements(predicate=lambda e: some_label.is_ancestor_of(e))
 
 `within` scopes the search to one element's subtree, and takes an
 `Element` -- for a window, `gui.window_element(title)`, not the
@@ -232,7 +241,7 @@ unfiltered walk crosses every application on the desktop.
 
 Scopes an element search to one window via `within=`:
 
-gui.element(role=Role.CHECK_BOX, name="Enable",
+    gui.element(role=Role.CHECK_BOX, name="Enable",
                 within=gui.window_element("Preferences"))
 
 `title` takes a plain string (matched literally, as a substring) or
@@ -287,7 +296,7 @@ Deliberately not a Capability: those are static, per-backend facts,
 and this one can only be answered by looking at the tree right now.
 Ask before depending on the three methods above:
 
-if gui.focus_tracking_works():
+    if gui.focus_tracking_works():
         gui.assert_focused(name="Password")
 
 A live probe of this moment, not a permanent verdict -- it is
@@ -407,10 +416,10 @@ Clicks wherever the pointer already is -- this moves nothing. Pair
 it with move_mouse(), or use click_element(), which takes its
 destination from the element's own extents:
 
-gui.move_mouse(x, y)
+    gui.move_mouse(x, y)
     gui.click()
 
-gui.click_element(gui.button("Save"))   # move and click
+    gui.click_element(gui.button("Save"))   # move and click
 
 `button` is 1 left, 2 middle, 3 right. Do not reach for 4/5 to
 scroll: X11's button-as-wheel encoding is not how the other
@@ -509,7 +518,7 @@ Replaces X11::GUITest's SendKeys and its `{}` grammar -- see
 quote_for_type for the escaping half of this contract. Special
 characters:
 
-^ % + # &   modifiers: Ctrl, Alt, Shift, Meta, AltGr
+    ^ % + # &   modifiers: Ctrl, Alt, Shift, Meta, AltGr
     ~ or \n     Enter
     ( )         group the following keys under a modifier
     { }         escape a special character, name a key by
@@ -519,7 +528,7 @@ Everything else is sent as literal text. A modifier not immediately
 followed by `(` is pressed and released on its own, combined with
 nothing:
 
-gui.send_keys("Hello, how are you?\n")
+    gui.send_keys("Hello, how are you?\n")
     gui.send_keys("%(f)q")        # Alt-f, then plain q
     gui.send_keys("^(+(l))")      # Ctrl-Shift-l
     gui.send_keys("+(abc)")       # Shift held: ABC
@@ -573,7 +582,7 @@ key names as press_key, and like it sends a *key*, not a character
 -- for text use type_text, and for a key with modifiers use
 send_keys:
 
-gui.tap_key("Return")
+    gui.tap_key("Return")
     gui.send_keys("^(s)")       # Ctrl-S, modifier released for you
 
 ### `press_tab`
@@ -585,7 +594,7 @@ permission.
 
 ## Windows
 
-A `Window` is a handle, not a snapshot: keep it and re-read through it. Finding one by title is the usual way in, and a window that the list already carries may still not be placed on screen -- check `is_window_viewable` before acting on a position.
+A `Window` stays usable as a handle, but its `title`, `app_id` and `pid` are read when it is created and do not update themselves -- call `refresh_window` for current values rather than comparing against a title the application has since changed. Finding one by title is the usual way in, and a window the list already carries may still not be placed on screen: check `is_window_viewable` before acting on a position.
 
 | Call | Needs | What it does |
 |------|-------|--------------|
@@ -850,7 +859,7 @@ Capturing it after the fact is too late -- by then the app has been
 torn down -- so it has to happen while the exception is still
 propagating:
 
-with gui.capture_on_failure("artifacts"):
+    with gui.capture_on_failure("artifacts"):
         gui.click_button("Save")
         assert gui.element(name="Saved")
 
@@ -948,7 +957,7 @@ assert_clipboard() where the test depends on it.
 
 ## Processes
 
-`start_app` launches and hands back an `Application` to wait on and tear down; `run_app` is the fire-and-forget form. Launching the application under test from the script is what makes a run repeatable.
+`start_app` launches and hands back an `Application` to wait on and tear down, and is what a GUI test wants. `run_app` **blocks until the program exits** -- it is `subprocess.run` underneath, so pointing it at an application hangs the script until someone closes the window. Launching the application under test from the script is what makes a run repeatable.
 
 | Call | Needs | What it does |
 |------|-------|--------------|
@@ -962,7 +971,7 @@ the bare one leaves to the caller. Use it as a context manager when
 the program should not outlive the block, which is almost always --
 it terminates, and kills if that does not take:
 
-with gui.start_app([EDITOR, path]) as app:
+    with gui.start_app([EDITOR, path]) as app:
         window = gui.wait_for_window("Editor", timeout=10)
         ...
 
@@ -982,7 +991,7 @@ environment rather than adding to it, which on a GUI session drops
 DISPLAY/WAYLAND_DISPLAY and the app never appears -- pass a merged
 copy to override one variable:
 
-gui.start_app(["app"], env={**os.environ, "LANG": "de_DE.UTF-8"})
+    gui.start_app(["app"], env={**os.environ, "LANG": "de_DE.UTF-8"})
 
 ### `run_app`
 
@@ -1030,7 +1039,7 @@ ping/pong round trip), this returns once the compositor has
 actually taken the events rather than once a guessed interval has
 elapsed::
 
-gui.click()
+    gui.click()
     gui.sync()
     assert gui.element(name="Saved")
 
@@ -1751,16 +1760,21 @@ the locator that found it in the first place to search again with.
 
 #### `checkable`
 
-Read this before trusting `checked`, which reports a plain bool on
-elements that have no such state to report. How it is decided is the
+Read this before trusting `checked`, which has no state to report on
+an element that has none -- and answers `None` where the platform
+says so rather than inventing a False. How it is decided is the
 platform's business -- a Toggle pattern on Windows, an at-spi state,
 the role plus a menu item's mark character on macOS -- but the
 question it answers is the same one everywhere.
 
 #### `checked`
 
-A real boolean everywhere, not only where `checkable` is true --
-read that first to know whether this value means anything.
+`None` is a real answer, not a failure, and the annotation means it:
+on Windows an element with no Toggle pattern and no radio-selection
+state has nothing to be checked, and an *indeterminate* control --
+a mixed-state check box -- has not said "set" or "not set" either.
+Read `checkable` first to know whether the value means anything,
+and treat `None` as "it did not say" rather than as False.
 
 #### `child`
 
@@ -2142,12 +2156,24 @@ the `Element.pid` or `Window.pid` of the application on screen. Check
 with `pyguitest inspect` when a pid-scoped element query comes back
 empty for an application that is plainly running.
 
-The string form of `command` is *not* the usual cause: the shell
-`exec`s a simple command, so `start_app("editor file")` and
-`start_app(["editor", "file"])` both report the editor's own pid.
-Only a string the shell cannot finish with an exec -- a background
-job, a pipeline, a trap -- leaves the shell itself here, with the
-program as its child. Measured both ways on Linux.
+The string form of `command` is a common cause, and which way it
+goes depends on what `/bin/sh` is on the machine. Measured three
+ways rather than assumed:
+
+- `/bin/sh` is **bash** (Fedora): bash `exec`s a simple command, no
+  shell is left behind, and `start_app("editor file")` reports the
+  editor's own pid.
+- `/bin/sh` is **dash** (Debian 13, dash 0.5.12-12; Pop!_OS, dash
+  0.5.12-6ubuntu5): the shell does *not* exec. `sleep 5` ran as a
+  child of a surviving `sh`, so the pid here is the **shell's**, and
+  a pid-scoped element query finds nothing. Debian and Ubuntu are
+  both in this group, so it is the common case, not the exotic one.
+
+A string the shell cannot finish with an exec at all -- a background
+job, a pipeline, a trap -- leaves the shell here on every platform.
+
+Pass the list form, `start_app(["editor", "file"])`, whenever the
+pid matters: it runs no shell, so the pid is always the program's.
 
 #### `poll`
 
@@ -2183,7 +2209,16 @@ Unix only in any real sense. On Windows `subprocess` accepts just
 `SIGTERM` (which it turns into `TerminateProcess`), `CTRL_C_EVENT`
 and `CTRL_BREAK_EVENT`, and raises `ValueError` for anything else --
 so a suite that signals a process needs a platform branch rather
-than a portable call. Signalling a process already known to have
+than a portable call.
+
+Accepted is not the same as delivered, and the two console events
+carry conditions `start_app` does not set up by default. A console
+event reaches a process only through a shared console, and
+`CTRL_BREAK_EVENT` needs the child in its own process group --
+launch it with `creationflags=subprocess.CREATE_NEW_PROCESS_GROUP`
+or it will not arrive. `CTRL_C_EVENT` cannot be aimed at one group
+at all on Windows, so it reaches every process sharing the console,
+this one included. Signalling a process already known to have
 exited returns silently on both platforms.
 
 #### `stderr`
@@ -2201,8 +2236,16 @@ for one with `stdin=subprocess.PIPE`.
 #### `stdout`
 
 None unless the caller passed `stdout=subprocess.PIPE`, and a GUI
-program often writes nothing useful there anyway. Read it before
-calling `restart()`, which closes the old process's pipes.
+program often writes nothing useful there anyway.
+
+`restart()` closes the old process's pipes, so anything still
+unread is gone -- but do not reach for `app.stdout.read()` to get
+in first: `read()` waits for EOF, which a *running* application
+will not give, so the call blocks instead of returning what has
+been written. Draining one pipe while the other fills can deadlock
+for the same reason the stdlib warns about. Use
+`communicate(timeout=...)` on `app.process`, or read incrementally
+on a thread, if the output is wanted while the program is alive.
 
 #### `stop`
 

@@ -854,7 +854,12 @@ class FlakyActivationBackend(SettlingBackend):
         if self.failures < self.fail_times:
             self.failures += 1
             self.activate_calls += 1
-            raise BackendCallTimeout("activate_window hung")
+            # Both arguments, or this constructs nothing: BackendCallTimeout
+            # takes (what, timeout), so the one-argument form raised
+            # TypeError instead -- which focus_window's broad `except` also
+            # catches, so these tests passed while never once exercising the
+            # backend-timeout path they exist for.
+            raise BackendCallTimeout("activate_window", 5.0)
         return super().activate_window(window)
 
 

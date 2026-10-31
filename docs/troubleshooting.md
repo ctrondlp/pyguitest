@@ -240,11 +240,16 @@ Work down this list; it is ordered by how often each one is the answer.
    permission, a `ydotool` daemon, libei, or portal consent, and no desktop
    has all of these by default.
 2. **Is it only the pointer, on Wayland?** If keystrokes land and clicks do
-   not, nothing is misconfigured: `uinput` pointer events are accepted by the
-   kernel and dropped before the compositor sees them, measured on COSMIC,
-   GNOME and KWin. Click through `Element.click()` (the accessible action,
-   which needs no pointer) or use `connect(backend="eiinput")` for real
-   motion over libei — [the full note is in
+   not, one likely cause needs no misconfiguration at all: `uinput` pointer
+   events are accepted by the kernel and dropped before the compositor sees
+   them, measured on COSMIC, GNOME and KWin. Confirm which pointer backend
+   was actually selected first — `pyguitest doctor` names it, and backends
+   compose independently, so a session can have working keyboard input and
+   no usable pointer backend. Then click through `Element.click(via="action")`
+   (the accessible action, which needs no pointer; plain `click()` can fall
+   back to coordinates on an element that publishes no action) or use
+   `connect(backend="eiinput")` for real motion over libei — [the full note
+   is in
    install.md](install.md#the-pointer-on-wayland-measured-rather-than-assumed).
    If the keyboard is dead *too*, this is not your problem; keep reading.
 3. **Did a consent dialog appear and get dismissed?** Portal-based input

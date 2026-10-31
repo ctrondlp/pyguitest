@@ -168,12 +168,24 @@ class Application:
         with `pyguitest inspect` when a pid-scoped element query comes back
         empty for an application that is plainly running.
 
-        The string form of `command` is *not* the usual cause: the shell
-        `exec`s a simple command, so `start_app("editor file")` and
-        `start_app(["editor", "file"])` both report the editor's own pid.
-        Only a string the shell cannot finish with an exec -- a background
-        job, a pipeline, a trap -- leaves the shell itself here, with the
-        program as its child. Measured both ways on Linux.
+        The string form of `command` is a common cause, and which way it
+        goes depends on what `/bin/sh` is on the machine. Measured three
+        ways rather than assumed:
+
+        - `/bin/sh` is **bash** (Fedora): bash `exec`s a simple command, no
+          shell is left behind, and `start_app("editor file")` reports the
+          editor's own pid.
+        - `/bin/sh` is **dash** (Debian 13, dash 0.5.12-12; Pop!_OS, dash
+          0.5.12-6ubuntu5): the shell does *not* exec. `sleep 5` ran as a
+          child of a surviving `sh`, so the pid here is the **shell's**, and
+          a pid-scoped element query finds nothing. Debian and Ubuntu are
+          both in this group, so it is the common case, not the exotic one.
+
+        A string the shell cannot finish with an exec at all -- a background
+        job, a pipeline, a trap -- leaves the shell here on every platform.
+
+        Pass the list form, `start_app(["editor", "file"])`, whenever the
+        pid matters: it runs no shell, so the pid is always the program's.
         """
         return self.process.pid
 
@@ -205,8 +217,16 @@ class Application:
         """The process's stdout, or None unless `start_app` was given a pipe.
 
         None unless the caller passed `stdout=subprocess.PIPE`, and a GUI
-        program often writes nothing useful there anyway. Read it before
-        calling `restart()`, which closes the old process's pipes.
+        program often writes nothing useful there anyway.
+
+        `restart()` closes the old process's pipes, so anything still
+        unread is gone -- but do not reach for `app.stdout.read()` to get
+        in first: `read()` waits for EOF, which a *running* application
+        will not give, so the call blocks instead of returning what has
+        been written. Draining one pipe while the other fills can deadlock
+        for the same reason the stdlib warns about. Use
+        `communicate(timeout=...)` on `app.process`, or read incrementally
+        on a thread, if the output is wanted while the program is alive.
         """
         return self.process.stdout
 
@@ -273,7 +293,16 @@ class Application:
         `SIGTERM` (which it turns into `TerminateProcess`), `CTRL_C_EVENT`
         and `CTRL_BREAK_EVENT`, and raises `ValueError` for anything else --
         so a suite that signals a process needs a platform branch rather
-        than a portable call. Signalling a process already known to have
+        than a portable call.
+
+        Accepted is not the same as delivered, and the two console events
+        carry conditions `start_app` does not set up by default. A console
+        event reaches a process only through a shared console, and
+        `CTRL_BREAK_EVENT` needs the child in its own process group --
+        launch it with `creationflags=subprocess.CREATE_NEW_PROCESS_GROUP`
+        or it will not arrive. `CTRL_C_EVENT` cannot be aimed at one group
+        at all on Windows, so it reaches every process sharing the console,
+        this one included. Signalling a process already known to have
         exited returns silently on both platforms.
         """
         self.process.send_signal(signal)

@@ -117,9 +117,13 @@ device works:
 So on a Wayland session, plan for keyboard and accessible actions and treat a
 working synthetic pointer as something to verify, not to assume:
 
-- `Element.click()` activates through the accessible action and needs no
-  pointer at all. It is what every pointer-free driver in the torture fleet
-  uses, on five compositors.
+- `Element.click()` activates through the accessible action **where the
+  element publishes one**, and that path needs no pointer at all. It is what
+  every pointer-free driver in the torture fleet uses, on five compositors.
+  Where an element offers no usable action the AT-SPI backend falls back to
+  a coordinate click, which does need pointer input — so on a session with
+  no working pointer, pass `click(via="action")` to forbid that fallback and
+  get a refusal you can see instead of a click that silently does nothing.
 - Reach keyboard-only controls by moving focus (Tab-seeking until
   `Element.focused`), not by clicking into them.
 - Where you genuinely need pointer *motion*, `connect(backend="eiinput")`
