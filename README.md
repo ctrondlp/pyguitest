@@ -56,6 +56,14 @@ minutes from nothing to a working script. [docs/recipes.md](https://github.com/c
 answers "how do I…", and [docs/troubleshooting.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/troubleshooting.md)
 answers "why didn't that work".
 
+**Prefer a book?** *Python Desktop Automation* is a full-length companion to
+pyguitest and pyguitest-recorder — the desktop automation mindset,
+accessibility and toolkit differences, display servers, the recorder, and
+professional test practice. Free to read, pay what you want:
+[leanpub.com/python-desktop-automation](https://leanpub.com/python-desktop-automation).
+The docs above remain authoritative for API detail; the book teaches the
+workflow.
+
 ## What pyguitest is for
 
 One Python API for driving an application that has no automation API of its
