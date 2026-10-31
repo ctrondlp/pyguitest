@@ -26,6 +26,19 @@ Reach for `validation.md` before trusting a claim about what works on your
 desktop specifically — it is the record of what was run, where, and what
 broke.
 
+## The book
+
+*Python Desktop Automation: Building Reliable Cross-Platform GUI Tests with
+pyguitest and pyguitest-recorder* covers this ground at book length — the
+mindset, the toolkits, the display servers, the recorder, and how to turn a
+working script into a suite worth keeping. Free to read, pay what you want:
+[leanpub.com/python-desktop-automation](https://leanpub.com/python-desktop-automation).
+
+It is a companion to these pages, not a replacement for them. The book is an
+edition and names the releases it was written against; `api.md` is generated
+from the source on every change, so it is the one to trust when the two
+disagree.
+
 ## Design and internals
 
 [developers/](developers/) holds the rationale and the internals: why the API
