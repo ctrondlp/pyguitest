@@ -27,6 +27,13 @@ DOCS = "\n".join((README, INSTALL, INPUT))
 _INLINE_LINK = re.compile(r"\]\(([^)\s]+)\)")
 _CONTENTS_ENTRY = re.compile(r"^- \[[^\]]+\]\(#([^)]+)\)$", re.MULTILINE)
 _HEADING = re.compile(r"^#{1,6} (.+)$", re.MULTILINE)
+# An explicit anchor, `<a id="...">`, which is the other way a page declares a
+# link target. api.md puts one on each row of its capability table so the ~95
+# `Needs` cells can link to the row defining the capability they name -- a
+# heading per capability would add 32 entries to the page outline to say what
+# one table row already says. These resolve exactly as a heading anchor does,
+# so a link to one is not a broken link and the checks below accept both.
+_EXPLICIT_ANCHOR = re.compile(r"""<a\s+(?:id|name)=["']([^"']+)["']""")
 
 # The canonical URL for a file in this repository. The README writes its
 # cross-references this way because the same file is also the PyPI long
@@ -246,6 +253,7 @@ class TestLinksAndAnchorsResolve(unittest.TestCase):
         for page in self.pages():
             text = page.read_text(encoding="utf-8")
             headings = {heading_slug(h) for h in _HEADING.findall(text)}
+            headings |= set(_EXPLICIT_ANCHOR.findall(text))
             for anchor in _CONTENTS_ENTRY.findall(text):
                 with self.subTest(page=page.name, anchor=anchor):
                     self.assertIn(
@@ -269,6 +277,7 @@ class TestLinksAndAnchorsResolve(unittest.TestCase):
         for page in self.pages():
             text = page.read_text(encoding="utf-8")
             headings = {heading_slug(h) for h in _HEADING.findall(text)}
+            headings |= set(_EXPLICIT_ANCHOR.findall(text))
             for target in anchor.findall(text):
                 seen += 1
                 with self.subTest(page=page.name, target=target):

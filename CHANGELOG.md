@@ -5,6 +5,59 @@ All notable changes to pyguitest are recorded here. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html) — with the usual
 0.x caveat that the API may still change between minor versions.
 
+## [Unreleased]
+
+### Documentation
+
+- **`docs/api.md` named a capability for almost every call and defined it
+  2000 lines away.** *Needs* carried bare names -- `ELEMENT_TREE` and
+  thirty-one others -- and the table saying what they mean sat at line 2455
+  of a 2590-line page, below every call that needed one. The names are also
+  opaque on first read: nothing in `ELEMENT_TREE` says it is the thing that
+  lets `gui.button("Save")` find a control by name, or that a desktop with
+  no accessibility bridge running does not have it, so every lookup fails
+  there while typing and clicking still work. All 103 mentions are now links
+  to the 32 rows that define them, and the reading guide says what a
+  capability *is* rather than only how to query one.
+
+- **Nothing on the page said which arguments were required.** The index
+  table published the whole signature in one cell, which for
+  `move_mouse_naturally` is fourteen parameters and 368 characters: a wall
+  rather than an answer, and it never revealed that two of those are
+  required and twelve have defaults. Each call now carries a Parameters
+  table -- name, type, and either the default or **required** -- generated
+  from `inspect.signature` so it cannot drift from the code, 98 of them with
+  78 required markers. The index shows `move_mouse_naturally(x, y, ...)` and
+  links to the full signature, wrapped one parameter per line.
+
+- **`connect()` was documented in one line with no signature at all**,
+  despite being the first call in every script, so the arguments that decide
+  how a whole run behaves -- which backends, the click strategy, the
+  inter-event and inter-key delays -- appeared nowhere on the page. The
+  module-level functions now get the same treatment as the methods.
+
+- **Examples where the parameters are the part a reader cannot guess**, added
+  to fourteen docstrings: `element` (seven filters, previously twenty words
+  of documentation), `drag`, `glide`, `move_mouse_naturally`, `locate_image`,
+  `screenshot`, `expect_text`, `expect_checked`, `assert_focused`,
+  `wait_until_gone`, `tree_items`, `find_window`, `wait_for_process` and
+  `wait_for_idle`. Each shows the optional arguments doing something, since
+  an example that restates the summary line earns nothing.
+
+- **Docstring examples are now fenced as Python, and therefore checked.**
+  An indented example rendered as an untagged code block, invisible to
+  anything looking for a fence and unhighlighted; promoting it also hands it
+  to the formatter, which found four existing examples with non-canonical
+  spacing. A block only claims to be Python if it actually parses -- several
+  indented blocks here are legends rather than code, `send_keys`' `{}`
+  grammar among them, and tagging those `python` gave them nonsense
+  highlighting. Adjacent example paragraphs merge into one block instead of
+  stacking as several.
+
+- `test_docs.py`'s in-page anchor checks accept an explicit `<a id="...">`
+  anchor as a link target alongside a heading, which is what the capability
+  rows use; a link to one resolves exactly as a heading anchor does.
+
 ## [0.20.0] — 2026-10-30
 
 ### Fixed

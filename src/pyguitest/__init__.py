@@ -1036,7 +1036,7 @@ class Session:
             gui.move_mouse(x, y)
             gui.click()
 
-            gui.click_element(gui.button("Save"))   # move and click
+            gui.click_element(gui.button("Save"))  # move and click
 
         `button` is 1 left, 2 middle, 3 right. Do not reach for 4/5 to
         scroll: X11's button-as-wheel encoding is not how the other
@@ -1342,6 +1342,13 @@ class Session:
         a flick released at zero speed does not throw.
 
         The origin is `start`, or wherever this session last put the pointer.
+
+            # Straight, over a fifth of a second.
+            gui.glide(600, 400)
+
+            # Through waypoints, slowly: a menu that opens on hover needs
+            # the pointer to actually pass along the path.
+            gui.glide(600, 400, via=[(300, 100), (450, 250)], duration=1.0)
         """
         if duration < 0:
             raise ValueError(f"duration must not be negative, got {duration!r}")
@@ -1470,6 +1477,22 @@ class Session:
         natural-motion implementation has to be careful: unseeded randomness
         would reintroduce exactly the flakiness glide() refuses, and make a
         second take impossible to match.
+
+            # Only x and y are required; every other argument shapes the
+            # path and has a working default.
+            gui.move_mouse_naturally(600, 400)
+
+            # Hover menus care about the path, not the endpoint. Slow it
+            # down and let it arc.
+            gui.move_mouse_naturally(600, 400, duration=1.2, arc=0.3)
+
+            # A take that has to look hand-driven, and has to look the
+            # same on every run: seed it.
+            gui.move_mouse_naturally(600, 400, wobble=2.0, overshoot=0.08, seed=7)
+
+            # Straighter and steadier than the defaults, for a path that
+            # must stay inside a narrow widget.
+            gui.move_mouse_naturally(600, 400, arc=0.0, wobble=0.0, overshoot=0.0)
         """
         latency = self._check_natural(
             duration=duration,
@@ -1573,6 +1596,19 @@ class Session:
         no caller would think to pair it.
 
         Every other argument is glide()'s, and means the same thing there.
+
+            # The straight case: press, glide, release.
+            gui.drag((120, 400), (600, 400))
+
+            # Slower, and through a waypoint -- for a target that only
+            # accepts the drop once the pointer has hovered over it, and
+            # for a tree that expands a branch on hover before it will
+            # take one.
+            gui.drag((120, 400), (600, 400), via=[(300, 250)], duration=0.8)
+
+            # A drop target that reads a too-quick release as a click on
+            # itself needs a longer pause around the button events.
+            gui.drag((120, 400), (600, 400), settle=0.2)
         """
         if settle < 0:
             raise ValueError(f"settle must not be negative, got {settle!r}")
@@ -1664,7 +1700,7 @@ class Session:
         send_keys:
 
             gui.tap_key("Return")
-            gui.send_keys("^(s)")       # Ctrl-S, modifier released for you
+            gui.send_keys("^(s)")  # Ctrl-S, modifier released for you
         """
         self.press_key(key)
         self.release_key(key)
@@ -1714,12 +1750,12 @@ class Session:
         nothing:
 
             gui.send_keys("Hello, how are you?\n")
-            gui.send_keys("%(f)q")        # Alt-f, then plain q
-            gui.send_keys("^(+(l))")      # Ctrl-Shift-l
-            gui.send_keys("+(abc)")       # Shift held: ABC
-            gui.send_keys("{BAC}")        # Backspace
-            gui.send_keys("{F1 F2 F3}")   # F1, F2, F3
-            gui.send_keys("{TAB 3}")      # Tab, three times
+            gui.send_keys("%(f)q")  # Alt-f, then plain q
+            gui.send_keys("^(+(l))")  # Ctrl-Shift-l
+            gui.send_keys("+(abc)")  # Shift held: ABC
+            gui.send_keys("{BAC}")  # Backspace
+            gui.send_keys("{F1 F2 F3}")  # F1, F2, F3
+            gui.send_keys("{TAB 3}")  # Tab, three times
             gui.send_keys("{PAUSE 500}")  # sleep 500ms
 
         Key names inside `{}` are looked up case-insensitively in the active
@@ -1806,7 +1842,7 @@ class Session:
         *,
         app_id: str | Sequence[str] | None = None,
     ) -> Window:
-        """The topmost window matching `title` and/or `app_id`.
+        r"""The topmost window matching `title` and/or `app_id`.
 
         Raises WindowNotFound if nothing matches, so a script stops where the
         mistake is. See find_windows for how `title`/`app_id` combine and
@@ -1819,6 +1855,17 @@ class Session:
         several same-titled toplevels, including ones parked off-screen).
         Taking the first used to hand back whichever happened to sit at the
         bottom of that list, which was reliably the wrong, invisible one.
+
+            # A plain string matches anywhere in the title.
+            window = gui.find_window("Text Editor")
+
+            # A compiled pattern is matched as a regex, for a title that
+            # carries something that changes.
+            window = gui.find_window(re.compile(r"^report\.txt - "))
+
+            # An application id does not follow the open document, so
+            # prefer it wherever the desktop reports one.
+            window = gui.find_window(app_id="org.gnome.TextEditor")
         """
         found = self.find_windows(title, app_id=app_id)
         if not found:
@@ -1835,8 +1882,11 @@ class Session:
 
         Scopes an element search to one window via `within=`:
 
-            gui.element(role=Role.CHECK_BOX, name="Enable",
-                        within=gui.window_element("Preferences"))
+            gui.element(
+                role=Role.CHECK_BOX,
+                name="Enable",
+                within=gui.window_element("Preferences"),
+            )
 
         `title` takes a plain string (matched literally, as a substring) or
         a compiled regex (matched with `.search()`) -- see find_windows.
@@ -2316,6 +2366,14 @@ class Session:
         toast or a modal's spinner to disappear. Returns True once the
         element is gone, False if timeout elapses first while it is still
         present.
+
+            # A progress label, a spinner, a toast.
+            gui.wait_until_gone(name="Saving...", timeout=30)
+
+            # Returns False rather than raising, so branch on it when the
+            # thing outstaying its welcome is the failure you report.
+            if not gui.wait_until_gone(name="Saving...", timeout=30):
+                raise AssertionError("the save never finished")
         """
 
         def gone() -> bool | None:
@@ -2379,6 +2437,16 @@ class Session:
         the element to exist, where its absence raises `ElementNotFound`,
         and again waiting for the text to match, where a mismatch raises
         `AssertionError` naming both sides.
+
+            gui.button("Save").click()
+            gui.expect_text(name="Status", equals="Saved", timeout=10)
+
+            # Scope it when more than one window can hold that name.
+            gui.expect_text(
+                name="Status",
+                equals="Saved",
+                within=gui.window_element("Editor"),
+            )
         """
         element = self.expect_element(
             role=role, name=name, within=within, timeout=timeout
@@ -2410,6 +2478,16 @@ class Session:
         `Element.checked` as None, which equals neither True nor False -- so
         this times out and then says "but it is unchecked", because None is
         falsey. Read `Element.checkable` first on a widget you do not know.
+
+            gui.checkbox("Read only").click()
+            gui.expect_checked(name="Read only", checked=True)
+
+            # Read `Element.checkable` first on a widget you do not know:
+            # a control whose toolkit publishes no checked state reports
+            # None, which matches neither bool, so this waits out the full
+            # timeout and then reports it as unchecked.
+            if gui.checkbox("Read only").checkable:
+                gui.expect_checked(name="Read only", checked=True)
         """
         element = self.expect_element(
             role=role, name=name, within=within, timeout=timeout
@@ -2494,6 +2572,16 @@ class Session:
         `wait_for_idle` directly, and the second identifies the process behind
         the window actually being driven rather than the first one sharing its
         name.
+
+            # Returns the pid, or None on timeout.
+            pid = gui.wait_for_process("gedit", timeout=30)
+            if pid is None:
+                raise RuntimeError("the editor never started")
+
+            # Prefer the pid you already have whenever you launched it
+            # yourself -- this call matches on a name, which can match
+            # somebody else's process.
+            pid = gui.start_app(["gedit"]).pid
         """
         pattern = re.compile(name) if isinstance(name, str) else name
 
@@ -2542,6 +2630,15 @@ class Session:
         core, which with /proc's 0.01s tick and the default 0.2s interval is
         5%, not the 1% the default threshold names. Loads under that floor
         read as idle. Raise `interval` to lower it.
+
+            # Wait for the process to stop burning CPU -- useful after an
+            # import or a render, where the work is not announced by any
+            # widget appearing.
+            gui.wait_for_idle(app.pid, timeout=60)
+
+            # Idle is not "finished": confirm the visible outcome as well.
+            gui.wait_for_idle(app.pid, timeout=60)
+            gui.expect_text(name="Status", equals="Ready", timeout=10)
         """
         deadline = None if timeout is None else time.monotonic() + timeout
         reading = _process_cpu_seconds(pid)
@@ -2612,6 +2709,14 @@ class Session:
         include whatever is covering it and does clip what is offscreen. Both
         are honest screenshots of a window; only one is a screenshot of *just*
         that window.
+
+            # The whole desktop, to a path it returns.
+            path = gui.screenshot("artifacts/state.png")
+
+            # One window, and an (x, y, width, height) rectangle in screen
+            # coordinates.
+            gui.screenshot("artifacts/editor.png", window=window)
+            gui.screenshot("artifacts/toolbar.png", region=(0, 0, 1920, 96))
         """
         return self.backend.capture(window=window, path=path, region=region)
 
@@ -2698,6 +2803,17 @@ class Session:
         better part of a minute on a 1080p desktop and several on a 4K one.
         The same search inside one window is usually a second or two, and it
         cannot match the same control in a different window.
+
+            # Scope the search to a window whenever you can: it is the
+            # difference between a second and most of a minute, and it
+            # cannot match the same control in somebody else's window.
+            match = gui.locate_image("templates/save.png", within=window)
+            gui.move_mouse(match.x + match.width // 2, match.y + match.height // 2)
+            gui.click()
+
+            # With no threshold the best match always comes back, however
+            # poor. Set one to make a changed theme raise instead.
+            gui.locate_image("templates/save.png", within=window, threshold=0.05)
         """
         desktop = self._desktop_region()
         haystack = self.backend.capture()
@@ -2847,6 +2963,16 @@ class Session:
 
         Raises ElementNotFound if nothing matches. See elements() for what
         each filter accepts.
+
+            # Filters combine, and all of them have to match.
+            gui.element(role=Role.CHECK_BOX, name="Enable", enabled=True)
+
+            # A compiled pattern matches the name as a regex; a plain
+            # string has to match it exactly.
+            gui.element(name=re.compile(r"^Save"), within=dialog)
+
+            # `predicate` is the escape hatch for what no filter covers.
+            gui.element(role=Role.PUSH_BUTTON, predicate=lambda e: e.pid == app.pid)
         """
         found = self.elements(
             role=role,
@@ -2957,6 +3083,15 @@ class Session:
         opened -- a tree with nothing left collapsed runs on the first alone,
         and the second is asked for before the first expansion rather than on
         the way in.
+
+            # `root` is required: pass the container's own Element.
+            tree = gui.element(role=Role.TREE, within=gui.window_element("Files"))
+            for row in gui.tree_items(tree):
+                print(gui.row_values(row))
+
+            # Narrow the walk by role, and bound it on a tree deep enough
+            # to be worth not walking all of.
+            gui.tree_items(tree, role=Role.TABLE_ROW, max_depth=4)
         """
         self.require(Capability.ELEMENT_TREE)
         found: list[Element] = []
@@ -3156,6 +3291,15 @@ class Session:
         -- see docs/validation.md) this raises for every element, which
         reads as a test failure rather than the unsupported-desktop
         answer it actually is.
+
+            # Where the click should have put focus.
+            gui.assert_focused(name="Name", role=Role.ENTRY)
+
+            # Ask first on a desktop you do not know: where per-widget
+            # focus is not published this raises for every element, which
+            # reads as a test failure when it is an unsupported session.
+            if gui.focus_tracking_works():
+                gui.assert_focused(name="Name", role=Role.ENTRY)
         """
 
         def is_focused_and_matches(e: Element) -> bool:
@@ -4161,10 +4305,13 @@ def connect(
     (`click_via`). The returned backend is reachable as
     `session.backend`, which is how a caller reads a value back out:
 
-        gui = connect(backend="portal", backend_options={
-            "persist_mode": 2,        # until explicitly revoked
-            "restore_token": saved,   # None on the first run
-        })
+        gui = connect(
+            backend="portal",
+            backend_options={
+                "persist_mode": 2,  # until explicitly revoked
+                "restore_token": saved,  # None on the first run
+            },
+        )
         save_somewhere(gui.backend.restore_token)
 
     `backend` also takes a *sequence* of names, which composes exactly those

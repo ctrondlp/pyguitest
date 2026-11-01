@@ -10,15 +10,32 @@ task-shaped questions — waiting properly, filling a form, screenshots, CI —
 and [troubleshooting.md](troubleshooting.md) starts from the symptom when a
 call finds nothing, types nothing or captures nothing.
 
-**Reading the tables.** *Needs* is the `Capability` a call requires; ask
-`gui.supports(...)` before depending on it, or let the call raise
-`CapabilityUnsupported`. A blank means the call works on any session, and
-"uses X if present" means the call adapts rather than fails when X is
-missing. A few calls can also be marked **X11 only** — a capability nothing
-but `X11Backend` provides. Nothing carries that mark today, because Windows
-provides every tier-6 capability and macOS serves `pointer_position()`: the
-capability model working, not an annotation gone missing. See
-[wayland-audit.md](developers/wayland-audit.md) for why.
+**Reading the tables.** Each group starts with an index — signature, what the
+call needs, and what it does in one line — and every signature links down to
+that call's own entry, which carries the full signature, a table of every
+parameter with its type and default, and the rest of the docstring. A
+parameter whose Default reads **required** is one you must pass; anything
+else shows the value used when you leave it out.
+
+*Needs* is the **capability** a call requires. A capability is one thing a
+desktop either lets a program do or does not — read the accessible tree,
+move the pointer, capture the screen, list windows — and which ones you get
+is decided by the session you are actually running on, not by the install.
+That is why it is per-call rather than a footnote: `ELEMENT_TREE`, for
+instance, is the one that lets `gui.button("Save")` find a control by name,
+and a desktop with no accessibility bridge running does not have it, so
+every lookup fails there while typing and clicking still work. Each name
+links to [Capabilities](#capabilities), which says what it covers, which
+backends provide it, and how hard it is to come by.
+
+Ask `gui.supports(...)` before depending on one, or let the call raise
+`CapabilityUnsupported`. A blank *Needs* means the call works on any
+session, and "uses X if present" means the call adapts rather than fails
+when X is missing. A few calls can also be marked **X11 only** — a
+capability nothing but `X11Backend` provides. Nothing carries that mark
+today, because Windows provides every tier-6 capability and macOS serves
+`pointer_position()`: the capability model working, not an annotation gone
+missing. See [wayland-audit.md](developers/wayland-audit.md) for why.
 
 ## Getting a session
 
@@ -70,13 +87,23 @@ A session is the handle on one desktop. `supports` and `require` are how a scrip
 
 | Call | Needs | What it does |
 |------|-------|--------------|
-| `supports(capability: Capability)` |  | Whether this session provides `capability`. |
-| `require(*capabilities: Capability)` |  | Raise unless every capability is available. |
-| `capabilities` |  | Everything this session can do. |
-| `report()` |  | A support table for this session, for logs and bug reports. |
-| `close()` |  | Release the backend's resources. |
+| [`supports(capability: Capability)`](#supports) |  | Whether this session provides `capability`. |
+| [`require(*capabilities: Capability)`](#require) |  | Raise unless every capability is available. |
+| [`capabilities`](#capabilities) |  | Everything this session can do. |
+| [`report()`](#report) |  | A support table for this session, for logs and bug reports. |
+| [`close()`](#close) |  | Release the backend's resources. |
 
 ### `supports`
+
+```python
+supports(capability: Capability)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `capability` | `Capability` | **required** |
 
 For branching on what a desktop can do -- taking a screenshot where
 capture exists, skipping that assertion where it does not. Where the
@@ -91,6 +118,16 @@ whole set and report() for a readable table.
 
 ### `require`
 
+```python
+require(*capabilities: Capability)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `*capabilities` |  | *any number* |
+
 For declaring a test suite's needs up front rather than failing part
 way through a run.
 
@@ -102,6 +139,10 @@ was selected, or whether one was found at all.
 
 ### `report`
 
+```python
+report()
+```
+
 Appends the backend's own provider breakdown when it offers one --
 CompositeBackend.report() shows which member serves which
 capability, which was otherwise unreachable from here even though
@@ -109,12 +150,18 @@ Session.report() is the CLI's whole `pyguitest` output.
 
 ### `close`
 
+```python
+close()
+```
+
 Closes display connections, virtual input devices and any portal or
 libei session the backend opened. Prefer the context-manager form,
 which closes on the way out even if the body raises:
 
-    with pyguitest.connect() as gui:
-        ...
+```python
+with pyguitest.connect() as gui:
+    ...
+```
 
 What this does *not* do is undo input state: a key or button left
 down by press_key/press_button stays down afterwards, because
@@ -129,20 +176,31 @@ The recommended way to drive an application: match on what a widget is and what 
 
 | Call | Needs | What it does |
 |------|-------|--------------|
-| `button(name: str, within: Element \| None = None)` | `ELEMENT_TREE` | Return the push button labelled `name`. |
-| `text_field(name: str, within: Element \| None = None)` | `ELEMENT_TREE` | Return the text box named `name`. |
-| `dropdown(name: str, within: Element \| None = None)` | `ELEMENT_TREE` | Return the combo box named `name`. |
-| `checkbox(name: str, within: Element \| None = None)` | `ELEMENT_TREE` | Return the check box named `name`. |
-| `link(name: str, within: Element \| None = None)` | `ELEMENT_TREE` | Return the link named `name`. |
-| `menu_item(name: str, within: Element \| None = None)` | `ELEMENT_TREE` | Return the menu item named `name`. |
-| `element(role: str \| Sequence[str] \| None = None, name: str \| re.Pattern[str] \| None = None, within: Element \| None = None, enabled: bool \| None = None, visible: bool \| None = None, description: str \| re.Pattern[str] \| None = None, predicate: Callable[[Element], bool] \| None = None)` | `ELEMENT_TREE` | Return the first element matching every given filter. |
-| `elements(role: str \| Sequence[str] \| None = None, name: str \| re.Pattern[str] \| None = None, within: Element \| None = None, enabled: bool \| None = None, visible: bool \| None = None, description: str \| re.Pattern[str] \| None = None, predicate: Callable[[Element], bool] \| None = None)` | `ELEMENT_TREE` | Return every accessible element matching every given filter. |
-| `root_element()` | `ELEMENT_TREE` | The accessible-tree root. The replacement for the X11 window tree. |
-| `window_element(title: str \| re.Pattern[str])` | `ELEMENT_TREE` — uses `WINDOW_LIST` if present | The accessible Element for the window matching `title`. |
-| `focused()` | `ELEMENT_TREE` — uses `WINDOW_STATE` if present | The accessible element that currently has keyboard focus, or None. |
-| `focus_tracking_works()` | `ELEMENT_TREE` — uses `WINDOW_STATE` if present | Whether this desktop actually publishes per-widget keyboard focus. |
+| [`button(name: str, within: Element \| None = None)`](#button) | [`ELEMENT_TREE`](#cap-element_tree) | Return the push button labelled `name`. |
+| [`text_field(name: str, within: Element \| None = None)`](#text_field) | [`ELEMENT_TREE`](#cap-element_tree) | Return the text box named `name`. |
+| [`dropdown(name: str, within: Element \| None = None)`](#dropdown) | [`ELEMENT_TREE`](#cap-element_tree) | Return the combo box named `name`. |
+| [`checkbox(name: str, within: Element \| None = None)`](#checkbox) | [`ELEMENT_TREE`](#cap-element_tree) | Return the check box named `name`. |
+| [`link(name: str, within: Element \| None = None)`](#link) | [`ELEMENT_TREE`](#cap-element_tree) | Return the link named `name`. |
+| [`menu_item(name: str, within: Element \| None = None)`](#menu_item) | [`ELEMENT_TREE`](#cap-element_tree) | Return the menu item named `name`. |
+| [`element(...)`](#element) | [`ELEMENT_TREE`](#cap-element_tree) | Return the first element matching every given filter. |
+| [`elements(...)`](#elements) | [`ELEMENT_TREE`](#cap-element_tree) | Return every accessible element matching every given filter. |
+| [`root_element()`](#root_element) | [`ELEMENT_TREE`](#cap-element_tree) | The accessible-tree root. The replacement for the X11 window tree. |
+| [`window_element(title: str \| re.Pattern[str])`](#window_element) | [`ELEMENT_TREE`](#cap-element_tree) — uses [`WINDOW_LIST`](#cap-window_list) if present | The accessible Element for the window matching `title`. |
+| [`focused()`](#focused) | [`ELEMENT_TREE`](#cap-element_tree) — uses [`WINDOW_STATE`](#cap-window_state) if present | The accessible element that currently has keyboard focus, or None. |
+| [`focus_tracking_works()`](#focus_tracking_works) | [`ELEMENT_TREE`](#cap-element_tree) — uses [`WINDOW_STATE`](#cap-window_state) if present | Whether this desktop actually publishes per-widget keyboard focus. |
 
 ### `button`
+
+```python
+button(name: str, within: Element | None = None)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `name` | `str` | **required** |
+| `within` | `Element \| None` | `None` |
 
 Push buttons only. A toolbar item, a tab, or a menu entry that looks
 like a button to a user usually publishes a different role -- reach
@@ -150,6 +208,17 @@ for menu_item(), or element(role=...), rather than assuming this
 covers them.
 
 ### `text_field`
+
+```python
+text_field(name: str, within: Element | None = None)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `name` | `str` | **required** |
+| `within` | `Element \| None` | `None` |
 
 Tries three roles in order -- ENTRY, TEXT, PASSWORD_TEXT -- because
 no single one covers every toolkit's idea of a text box: at-spi2
@@ -161,12 +230,34 @@ input (its READ_ONLY state is the honest signal to check first).
 
 ### `dropdown`
 
+```python
+dropdown(name: str, within: Element | None = None)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `name` | `str` | **required** |
+| `within` | `Element \| None` | `None` |
+
 A Qt combo box publishes its *current text* as the accessible name
 and discards the name set on it, so the stable name often travels in
 the accessible *description* instead. Try the description before
 giving up.
 
 ### `checkbox`
+
+```python
+checkbox(name: str, within: Element | None = None)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `name` | `str` | **required** |
+| `within` | `Element \| None` | `None` |
 
 Check boxes only, not radio buttons or toggle buttons -- each is its
 own role. Read the returned element's `checked` to see its state,
@@ -175,6 +266,17 @@ everything, whether or not it has a box to check.
 
 ### `link`
 
+```python
+link(name: str, within: Element | None = None)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `name` | `str` | **required** |
+| `within` | `Element \| None` | `None` |
+
 The link's text is its name. A Chromium or Electron application
 publishes no accessible tree at all until an assistive technology is
 announced, so this raising ElementNotFound on every link in such an
@@ -182,6 +284,17 @@ app is a sign of that rather than of a wrong name -- see
 docs/troubleshooting.md.
 
 ### `menu_item`
+
+```python
+menu_item(name: str, within: Element | None = None)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `name` | `str` | **required** |
+| `within` | `Element \| None` | `None` |
 
 Finding a menu item does not require its menu to be open -- the
 accessible tree publishes the whole structure -- so the usual way to
@@ -195,22 +308,86 @@ toolkit; use element(role=...) where that distinction matters.
 
 ### `element`
 
+```python
+element(
+    role: str | Sequence[str] | None = None,
+    name: str | re.Pattern[str] | None = None,
+    within: Element | None = None,
+    enabled: bool | None = None,
+    visible: bool | None = None,
+    description: str | re.Pattern[str] | None = None,
+    predicate: Callable[[Element], bool] | None = None,
+)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `role` | `str \| Sequence[str] \| None` | `None` |
+| `name` | `str \| re.Pattern[str] \| None` | `None` |
+| `within` | `Element \| None` | `None` |
+| `enabled` | `bool \| None` | `None` |
+| `visible` | `bool \| None` | `None` |
+| `description` | `str \| re.Pattern[str] \| None` | `None` |
+| `predicate` | `Callable[[Element], bool] \| None` | `None` |
+
 Raises ElementNotFound if nothing matches. See elements() for what
 each filter accepts.
 
+```python
+# Filters combine, and all of them have to match.
+gui.element(role=Role.CHECK_BOX, name="Enable", enabled=True)
+
+# A compiled pattern matches the name as a regex; a plain
+# string has to match it exactly.
+gui.element(name=re.compile(r"^Save"), within=dialog)
+
+# `predicate` is the escape hatch for what no filter covers.
+gui.element(role=Role.PUSH_BUTTON, predicate=lambda e: e.pid == app.pid)
+```
+
 ### `elements`
+
+```python
+elements(
+    role: str | Sequence[str] | None = None,
+    name: str | re.Pattern[str] | None = None,
+    within: Element | None = None,
+    enabled: bool | None = None,
+    visible: bool | None = None,
+    description: str | re.Pattern[str] | None = None,
+    predicate: Callable[[Element], bool] | None = None,
+)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `role` | `str \| Sequence[str] \| None` | `None` |
+| `name` | `str \| re.Pattern[str] \| None` | `None` |
+| `within` | `Element \| None` | `None` |
+| `enabled` | `bool \| None` | `None` |
+| `visible` | `bool \| None` | `None` |
+| `description` | `str \| re.Pattern[str] \| None` | `None` |
+| `predicate` | `Callable[[Element], bool] \| None` | `None` |
 
 `name`/`description` take a plain string (exact match) or a compiled
 regex, matched with `.search()` -- the same convention find_window
 uses for titles:
 
-    gui.elements(role=Role.PUSH_BUTTON, enabled=True)
-    gui.elements(name=re.compile(r"^Save"))
+```python
+gui.elements(role=Role.PUSH_BUTTON, enabled=True)
+gui.elements(name=re.compile(r"^Save"))
+```
 
 `predicate` is an escape hatch for anything the named filters do not
 cover, such as an ancestor/descendant relationship:
 
-    gui.elements(predicate=lambda e: some_label.is_ancestor_of(e))
+```python
+gui.elements(predicate=lambda e: some_label.is_ancestor_of(e))
+```
 
 `within` scopes the search to one element's subtree, and takes an
 `Element` -- for a window, `gui.window_element(title)`, not the
@@ -228,6 +405,10 @@ in one call took a few seconds, the walk's own cost either way.
 
 ### `root_element`
 
+```python
+root_element()
+```
+
 The desktop-wide root: its children are *applications*, whose
 children are their windows. Rarely what a test wants directly --
 elements()/element() search from here already, and
@@ -239,10 +420,25 @@ unfiltered walk crosses every application on the desktop.
 
 ### `window_element`
 
+```python
+window_element(title: str | re.Pattern[str])
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `title` | `str \| re.Pattern[str]` | **required** |
+
 Scopes an element search to one window via `within=`:
 
-    gui.element(role=Role.CHECK_BOX, name="Enable",
-                within=gui.window_element("Preferences"))
+```python
+gui.element(
+    role=Role.CHECK_BOX,
+    name="Enable",
+    within=gui.window_element("Preferences"),
+)
+```
 
 `title` takes a plain string (matched literally, as a substring) or
 a compiled regex (matched with `.search()`) -- see find_windows.
@@ -270,6 +466,10 @@ proxy, or a backend with no window list at all, sees no change.
 
 ### `focused`
 
+```python
+focused()
+```
+
 The active window's application is searched first and the whole
 desktop only if that finds nothing, so the answer does not depend on
 which application the tree happens to enumerate first. On a desktop
@@ -282,6 +482,10 @@ claiming the same state, and _focus_scope for why the search is
 scoped before it is broadened.
 
 ### `focus_tracking_works`
+
+```python
+focus_tracking_works()
+```
 
 AT-SPI's FOCUSED state is what focused(), assert_focused() and
 assert_tab_order() read, and some desktops never set it on
@@ -296,8 +500,10 @@ Deliberately not a Capability: those are static, per-backend facts,
 and this one can only be answered by looking at the tree right now.
 Ask before depending on the three methods above:
 
-    if gui.focus_tracking_works():
-        gui.assert_focused(name="Password")
+```python
+if gui.focus_tracking_works():
+    gui.assert_focused(name="Password")
+```
 
 A live probe of this moment, not a permanent verdict -- it is
 False when nothing at all currently has focus, which on a healthy
@@ -310,21 +516,59 @@ Coordinates are absolute screen pixels, and `screen=` selects the monitor. Prefe
 
 | Call | Needs | What it does |
 |------|-------|--------------|
-| `move_mouse(x: int, y: int, screen: int = 0)` | `POINTER_MOVE` | Move the pointer to an absolute position. |
-| `glide(x: int, y: int, duration: float = 0.2, rate: float = 120.0, via: Sequence[tuple[int, int]] = (), start: tuple[int, int] \| None = None, ease: Callable[[float], float] \| None = None, screen: int = 0)` | `POINTER_MOVE` — uses `POINTER_QUERY` if present | Move the pointer to (x, y) as a stream of events, not a jump. |
-| `move_mouse_naturally(x: int, y: int, duration: float \| None = None, pace: float = 700.0, rate: float = 120.0, via: Sequence[tuple[int, int]] = (), start: tuple[int, int] \| None = None, screen: int = 0, arc: float = 0.15, wobble: float = 1.0, overshoot: float = 0.04, latency: float \| None = None, pause: float = 0.0, seed: int \| None = None)` | `POINTER_MOVE` — uses `POINTER_QUERY` if present | Move the pointer the way a hand does, not the way a line does. |
-| `click(button: int = 1)` | `POINTER_BUTTON` | Press and release a mouse button. Replaces ClickMouseButton. |
-| `press_button(button: int)` | `POINTER_BUTTON` | Press a mouse button. 1 is left, 2 middle, 3 right. |
-| `release_button(button: int)` | `POINTER_BUTTON` | Release a mouse button. |
-| `drag(start: tuple[int, int], end: tuple[int, int], button: int = 1, duration: float = 0.3, rate: float = 120.0, via: Sequence[tuple[int, int]] = (), ease: Callable[[float], float] \| None = None, settle: float = 0.05, screen: int = 0)` | `POINTER_BUTTON`, `POINTER_MOVE` — uses `POINTER_QUERY` if present | Press at `start`, glide to `end`, release. Drag-and-drop. |
-| `scroll(dx: int = 0, dy: int = 0)` | `POINTER_SCROLL` | Scroll by whole wheel detents: `dy` positive is up, `dx` right. |
+| [`move_mouse(x: int, y: int, screen: int = 0)`](#move_mouse) | [`POINTER_MOVE`](#cap-pointer_move) | Move the pointer to an absolute position. |
+| [`glide(x, y, ...)`](#glide) | [`POINTER_MOVE`](#cap-pointer_move) — uses [`POINTER_QUERY`](#cap-pointer_query) if present | Move the pointer to (x, y) as a stream of events, not a jump. |
+| [`move_mouse_naturally(x, y, ...)`](#move_mouse_naturally) | [`POINTER_MOVE`](#cap-pointer_move) — uses [`POINTER_QUERY`](#cap-pointer_query) if present | Move the pointer the way a hand does, not the way a line does. |
+| [`click(button: int = 1)`](#click) | [`POINTER_BUTTON`](#cap-pointer_button) | Press and release a mouse button. Replaces ClickMouseButton. |
+| [`press_button(button: int)`](#press_button) | [`POINTER_BUTTON`](#cap-pointer_button) | Press a mouse button. 1 is left, 2 middle, 3 right. |
+| [`release_button(button: int)`](#release_button) | [`POINTER_BUTTON`](#cap-pointer_button) | Release a mouse button. |
+| [`drag(start, end, ...)`](#drag) | [`POINTER_BUTTON`](#cap-pointer_button), [`POINTER_MOVE`](#cap-pointer_move) — uses [`POINTER_QUERY`](#cap-pointer_query) if present | Press at `start`, glide to `end`, release. Drag-and-drop. |
+| [`scroll(dx: int = 0, dy: int = 0)`](#scroll) | [`POINTER_SCROLL`](#cap-pointer_scroll) | Scroll by whole wheel detents: `dy` positive is up, `dx` right. |
 
 ### `move_mouse`
+
+```python
+move_mouse(x: int, y: int, screen: int = 0)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `x` | `int` | **required** |
+| `y` | `int` | **required** |
+| `screen` | `int` | `0` |
 
 One event: the pointer is where it was, then it is here, with
 nothing in between. See glide() for the animated form.
 
 ### `glide`
+
+```python
+glide(
+    x: int,
+    y: int,
+    duration: float = 0.2,
+    rate: float = 120.0,
+    via: Sequence[tuple[int, int]] = (),
+    start: tuple[int, int] | None = None,
+    ease: Callable[[float], float] | None = None,
+    screen: int = 0,
+)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `x` | `int` | **required** |
+| `y` | `int` | **required** |
+| `duration` | `float` | `0.2` |
+| `rate` | `float` | `120.0` |
+| `via` | `Sequence[tuple[int, int]]` | `()` |
+| `start` | `tuple[int, int] \| None` | `None` |
+| `ease` | `Callable[[float], float] \| None` | `None` |
+| `screen` | `int` | `0` |
 
 move_mouse() teleports, which is enough to click with and wrong for
 everything that watches the pointer on its way: drag-and-drop only
@@ -356,7 +600,54 @@ a flick released at zero speed does not throw.
 
 The origin is `start`, or wherever this session last put the pointer.
 
+```python
+# Straight, over a fifth of a second.
+gui.glide(600, 400)
+
+# Through waypoints, slowly: a menu that opens on hover needs
+# the pointer to actually pass along the path.
+gui.glide(600, 400, via=[(300, 100), (450, 250)], duration=1.0)
+```
+
 ### `move_mouse_naturally`
+
+```python
+move_mouse_naturally(
+    x: int,
+    y: int,
+    duration: float | None = None,
+    pace: float = 700.0,
+    rate: float = 120.0,
+    via: Sequence[tuple[int, int]] = (),
+    start: tuple[int, int] | None = None,
+    screen: int = 0,
+    arc: float = 0.15,
+    wobble: float = 1.0,
+    overshoot: float = 0.04,
+    latency: float | None = None,
+    pause: float = 0.0,
+    seed: int | None = None,
+)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `x` | `int` | **required** |
+| `y` | `int` | **required** |
+| `duration` | `float \| None` | `None` |
+| `pace` | `float` | `700.0` |
+| `rate` | `float` | `120.0` |
+| `via` | `Sequence[tuple[int, int]]` | `()` |
+| `start` | `tuple[int, int] \| None` | `None` |
+| `screen` | `int` | `0` |
+| `arc` | `float` | `0.15` |
+| `wobble` | `float` | `1.0` |
+| `overshoot` | `float` | `0.04` |
+| `latency` | `float \| None` | `None` |
+| `pause` | `float` | `0.0` |
+| `seed` | `int \| None` | `None` |
 
 glide() is shaped like a machine on purpose -- straight legs, constant
 velocity unless an `ease` says otherwise, and no wobble at all, its
@@ -410,16 +701,46 @@ natural-motion implementation has to be careful: unseeded randomness
 would reintroduce exactly the flakiness glide() refuses, and make a
 second take impossible to match.
 
+```python
+# Only x and y are required; every other argument shapes the
+# path and has a working default.
+gui.move_mouse_naturally(600, 400)
+
+# Hover menus care about the path, not the endpoint. Slow it
+# down and let it arc.
+gui.move_mouse_naturally(600, 400, duration=1.2, arc=0.3)
+
+# A take that has to look hand-driven, and has to look the
+# same on every run: seed it.
+gui.move_mouse_naturally(600, 400, wobble=2.0, overshoot=0.08, seed=7)
+
+# Straighter and steadier than the defaults, for a path that
+# must stay inside a narrow widget.
+gui.move_mouse_naturally(600, 400, arc=0.0, wobble=0.0, overshoot=0.0)
+```
+
 ### `click`
+
+```python
+click(button: int = 1)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `button` | `int` | `1` |
 
 Clicks wherever the pointer already is -- this moves nothing. Pair
 it with move_mouse(), or use click_element(), which takes its
 destination from the element's own extents:
 
-    gui.move_mouse(x, y)
-    gui.click()
+```python
+gui.move_mouse(x, y)
+gui.click()
 
-    gui.click_element(gui.button("Save"))   # move and click
+gui.click_element(gui.button("Save"))  # move and click
+```
 
 `button` is 1 left, 2 middle, 3 right. Do not reach for 4/5 to
 scroll: X11's button-as-wheel encoding is not how the other
@@ -432,12 +753,32 @@ rather than emitting a zero-length click some toolkits drop.
 
 ### `press_button`
 
+```python
+press_button(button: int)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `button` | `int` | **required** |
+
 Presses wherever the pointer already is -- this moves nothing --
 and holds the button down until release_button(). For a plain click
 use click(); for a press-move-release use drag(), which handles the
 intermediate motion a toolkit needs to see a drag as a drag.
 
 ### `release_button`
+
+```python
+release_button(button: int)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `button` | `int` | **required** |
 
 A press with no matching release outlives the session: nothing here
 tracks held buttons to let go of them on close, and the compositor
@@ -447,6 +788,34 @@ this, under try/finally if anything between them can raise, or use
 click()/drag(), which pair them for you.
 
 ### `drag`
+
+```python
+drag(
+    start: tuple[int, int],
+    end: tuple[int, int],
+    button: int = 1,
+    duration: float = 0.3,
+    rate: float = 120.0,
+    via: Sequence[tuple[int, int]] = (),
+    ease: Callable[[float], float] | None = None,
+    settle: float = 0.05,
+    screen: int = 0,
+)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `start` | `tuple[int, int]` | **required** |
+| `end` | `tuple[int, int]` | **required** |
+| `button` | `int` | `1` |
+| `duration` | `float` | `0.3` |
+| `rate` | `float` | `120.0` |
+| `via` | `Sequence[tuple[int, int]]` | `()` |
+| `ease` | `Callable[[float], float] \| None` | `None` |
+| `settle` | `float` | `0.05` |
+| `screen` | `int` | `0` |
 
 Press-teleport-release is not a drag in either GTK or Qt: both arm on
 the press and start the operation only when motion afterwards passes
@@ -469,7 +838,33 @@ no caller would think to pair it.
 
 Every other argument is glide()'s, and means the same thing there.
 
+```python
+# The straight case: press, glide, release.
+gui.drag((120, 400), (600, 400))
+
+# Slower, and through a waypoint -- for a target that only
+# accepts the drop once the pointer has hovered over it, and
+# for a tree that expands a branch on hover before it will
+# take one.
+gui.drag((120, 400), (600, 400), via=[(300, 250)], duration=0.8)
+
+# A drop target that reads a too-quick release as a click on
+# itself needs a longer pause around the button events.
+gui.drag((120, 400), (600, 400), settle=0.2)
+```
+
 ### `scroll`
+
+```python
+scroll(dx: int = 0, dy: int = 0)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `dx` | `int` | `0` |
+| `dy` | `int` | `0` |
 
 One unit is one notch of a physical wheel, not a pixel, and the
 direction is X11's rather than Wayland's -- the same on every
@@ -482,14 +877,26 @@ has the reasoning.
 
 | Call | Needs | What it does |
 |------|-------|--------------|
-| `type_text(text: str, delay: float \| None = None, **kwargs: Any)` | `TEXT_ENTRY` | Type `text`, using the session's `key_delay` unless overridden. |
-| `send_keys(keys: str)` | `KEY_EVENT` | Send literal text and key combinations in one string. |
-| `press_key(key: str)` | `KEY_EVENT` | Press a key by name, without releasing it. |
-| `release_key(key: str)` | `KEY_EVENT` | Release a key by name. |
-| `tap_key(key: str)` | `KEY_EVENT` | Press and release a key. Replaces PressReleaseKey. |
-| `press_tab(reverse: bool = False)` | `KEY_EVENT` | Press Tab (or Shift+Tab if `reverse`), advancing keyboard focus. |
+| [`type_text(text: str, delay: float \| None = None, **kwargs: Any)`](#type_text) | [`TEXT_ENTRY`](#cap-text_entry) | Type `text`, using the session's `key_delay` unless overridden. |
+| [`send_keys(keys: str)`](#send_keys) | [`KEY_EVENT`](#cap-key_event) | Send literal text and key combinations in one string. |
+| [`press_key(key: str)`](#press_key) | [`KEY_EVENT`](#cap-key_event) | Press a key by name, without releasing it. |
+| [`release_key(key: str)`](#release_key) | [`KEY_EVENT`](#cap-key_event) | Release a key by name. |
+| [`tap_key(key: str)`](#tap_key) | [`KEY_EVENT`](#cap-key_event) | Press and release a key. Replaces PressReleaseKey. |
+| [`press_tab(reverse: bool = False)`](#press_tab) | [`KEY_EVENT`](#cap-key_event) | Press Tab (or Shift+Tab if `reverse`), advancing keyboard focus. |
 
 ### `type_text`
+
+```python
+type_text(text: str, delay: float | None = None, **kwargs: Any)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `text` | `str` | **required** |
+| `delay` | `float \| None` | `None` |
+| `**kwargs` |  | *any keyword* |
 
 The keymap-aware path, and the right one for arbitrary or non-ASCII
 text: it asks the backend to produce the characters rather than
@@ -514,28 +921,42 @@ characters -- see GUIBackend.type_text.
 
 ### `send_keys`
 
+```python
+send_keys(keys: str)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `keys` | `str` | **required** |
+
 Replaces X11::GUITest's SendKeys and its `{}` grammar -- see
 quote_for_type for the escaping half of this contract. Special
 characters:
 
-    ^ % + # &   modifiers: Ctrl, Alt, Shift, Meta, AltGr
-    ~ or \n     Enter
-    ( )         group the following keys under a modifier
-    { }         escape a special character, name a key by
-                abbreviation, repeat one, or pause
+```
+^ % + # &   modifiers: Ctrl, Alt, Shift, Meta, AltGr
+~ or \n     Enter
+( )         group the following keys under a modifier
+{ }         escape a special character, name a key by
+            abbreviation, repeat one, or pause
+```
 
 Everything else is sent as literal text. A modifier not immediately
 followed by `(` is pressed and released on its own, combined with
 nothing:
 
-    gui.send_keys("Hello, how are you?\n")
-    gui.send_keys("%(f)q")        # Alt-f, then plain q
-    gui.send_keys("^(+(l))")      # Ctrl-Shift-l
-    gui.send_keys("+(abc)")       # Shift held: ABC
-    gui.send_keys("{BAC}")        # Backspace
-    gui.send_keys("{F1 F2 F3}")   # F1, F2, F3
-    gui.send_keys("{TAB 3}")      # Tab, three times
-    gui.send_keys("{PAUSE 500}")  # sleep 500ms
+```python
+gui.send_keys("Hello, how are you?\n")
+gui.send_keys("%(f)q")  # Alt-f, then plain q
+gui.send_keys("^(+(l))")  # Ctrl-Shift-l
+gui.send_keys("+(abc)")  # Shift held: ABC
+gui.send_keys("{BAC}")  # Backspace
+gui.send_keys("{F1 F2 F3}")  # F1, F2, F3
+gui.send_keys("{TAB 3}")  # Tab, three times
+gui.send_keys("{PAUSE 500}")  # sleep 500ms
+```
 
 Key names inside `{}` are looked up case-insensitively in the active
 backend's KEY_ALIASES, or else passed to press_key as written, so an
@@ -548,6 +969,16 @@ static key mapping (see GUIBackend.resolve_char_key), for malformed
 `{}` syntax, and for a `{}` key name this backend does not resolve.
 
 ### `press_key`
+
+```python
+press_key(key: str)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `key` | `str` | **required** |
 
 `key` is passed to the backend as written, in that backend's own
 key vocabulary: X11 keysym names (`"Return"`, `"Escape"`,
@@ -568,6 +999,16 @@ something between the press and the release raises.
 
 ### `release_key`
 
+```python
+release_key(key: str)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `key` | `str` | **required** |
+
 Same stuck-state hazard as release_button, and worse in practice: a
 modifier left down survives this session and silently rewrites every
 keystroke the *user* then types, with nothing on screen to say why.
@@ -577,15 +1018,37 @@ pairing.
 
 ### `tap_key`
 
+```python
+tap_key(key: str)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `key` | `str` | **required** |
+
 The normal way to send one keystroke. Takes the same backend-native
 key names as press_key, and like it sends a *key*, not a character
 -- for text use type_text, and for a key with modifiers use
 send_keys:
 
-    gui.tap_key("Return")
-    gui.send_keys("^(s)")       # Ctrl-S, modifier released for you
+```python
+gui.tap_key("Return")
+gui.send_keys("^(s)")  # Ctrl-S, modifier released for you
+```
 
 ### `press_tab`
+
+```python
+press_tab(reverse: bool = False)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `reverse` | `bool` | `False` |
 
 Sugar over send_keys -- needs real key injection
 (Capability.KEY_EVENT), unlike focused()/Element.focus(), which
@@ -598,22 +1061,26 @@ A `Window` stays usable as a handle, but its `title`, `app_id` and `pid` are rea
 
 | Call | Needs | What it does |
 |------|-------|--------------|
-| `windows()` | `WINDOW_LIST` | Return every open window. |
-| `find_window(title: str \| re.Pattern[str] \| None = None, app_id: str \| Sequence[str] \| None = None)` | `WINDOW_LIST` | The topmost window matching `title` and/or `app_id`. |
-| `find_windows(title: str \| re.Pattern[str] \| None = None, app_id: str \| Sequence[str] \| None = None)` | `WINDOW_LIST` | Every window matching `title` and/or `app_id` (exact). |
-| `active_window()` | `WINDOW_STATE` | The currently focused window, or None if nothing holds focus. |
-| `window_at(x: int, y: int, screen: int = 0)` | `WINDOW_AT_POINT` | The topmost window covering a screen coordinate, or None. |
-| `geometry(window: Window)` | `WINDOW_GEOMETRY` | `window`'s (x, y, width, height) in screen coordinates. |
-| `move_window(window: Window, x: int, y: int)` | `WINDOW_PLACEMENT` | Move a window's top-left corner to (x, y). |
-| `resize_window(window: Window, width: int, height: int)` | `WINDOW_RESIZE` | Resize a window to `width` by `height`. |
-| `activate_window(window: Window)` | `WINDOW_ACTIVATE` | Raise and focus. There is no raise-without-focus operation. |
-| `minimize_window(window: Window, minimized: bool = True)` | `WINDOW_MINIMIZE` | Minimize a window, or restore it when `minimized` is False. |
-| `is_window_open(window: Window)` | `WINDOW_LIST` | Whether `window` is still in the window list. |
-| `is_window_viewable(window: Window)` | `WINDOW_STATE` | Whether `window` is currently mapped and showing. |
-| `refresh_window(window: Window)` | `WINDOW_LIST` | `window` as it is *now*, or None if it has closed. |
-| `window_events(timeout: float \| None = None)` | `WINDOW_EVENTS` | Yield WindowEvents as the compositor reports them. |
+| [`windows()`](#windows) | [`WINDOW_LIST`](#cap-window_list) | Return every open window. |
+| [`find_window(title: str \| re.Pattern[str] \| None = None, app_id: str \| Sequence[str] \| None = None)`](#find_window) | [`WINDOW_LIST`](#cap-window_list) | The topmost window matching `title` and/or `app_id`. |
+| [`find_windows(title: str \| re.Pattern[str] \| None = None, app_id: str \| Sequence[str] \| None = None)`](#find_windows) | [`WINDOW_LIST`](#cap-window_list) | Every window matching `title` and/or `app_id` (exact). |
+| [`active_window()`](#active_window) | [`WINDOW_STATE`](#cap-window_state) | The currently focused window, or None if nothing holds focus. |
+| [`window_at(x: int, y: int, screen: int = 0)`](#window_at) | [`WINDOW_AT_POINT`](#cap-window_at_point) | The topmost window covering a screen coordinate, or None. |
+| [`geometry(window: Window)`](#geometry) | [`WINDOW_GEOMETRY`](#cap-window_geometry) | `window`'s (x, y, width, height) in screen coordinates. |
+| [`move_window(window: Window, x: int, y: int)`](#move_window) | [`WINDOW_PLACEMENT`](#cap-window_placement) | Move a window's top-left corner to (x, y). |
+| [`resize_window(window: Window, width: int, height: int)`](#resize_window) | [`WINDOW_RESIZE`](#cap-window_resize) | Resize a window to `width` by `height`. |
+| [`activate_window(window: Window)`](#activate_window) | [`WINDOW_ACTIVATE`](#cap-window_activate) | Raise and focus. There is no raise-without-focus operation. |
+| [`minimize_window(window: Window, minimized: bool = True)`](#minimize_window) | [`WINDOW_MINIMIZE`](#cap-window_minimize) | Minimize a window, or restore it when `minimized` is False. |
+| [`is_window_open(window: Window)`](#is_window_open) | [`WINDOW_LIST`](#cap-window_list) | Whether `window` is still in the window list. |
+| [`is_window_viewable(window: Window)`](#is_window_viewable) | [`WINDOW_STATE`](#cap-window_state) | Whether `window` is currently mapped and showing. |
+| [`refresh_window(window: Window)`](#refresh_window) | [`WINDOW_LIST`](#cap-window_list) | `window` as it is *now*, or None if it has closed. |
+| [`window_events(timeout: float \| None = None)`](#window_events) | [`WINDOW_EVENTS`](#cap-window_events) | Yield WindowEvents as the compositor reports them. |
 
 ### `windows`
+
+```python
+windows()
+```
 
 **Ordered bottom-to-top**, so the last entry is the topmost window
 and `windows()[-1]` is the one a user would say is in front. That
@@ -635,6 +1102,17 @@ fills it in.
 
 ### `find_window`
 
+```python
+find_window(title: str | re.Pattern[str] | None = None, app_id: str | Sequence[str] | None = None)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `title` | `str \| re.Pattern[str] \| None` | `None` |
+| `app_id` | `str \| Sequence[str] \| None` | `None` |
+
 Raises WindowNotFound if nothing matches, so a script stops where the
 mistake is. See find_windows for how `title`/`app_id` combine and
 what `title` accepts.
@@ -647,7 +1125,31 @@ several same-titled toplevels, including ones parked off-screen).
 Taking the first used to hand back whichever happened to sit at the
 bottom of that list, which was reliably the wrong, invisible one.
 
+```python
+# A plain string matches anywhere in the title.
+window = gui.find_window("Text Editor")
+
+# A compiled pattern is matched as a regex, for a title that
+# carries something that changes.
+window = gui.find_window(re.compile(r"^report\.txt - "))
+
+# An application id does not follow the open document, so
+# prefer it wherever the desktop reports one.
+window = gui.find_window(app_id="org.gnome.TextEditor")
+```
+
 ### `find_windows`
+
+```python
+find_windows(title: str | re.Pattern[str] | None = None, app_id: str | Sequence[str] | None = None)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `title` | `str \| re.Pattern[str] \| None` | `None` |
+| `app_id` | `str \| Sequence[str] \| None` | `None` |
 
 At least one of `title`/`app_id` is required. Given both, a window
 must satisfy each. `title` takes a plain string (matched literally,
@@ -663,6 +1165,10 @@ nothing matches `app_id=""` on purpose, since that is "unset", not a
 real identifier; an empty sequence matches nothing for that reason.
 
 ### `active_window`
+
+```python
+active_window()
+```
 
 What the *window manager* considers focused, which is not a promise
 about where injected keystrokes will land. The two can disagree:
@@ -681,6 +1187,18 @@ this.
 
 ### `window_at`
 
+```python
+window_at(x: int, y: int, screen: int = 0)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `x` | `int` | **required** |
+| `y` | `int` | **required** |
+| `screen` | `int` | `0` |
+
 The authoritative answer to "what will a click here actually hit",
 and worth asking before a coordinate click rather than after. A
 control's reported rectangle can lie outside its own window --
@@ -695,6 +1213,16 @@ means no window covers the point -- bare desktop, or off every
 output.
 
 ### `geometry`
+
+```python
+geometry(window: Window)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `window` | `Window` | **required** |
 
 The most commonly missing capability (Capability.WINDOW_GEOMETRY),
 and raises CapabilityUnsupported where it is absent rather than
@@ -717,6 +1245,18 @@ write a test that sets a position and reads it back.
 
 ### `move_window`
 
+```python
+move_window(window: Window, x: int, y: int)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `window` | `Window` | **required** |
+| `x` | `int` | **required** |
+| `y` | `int` | **required** |
+
 A request, not a command: a window manager may clamp it to keep the
 window on an output, offset it by the decoration frame, or refuse a
 maximized or fullscreen window outright. Nothing here waits for or
@@ -729,6 +1269,18 @@ docs/troubleshooting.md.
 
 ### `resize_window`
 
+```python
+resize_window(window: Window, width: int, height: int)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `window` | `Window` | **required** |
+| `width` | `int` | **required** |
+| `height` | `int` | **required** |
+
 Also a request: a client's own minimum and maximum size hints win,
 and a tiling window manager may ignore it completely. Whether the
 size covers the decoration frame or just the client area varies by
@@ -739,6 +1291,16 @@ Resizing reflows the application's layout, so every element extent
 read before this is stale -- re-read them afterwards.
 
 ### `activate_window`
+
+```python
+activate_window(window: Window)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `window` | `Window` | **required** |
 
 The two are one operation on purpose: no desktop this supports
 offers a reliable raise that leaves focus alone, so splitting them
@@ -759,6 +1321,17 @@ windows, raising one does not raise its siblings.
 
 ### `minimize_window`
 
+```python
+minimize_window(window: Window, minimized: bool = True)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `window` | `Window` | **required** |
+| `minimized` | `bool` | `True` |
+
 A minimized window stays in windows() -- it still exists, so
 find_window() keeps matching it. is_window_viewable() is what
 distinguishes the two states.
@@ -770,12 +1343,32 @@ with activate_window() where the next step is input.
 
 ### `is_window_open`
 
+```python
+is_window_open(window: Window)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `window` | `Window` | **required** |
+
 Asked of the list rather than of the handle, because a handle does
 not know it has died: reading geometry from a closed window raises
 from somewhere inside the backend -- "no window with id 106" is a
 real example -- rather than reporting cleanly that it is gone.
 
 ### `is_window_viewable`
+
+```python
+is_window_viewable(window: Window)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `window` | `Window` | **required** |
 
 The honest test for "is this on screen", as against merely present
 in windows() -- which also lists off-screen and utility toplevels.
@@ -786,6 +1379,16 @@ and wait_window_close() are the polling forms.
 fully covered by another still answers True.
 
 ### `refresh_window`
+
+```python
+refresh_window(window: Window)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `window` | `Window` | **required** |
 
 A `Window` is a snapshot: its title was true when it was taken, and
 the handle beneath it may since have gone. Both bite in practice --
@@ -801,6 +1404,16 @@ most often need and cannot get from the handle itself.
 
 ### `window_events`
 
+```python
+window_events(timeout: float | None = None)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `timeout` | `float \| None` | `None` |
+
 Needs Capability.WINDOW_EVENTS. wait_for_window and
 wait_window_close are what most callers want instead: they consume
 this where it exists and poll where it does not.
@@ -811,13 +1424,17 @@ Capture is the one area where desktops differ most in what they permit; `screens
 
 | Call | Needs | What it does |
 |------|-------|--------------|
-| `screens()` | `SCREEN_INFO` | Every output, in advertised order. |
-| `screenshot(path: str \| None = None, window: Window \| None = None, region: tuple[int, int, int, int] \| None = None)` | `SCREEN_CAPTURE` | Write a screenshot and return the path it was written to. |
-| `capture_on_failure(directory: str \| None = None, name: str \| None = None, window: Window \| None = None)` |  | Capture a failure bundle if the wrapped block raises. |
-| `locate(haystack: str, template: str, region: Sequence[float] \| None = None, metric: str = RMSE, threshold: float \| None = None)` | `IMAGE_LOCATE` | Find `template` within the already-captured image `haystack`. |
-| `locate_image(template_path: str, within: Window \| None = None, threshold: float \| None = None, metric: str = RMSE)` | `IMAGE_LOCATE`, `SCREEN_CAPTURE`, `WINDOW_GEOMETRY` — uses `SCREEN_INFO` if present | Find `template_path` on screen, restricted to `within` if given. |
+| [`screens()`](#screens) | [`SCREEN_INFO`](#cap-screen_info) | Every output, in advertised order. |
+| [`screenshot(...)`](#screenshot) | [`SCREEN_CAPTURE`](#cap-screen_capture) | Write a screenshot and return the path it was written to. |
+| [`capture_on_failure(directory: str \| None = None, name: str \| None = None, window: Window \| None = None)`](#capture_on_failure) |  | Capture a failure bundle if the wrapped block raises. |
+| [`locate(haystack, template, ...)`](#locate) | [`IMAGE_LOCATE`](#cap-image_locate) | Find `template` within the already-captured image `haystack`. |
+| [`locate_image(template_path, ...)`](#locate_image) | [`IMAGE_LOCATE`](#cap-image_locate), [`SCREEN_CAPTURE`](#cap-screen_capture), [`WINDOW_GEOMETRY`](#cap-window_geometry) — uses [`SCREEN_INFO`](#cap-screen_info) if present | Find `template_path` on screen, restricted to `within` if given. |
 
 ### `screens`
+
+```python
+screens()
+```
 
 "Advertised order" is the display server's own, which is not a
 statement about which output the desktop calls primary -- there is
@@ -832,6 +1449,22 @@ pixels, the same units geometry() and screenshot() use; `scale` is
 DPI over 96 and never a pixel count.
 
 ### `screenshot`
+
+```python
+screenshot(
+    path: str | None = None,
+    window: Window | None = None,
+    region: tuple[int, int, int, int] | None = None,
+)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `path` | `str \| None` | `None` |
+| `window` | `Window \| None` | `None` |
+| `region` | `tuple[int, int, int, int] \| None` | `None` |
 
 With no arguments, captures the whole desktop to a temporary file.
 `window` captures one window; `region` captures an `(x, y, width,
@@ -850,7 +1483,29 @@ include whatever is covering it and does clip what is offscreen. Both
 are honest screenshots of a window; only one is a screenshot of *just*
 that window.
 
+```python
+# The whole desktop, to a path it returns.
+path = gui.screenshot("artifacts/state.png")
+
+# One window, and an (x, y, width, height) rectangle in screen
+# coordinates.
+gui.screenshot("artifacts/editor.png", window=window)
+gui.screenshot("artifacts/toolbar.png", region=(0, 0, 1920, 96))
+```
+
 ### `capture_on_failure`
+
+```python
+capture_on_failure(directory: str | None = None, name: str | None = None, window: Window | None = None)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `directory` | `str \| None` | `None` |
+| `name` | `str \| None` | `None` |
+| `window` | `Window \| None` | `None` |
 
 A GUI test that fails tells you an assertion did not hold; a
 screenshot, the accessible tree, the active window, and whatever had
@@ -859,9 +1514,11 @@ Capturing it after the fact is too late -- by then the app has been
 torn down -- so it has to happen while the exception is still
 propagating:
 
-    with gui.capture_on_failure("artifacts"):
-        gui.click_button("Save")
-        assert gui.element(name="Saved")
+```python
+with gui.capture_on_failure("artifacts"):
+    gui.click_button("Save")
+    assert gui.element(name="Saved")
+```
 
 Each artifact is attached to the exception under its own name --
 `screenshot`, `accessibility_tree`, `active_window`,
@@ -884,11 +1541,49 @@ window-scoped.
 
 ### `locate`
 
+```python
+locate(
+    haystack: str,
+    template: str,
+    region: Sequence[float] | None = None,
+    metric: str = RMSE,
+    threshold: float | None = None,
+)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `haystack` | `str` | **required** |
+| `template` | `str` | **required** |
+| `region` | `Sequence[float] \| None` | `None` |
+| `metric` | `str` | `'RMSE'` |
+| `threshold` | `float \| None` | `None` |
+
 Returns None if no match clears `threshold`. Unlike locate_image,
 this searches a file rather than the live screen, and answers with
 None rather than raising -- no display connection is involved.
 
 ### `locate_image`
+
+```python
+locate_image(
+    template_path: str,
+    within: Window | None = None,
+    threshold: float | None = None,
+    metric: str = RMSE,
+)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `template_path` | `str` | **required** |
+| `within` | `Window \| None` | `None` |
+| `threshold` | `float \| None` | `None` |
+| `metric` | `str` | `'RMSE'` |
 
 Captures the whole desktop and, with `within`, restricts the search
 to that window's rectangle, looked up via WINDOW_GEOMETRY. Either way
@@ -925,22 +1620,56 @@ better part of a minute on a 1080p desktop and several on a 4K one.
 The same search inside one window is usually a second or two, and it
 cannot match the same control in a different window.
 
+```python
+# Scope the search to a window whenever you can: it is the
+# difference between a second and most of a minute, and it
+# cannot match the same control in somebody else's window.
+match = gui.locate_image("templates/save.png", within=window)
+gui.move_mouse(match.x + match.width // 2, match.y + match.height // 2)
+gui.click()
+
+# With no threshold the best match always comes back, however
+# poor. Set one to make a changed theme raise instead.
+gui.locate_image("templates/save.png", within=window, threshold=0.05)
+```
+
 ## Clipboard
 
 Text only, and the selection a desktop calls the clipboard rather than the X11 primary selection.
 
 | Call | Needs | What it does |
 |------|-------|--------------|
-| `get_clipboard(primary: bool = False)` | `CLIPBOARD` | The current text content of the clipboard, or of PRIMARY. |
-| `set_clipboard(text: str, primary: bool = False)` | `CLIPBOARD` | Replace the text content of the clipboard, or of PRIMARY. |
+| [`get_clipboard(primary: bool = False)`](#get_clipboard) | [`CLIPBOARD`](#cap-clipboard) | The current text content of the clipboard, or of PRIMARY. |
+| [`set_clipboard(text: str, primary: bool = False)`](#set_clipboard) | [`CLIPBOARD`](#cap-clipboard) | Replace the text content of the clipboard, or of PRIMARY. |
 
 ### `get_clipboard`
+
+```python
+get_clipboard(primary: bool = False)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `primary` | `bool` | `False` |
 
 `primary=True` reads the X11/Wayland PRIMARY selection instead --
 what a middle-click paste inserts, and independent of the
 clipboard proper: writing one never touches the other.
 
 ### `set_clipboard`
+
+```python
+set_clipboard(text: str, primary: bool = False)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `text` | `str` | **required** |
+| `primary` | `bool` | `False` |
 
 Replaces rather than appends, and the two selections are
 independent: writing the clipboard never touches PRIMARY or the
@@ -961,19 +1690,32 @@ assert_clipboard() where the test depends on it.
 
 | Call | Needs | What it does |
 |------|-------|--------------|
-| `start_app(command: str \| Sequence[str], **kwargs: Any)` |  | Launch a program without waiting. Replaces StartApp. |
-| `run_app(command: str \| Sequence[str], **kwargs: Any)` |  | Run a program to completion. Replaces RunApp. |
+| [`start_app(command: str \| Sequence[str], **kwargs: Any)`](#start_app) |  | Launch a program without waiting. Replaces StartApp. |
+| [`run_app(command: str \| Sequence[str], **kwargs: Any)`](#run_app) |  | Run a program to completion. Replaces RunApp. |
 
 ### `start_app`
+
+```python
+start_app(command: str | Sequence[str], **kwargs: Any)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `command` | `str \| Sequence[str]` | **required** |
+| `**kwargs` |  | *any keyword* |
 
 Returns an `Application`: a `subprocess.Popen` plus the lifecycle
 the bare one leaves to the caller. Use it as a context manager when
 the program should not outlive the block, which is almost always --
 it terminates, and kills if that does not take:
 
-    with gui.start_app([EDITOR, path]) as app:
-        window = gui.wait_for_window("Editor", timeout=10)
-        ...
+```python
+with gui.start_app([EDITOR, path]) as app:
+    window = gui.wait_for_window("Editor", timeout=10)
+    ...
+```
 
 Everything a `Popen` answered still works (`pid`, `wait`,
 `terminate`, `poll`, `returncode`, ...), so code written before this
@@ -991,9 +1733,22 @@ environment rather than adding to it, which on a GUI session drops
 DISPLAY/WAYLAND_DISPLAY and the app never appears -- pass a merged
 copy to override one variable:
 
-    gui.start_app(["app"], env={**os.environ, "LANG": "de_DE.UTF-8"})
+```python
+gui.start_app(["app"], env={**os.environ, "LANG": "de_DE.UTF-8"})
+```
 
 ### `run_app`
+
+```python
+run_app(command: str | Sequence[str], **kwargs: Any)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `command` | `str \| Sequence[str]` | **required** |
+| `**kwargs` |  | *any keyword* |
 
 Same shell and `env=` behaviour as :meth:`start_app`: a string runs
 through the shell, and `env=` replaces rather than extends the
@@ -1005,18 +1760,28 @@ Every `wait_*` call polls on an interval unless the backend can do better: a win
 
 | Call | Needs | What it does |
 |------|-------|--------------|
-| `wait(seconds: float)` |  | Sleep for `seconds`. Replaces WaitSeconds. |
-| `sync(timeout: float = 1.0)` | `INPUT_SYNC` | Block until the compositor has consumed the input sent so far. |
-| `wait_until(predicate: Callable[[], bool], timeout: float \| None = None, interval: float = 0.5)` |  | Block until predicate() is truthy, or timeout elapses. |
-| `wait_for_element(role: str \| None = None, name: str \| None = None, within: Element \| None = None, timeout: float \| None = None, interval: float = 0.5)` | `ELEMENT_TREE` | Block until an element matching role/name appears. |
-| `wait_until_gone(role: str \| None = None, name: str \| None = None, within: Element \| None = None, timeout: float \| None = None, interval: float = 0.5)` | `ELEMENT_TREE` | Block until no element matches role/name/within, or timeout. |
-| `wait_for_window(title: str \| re.Pattern[str] \| None = None, timeout: float \| None = None, interval: float = 0.5, app_id: str \| Sequence[str] \| None = None)` | `WINDOW_LIST` — uses `WINDOW_EVENTS` if present | Block until a window matching `title` and/or `app_id`. |
-| `wait_window_close(window: Window, timeout: float \| None = None, interval: float = 0.5)` | `WINDOW_LIST` — uses `WINDOW_EVENTS` if present | Block until `window` (from find_window or wait_for_window) closes. |
-| `wait_for_process(name: str \| re.Pattern[str], timeout: float \| None = None, interval: float = 0.5)` |  | Block until a process matching `name` is running, or timeout. |
-| `wait_for_idle(pid: int, timeout: float \| None = None, interval: float = 0.2, samples: int = 3, cpu_threshold: float = 0.01)` |  | Block until `pid` looks CPU-idle, or timeout. |
-| `wait_for_file(path: str, timeout: float \| None = None, interval: float = 0.5)` |  | Block until `path` exists, or timeout. Returns whether it appeared. |
+| [`wait(seconds: float)`](#wait) |  | Sleep for `seconds`. Replaces WaitSeconds. |
+| [`sync(timeout: float = 1.0)`](#sync) | [`INPUT_SYNC`](#cap-input_sync) | Block until the compositor has consumed the input sent so far. |
+| [`wait_until(predicate: Callable[[], bool], timeout: float \| None = None, interval: float = 0.5)`](#wait_until) |  | Block until predicate() is truthy, or timeout elapses. |
+| [`wait_for_element(...)`](#wait_for_element) | [`ELEMENT_TREE`](#cap-element_tree) | Block until an element matching role/name appears. |
+| [`wait_until_gone(...)`](#wait_until_gone) | [`ELEMENT_TREE`](#cap-element_tree) | Block until no element matches role/name/within, or timeout. |
+| [`wait_for_window(...)`](#wait_for_window) | [`WINDOW_LIST`](#cap-window_list) — uses [`WINDOW_EVENTS`](#cap-window_events) if present | Block until a window matching `title` and/or `app_id`. |
+| [`wait_window_close(window: Window, timeout: float \| None = None, interval: float = 0.5)`](#wait_window_close) | [`WINDOW_LIST`](#cap-window_list) — uses [`WINDOW_EVENTS`](#cap-window_events) if present | Block until `window` (from find_window or wait_for_window) closes. |
+| [`wait_for_process(name: str \| re.Pattern[str], timeout: float \| None = None, interval: float = 0.5)`](#wait_for_process) |  | Block until a process matching `name` is running, or timeout. |
+| [`wait_for_idle(pid, ...)`](#wait_for_idle) |  | Block until `pid` looks CPU-idle, or timeout. |
+| [`wait_for_file(path: str, timeout: float \| None = None, interval: float = 0.5)`](#wait_for_file) |  | Block until `path` exists, or timeout. Returns whether it appeared. |
 
 ### `wait`
+
+```python
+wait(seconds: float)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `seconds` | `float` | **required** |
 
 An unconditional sleep, and almost always the wrong tool: it is
 simultaneously too short on a loaded machine and wasted time on a
@@ -1033,15 +1798,27 @@ session-wide form).
 
 ### `sync`
 
+```python
+sync(timeout: float = 1.0)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `timeout` | `float` | `1.0` |
+
 The honest replacement for `wait()` after injection. Where a
 backend offers Capability.INPUT_SYNC (libei today, via its
 ping/pong round trip), this returns once the compositor has
 actually taken the events rather than once a guessed interval has
 elapsed::
 
-    gui.click()
-    gui.sync()
-    assert gui.element(name="Saved")
+```python
+gui.click()
+gui.sync()
+assert gui.element(name="Saved")
+```
 
 It proves the compositor consumed them, never that the
 application processed or repainted them -- `wait_until` on the
@@ -1055,6 +1832,18 @@ exactly the false confidence it exists to remove.
 
 ### `wait_until`
 
+```python
+wait_until(predicate: Callable[[], bool], timeout: float | None = None, interval: float = 0.5)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `predicate` | `Callable[[], bool]` | **required** |
+| `timeout` | `float \| None` | `None` |
+| `interval` | `float` | `0.5` |
+
 The general-purpose polling primitive behind element state waits --
 "wait until this button is enabled" is
 `gui.wait_until(lambda: button.enabled)` rather than a hand-rolled
@@ -1063,6 +1852,26 @@ timeout; never raises on timeout, matching
 wait_for_window/wait_window_close.
 
 ### `wait_for_element`
+
+```python
+wait_for_element(
+    role: str | None = None,
+    name: str | None = None,
+    within: Element | None = None,
+    timeout: float | None = None,
+    interval: float = 0.5,
+)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `role` | `str \| None` | `None` |
+| `name` | `str \| None` | `None` |
+| `within` | `Element \| None` | `None` |
+| `timeout` | `float \| None` | `None` |
+| `interval` | `float` | `0.5` |
 
 Poll-based only -- unlike wait_for_window, no backend currently
 offers element-level change events, so there is no event-driven
@@ -1073,12 +1882,60 @@ wait_for_window uses.
 
 ### `wait_until_gone`
 
+```python
+wait_until_gone(
+    role: str | None = None,
+    name: str | None = None,
+    within: Element | None = None,
+    timeout: float | None = None,
+    interval: float = 0.5,
+)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `role` | `str \| None` | `None` |
+| `name` | `str \| None` | `None` |
+| `within` | `Element \| None` | `None` |
+| `timeout` | `float \| None` | `None` |
+| `interval` | `float` | `0.5` |
+
 Mirrors wait_window_close for elements -- waiting for a "Saving..."
 toast or a modal's spinner to disappear. Returns True once the
 element is gone, False if timeout elapses first while it is still
 present.
 
+```python
+# A progress label, a spinner, a toast.
+gui.wait_until_gone(name="Saving...", timeout=30)
+
+# Returns False rather than raising, so branch on it when the
+# thing outstaying its welcome is the failure you report.
+if not gui.wait_until_gone(name="Saving...", timeout=30):
+    raise AssertionError("the save never finished")
+```
+
 ### `wait_for_window`
+
+```python
+wait_for_window(
+    title: str | re.Pattern[str] | None = None,
+    timeout: float | None = None,
+    interval: float = 0.5,
+    app_id: str | Sequence[str] | None = None,
+)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `title` | `str \| re.Pattern[str] \| None` | `None` |
+| `timeout` | `float \| None` | `None` |
+| `interval` | `float` | `0.5` |
+| `app_id` | `str \| Sequence[str] \| None` | `None` |
 
 See find_windows for how `title`/`app_id` combine and what `title`
 accepts; at least one is required.
@@ -1112,6 +1969,18 @@ matters.
 
 ### `wait_window_close`
 
+```python
+wait_window_close(window: Window, timeout: float | None = None, interval: float = 0.5)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `window` | `Window` | **required** |
+| `timeout` | `float \| None` | `None` |
+| `interval` | `float` | `0.5` |
+
 Replaces X11::GUITest's WaitWindowClose. Compares by `window.handle`,
 which is stable for the backend that produced it (see the Window
 docstring), rather than by title -- two windows can share a title,
@@ -1125,6 +1994,18 @@ None waits indefinitely. Returns True once closed, False if `timeout`
 elapses first while it is still open.
 
 ### `wait_for_process`
+
+```python
+wait_for_process(name: str | re.Pattern[str], timeout: float | None = None, interval: float = 0.5)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `name` | `str \| re.Pattern[str]` | **required** |
+| `timeout` | `float \| None` | `None` |
+| `interval` | `float` | `0.5` |
 
 `name` is `.search()`ed against the full command line, the same way
 Session.find_window matches window titles. Returns the matched
@@ -1155,7 +2036,39 @@ the program, and `Window.pid` -- which `win32` fills in from
 the window actually being driven rather than the first one sharing its
 name.
 
+```python
+# Returns the pid, or None on timeout.
+pid = gui.wait_for_process("gedit", timeout=30)
+if pid is None:
+    raise RuntimeError("the editor never started")
+
+# Prefer the pid you already have whenever you launched it
+# yourself -- this call matches on a name, which can match
+# somebody else's process.
+pid = gui.start_app(["gedit"]).pid
+```
+
 ### `wait_for_idle`
+
+```python
+wait_for_idle(
+    pid: int,
+    timeout: float | None = None,
+    interval: float = 0.2,
+    samples: int = 3,
+    cpu_threshold: float = 0.01,
+)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `pid` | `int` | **required** |
+| `timeout` | `float \| None` | `None` |
+| `interval` | `float` | `0.2` |
+| `samples` | `int` | `3` |
+| `cpu_threshold` | `float` | `0.01` |
 
 "Idle" means its CPU usage stayed under `cpu_threshold` (a fraction
 of one core) across `samples` consecutive polls -- CPU-idle, not
@@ -1184,7 +2097,30 @@ core, which with /proc's 0.01s tick and the default 0.2s interval is
 5%, not the 1% the default threshold names. Loads under that floor
 read as idle. Raise `interval` to lower it.
 
+```python
+# Wait for the process to stop burning CPU -- useful after an
+# import or a render, where the work is not announced by any
+# widget appearing.
+gui.wait_for_idle(app.pid, timeout=60)
+
+# Idle is not "finished": confirm the visible outcome as well.
+gui.wait_for_idle(app.pid, timeout=60)
+gui.expect_text(name="Status", equals="Ready", timeout=10)
+```
+
 ### `wait_for_file`
+
+```python
+wait_for_file(path: str, timeout: float | None = None, interval: float = 0.5)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `path` | `str` | **required** |
+| `timeout` | `float \| None` | `None` |
+| `interval` | `float` | `0.5` |
 
 For a process under test writing output somewhere -- an export, a
 log file -- rather than polling os.path.exists in a hand-rolled loop.
@@ -1195,14 +2131,36 @@ Raise on failure with a message naming what was actually found, for use directly
 
 | Call | Needs | What it does |
 |------|-------|--------------|
-| `assert_focused(name: str \| re.Pattern[str] \| None = None, role: str \| None = None, enabled: bool \| None = None, visible: bool \| None = None, description: str \| re.Pattern[str] \| None = None, predicate: Callable[[Element], bool] \| None = None)` | `ELEMENT_TREE` — uses `WINDOW_STATE` if present | Raise FocusMismatch unless the focus matches every given filter. |
-| `assert_clipboard(expected: str, primary: bool = False)` | `CLIPBOARD` | Raise ClipboardMismatch unless the clipboard holds `expected`. |
-| `assert_tab_order(names: Sequence[str], timeout: float \| None = 1.0, interval: float = 0.05)` | `ELEMENT_TREE`, `KEY_EVENT` — uses `WINDOW_STATE` if present | Raise FocusMismatch unless Tab visits `names` in order. |
-| `assert_accessible(within: Element \| None = None, roles: Sequence[str] \| None = None)` | `ELEMENT_TREE` | Raise AccessibilityViolation if names are missing or ambiguous. |
-| `assert_no_missing_accessible_names(within: Element \| None = None, roles: Sequence[str] \| None = None)` | `ELEMENT_TREE` | Raise AccessibilityViolation for any unnamed control. |
-| `assert_no_duplicate_accessible_names(within: Element \| None = None, roles: Sequence[str] \| None = None)` | `ELEMENT_TREE` | Raise AccessibilityViolation if one role reuses a name. |
+| [`assert_focused(...)`](#assert_focused) | [`ELEMENT_TREE`](#cap-element_tree) — uses [`WINDOW_STATE`](#cap-window_state) if present | Raise FocusMismatch unless the focus matches every given filter. |
+| [`assert_clipboard(expected: str, primary: bool = False)`](#assert_clipboard) | [`CLIPBOARD`](#cap-clipboard) | Raise ClipboardMismatch unless the clipboard holds `expected`. |
+| [`assert_tab_order(names: Sequence[str], timeout: float \| None = 1.0, interval: float = 0.05)`](#assert_tab_order) | [`ELEMENT_TREE`](#cap-element_tree), [`KEY_EVENT`](#cap-key_event) — uses [`WINDOW_STATE`](#cap-window_state) if present | Raise FocusMismatch unless Tab visits `names` in order. |
+| [`assert_accessible(within: Element \| None = None, roles: Sequence[str] \| None = None)`](#assert_accessible) | [`ELEMENT_TREE`](#cap-element_tree) | Raise AccessibilityViolation if names are missing or ambiguous. |
+| [`assert_no_missing_accessible_names(within: Element \| None = None, roles: Sequence[str] \| None = None)`](#assert_no_missing_accessible_names) | [`ELEMENT_TREE`](#cap-element_tree) | Raise AccessibilityViolation for any unnamed control. |
+| [`assert_no_duplicate_accessible_names(within: Element \| None = None, roles: Sequence[str] \| None = None)`](#assert_no_duplicate_accessible_names) | [`ELEMENT_TREE`](#cap-element_tree) | Raise AccessibilityViolation if one role reuses a name. |
 
 ### `assert_focused`
+
+```python
+assert_focused(
+    name: str | re.Pattern[str] | None = None,
+    role: str | None = None,
+    enabled: bool | None = None,
+    visible: bool | None = None,
+    description: str | re.Pattern[str] | None = None,
+    predicate: Callable[[Element], bool] | None = None,
+)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `name` | `str \| re.Pattern[str] \| None` | `None` |
+| `role` | `str \| None` | `None` |
+| `enabled` | `bool \| None` | `None` |
+| `visible` | `bool \| None` | `None` |
+| `description` | `str \| re.Pattern[str] \| None` | `None` |
+| `predicate` | `Callable[[Element], bool] \| None` | `None` |
 
 Filters mean the same as elements()'s. Returns the focused Element
 on success, so a caller can chain into it the same way element()
@@ -1214,7 +2172,29 @@ per-widget focus is not published at all (GNOME Wayland, measured
 reads as a test failure rather than the unsupported-desktop
 answer it actually is.
 
+```python
+# Where the click should have put focus.
+gui.assert_focused(name="Name", role=Role.ENTRY)
+
+# Ask first on a desktop you do not know: where per-widget
+# focus is not published this raises for every element, which
+# reads as a test failure when it is an unsupported session.
+if gui.focus_tracking_works():
+    gui.assert_focused(name="Name", role=Role.ENTRY)
+```
+
 ### `assert_clipboard`
+
+```python
+assert_clipboard(expected: str, primary: bool = False)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `expected` | `str` | **required** |
+| `primary` | `bool` | `False` |
 
 Reads through `get_clipboard`, so `primary=True` checks PRIMARY
 instead. An exact match, not a substring -- `set_clipboard()`
@@ -1222,6 +2202,18 @@ replaces rather than appends, and a caller wanting the round trip
 confirmed wants to know if that stopped being true.
 
 ### `assert_tab_order`
+
+```python
+assert_tab_order(names: Sequence[str], timeout: float | None = 1.0, interval: float = 0.05)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `names` | `Sequence[str]` | **required** |
+| `timeout` | `float \| None` | `1.0` |
+| `interval` | `float` | `0.05` |
 
 Focuses `names[0]` directly (Element.focus(), no key injection
 needed for that step), then presses Tab once per remaining name.
@@ -1238,12 +2230,34 @@ docstring gives.
 
 ### `assert_accessible`
 
+```python
+assert_accessible(within: Element | None = None, roles: Sequence[str] | None = None)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `within` | `Element \| None` | `None` |
+| `roles` | `Sequence[str] \| None` | `None` |
+
 Both checks in one call, for a test suite that wants a single
 assertion per screen. Missing names are reported first: a control
 with no name at all cannot also be a duplicate, so fixing those
 usually changes the second answer.
 
 ### `assert_no_missing_accessible_names`
+
+```python
+assert_no_missing_accessible_names(within: Element | None = None, roles: Sequence[str] | None = None)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `within` | `Element \| None` | `None` |
+| `roles` | `Sequence[str] \| None` | `None` |
 
 An unnamed button is read out by a screen reader as "button", and
 cannot be found by `gui.button("Save")` either -- the same defect
@@ -1255,6 +2269,17 @@ overrides NAMED_ROLES, which documents where the default line is
 drawn.
 
 ### `assert_no_duplicate_accessible_names`
+
+```python
+assert_no_duplicate_accessible_names(within: Element | None = None, roles: Sequence[str] | None = None)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `within` | `Element \| None` | `None` |
+| `roles` | `Sequence[str] \| None` | `None` |
 
 Two buttons both called "Delete" are ambiguous to a screen reader
 and to `gui.button("Delete")` alike -- whichever the locator returns
@@ -1268,30 +2293,41 @@ Compared per role rather than globally: a "Save" button beside a
 
 | Call | Needs | What it does |
 |------|-------|--------------|
-| `click_element(element: Element, button: int = 1)` | `ELEMENT_GEOMETRY`, `POINTER_BUTTON`, `POINTER_MOVE` | Click a named element through the pointer. `element.click()` ends here. |
-| `double_click(button: int = 1)` | `POINTER_BUTTON` | Press and release a mouse button twice, as one double-click. |
-| `double_click_element(element: Element)` | `ELEMENT_GEOMETRY`, `POINTER_BUTTON`, `POINTER_MOVE` | Double-click a named element. `element.double_click()` does the same. |
-| `element_at(x: int, y: int)` | `ELEMENT_GEOMETRY` | The deepest accessible element at a screen coordinate, or None. |
-| `expect_checked(role: str \| None = None, name: str \| None = None, checked: bool, timeout: float = 5.0, within: Element \| None = None)` | `ELEMENT_TREE` | Fail unless the named checkbox, radio button or toggle is `checked`. |
-| `expect_element(role: str \| None = None, name: str \| None = None, within: Element \| None = None, timeout: float \| None = None, interval: float = 0.5)` | `ELEMENT_TREE` | wait_for_element, but raises ElementNotFound instead of returning None. |
-| `expect_showing(role: str \| None = None, name: str \| None = None, timeout: float = 5.0, within: Element \| None = None)` | `ELEMENT_TREE` | Fail unless the named element is present and visible. |
-| `expect_text(role: str \| None = None, name: str \| None = None, equals: str, timeout: float = 5.0, within: Element \| None = None)` | `ELEMENT_TREE` | Fail unless the named element reads `equals`. |
-| `expect_window(title: str \| re.Pattern[str] \| None = None, timeout: float \| None = None, app_id: str \| Sequence[str] \| None = None)` | `WINDOW_LIST` — uses `WINDOW_EVENTS` if present | wait_for_window, but raises WindowNotFound instead of returning None. |
-| `extents(element: Element)` | `ELEMENT_GEOMETRY` | `element`'s (x, y, width, height) in screen coordinates. |
-| `focus_window(window: Window, attempts: int = 5)` | `WINDOW_ACTIVATE`, `WINDOW_GEOMETRY`, `WINDOW_STATE` | Give `window` focus and confirm it actually took, best-effort. |
-| `is_button_pressed(button: int)` | `INPUT_STATE_QUERY` | Whether a mouse button is currently held down. |
-| `is_key_pressed(key: str)` | `INPUT_STATE_QUERY` | Whether a key is currently held down. Replaces IsKeyPressed. |
-| `is_window_cursor(window: Window, shape: int)` | `WINDOW_CURSOR_QUERY` | Whether `window` is currently showing cursor `shape`. |
-| `lower_window(window: Window)` | `WINDOW_LOWER` | Replaces LowerWindow -- no foreign-toplevel protocol offers this. |
-| `pointer_position()` | `POINTER_QUERY` | The global pointer position. Replaces GetMousePos. |
-| `require_version(minimum: str)` |  | Raise VersionTooOld unless this pyguitest is at least `minimum`. |
-| `row_values(row: Element)` |  | `row`'s own column values, as plain text, one per child cell. |
-| `set_window_title(window: Window, title: str)` | `WINDOW_TITLE_SET` | Replaces SetWindowName. Impersonation is possible under X11. |
-| `tree_items(root: Element, role: str \| None = None, max_depth: int = 24)` | `ELEMENT_ACTION`, `ELEMENT_TREE` | Every descendant of `root`, opening collapsed branches to reach them. |
-| `wait_for_pointer_activation(timeout: float \| None = None)` | `INPUT_CAPTURE` | Block for one real crossing of a screen edge, and return where. |
-| `wait_window_focus(window: Window, timeout: float \| None = None, interval: float = 0.1)` | `WINDOW_STATE` | Block until `window` holds keyboard focus, or timeout. |
+| [`click_element(element: Element, button: int = 1)`](#click_element) | [`ELEMENT_GEOMETRY`](#cap-element_geometry), [`POINTER_BUTTON`](#cap-pointer_button), [`POINTER_MOVE`](#cap-pointer_move) | Click a named element through the pointer. `element.click()` ends here. |
+| [`double_click(button: int = 1)`](#double_click) | [`POINTER_BUTTON`](#cap-pointer_button) | Press and release a mouse button twice, as one double-click. |
+| [`double_click_element(element: Element)`](#double_click_element) | [`ELEMENT_GEOMETRY`](#cap-element_geometry), [`POINTER_BUTTON`](#cap-pointer_button), [`POINTER_MOVE`](#cap-pointer_move) | Double-click a named element. `element.double_click()` does the same. |
+| [`element_at(x: int, y: int)`](#element_at) | [`ELEMENT_GEOMETRY`](#cap-element_geometry) | The deepest accessible element at a screen coordinate, or None. |
+| [`expect_checked(checked, ...)`](#expect_checked) | [`ELEMENT_TREE`](#cap-element_tree) | Fail unless the named checkbox, radio button or toggle is `checked`. |
+| [`expect_element(...)`](#expect_element) | [`ELEMENT_TREE`](#cap-element_tree) | wait_for_element, but raises ElementNotFound instead of returning None. |
+| [`expect_showing(...)`](#expect_showing) | [`ELEMENT_TREE`](#cap-element_tree) | Fail unless the named element is present and visible. |
+| [`expect_text(equals, ...)`](#expect_text) | [`ELEMENT_TREE`](#cap-element_tree) | Fail unless the named element reads `equals`. |
+| [`expect_window(...)`](#expect_window) | [`WINDOW_LIST`](#cap-window_list) — uses [`WINDOW_EVENTS`](#cap-window_events) if present | wait_for_window, but raises WindowNotFound instead of returning None. |
+| [`extents(element: Element)`](#extents) | [`ELEMENT_GEOMETRY`](#cap-element_geometry) | `element`'s (x, y, width, height) in screen coordinates. |
+| [`focus_window(window: Window, attempts: int = 5)`](#focus_window) | [`WINDOW_ACTIVATE`](#cap-window_activate), [`WINDOW_GEOMETRY`](#cap-window_geometry), [`WINDOW_STATE`](#cap-window_state) | Give `window` focus and confirm it actually took, best-effort. |
+| [`is_button_pressed(button: int)`](#is_button_pressed) | [`INPUT_STATE_QUERY`](#cap-input_state_query) | Whether a mouse button is currently held down. |
+| [`is_key_pressed(key: str)`](#is_key_pressed) | [`INPUT_STATE_QUERY`](#cap-input_state_query) | Whether a key is currently held down. Replaces IsKeyPressed. |
+| [`is_window_cursor(window: Window, shape: int)`](#is_window_cursor) | [`WINDOW_CURSOR_QUERY`](#cap-window_cursor_query) | Whether `window` is currently showing cursor `shape`. |
+| [`lower_window(window: Window)`](#lower_window) | [`WINDOW_LOWER`](#cap-window_lower) | Replaces LowerWindow -- no foreign-toplevel protocol offers this. |
+| [`pointer_position()`](#pointer_position) | [`POINTER_QUERY`](#cap-pointer_query) | The global pointer position. Replaces GetMousePos. |
+| [`require_version(minimum: str)`](#require_version) |  | Raise VersionTooOld unless this pyguitest is at least `minimum`. |
+| [`row_values(row: Element)`](#row_values) |  | `row`'s own column values, as plain text, one per child cell. |
+| [`set_window_title(window: Window, title: str)`](#set_window_title) | [`WINDOW_TITLE_SET`](#cap-window_title_set) | Replaces SetWindowName. Impersonation is possible under X11. |
+| [`tree_items(root: Element, role: str \| None = None, max_depth: int = 24)`](#tree_items) | [`ELEMENT_ACTION`](#cap-element_action), [`ELEMENT_TREE`](#cap-element_tree) | Every descendant of `root`, opening collapsed branches to reach them. |
+| [`wait_for_pointer_activation(timeout: float \| None = None)`](#wait_for_pointer_activation) | [`INPUT_CAPTURE`](#cap-input_capture) | Block for one real crossing of a screen edge, and return where. |
+| [`wait_window_focus(window: Window, timeout: float \| None = None, interval: float = 0.1)`](#wait_window_focus) | [`WINDOW_STATE`](#cap-window_state) | Block until `window` holds keyboard focus, or timeout. |
 
 ### `click_element`
+
+```python
+click_element(element: Element, button: int = 1)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `element` | `Element` | **required** |
+| `button` | `int` | `1` |
 
 Where the element publishes no accessible action to name -- a widget
 whose provider offers neither Invoke nor Toggle nor an MSAA default
@@ -1318,6 +2354,16 @@ refusal a caller already catches keeps its meaning.
 
 ### `double_click`
 
+```python
+double_click(button: int = 1)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `button` | `int` | `1` |
+
 Whether a pair of clicks *is* a double-click is the toolkit's
 judgement, not this package's: GTK and Qt each measure the gap
 between the two presses against a threshold that defaults to 400ms
@@ -1333,6 +2379,16 @@ is one user action, so it takes one `event_delay` at the end, the
 same as every other action here.
 
 ### `double_click_element`
+
+```python
+double_click_element(element: Element)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `element` | `Element` | **required** |
 
 The spelling for an element with no session behind it -- one taken
 straight from a backend, where `element.double_click()` has nothing
@@ -1357,6 +2413,17 @@ or press action for element.click() to fall back to.
 
 ### `element_at`
 
+```python
+element_at(x: int, y: int)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `x` | `int` | **required** |
+| `y` | `int` | **required** |
+
 What window_at is for windows, with no `screen` argument: the
 accessible tree is addressed in one desktop-wide coordinate space.
 
@@ -1369,6 +2436,26 @@ really covers the point (extents() says).
 
 ### `expect_checked`
 
+```python
+expect_checked(
+    role: str | None = None,
+    name: str | None = None,
+    checked: bool,
+    timeout: float = 5.0,
+    within: Element | None = None,
+)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `role` | `str \| None` | `None` |
+| `name` | `str \| None` | `None` |
+| `checked` | `bool` | **required** |
+| `timeout` | `float` | `5.0` |
+| `within` | `Element \| None` | `None` |
+
 Two waits, not one: `expect_element` first, which raises
 `ElementNotFound` if the control never appears, then the state is
 re-read until the deadline. So "no such control" and "the wrong
@@ -1380,7 +2467,39 @@ A control whose toolkit publishes no checked state at all reports
 this times out and then says "but it is unchecked", because None is
 falsey. Read `Element.checkable` first on a widget you do not know.
 
+```python
+gui.checkbox("Read only").click()
+gui.expect_checked(name="Read only", checked=True)
+
+# Read `Element.checkable` first on a widget you do not know:
+# a control whose toolkit publishes no checked state reports
+# None, which matches neither bool, so this waits out the full
+# timeout and then reports it as unchecked.
+if gui.checkbox("Read only").checkable:
+    gui.expect_checked(name="Read only", checked=True)
+```
+
 ### `expect_element`
+
+```python
+expect_element(
+    role: str | None = None,
+    name: str | None = None,
+    within: Element | None = None,
+    timeout: float | None = None,
+    interval: float = 0.5,
+)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `role` | `str \| None` | `None` |
+| `name` | `str \| None` | `None` |
+| `within` | `Element \| None` | `None` |
+| `timeout` | `float \| None` | `None` |
+| `interval` | `float` | `0.5` |
 
 The raising sibling wait_for_element deliberately lacks, for the
 same reason expect_window exists next to wait_for_window: a script
@@ -1388,6 +2507,24 @@ written against a specific recorded element treats its absence as
 the failure, not a branch to handle.
 
 ### `expect_showing`
+
+```python
+expect_showing(
+    role: str | None = None,
+    name: str | None = None,
+    timeout: float = 5.0,
+    within: Element | None = None,
+)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `role` | `str \| None` | `None` |
+| `name` | `str \| None` | `None` |
+| `timeout` | `float` | `5.0` |
+| `within` | `Element \| None` | `None` |
 
 Two waits, as in `expect_checked`: `expect_element` raises
 `ElementNotFound` where the control never appears, and only then is
@@ -1403,6 +2540,26 @@ the action the element exists for actually worked.
 
 ### `expect_text`
 
+```python
+expect_text(
+    role: str | None = None,
+    name: str | None = None,
+    equals: str,
+    timeout: float = 5.0,
+    within: Element | None = None,
+)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `role` | `str \| None` | `None` |
+| `name` | `str \| None` | `None` |
+| `equals` | `str` | **required** |
+| `timeout` | `float` | `5.0` |
+| `within` | `Element \| None` | `None` |
+
 Re-read until `timeout` rather than checked once: a check made
 right after the action it verifies would otherwise race the
 application, which has not necessarily finished redrawing by the
@@ -1413,7 +2570,35 @@ the element to exist, where its absence raises `ElementNotFound`,
 and again waiting for the text to match, where a mismatch raises
 `AssertionError` naming both sides.
 
+```python
+gui.button("Save").click()
+gui.expect_text(name="Status", equals="Saved", timeout=10)
+
+# Scope it when more than one window can hold that name.
+gui.expect_text(
+    name="Status",
+    equals="Saved",
+    within=gui.window_element("Editor"),
+)
+```
+
 ### `expect_window`
+
+```python
+expect_window(
+    title: str | re.Pattern[str] | None = None,
+    timeout: float | None = None,
+    app_id: str | Sequence[str] | None = None,
+)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `title` | `str \| re.Pattern[str] \| None` | `None` |
+| `timeout` | `float \| None` | `None` |
+| `app_id` | `str \| Sequence[str] \| None` | `None` |
 
 The raising sibling wait_for_window deliberately lacks (see its
 docstring): a script that already knows the window it wants exist is
@@ -1432,6 +2617,16 @@ landing on nothing -- found live on MATE.
 
 ### `extents`
 
+```python
+extents(element: Element)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `element` | `Element` | **required** |
+
 None where the element occupies no screen space -- it publishes no
 rectangle, or reports an empty one because it is not showing.
 
@@ -1441,6 +2636,17 @@ rectangle can come from the compositor, an element's only ever from
 the accessible tree. Needs Capability.ELEMENT_GEOMETRY.
 
 ### `focus_window`
+
+```python
+focus_window(window: Window, attempts: int = 5)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `window` | `Window` | **required** |
+| `attempts` | `int` | `5` |
 
 Three things activate_window() on its own does not do: it waits for
 the window's geometry to stop changing first (a still-animating
@@ -1474,12 +2680,32 @@ the parameter is for.
 
 ### `is_button_pressed`
 
+```python
+is_button_pressed(button: int)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `button` | `int` | **required** |
+
 Same numbering as click() -- 1 left, 2 middle, 3 right -- and
 reports the *desktop's* state, so a button a user is physically
 holding reads as pressed too, not only one this session injected.
 See the note above for the Wayland and XWayland caveats.
 
 ### `is_key_pressed`
+
+```python
+is_key_pressed(key: str)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `key` | `str` | **required** |
 
 Takes the same backend-native key name as press_key. Useful for
 asserting a modifier was actually released after a combination; see
@@ -1488,10 +2714,31 @@ only while an X client holds focus.
 
 ### `is_window_cursor`
 
+```python
+is_window_cursor(window: Window, shape: int)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `window` | `Window` | **required** |
+| `shape` | `int` | **required** |
+
 Replaces IsWindowCursor. Impossible on Wayland, where cursor shape is
 negotiated privately between client and compositor.
 
 ### `lower_window`
+
+```python
+lower_window(window: Window)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `window` | `Window` | **required** |
 
 Sends a window to the bottom of the stack. There is no Wayland
 route: the foreign-toplevel protocols expose activate and close but
@@ -1505,12 +2752,26 @@ active_window() if the next step depends on it.
 
 ### `pointer_position`
 
+```python
+pointer_position()
+```
+
 In the coordinate space `screens()` reports. Works on X11, Windows
 and macOS; see the note above for why an XWayland answer can be
 silently stale. To check where a click will land, prefer
 window_at()/element_at() over comparing this against an expectation.
 
 ### `require_version`
+
+```python
+require_version(minimum: str)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `minimum` | `str` | **required** |
 
 The counterpart of require() for the package itself rather than the
 desktop: a script written against this release declares that fact up
@@ -1523,6 +2784,16 @@ only `gui` declares its floor the same way it declares the
 capabilities it needs.
 
 ### `row_values`
+
+```python
+row_values(row: Element)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `row` | `Element` | **required** |
 
 For a control that nests each row's cells beneath it as children --
 confirmed live against a UIA `ListView` (WinDirStat's real
@@ -1549,6 +2820,17 @@ hand, since nothing here has that structure to read automatically.
 
 ### `set_window_title`
 
+```python
+set_window_title(window: Window, title: str)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `window` | `Window` | **required** |
+| `title` | `str` | **required** |
+
 Renames *another* application's window, which X11 permits any client
 to do -- that is the impersonation note, and the reason no Wayland
 protocol offers it. Mostly useful for tagging a window a test
@@ -1560,6 +2842,18 @@ overwrites this. Do not use it as durable identity -- `app_id` is
 the stable handle where a backend fills it in.
 
 ### `tree_items`
+
+```python
+tree_items(root: Element, role: str | None = None, max_depth: int = 24)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `root` | `Element` | **required** |
+| `role` | `str \| None` | `None` |
+| `max_depth` | `int` | `24` |
 
 `elements(within=root)` only ever sees what the accessibility tree
 already has *visible* -- a collapsed tree row's children are not
@@ -1641,7 +2935,28 @@ opened -- a tree with nothing left collapsed runs on the first alone,
 and the second is asked for before the first expansion rather than on
 the way in.
 
+```python
+# `root` is required: pass the container's own Element.
+tree = gui.element(role=Role.TREE, within=gui.window_element("Files"))
+for row in gui.tree_items(tree):
+    print(gui.row_values(row))
+
+# Narrow the walk by role, and bound it on a tree deep enough
+# to be worth not walking all of.
+gui.tree_items(tree, role=Role.TABLE_ROW, max_depth=4)
+```
+
 ### `wait_for_pointer_activation`
+
+```python
+wait_for_pointer_activation(timeout: float | None = None)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `timeout` | `float \| None` | `None` |
 
 Not a query, and deliberately not spelled `pointer_position()`:
 Capability.INPUT_CAPTURE (the `inputcapture` backend, opt-in --
@@ -1663,6 +2978,18 @@ reports, or None if `timeout` elapsed with nobody crossing an edge
 here, not an error. `timeout=None` waits indefinitely.
 
 ### `wait_window_focus`
+
+```python
+wait_window_focus(window: Window, timeout: float | None = None, interval: float = 0.1)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `window` | `Window` | **required** |
+| `timeout` | `float \| None` | `None` |
+| `interval` | `float` | `0.1` |
 
 A window can exist -- wait_for_window has already returned it -- for
 a moment before the window manager actually gives it focus, e.g. a
@@ -1687,9 +3014,9 @@ prevents by design lives here — on a Wayland session they raise
 
 | Call | Needs | What it does |
 |------|-------|--------------|
-| `desktop_region()` | `SCREEN_INFO` | The screen rectangle a whole-desktop `capture()` covers, or None. |
-| `find_elements(role: str \| Sequence[str] \| None = None, name: str \| re.Pattern \| None = None, within: Element \| None = None, enabled: bool \| None = None, visible: bool \| None = None, description: str \| re.Pattern \| None = None, predicate: Callable[[Element], bool] \| None = None)` | `ELEMENT_TREE` | Search the accessible tree. |
-| `find_element(role: str \| Sequence[str] \| None = None, name: str \| re.Pattern \| None = None, within: Element \| None = None, enabled: bool \| None = None, visible: bool \| None = None, description: str \| re.Pattern \| None = None, predicate: Callable[[Element], bool] \| None = None)` | `ELEMENT_TREE` | The first accessible element matching, or None. |
+| `desktop_region()` | [`SCREEN_INFO`](#cap-screen_info) | The screen rectangle a whole-desktop `capture()` covers, or None. |
+| `find_elements(role: str \| Sequence[str] \| None = None, name: str \| re.Pattern \| None = None, within: Element \| None = None, enabled: bool \| None = None, visible: bool \| None = None, description: str \| re.Pattern \| None = None, predicate: Callable[[Element], bool] \| None = None)` | [`ELEMENT_TREE`](#cap-element_tree) | Search the accessible tree. |
+| `find_element(role: str \| Sequence[str] \| None = None, name: str \| re.Pattern \| None = None, within: Element \| None = None, enabled: bool \| None = None, visible: bool \| None = None, description: str \| re.Pattern \| None = None, predicate: Callable[[Element], bool] \| None = None)` | [`ELEMENT_TREE`](#cap-element_tree) | The first accessible element matching, or None. |
 
 ## Types
 
@@ -1778,6 +3105,13 @@ and treat `None` as "it did not say" rather than as False.
 
 #### `child`
 
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `role` | `str \| None` | `None` |
+| `name` | `str \| None` | `None` |
+
 `find`'s first match, with the same recursive reach, and None rather
 than an exception where nothing matches -- the opposite convention
 from `Session.element`, which raises. Useful for a local lookup
@@ -1792,6 +3126,12 @@ the first time someone inserts a widget.
 
 #### `choose`
 
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `option` | `str` | **required** |
+
 Through the control's own accessibility interface, which is why it
 keeps working when the list is long enough to scroll. The mechanics
 differ underneath: Windows and macOS open the popup first, because a
@@ -1801,6 +3141,12 @@ window in turn -- the two kinds of combo box put it in different
 places. When the text does not match, `options()` is what to print.
 
 #### `click`
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `via` | `str \| None` | `None` |
 
 The toolkit's own action first, named -- Invoke, Toggle, an MSAA
 default action, AT-SPI's `click`. Where the element publishes none at
@@ -1836,6 +3182,12 @@ attribute `name` does, so the two can come back identical there.
 
 #### `do_action`
 
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `name` | `str` | **required** |
+
 The names are the ones `actions` publishes. Windows and macOS also
 accept at-spi's spellings, so `click`, `press` and `activate` all
 mean the native invoke there and a script written against Linux keeps
@@ -1846,6 +3198,12 @@ typo apart from a widget that cannot. On Linux the name is passed to
 the toolkit as given, so the refusal is the toolkit's own.
 
 #### `double_click`
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `via` | `str \| None` | `None` |
 
 Not an accessible action, the way click is. `click` names an action
 the toolkit publishes and lets the toolkit perform it; a
@@ -1892,6 +3250,13 @@ Same caveat as `checked`: read `expandable` first.
 
 #### `find`
 
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `role` | `str \| None` | `None` |
+| `name` | `str \| None` | `None` |
+
 The recursive search, where `children` is one level. An empty list is
 how it reports no match, rather than raising. The elements it hands
 back carry this one's session, so a result can be clicked and
@@ -1921,6 +3286,12 @@ a test failure when it is an unsupported desktop. Ask
 `Session.focus_tracking_works()` first on a machine you do not know.
 
 #### `is_ancestor_of`
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `other` | `Element` | **required** |
 
 Strictly inside: an element is not its own ancestor. Answered by
 walking upwards from `other` rather than descending, since the
@@ -2006,6 +3377,12 @@ False here is also the reason that call would refuse.
 Same caveat as `checked`: read `selectable` first.
 
 #### `set_text`
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `text` | `str` | **required** |
 
 Not typing: no key events are sent, so autocomplete, input masks and
 per-keystroke validation are never exercised. That is the right call
@@ -2182,6 +3559,12 @@ for in a loop that is waiting without committing to a deadline.
 
 #### `restart`
 
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `timeout` | `float` | `5.0` |
+
 Returns self, so `app.restart().pid` reads. The new process replaces
 `.process`; the old one is stopped first by the rules above.
 
@@ -2204,6 +3587,12 @@ after the program quits still answers None; call `poll()` first, or
 read what `stop()` returns.
 
 #### `send_signal`
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `signal` | `int` | **required** |
 
 Unix only in any real sense. On Windows `subprocess` accepts just
 `SIGTERM` (which it turns into `TerminateProcess`), `CTRL_C_EVENT`
@@ -2249,6 +3638,12 @@ on a thread, if the output is wanted while the program is alive.
 
 #### `stop`
 
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `timeout` | `float` | `5.0` |
+
 SIGTERM first, because a GUI program asked to quit politely gets to
 save its state; `SIGKILL` only if it has not gone within `timeout`.
 That fallback is not theoretical: an editor holding unsaved text
@@ -2274,6 +3669,12 @@ this and `kill()`. Both also return silently once `returncode` has
 been filled in.
 
 #### `wait`
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `timeout` | `float \| None` | `None` |
 
 Unbounded with no `timeout`, which on a GUI program is a real risk
 rather than a theoretical one: an editor holding unsaved text answers
@@ -2463,38 +3864,38 @@ provides the capability at all -- which today is nowhere.
 
 | Capability | Tier | Provided by | What it covers |
 |------------|------|-------------|----------------|
-| `PROCESS_LAUNCH` | T1 | *session itself* | Start and run applications |
-| `TIMING` | T1 | *session itself* | Waits, and inter-event and inter-key delays |
-| `IMAGE_LOCATE` | T1 | ToolImageSearchBackend | Find a template image's position inside an already-captured screenshot by pixel comparison; a new feature, X11::GUITest never had it, and needs no live display connection, only files |
-| `SCREEN_INFO` | T2 | CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Output enumeration, resolution, scale (wl_output) |
-| `POINTER_MOVE` | T4 | LibeiBackend, MacquartzBackend, ToolInputBackend, UinputBackend, Win32Backend, X11Backend | Absolute pointer positioning; relative-only injection cannot do this |
-| `POINTER_BUTTON` | T4 | LibeiBackend, MacquartzBackend, PortalBackend, ToolInputBackend, UinputBackend, Win32Backend, X11Backend | Button press and release |
-| `POINTER_SCROLL` | T4 | LibeiBackend, MacquartzBackend, PortalBackend, ToolInputBackend, UinputBackend, Win32Backend, X11Backend | Axis events; X11 buttons 4/5 were scroll, Wayland's are not |
-| `KEY_EVENT` | T4 | LibeiBackend, MacquartzBackend, PortalBackend, ToolInputBackend, UinputBackend, Win32Backend, X11Backend | Keycode press and release |
-| `TEXT_ENTRY` | T4 | LibeiBackend, MacquartzBackend, PortalBackend, ToolInputBackend, UinputBackend, Win32Backend, X11Backend | Typing characters; needs a backend-controlled keymap, which raw uinput lacks |
-| `INPUT_SYNC` | T4 | LibeiBackend | Confirm the compositor has consumed the events sent so far, instead of sleeping and hoping; proves delivery to the compositor, never that the application processed or repainted them |
-| `INPUT_CAPTURE` | T4 | InputCaptureBackend | Learn where the pointer is from a real crossing of a screen edge the caller sets up, exclusively diverting real input for the length of one activation; not a query -- see Session.wait_for_pointer_activation, which can return None rather than answer at all if nobody moves the pointer there in time |
-| `WINDOW_LIST` | T3 | AtspiBackend, CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Enumerate toplevels, read titles and app ids |
-| `WINDOW_EVENTS` | T3 | CosmicBackend, GnomeShellBackend, KWinEventsBackend, NiriBackend, SwayBackend, Win32Backend | Subscribe to open/close/title-change instead of polling |
-| `WINDOW_STATE` | T3 | AtspiBackend, CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Read minimized and activated state |
-| `WINDOW_ACTIVATE` | T3 | AtspiBackend, CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Raise and focus; there is no raise-without-focus operation |
-| `WINDOW_MINIMIZE` | T3 | CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Minimize and restore |
-| `WINDOW_GEOMETRY` | T3 | AtspiBackend, CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Read position and size; no foreign-toplevel protocol carries this |
-| `WINDOW_PLACEMENT` | T3 | GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Move to a position; placement is the compositor's prerogative |
-| `WINDOW_RESIZE` | T3 | GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Change width and height; separate from placement because a tiling compositor can size a window without letting anyone position it |
-| `WINDOW_PID` | T3 | GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Map a window to a process id; prefer app_id |
-| `WINDOW_AT_POINT` | T3 | CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Hit-test a coordinate; needs geometry and stacking order |
-| `SCREEN_CAPTURE` | T3 | CosmicBackend, PortalCaptureBackend, ToolCaptureBackend, Win32Backend, X11Backend | Pixels; a new feature, X11::GUITest never had it |
-| `WINDOW_CAPTURE` | T3 | CosmicBackend, GnomeShellBackend, MacosBackend, Win32Backend, X11Backend | Pixels of one window, captured natively rather than cropped out of a screen shot -- so an occluded or offscreen window still comes back whole |
-| `CLIPBOARD` | T3 | PortalBackend, ToolClipboardBackend, Win32Backend | Read and write the clipboard's text content; a new feature, X11::GUITest never had it |
-| `ELEMENT_TREE` | T5 | AtspiBackend, MacosBackend, UiaBackend | Walk the accessible tree; replaces the X11 window-tree walk |
-| `ELEMENT_ACTION` | T5 | AtspiBackend, MacosBackend, UiaBackend | Act on an element without coordinates or injection permission |
-| `ELEMENT_GEOMETRY` | T5 | AtspiBackend, MacosBackend, UiaBackend | Read an element's screen rectangle, and hit-test a coordinate against the accessible tree; one capability rather than the two windows get, because on AT-SPI both are the same Component call and no toolkit answers one without the other. Where it is withheld is a per-backend answer, not a property of the capability: AT-SPI offers it on X11 and XWayland only, since a pure Wayland client is never told where it sits on screen, while UI Automation answers it on any Windows session |
-| `POINTER_QUERY` | T6 | MacosBackend, Win32Backend, X11Backend | Read the global pointer position; injection works, readback does not |
-| `INPUT_STATE_QUERY` | T6 | Win32Backend, X11Backend | Read global keyboard or button state; this is what a keylogger reads |
-| `WINDOW_TITLE_SET` | T6 | Win32Backend, X11Backend | Rewrite another application's title; that is impersonation |
-| `WINDOW_LOWER` | T6 | Win32Backend, X11Backend | Lower or restack; only activate exists, upward only |
-| `WINDOW_CURSOR_QUERY` | T6 | Win32Backend, X11Backend | Read the cursor shape over a window; no workaround anywhere on Wayland, and a scoped one on Windows, where the cursor being shown is readable but compared against the system's own handles rather than asked of a window |
+| <a id="cap-process_launch"></a>`PROCESS_LAUNCH` | T1 | *session itself* | Start and run applications |
+| <a id="cap-timing"></a>`TIMING` | T1 | *session itself* | Waits, and inter-event and inter-key delays |
+| <a id="cap-image_locate"></a>`IMAGE_LOCATE` | T1 | ToolImageSearchBackend | Find a template image's position inside an already-captured screenshot by pixel comparison; a new feature, X11::GUITest never had it, and needs no live display connection, only files |
+| <a id="cap-screen_info"></a>`SCREEN_INFO` | T2 | CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Output enumeration, resolution, scale (wl_output) |
+| <a id="cap-pointer_move"></a>`POINTER_MOVE` | T4 | LibeiBackend, MacquartzBackend, ToolInputBackend, UinputBackend, Win32Backend, X11Backend | Absolute pointer positioning; relative-only injection cannot do this |
+| <a id="cap-pointer_button"></a>`POINTER_BUTTON` | T4 | LibeiBackend, MacquartzBackend, PortalBackend, ToolInputBackend, UinputBackend, Win32Backend, X11Backend | Button press and release |
+| <a id="cap-pointer_scroll"></a>`POINTER_SCROLL` | T4 | LibeiBackend, MacquartzBackend, PortalBackend, ToolInputBackend, UinputBackend, Win32Backend, X11Backend | Axis events; X11 buttons 4/5 were scroll, Wayland's are not |
+| <a id="cap-key_event"></a>`KEY_EVENT` | T4 | LibeiBackend, MacquartzBackend, PortalBackend, ToolInputBackend, UinputBackend, Win32Backend, X11Backend | Keycode press and release |
+| <a id="cap-text_entry"></a>`TEXT_ENTRY` | T4 | LibeiBackend, MacquartzBackend, PortalBackend, ToolInputBackend, UinputBackend, Win32Backend, X11Backend | Typing characters; needs a backend-controlled keymap, which raw uinput lacks |
+| <a id="cap-input_sync"></a>`INPUT_SYNC` | T4 | LibeiBackend | Confirm the compositor has consumed the events sent so far, instead of sleeping and hoping; proves delivery to the compositor, never that the application processed or repainted them |
+| <a id="cap-input_capture"></a>`INPUT_CAPTURE` | T4 | InputCaptureBackend | Learn where the pointer is from a real crossing of a screen edge the caller sets up, exclusively diverting real input for the length of one activation; not a query -- see Session.wait_for_pointer_activation, which can return None rather than answer at all if nobody moves the pointer there in time |
+| <a id="cap-window_list"></a>`WINDOW_LIST` | T3 | AtspiBackend, CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Enumerate toplevels, read titles and app ids |
+| <a id="cap-window_events"></a>`WINDOW_EVENTS` | T3 | CosmicBackend, GnomeShellBackend, KWinEventsBackend, NiriBackend, SwayBackend, Win32Backend | Subscribe to open/close/title-change instead of polling |
+| <a id="cap-window_state"></a>`WINDOW_STATE` | T3 | AtspiBackend, CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Read minimized and activated state |
+| <a id="cap-window_activate"></a>`WINDOW_ACTIVATE` | T3 | AtspiBackend, CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Raise and focus; there is no raise-without-focus operation |
+| <a id="cap-window_minimize"></a>`WINDOW_MINIMIZE` | T3 | CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Minimize and restore |
+| <a id="cap-window_geometry"></a>`WINDOW_GEOMETRY` | T3 | AtspiBackend, CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Read position and size; no foreign-toplevel protocol carries this |
+| <a id="cap-window_placement"></a>`WINDOW_PLACEMENT` | T3 | GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Move to a position; placement is the compositor's prerogative |
+| <a id="cap-window_resize"></a>`WINDOW_RESIZE` | T3 | GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Change width and height; separate from placement because a tiling compositor can size a window without letting anyone position it |
+| <a id="cap-window_pid"></a>`WINDOW_PID` | T3 | GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Map a window to a process id; prefer app_id |
+| <a id="cap-window_at_point"></a>`WINDOW_AT_POINT` | T3 | CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Hit-test a coordinate; needs geometry and stacking order |
+| <a id="cap-screen_capture"></a>`SCREEN_CAPTURE` | T3 | CosmicBackend, PortalCaptureBackend, ToolCaptureBackend, Win32Backend, X11Backend | Pixels; a new feature, X11::GUITest never had it |
+| <a id="cap-window_capture"></a>`WINDOW_CAPTURE` | T3 | CosmicBackend, GnomeShellBackend, MacosBackend, Win32Backend, X11Backend | Pixels of one window, captured natively rather than cropped out of a screen shot -- so an occluded or offscreen window still comes back whole |
+| <a id="cap-clipboard"></a>`CLIPBOARD` | T3 | PortalBackend, ToolClipboardBackend, Win32Backend | Read and write the clipboard's text content; a new feature, X11::GUITest never had it |
+| <a id="cap-element_tree"></a>`ELEMENT_TREE` | T5 | AtspiBackend, MacosBackend, UiaBackend | Walk the accessible tree; replaces the X11 window-tree walk |
+| <a id="cap-element_action"></a>`ELEMENT_ACTION` | T5 | AtspiBackend, MacosBackend, UiaBackend | Act on an element without coordinates or injection permission |
+| <a id="cap-element_geometry"></a>`ELEMENT_GEOMETRY` | T5 | AtspiBackend, MacosBackend, UiaBackend | Read an element's screen rectangle, and hit-test a coordinate against the accessible tree; one capability rather than the two windows get, because on AT-SPI both are the same Component call and no toolkit answers one without the other. Where it is withheld is a per-backend answer, not a property of the capability: AT-SPI offers it on X11 and XWayland only, since a pure Wayland client is never told where it sits on screen, while UI Automation answers it on any Windows session |
+| <a id="cap-pointer_query"></a>`POINTER_QUERY` | T6 | MacosBackend, Win32Backend, X11Backend | Read the global pointer position; injection works, readback does not |
+| <a id="cap-input_state_query"></a>`INPUT_STATE_QUERY` | T6 | Win32Backend, X11Backend | Read global keyboard or button state; this is what a keylogger reads |
+| <a id="cap-window_title_set"></a>`WINDOW_TITLE_SET` | T6 | Win32Backend, X11Backend | Rewrite another application's title; that is impersonation |
+| <a id="cap-window_lower"></a>`WINDOW_LOWER` | T6 | Win32Backend, X11Backend | Lower or restack; only activate exists, upward only |
+| <a id="cap-window_cursor_query"></a>`WINDOW_CURSOR_QUERY` | T6 | Win32Backend, X11Backend | Read the cursor shape over a window; no workaround anywhere on Wayland, and a scoped one on Windows, where the cursor being shown is readable but compared against the system's own handles rather than asked of a window |
 
 ### Tiers
 
@@ -2549,11 +3950,11 @@ WINDOW_ROLES
 
 | Name | What it is |
 |------|------------|
-| `connect` | Open an automation session. |
+| [`connect`](#connect) | Open an automation session. |
 | `Session` | A connected automation session. |
 | `Application` | A program started by `Session.start_app`, and its lifecycle. |
-| `detect` | Probe the current environment. Pass `env` to test against a fake one. |
-| `quote_for_type` | Escape the characters `send_keys` reads as syntax. |
+| [`detect`](#detect) | Probe the current environment. Pass `env` to test against a fake one. |
+| [`quote_for_type`](#quote_for_type) | Escape the characters `send_keys` reads as syntax. |
 | `Role` | Accessible role names, grouped by what you would look for. |
 | `Capability` | An operation a backend may or may not support. |
 | `CapabilitySet` | The capabilities a backend actually provides. |
@@ -2585,6 +3986,163 @@ WINDOW_ROLES
 | `PortalTimeout` | A portal request was accepted but never answered. |
 | `VersionTooOld` | The installed pyguitest is older than the floor a script declared. |
 | `WindowNotFound` | No window matched, or a handle refers to a window that has closed. |
-| `require_version` | Raise VersionTooOld unless this pyguitest is at least `minimum`. |
+| [`require_version`](#require_version) | Raise VersionTooOld unless this pyguitest is at least `minimum`. |
 | `backends` | Backend registry and selection. |
 | `compat` | The X11::GUITest 0.29 migration table, as data. |
+
+### `connect`
+
+```python
+connect(
+    backend: str | Sequence[str] | None = None,
+    environment: Environment | None = None,
+    backend_options: dict | None = None,
+    **kwargs: Any,
+) -> Session
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `backend` | `str \| Sequence[str] \| None` | `None` |
+| `environment` | `Environment \| None` | `None` |
+| `backend_options` | `dict \| None` | `None` |
+| `**kwargs` |  | *any keyword* |
+
+Detects the environment, selects a backend, and returns a Session. Never
+raises for a limited desktop -- a session with few capabilities is the
+normal case, and `supports()` is how you find out. Pass `backend` by name
+to override selection.
+
+`event_delay` defaults to 0.0 -- no pause between a `move_mouse()` and
+the `click()` after it -- which is not free: the target application can
+get the button event before it has processed the pointer motion, and
+the click is simply lost, no exception, just a control that never
+responds. Confirmed live on two separate driver scripts, independently:
+both ran for a long time looking fine because nothing checked that each
+click actually landed, and `event_delay=0.15` turned a high silent-miss
+rate into a clean run. A script driving real input against a real
+application should usually set this rather than keep the default.
+
+`backend_options` goes to that named backend's own constructor, for
+settings only it understands -- `persist_mode`/`restore_token` on
+`portal` and `eiinput`, say. `**kwargs` is unrelated and configures the
+Session's own delays (`event_delay`, `key_delay`) and its click route
+(`click_via`). The returned backend is reachable as
+`session.backend`, which is how a caller reads a value back out:
+
+```python
+gui = connect(
+    backend="portal",
+    backend_options={
+        "persist_mode": 2,  # until explicitly revoked
+        "restore_token": saved,  # None on the first run
+    },
+)
+save_somewhere(gui.backend.restore_token)
+```
+
+`backend` also takes a *sequence* of names, which composes exactly those
+-- the way to pair an opt-in input backend with the element and window
+access a plain `connect()` would have given you, in one session instead
+of two:
+
+```python
+gui = connect(
+    backend=["eiinput", "atspi"],
+    backend_options={"eiinput": {"persist_mode": 2}},
+)
+save_somewhere(gui.backend.member("eiinput").restore_token)
+```
+
+Three things differ in that form, all deliberate: the caller's order is
+the precedence (the first member that has a capability serves it), a
+named backend that cannot build raises instead of being quietly skipped,
+and `backend_options` is keyed by backend name because a flat dict could
+not say who an option was for. Reading a value back off one member goes
+through `member()`, since `session.backend` is then the composite.
+
+### `detect`
+
+```python
+detect(env: Mapping[str, str] | None = None) -> Environment
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `env` | `Mapping[str, str] \| None` | `None` |
+
+Only affects the parts of detection that read environment variables:
+session classification, compositor identification, and portal detection.
+Library presence (has_libei, has_atspi, has_pygobject, has_dogtail,
+has_evdev), /dev/uinput access, and installed tools are always probed
+against the real host --
+a fake `env` cannot make evdev importable or put swaymsg on PATH. A test
+against those needs to mock the underlying probe (_lib, _module, _uinput,
+tools.discover) directly rather than routing through `env`.
+
+The Windows probes run only when `_classify()` has said this is a Windows
+session, so a fake `env` cannot bring them to life either: driving them
+means patching `_platform`, and everything they then report is read from
+the machine the test is running on, which is why they are asserted on
+what they report where they cannot ask rather than on Windows-only values.
+
+The macOS probes are gated the same way and driven by the same patch, but
+are *faked* rather than recorded -- `tests/test_macos.py` replaces the
+four questions in `backends._macapi`. What they answer is a property of
+the machine's TCC database, so asserting on what this one reports would
+pin the developer's grants into the suite.
+
+### `quote_for_type`
+
+```python
+quote_for_type(text: str | None) -> str | None
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `text` | `str \| None` | **required** |
+
+Replaces X11::GUITest's QuoteStringForSendKeys, with the same behaviour
+plus the # fix noted above: each of ^ % + ~ # ( ) { } is wrapped in
+braces, so send_keys(quote_for_type(text)) sends `text` literally.
+
+One exception, deliberately kept from upstream: `&` (AltGr) is not
+escaped, so a `&` in `text` is read as the modifier. `{&}` is the literal
+spelling, but it cannot be passed *in*: braces are escaped too, so
+`quote_for_type("{&}")` returns `{{}&{}}` and the `&` is a modifier
+again. Apply it to the result:
+
+```python
+gui.send_keys(quote_for_type(text).replace("&", "{&}"))
+```
+
+### `require_version`
+
+```python
+require_version(minimum: str) -> None
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `minimum` | `str` | **required** |
+
+For a script that travels: state the release it was checked against at
+the top -- pyguitest.require_version("0.18") -- and an older install
+fails right there, naming both versions and the pip command, instead of
+part way through a run with an AttributeError on an API that release
+does not have. Also available on the session as gui.require_version(),
+the counterpart of gui.require() for the package itself rather than
+the desktop.
+
+`minimum` is a dotted release like "0.17" or "0.17.2", compared
+numerically per component against the components it names -- "0.17"
+accepts every 0.17.x. It is a floor, not a pin: a newer pyguitest
+passes, matching the `>=` a requirements file would state.
