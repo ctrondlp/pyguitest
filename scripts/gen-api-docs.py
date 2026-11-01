@@ -291,9 +291,76 @@ def body(obj) -> list[str]:
     # empty, so it had nothing to remove.
     paragraphs = [p.rstrip() for p in doc.split("\n\n")[1:] if p.strip()]
     lines: list[str] = []
+    # Consecutive code paragraphs become one fence, not one each. A docstring
+    # that shows three variations of a call separates them with blank lines,
+    # which are paragraph breaks here -- fencing each separately turned one
+    # worked example into three stacked blocks with nothing between them.
+    # Merging keeps the blank lines *inside* the fence, which is how the
+    # example was written and how code is normally read.
+    # Only blocks carrying the same fence tag merge: a Python example and a
+    # non-Python legend are both fenced but must not end up in one block.
+    run: list[str] = []
+    run_tag = ""
     for paragraph in paragraphs:
+        fenced = code_fence(paragraph)
+        if fenced:
+            tag = fenced[0]
+            if run and tag == run_tag:
+                run.append("")
+                run += fenced[1:-2]
+                continue
+            if run:
+                lines += [run_tag, *run, "```", ""]
+            run = list(fenced[1:-2])
+            run_tag = tag
+            continue
+        if run:
+            lines += [run_tag, *run, "```", ""]
+            run, run_tag = [], ""
         lines += [paragraph, ""]
+    if run:
+        lines += [run_tag, *run, "```", ""]
     return lines
+
+
+def code_fence(paragraph: str) -> list[str]:
+    """A wholly-indented paragraph as a fenced Python block, else [].
+
+    An indented paragraph already rendered as a markdown code block, but as
+    an indented one: no language, so no highlighting, and it is invisible to
+    anything that looks for fences. Promoting it to a real fence costs
+    nothing and upgrades every example already written in a docstring,
+    rather than only the ones added after this.
+
+    A bullet list is indented too and must not be caught, so a block
+    qualifies only if no line opens with a list marker.
+
+    The `python` tag is only applied to a block that actually parses as
+    Python. Several indented blocks in these docstrings are not code at all
+    but legends and measured results -- `send_keys` sets out its `{}` grammar
+    as one, `^ % + # &   modifiers: Ctrl, Alt, ...` -- and tagging those
+    `python` gave them nonsense highlighting and offered them to the
+    formatter as source. They still get a fence, so the spacing that makes
+    them readable is preserved; they just do not claim to be code.
+    """
+    raw = paragraph.split("\n")
+    if not all(line.startswith("    ") or not line.strip() for line in raw):
+        return []
+    stripped = [line[4:] if line.startswith("    ") else line for line in raw]
+    if any(re.match(r"\s*([*\-+]|\d+\.)\s", line) for line in stripped):
+        return []
+    # Prose that merely happens to be indented is not an example. Require
+    # something that reads as code: an assignment, a call, or a keyword.
+    joined = "\n".join(stripped)
+    if not re.search(
+        r"[=(]|^\s*(import|from|with|for|if|def|assert|return)\b", joined, re.M
+    ):
+        return []
+    try:
+        compile(joined, "<docstring>", "exec")
+    except SyntaxError:
+        return ["```", *stripped, "```", ""]
+    return ["```python", *stripped, "```", ""]
 
 
 def borrowed_docstring(obj) -> bool:
@@ -393,6 +460,148 @@ def signature(cls, name: str) -> str:
     params = [str(p) for n, p in sig.parameters.items() if n != "self"]
     rendered = re.sub(r"'([^']*)'", r"\1", ", ".join(params))
     return f"{name}({rendered})"
+
+
+SIG_CELL_LIMIT = 110
+
+
+def short_signature(cls, name: str) -> str:
+    """`signature`, trimmed to the required parameters when it is unreadable.
+
+    `move_mouse_naturally` takes fourteen parameters and renders as 368
+    characters, which in a table cell is a wall rather than an answer: two of
+    those parameters are required and the other twelve have defaults, and
+    nothing about the rendering said so. The index table exists to answer
+    "which call do I want", so over the limit it now shows what a caller must
+    pass and defers the rest to that call's own Parameters table below, which
+    carries every name, type and default in a form that can be read.
+    """
+    full = signature(cls, name)
+    if len(full) <= SIG_CELL_LIMIT:
+        return full
+    static = inspect.getattr_static(cls, name, None)
+    try:
+        sig = inspect.signature(getattr(cls, name))
+    except (TypeError, ValueError):
+        return full
+    required = [
+        n
+        for n, p in sig.parameters.items()
+        if n != "self"
+        and p.default is inspect.Parameter.empty
+        and p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)
+    ]
+    del static
+    shown = ", ".join(required)
+    tail = ", ..." if shown else "..."
+    return f"{name}({shown}{tail})"
+
+
+def signature_fence(sig_text: str) -> list[str]:
+    """The full signature as a code block, wrapped if it is long.
+
+    One parameter per line past the limit. A fence does not soft-wrap, so the
+    fourteen-parameter calls would otherwise be a single line the reader has
+    to scroll sideways through -- the same problem the table cell had, moved.
+
+    The parameter list is found by matching the opening bracket rather than
+    by slicing to the last character: a module-level function's signature
+    carries its return annotation after the closing bracket, and assuming
+    the text ended with `)` truncated `-> Session` to `-> Sessio` and left a
+    stray comma behind it.
+    """
+    if len(sig_text) <= SIG_CELL_LIMIT:
+        return ["```python", sig_text, "```", ""]
+    open_at = sig_text.find("(")
+    if open_at == -1:
+        return ["```python", sig_text, "```", ""]
+    depth = 0
+    close_at = -1
+    for i, ch in enumerate(sig_text[open_at:], start=open_at):
+        if ch in "[(":
+            depth += 1
+        elif ch in "])":
+            depth -= 1
+            if depth == 0:
+                close_at = i
+                break
+    if close_at == -1:
+        return ["```python", sig_text, "```", ""]
+    head = sig_text[:open_at]
+    inner = sig_text[open_at + 1 : close_at]
+    suffix = sig_text[close_at + 1 :]
+    # Split on commas that separate parameters, not commas inside a type such
+    # as `Sequence[tuple[int, int]]` or `dict[str, int]`.
+    parts: list[str] = []
+    depth = 0
+    current = ""
+    for ch in inner:
+        if ch in "[(":
+            depth += 1
+        elif ch in "])":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append(current.strip())
+            current = ""
+            continue
+        current += ch
+    if current.strip():
+        parts.append(current.strip())
+    body_lines = [f"    {p}," for p in parts]
+    return ["```python", f"{head}(", *body_lines, f"){suffix}", "```", ""]
+
+
+def parameter_rows(fn) -> list[tuple[str, str, str]]:
+    """(name, type, default) for one callable, or [] if it takes nothing.
+
+    Generated from the signature rather than parsed out of prose, so it
+    cannot fall out of step with the code the way a hand-written parameter
+    list does.
+    """
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return []
+    rows: list[tuple[str, str, str]] = []
+    for name, p in sig.parameters.items():
+        if name == "self":
+            continue
+        if p.kind is p.VAR_POSITIONAL:
+            rows.append((f"*{name}", "", "*any number*"))
+            continue
+        if p.kind is p.VAR_KEYWORD:
+            rows.append((f"**{name}", "", "*any keyword*"))
+            continue
+        if p.annotation is inspect.Parameter.empty:
+            declared = ""
+        else:
+            declared = re.sub(
+                r"'([^']*)'", r"\1", inspect.formatannotation(p.annotation)
+            )
+        if p.default is inspect.Parameter.empty:
+            default = "**required**"
+        else:
+            default = f"`{p.default!r}`" if p.default != () else "`()`"
+        rows.append((name, declared, default))
+    return rows
+
+
+def parameter_table(fn) -> list[str]:
+    """The Parameters block for a call, or [] when it takes no arguments."""
+    rows = parameter_rows(fn)
+    if not rows:
+        return []
+    out = [
+        "**Parameters**",
+        "",
+        "| Parameter | Type | Default |",
+        "|-----------|------|---------|",
+    ]
+    for name, declared, default in rows:
+        shown_type = f"`{cell(declared)}`" if declared else ""
+        out.append(f"| `{name}` | {shown_type} | {default} |")
+    out.append("")
+    return out
 
 
 def function_signature(fn) -> str:
@@ -580,6 +789,18 @@ def member_row(cls, name: str, types: dict[str, str]) -> str:
     return f"| `{cell(label)}` |  |"
 
 
+def cap_link(name: str) -> str:
+    """A capability name, linked to the row that explains it.
+
+    The names are opaque on first read -- `ELEMENT_TREE` tells a reader
+    nothing about what it is or why a desktop might not have it -- and the
+    table that defines all of them is 2000 lines below the first call that
+    needs one. Linking costs nothing and puts the definition one click from
+    every one of the ~95 places a capability is named.
+    """
+    return f"[`{name}`](#cap-{name.lower()})"
+
+
 def needs_cell(required, optional, x11_only: set[str]) -> str:
     """The *Needs* cell: the capabilities, and the caveats on reaching them.
 
@@ -591,10 +812,10 @@ def needs_cell(required, optional, x11_only: set[str]) -> str:
     qualifies when it does. It is also how the Capabilities table has always
     rendered the same fact, so the three tables now agree.
     """
-    cell_text = ", ".join(f"`{c}`" for c in sorted(required))
+    cell_text = ", ".join(cap_link(c) for c in sorted(required))
     notes = []
     if optional:
-        extra = ", ".join(f"`{c}`" for c in sorted(optional))
+        extra = ", ".join(cap_link(c) for c in sorted(optional))
         notes.append(f"uses {extra} if present")
     if any(c in x11_only for c in required):
         notes.append("**X11 only**")
@@ -608,8 +829,8 @@ def session_row(name: str, x11_only: set[str]) -> str:
     required, optional = method_capabilities(pyguitest.Session, name)
     needs = needs_cell(required, optional, x11_only)
     doc = first_line(inspect.getattr_static(pyguitest.Session, name))
-    sig = cell(signature(pyguitest.Session, name))
-    return f"| `{sig}` | {needs} | {cell(doc)} |"
+    sig = cell(short_signature(pyguitest.Session, name))
+    return f"| [`{sig}`](#{name}) | {needs} | {cell(doc)} |"
 
 
 HEADER = """# API reference
@@ -624,15 +845,32 @@ task-shaped questions — waiting properly, filling a form, screenshots, CI —
 and [troubleshooting.md](troubleshooting.md) starts from the symptom when a
 call finds nothing, types nothing or captures nothing.
 
-**Reading the tables.** *Needs* is the `Capability` a call requires; ask
-`gui.supports(...)` before depending on it, or let the call raise
-`CapabilityUnsupported`. A blank means the call works on any session, and
-"uses X if present" means the call adapts rather than fails when X is
-missing. A few calls can also be marked **X11 only** — a capability nothing
-but `X11Backend` provides. Nothing carries that mark today, because Windows
-provides every tier-6 capability and macOS serves `pointer_position()`: the
-capability model working, not an annotation gone missing. See
-[wayland-audit.md](developers/wayland-audit.md) for why.
+**Reading the tables.** Each group starts with an index — signature, what the
+call needs, and what it does in one line — and every signature links down to
+that call's own entry, which carries the full signature, a table of every
+parameter with its type and default, and the rest of the docstring. A
+parameter whose Default reads **required** is one you must pass; anything
+else shows the value used when you leave it out.
+
+*Needs* is the **capability** a call requires. A capability is one thing a
+desktop either lets a program do or does not — read the accessible tree,
+move the pointer, capture the screen, list windows — and which ones you get
+is decided by the session you are actually running on, not by the install.
+That is why it is per-call rather than a footnote: `ELEMENT_TREE`, for
+instance, is the one that lets `gui.button("Save")` find a control by name,
+and a desktop with no accessibility bridge running does not have it, so
+every lookup fails there while typing and clicking still work. Each name
+links to [Capabilities](#capabilities), which says what it covers, which
+backends provide it, and how hard it is to come by.
+
+Ask `gui.supports(...)` before depending on one, or let the call raise
+`CapabilityUnsupported`. A blank *Needs* means the call works on any
+session, and "uses X if present" means the call adapts rather than fails
+when X is missing. A few calls can also be marked **X11 only** — a
+capability nothing but `X11Backend` provides. Nothing carries that mark
+today, because Windows provides every tier-6 capability and macOS serves
+`pointer_position()`: the capability model working, not an annotation gone
+missing. See [wayland-audit.md](developers/wayland-audit.md) for why.
 
 ## Getting a session
 
@@ -719,7 +957,15 @@ def session_details(names: list[str]) -> list[str]:
     for name in names:
         static = inspect.getattr_static(pyguitest.Session, name)
         detail = body(static)
-        if not detail:
+        params = (
+            []
+            if isinstance(static, property)
+            else parameter_table(getattr(pyguitest.Session, name))
+        )
+        # A call with neither prose nor parameters has nothing to show here;
+        # one with only parameters still does, which is why this is not the
+        # old `if not detail: continue`.
+        if not detail and not params:
             continue
         # The name alone, not the signature. The table above carries the
         # full one, and several run past 300 characters -- `elements()` takes
@@ -727,6 +973,12 @@ def session_details(names: list[str]) -> list[str]:
         # unusable anchor. A bare name also gives every call a stable
         # `#name` link that survives a signature change.
         out += [f"### `{name}`", ""]
+        # The full signature, in a fence rather than a cell: this is where a
+        # reader who followed the index link lands, and the long ones are
+        # only readable with room to wrap.
+        if not isinstance(static, property):
+            out += signature_fence(signature(pyguitest.Session, name))
+        out += params
         out += detail
     return out
 
@@ -830,9 +1082,15 @@ def render_types(out: list[str]) -> None:
             if static is None:
                 continue
             detail = body(static)
-            if not detail:
+            params = (
+                parameter_table(getattr(cls, member))
+                if inspect.isfunction(static)
+                else []
+            )
+            if not detail and not params:
                 continue
             out += [f"#### `{member}`", ""]
+            out += params
             out += detail
 
 
@@ -855,8 +1113,13 @@ def render_capabilities(out: list[str], prov, x11_only: set[str]) -> None:
         who = sorted(prov.get(cap.name, set()) - UNINFORMATIVE)
         shown = ", ".join(who) if who else "*session itself*"
         mark = " **(X11 only)**" if cap.name in x11_only else ""
+        # An inline anchor, so every `Needs` cell above can link straight to
+        # the row that defines the capability it names. GitHub renders inline
+        # HTML in a table cell; a heading per capability would give 32 more
+        # entries in the page outline for no gain.
+        anchor = f'<a id="cap-{cap.name.lower()}"></a>'
         out.append(
-            f"| `{cap.name}` | T{cap.tier.value} | {shown}{mark} "
+            f"| {anchor}`{cap.name}` | T{cap.tier.value} | {shown}{mark} "
             f"| {cell(cap.description)} |"
         )
     out += [
@@ -915,8 +1178,31 @@ def render_names(out: list[str]) -> None:
         obj = getattr(pyguitest, name, None)
         if obj is not None:
             described = first_line(obj) or note_for(name, obj)
-            out.append(f"| `{name}` | {cell(described)} |")
+            linked = f"[`{name}`](#{name.lower()})" if _has_detail(obj) else f"`{name}`"
+            out.append(f"| {linked} | {cell(described)} |")
     out.append("")
+    # The module-level *functions* in full. `connect` is the first call in
+    # every script and the table above gave it one line and no signature, so
+    # the parameters that decide how a whole run behaves -- which backends,
+    # the click strategy, the inter-event and inter-key delays -- were
+    # documented nowhere on this page. The classes are covered under Types.
+    for name in pyguitest.__all__:
+        obj = getattr(pyguitest, name, None)
+        if not _has_detail(obj):
+            continue
+        out += [f"### `{name}`", ""]
+        out += signature_fence(f"{name}{function_signature(obj)}")
+        out += parameter_table(obj)
+        out += body(obj)
+
+
+def _has_detail(obj) -> bool:
+    """Whether a module-level export earns a section of its own.
+
+    Functions do: they take arguments. Classes are already rendered under
+    Types, and an enum or a constant has nothing a signature would describe.
+    """
+    return inspect.isfunction(obj)
 
 
 def render() -> str:
