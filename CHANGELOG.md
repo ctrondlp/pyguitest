@@ -7,6 +7,106 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.20.1] — 2026-11-02
+
+### Fixed
+
+- **`Element.find(role=...)` and `Element.child(role=...)` silently matched
+  nothing on a current at-spi2.** Both built a `dogtail.predicate.
+  GenericPredicate`, which compares the role asked for against the single
+  spelling the bus reports — and at-spi2 renamed `ATSPI_ROLE_PUSH_BUTTON` to
+  `ATSPI_ROLE_BUTTON` without changing the integer. So on at-spi2-core 2.62.1
+  (Fedora 45), `find(role=Role.PUSH_BUTTON)` returned `[]`, which is not an
+  error and says nothing: measured live, `elements(role="push button")` found
+  two buttons in a window whose own `frame.find(role="push button")` found
+  none, with `is_ancestor_of` confirming they were descendants.
+
+  `roles.spellings()` exists for exactly this rename and the Session-level
+  search already went through it — `_build_predicate`'s docstring says it
+  *replaced* the `GenericPredicate` call — but `Element.find` was left behind
+  on the old one, so the two search layers had drifted onto two matchers and
+  only one knew about the rename. Both now use `_build_predicate`, which also
+  brings its entry-reported-as-text fallback to the element-scoped search.
+
+  This narrows rather than widens what is asked of dogtail, which matters
+  because several versions have to work. Of the two things
+  `find_all_descendants` accepts, the plain function is the stable one —
+  dogtail checks `isinstance(pred, LambdaType)` and calls it. The predicate
+  *object* protocol is what moved: the constructor keyword (`roleName` →
+  `role_name`, kept only by a compatibility shim), the method the walk calls
+  on it (`matches` → `satisfied_by_node`), and the role spelling it compares
+  against. Constructing one meant depending on all three; passing a function
+  depends on none. The suite had not caught it because its fake tree models
+  only the older spelling; it now asserts the two layers agree per role under
+  either spelling, rather than one assertion per role.
+
+- **The clipboard was served by `wl-copy` on sessions with no Wayland at
+  all.** `wl-copy` is first in `CLIPBOARD_TOOLS` and was gated on
+  `mutter_incompatible` alone, which answers "can this work on GNOME" and
+  nothing about whether a Wayland compositor is running. On an X11 session
+  under any other compositor — Xfce, i3, MATE, Cinnamon, LXQt, KDE-on-X11 —
+  it was therefore selected, every `set_clipboard`/`get_clipboard` failed
+  with "Failed to connect to a Wayland server", and `xclip` went untried
+  though it was installed and next in line. The fallback loop could not
+  recover: construction succeeds, because `wl-copy` is on PATH and answers
+  `--version` with no display, and only the read or write fails.
+
+  `doctor` reported `CLIPBOARD` available and "Nothing missing" throughout,
+  which is what made it expensive rather than obvious. There is now a
+  `wayland_only` flag, the mirror of the existing `x11_only`, set on
+  `wl-copy` and passed from both `_clipboard_factory` and the environment
+  report; on XWayland both are true, which is right, since both kinds of
+  client are reachable there. Asserted as an invariant over the whole group —
+  a clipboard tool speaks one display protocol or the other, so exactly one
+  of the two flags must be set on each — rather than only on the tool that
+  had the bug.
+
+- **`Element.choose()` let dogtail's own `SearchError` escape.** It is a
+  plain `Exception`, not a `PyGUITestError`, so the one public call raised a
+  catchable error on Windows and macOS (both `ElementNotFound`) and an
+  uncatchable dogtail internal on Linux — and a caller following this
+  method's own documented advice, catch the failure and print `options()`,
+  could not catch it at all. It now raises `ElementNotFound` naming the
+  option and listing what the control does offer, chained with `from` so
+  dogtail's traceback stays reachable.
+
+- **`Element.checkable` was False for every check box and radio button on
+  GTK 3.** It read the `CHECKABLE` state alone, and GTK 3 publishes none:
+  measured on GTK 3.24.52 with at-spi2-core 2.62.1, a `Gtk.CheckButton`'s
+  whole state set is `ENABLED`, `FOCUSABLE`, `SENSITIVE`, `SHOWING`,
+  `VISIBLE` — while `checked` tracked the widget correctly all along. Since
+  both `Element.checked` and `Session.expect_checked` tell a caller to read
+  `checkable` first on a control they do not know, following that advice
+  skipped working checkboxes on the toolkit most Linux applications are
+  written in.
+
+  It now falls back to the role (check box, radio button, toggle button,
+  check menu item, radio menu item) when no state is published. That list is
+  private to the AT-SPI backend rather than a group beside `Role`'s public
+  `WINDOW_ROLES`/`TEXT_ROLES`/`CHOICE_ROLES`: those exist for callers to pass
+  to `elements(role=...)`, while this is one backend's workaround for one
+  toolkit's missing state. Publishing it would have added API surface, and so
+  required a minor rather than a patch release — which the recorder's
+  `PROFILE` is pinned to. The fallback only widens the answer where the state
+  is absent,
+  so a toolkit that does publish `CHECKABLE` still decides for itself, and no
+  element gains a `checked` value it did not already have — the same shape as
+  `expanded`, which reads the state set directly for its own version of this
+  problem. `expect_checked`'s docstring now says what the guard does and does
+  not rule out.
+
+- **`pyguitest doctor` named window tools that could not drive anything
+  here.** `WINDOW_TOOLS` was discovered with no gate at all, unlike the
+  capture, input and clipboard groups beside it, so every one of those
+  desktops' IPC clients was offered wherever its binary happened to be
+  installed. Observed on a Fedora 45 GNOME box with sway installed for
+  `scripts/headless-sway-session.sh`: the `tools` line — the one place a
+  reader looks to find out what this desktop can do — listed `swaymsg`.
+  Each entry now names the compositors it can drive. Family-level, because
+  that is the granularity `Compositor` has; `for_compositor` still makes the
+  finer distinction where it matters, by each compositor's own environment
+  signature rather than by which binaries are present.
+
 ### Documentation
 
 - **`docs/api.md` named a capability for almost every call and defined it
@@ -5145,7 +5245,8 @@ First public release.
 - A `pyguitest` command-line entry point.
 - PEP 561 type information (`py.typed`); no hard runtime dependencies.
 
-[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.20.0...HEAD
+[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.20.1...HEAD
+[0.20.1]: https://github.com/ctrondlp/pyguitest/compare/v0.20.0...v0.20.1
 [0.20.0]: https://github.com/ctrondlp/pyguitest/compare/v0.19.1...v0.20.0
 [0.19.1]: https://github.com/ctrondlp/pyguitest/compare/v0.19.0...v0.19.1
 [0.19.0]: https://github.com/ctrondlp/pyguitest/compare/v0.18.0...v0.19.0

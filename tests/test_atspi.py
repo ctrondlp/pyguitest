@@ -22,6 +22,7 @@ from pyguitest.errors import (
     BackendUnavailable,
     CapabilityUnsupported,
     ElementNotActionable,
+    ElementNotFound,
     PyGUITestError,
 )
 from pyguitest.roles import Role, spellings
@@ -1397,6 +1398,51 @@ class TestWaylandElementGeometry(AtspiTestCase):
         self.assertIsNotNone(found)
         self.assertEqual(found.name, "OK")
 
+    def test_element_find_matches_whichever_name_atspi_gives_it(self):
+        # The same rename, one layer down. Element.find built a dogtail
+        # GenericPredicate, which compares the role asked for against the one
+        # spelling this desktop reports -- so on an at-spi2 that says "button",
+        # find(role=Role.PUSH_BUTTON) matched nothing and said so by returning
+        # an empty list, which is not an error. Measured live on at-spi2-core
+        # 2.62.1 (Fedora 45): elements(role="push button") found two buttons in
+        # a window whose own frame.find(role="push button") found none.
+        # Only OK's spelling is changed, so this also pins that one search
+        # matches both names at once -- a tree mid-upgrade, or a toolkit that
+        # publishes one and an at-spi2 that renames the other.
+        self.button.roleName = "button"
+        gui = self.backend()
+        frame = gui.find_element(role=Role.FRAME)
+        self.assertEqual(
+            [e.name for e in frame.find(role=Role.PUSH_BUTTON)], ["OK", "Cancel"]
+        )
+
+    def test_element_child_matches_whichever_name_atspi_gives_it(self):
+        # child() is find()'s first result, and the spelling the recorder
+        # emits into generated scripts -- root_element().child(role=...).
+        self.button.roleName = "button"
+        gui = self.backend()
+        frame = gui.find_element(role=Role.FRAME)
+        self.assertEqual(frame.child(role=Role.PUSH_BUTTON).name, "OK")
+
+    def test_the_two_search_layers_agree_on_every_role_they_are_asked(self):
+        # The invariant that would have caught the above, rather than one
+        # assertion per role: a descendant search scoped to a window must
+        # return what the same search unscoped returns, for every role in the
+        # tree, whichever spelling the bus happens to use. Element.find and
+        # find_elements had drifted onto two different matchers, and only one
+        # of them knew about the rename.
+        for spelling in ("push button", "button"):
+            with self.subTest(spelling=spelling):
+                self.button.roleName = spelling
+                gui = self.backend()
+                frame = gui.find_element(role=Role.FRAME)
+                for role in (Role.PUSH_BUTTON, Role.CHECK_BOX, "button"):
+                    scoped = sorted(e.name for e in frame.find(role=role))
+                    unscoped = sorted(
+                        e.name for e in gui.find_elements(role=role, within=frame)
+                    )
+                    self.assertEqual(scoped, unscoped, f"role={role!r}")
+
     def test_a_role_with_no_alias_still_has_to_match_exactly(self):
         # The aliasing is a fixed table of names at-spi2 itself moved, not
         # fuzzy matching: "check" must not find a "check box".
@@ -1779,6 +1825,111 @@ class TestWaylandElementGeometry(AtspiTestCase):
         combo = FakeNode(role="combo box", children=[FakeNode(role="list")])
         self.atspi.Element(combo).choose("Pro")
         self.assertEqual(combo.combovalue, "Pro")
+
+    def test_an_option_that_is_not_there_raises_this_packages_own_error(self):
+        # dogtail's combovalue setter raises its own SearchError, which is not
+        # a PyGUITestError -- so this one public call raised a catchable error
+        # on Windows and macOS (both ElementNotFound) and an uncatchable
+        # dogtail internal on Linux. Seen live choosing a name that was not
+        # among a GTK combo's items.
+        class _Refusing(FakeNode):
+            @property
+            def combovalue(self):
+                return None
+
+            @combovalue.setter
+            def combovalue(self, value):
+                raise _DogtailSearchError(f"No match for {value!r}")
+
+        combo = _Refusing(role="combo box", children=[FakeNode(role="list")])
+        with self.assertRaises(ElementNotFound) as caught:
+            self.atspi.Element(combo).choose("Nope")
+        self.assertIn("Nope", str(caught.exception))
+        # Chained, so dogtail's own traceback is still reachable.
+        self.assertIsInstance(caught.exception.__cause__, _DogtailSearchError)
+
+    def test_the_refusal_names_what_the_control_does_offer(self):
+        # The method's documented advice is "when the text does not match,
+        # options() is what to print" -- so the error prints it rather than
+        # leaving the caller to.
+        class _Refusing(FakeNode):
+            @property
+            def combovalue(self):
+                return None
+
+            @combovalue.setter
+            def combovalue(self, value):
+                raise _DogtailSearchError("no match")
+
+        combo = _Refusing(
+            role="combo box",
+            children=[
+                FakeNode(name="Alpha", role="menu item"),
+                FakeNode(name="Beta", role="menu item"),
+            ],
+        )
+        with self.assertRaises(ElementNotFound) as caught:
+            self.atspi.Element(combo).choose("Gamma")
+        self.assertIn("Alpha", str(caught.exception))
+        self.assertIn("Beta", str(caught.exception))
+
+
+class _DogtailSearchError(Exception):
+    """Stands in for dogtail's SearchError, which is a plain Exception.
+
+    Deliberately not imported from dogtail: these tests run against the fake
+    tree with no dogtail installed, and what matters is only that the error is
+    foreign to this package's taxonomy -- which any plain Exception models.
+    """
+
+
+class TestElementCheckable(AtspiTestCase):
+    """checkable: the CHECKABLE state, or the role where there is none.
+
+    GTK 3 publishes no CHECKABLE state at all. Measured on GTK 3.24.52 with
+    at-spi2-core 2.62.1: a Gtk.CheckButton's whole state set is ENABLED,
+    FOCUSABLE, SENSITIVE, SHOWING, VISIBLE, so this read False for every check
+    box and radio button on the toolkit most Linux applications use, while
+    `checked` tracked them correctly -- making the advice `checked` and
+    `Session.expect_checked` both give ("read checkable first") skip working
+    controls.
+    """
+
+    def test_the_published_state_is_believed_when_there_is_one(self):
+        # On a role the fallback list does not name, so this can only be the
+        # state talking: a toolkit that does publish CHECKABLE still decides.
+        node = FakeNode(role="push button")
+        node.checkable = True
+        self.assertTrue(self.atspi.Element(node).checkable)
+
+    def test_a_role_that_carries_a_check_state_falls_back_to_its_role(self):
+        for role in (
+            "check box",
+            "radio button",
+            "toggle button",
+            "check menu item",
+            "radio menu item",
+        ):
+            with self.subTest(role=role):
+                node = FakeNode(role=role)
+                self.assertFalse(getattr(node, "checkable", False))
+                self.assertTrue(self.atspi.Element(node).checkable)
+
+    def test_a_role_that_carries_no_check_state_stays_false(self):
+        # The fallback is a fixed list of roles, not "anything clickable": a
+        # push button and a label must not start claiming a checked state.
+        for role in ("push button", "label", "entry", "menu item", "frame"):
+            with self.subTest(role=role):
+                self.assertFalse(self.atspi.Element(FakeNode(role=role)).checkable)
+
+    def test_the_fallback_grants_no_checked_value_of_its_own(self):
+        # Widening `checkable` must not touch `checked` -- a control whose
+        # toolkit publishes no state still reports None, which is what
+        # expect_checked's own caveat is about.
+        node = FakeNode(role="check box")
+        element = self.atspi.Element(node)
+        self.assertTrue(element.checkable)
+        self.assertIsNone(element.checked)
 
 
 class TestElementExpandCollapse(AtspiTestCase):

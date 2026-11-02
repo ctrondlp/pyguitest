@@ -768,14 +768,26 @@ def _clipboard_factory(environment):
     CLIPBOARD_TOOLS that is not x11_only, and it is excluded there by
     mutter_incompatible. That leaves GNOME with no clipboard backend at all
     rather than a broken one; see clipboard.py's module docstring on why.
+
+    `allow_wayland_only` is the other half of that and was missing: Mutter is
+    not the only session with no Wayland socket for wl-copy to reach. On an
+    X11 session under any other compositor -- Xfce, i3, MATE, Cinnamon, LXQt,
+    KDE-on-X11 -- `mutter_incompatible` does not fire, so wl-copy (first in
+    the group) was selected and every clipboard call failed with "Failed to
+    connect to a Wayland server" while xclip sat unused behind it. The loop
+    below could not recover: construction succeeds, because wl-copy is on
+    PATH and answers --version without a display, and only the actual
+    read/write fails.
     """
     from .. import tools
     from ..session import Compositor, SessionType
 
     x11 = environment.session_type in (SessionType.X11, SessionType.XWAYLAND)
+    wayland = environment.session_type in (SessionType.WAYLAND, SessionType.XWAYLAND)
     usable = tools.discover(
         tools.CLIPBOARD_TOOLS,
         allow_x11_only=x11,
+        allow_wayland_only=wayland,
         allow_mutter_incompatible=environment.compositor is not Compositor.MUTTER,
     )
     for tool in usable:

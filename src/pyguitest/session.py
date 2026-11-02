@@ -1866,6 +1866,11 @@ def detect(env: Mapping[str, str] | None = None) -> Environment:
     # limitation that remains once they are included, not a reason to
     # exclude them.
     x11_session = session_type in (SessionType.X11, SessionType.XWAYLAND)
+    # The mirror of the above, and true on XWayland for the same reason: a tool
+    # that speaks only the Wayland protocol needs a compositor to connect to,
+    # and a session that merely looks modern is not one. See the wayland_only
+    # flag in tools.py for the clipboard bug this closes.
+    wayland_session = session_type in (SessionType.WAYLAND, SessionType.XWAYLAND)
     # A tool gated by its `compositors` allowlist is offered only where that
     # compositor is running; an X connection does not substitute, which is why
     # this is not `or x11_session`. See _input_factory in backends/__init__.py,
@@ -1962,13 +1967,24 @@ def detect(env: Mapping[str, str] | None = None) -> Environment:
                 allow_mutter_incompatible=compositor is not Compositor.MUTTER,
             )
         ),
-        window_tools=tuple(t.name for t in _tools.discover(_tools.WINDOW_TOOLS)),
+        # Compositor-gated like the groups above it, and for the same reason:
+        # every window tool here is one desktop's own IPC client, and none of
+        # them can drive a window under a compositor that does not speak it.
+        # Ungated, a box with sway installed for the headless harness had
+        # `pyguitest doctor` name swaymsg among the tools it could use while
+        # running GNOME -- a path that does not exist, in the one line a reader
+        # consults to find out what this desktop can do.
+        window_tools=tuple(
+            t.name
+            for t in _tools.discover(_tools.WINDOW_TOOLS, compositor=compositor.value)
+        ),
         image_tools=tuple(t.name for t in _tools.discover(_tools.IMAGE_TOOLS)),
         clipboard_tools=tuple(
             t.name
             for t in _tools.discover(
                 _tools.CLIPBOARD_TOOLS,
                 allow_x11_only=x11_session,
+                allow_wayland_only=wayland_session,
                 allow_mutter_incompatible=compositor is not Compositor.MUTTER,
             )
         ),

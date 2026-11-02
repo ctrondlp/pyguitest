@@ -4566,3 +4566,56 @@ unchanged: the controls that were driven really were verified, and treating
 "fewer controls" as a failure would make the drivers useless on a small
 screen rather than honest about one. `drivers/macos.py` structures the skip
 differently and was left untouched rather than patched blind.
+
+## XTest input on a real X11 session: the regime the Mutter run could not reach (2026-11-02)
+
+**Fedora 45, `examples/_xtest_input_validate.py`, 22/22** — inside a private
+Xvfb (`1280x900x24`, its own session and accessibility buses), with the `x11`
+backend forced.
+
+This closes the caveat on the XTest entry in [Not run live](#not-run-live)
+above. That entry records 2 of 21 checks against Mutter and explains why the
+20 failures were the probe's design meeting a compositor that routes injected
+events by its *own* focus, not the X server's — leaving the script's premise,
+that an X window given `XSetInputFocus` really receives what is injected,
+sound in principle and measured nowhere. The script's own docstring said as
+much: "the design is still sound as an instrument on any compositor where an
+X window can genuinely take input focus (a real X11 session, or possibly
+KWin/wlroots under XWayland -- unmeasured)."
+
+On a bare X server with no compositor arbitrating focus, the premise holds and
+every assertion lands:
+
+- **`input focus is the probe window: True`** — the one precondition the
+  Mutter run could not establish, and everything below depends on it.
+- **Pointer: 3/3 moves delivered as exactly one `MotionNotify` each, and
+  `pointer_position()` reads back each target exactly.** This is also the
+  regime where that readback is unconditionally trustworthy, rather than
+  accurate-over-an-X-surface and silently stale elsewhere as it is under
+  XWayland.
+- **Buttons: press, release and `click()` arrive in order, as button 1, and
+  `is_button_pressed()` tracks held and released.** The tier-6 state query
+  answering correctly is the half XWayland cannot promise.
+- **Keys: `press_key`/`release_key("a")` deliver keysym `a` with
+  `is_key_pressed()` tracking it, `type_text("pyguitest")` arrives whole and
+  in order, `type_text("X")` arrives upper-case with Shift in its modifier
+  state (`0x1`), and `send_keys("^(a)")` arrives as `a` with Control in its
+  modifier state (`0x4`).** On Mutter this last one could only be inferred
+  from readline's behaviour in a terminal; here it is read off the event.
+
+So the "XWayland: reaches X11 clients only" note stays exactly as written —
+it is about XWayland, and this run is not one. What the two runs now say
+together is that `X11Backend`'s input half is correct where an X window can
+hold focus, and that on Mutter the limitation is in *aiming* rather than in
+injection.
+
+**What this does not cover.** No compositor is running, so nothing here says
+how KWin or a wlroots compositor routes XTest under XWayland — still
+unmeasured, and still flagged as such above. The probe is a raw X window, so
+no toolkit's own key handling is exercised. The harness for it is not in the
+repository: it was a throwaway Xvfb wrapper, and the script needs only a real
+X server with no window manager, which `Xvfb` plus a private `dbus-run-session`
+provides in about a second. Note that a window manager *is* needed to
+exercise `move_window`/`resize_window` from the same script, since those go
+through `_NET_MOVERESIZE_WINDOW` and do nothing without one — those claims are
+covered by the sway and GNOME harnesses instead.
