@@ -32,6 +32,7 @@ from ..errors import (
     BackendUnavailable,
     CapabilityUnsupported,
     ElementNotActionable,
+    ElementNotFound,
     PyGUITestError,
 )
 from ..roles import Role, canonical_role, spellings
@@ -564,6 +565,34 @@ def _node_attr(node, attr, default=_NO_DEFAULT):
     return _run_bounded(_DEFAULT_CALL_TIMEOUT, getattr, node, attr, default)
 
 
+_CHECKABLE_ROLES = frozenset(
+    {
+        Role.CHECK_BOX,
+        Role.RADIO_BUTTON,
+        Role.TOGGLE_BUTTON,
+        Role.CHECK_MENU_ITEM,
+        Role.RADIO_MENU_ITEM,
+    }
+)
+"""Roles that carry a check, radio or toggle state by definition.
+
+What `Element.checkable` falls back to where the toolkit publishes no
+`ATSPI_STATE_CHECKABLE`, and many do not: measured on GTK 3.24.52 with
+at-spi2-core 2.62.1, a `Gtk.CheckButton` and a `Gtk.RadioButton` publish
+ENABLED, FOCUSABLE, SENSITIVE, SHOWING and VISIBLE and nothing else -- no
+CHECKABLE, though the state exists in that at-spi2 and `checked` tracks the
+widget correctly.
+
+Private, and here rather than beside `Role`'s own WINDOW_ROLES/TEXT_ROLES/
+CHOICE_ROLES groups, because those are public: a caller passes them to
+`elements(role=...)`. This list is one backend's workaround for one toolkit's
+missing state, so publishing it would add API surface -- and a minor version
+bump, which the recorder's PROFILE is pinned to -- for an implementation
+detail. Worth promoting to `Role` if a caller ever genuinely wants to search
+by it.
+"""
+
+
 class Element:
     """One node of the accessible tree.
 
@@ -688,8 +717,28 @@ class Element:
 
     @property
     def checkable(self):
-        """Whether the element has a check box, radio button, or toggle."""
-        return _node_attr(self.node, "checkable", False)
+        """Whether the element has a check box, radio button, or toggle.
+
+        The CHECKABLE state when the toolkit publishes one, and the role when
+        it does not. The fallback is not belt-and-braces: GTK 3 publishes no
+        CHECKABLE at all. Measured on GTK 3.24.52 / at-spi2-core 2.62.1, a
+        `Gtk.CheckButton`'s whole state set is ENABLED, FOCUSABLE, SENSITIVE,
+        SHOWING, VISIBLE -- so this read False for every check box and radio
+        button on the toolkit most Linux applications are written in, while
+        `checked` tracked them correctly all along.
+
+        That made the advice `checked` gives -- and the example in
+        `Session.checkbox`'s docstring -- actively wrong: gating on this
+        skipped working checkboxes. Falling back to the role only widens the
+        answer where the state is absent, so a toolkit that does publish
+        CHECKABLE still decides for itself, and no element gains a `checked`
+        value it did not already have. Same shape as `expanded`, which reads
+        the state set directly because dogtail's own property answers nothing
+        useful here.
+        """
+        if _node_attr(self.node, "checkable", False):
+            return True
+        return self.role in _CHECKABLE_ROLES
 
     @property
     def selected(self):
@@ -1103,6 +1152,15 @@ class Element:
         person would do, and it lands the same way. Non-editable boxes have no
         `text` child and fall back to `combovalue`, which works where the
         toolkit publishes menu items with a `click` action (GTK).
+
+        An option that is not there raises `ElementNotFound`, which is what
+        the uia and macos backends already raise for it -- before, dogtail's
+        own `SearchError` came out of `combovalue` unwrapped. That is not a
+        `PyGUITestError`, so the one public call raised a catchable error on
+        Windows and macOS and an uncatchable dogtail internal on Linux, and a
+        caller following this method's own advice -- catch the failure, print
+        `options()` -- could not catch it at all. Chained with `from`, so the
+        dogtail traceback is still there for anyone who wants it.
         """
 
         def _pick():
@@ -1113,9 +1171,20 @@ class Element:
             return False
 
         if not _run_bounded(_DEFAULT_CALL_TIMEOUT, _pick):
-            _run_bounded(
-                _DEFAULT_CALL_TIMEOUT, setattr, self.node, "combovalue", option
-            )
+            try:
+                _run_bounded(
+                    _DEFAULT_CALL_TIMEOUT, setattr, self.node, "combovalue", option
+                )
+            except PyGUITestError:
+                # A timeout or a capability refusal from _run_bounded is
+                # already this package's own and says something different;
+                # only dogtail's lookup failure is being translated here.
+                raise
+            except Exception as error:
+                raise ElementNotFound(
+                    f"no option named {option!r} is in {self!r}; it offers "
+                    f"{', '.join(repr(o.name) for o in self.options()) or 'none'}"
+                ) from error
 
     def options(self):
         """The choices this dropdown or list offers, as Elements."""
@@ -1123,10 +1192,36 @@ class Element:
         return found or self.find(role=Role.LIST_ITEM)
 
     def find(self, role=None, name=None):
-        """Search this element's descendants by role and/or name."""
-        from dogtail import predicate
+        """Search this element's descendants by role and/or name.
 
-        pred = predicate.GenericPredicate(roleName=role, name=name)
+        Built on `_build_predicate`, the same matcher `find_elements` uses, and
+        that is the whole point of it rather than dogtail's own
+        `GenericPredicate`: a GenericPredicate compares the role asked for
+        against the single spelling this desktop's at-spi2 reports, so
+        `find(role=Role.PUSH_BUTTON)` matched nothing at all on an at-spi2 that
+        calls that role "button" -- silently, since no match is not an error.
+        Measured live on at-spi2-core 2.62.1 (Fedora 45): `elements(role="push
+        button")` found two buttons in a window where `window_element(...).find(
+        role="push button")` found none, with `is_ancestor_of` confirming they
+        were descendants. `_build_predicate` goes through `roles.spellings()`
+        and so matches either name; see the alias group in roles.py.
+
+        Keeping the two searches on one matcher is also what stops them
+        drifting again -- `_build_predicate`'s entry-reported-as-text fallback
+        now applies here too, where before it only applied to `find_elements`.
+
+        It also narrows rather than widens what this asks of dogtail, which
+        matters because several dogtail versions have to work here. Of the two
+        things `find_all_descendants` accepts, the plain function is the stable
+        one: dogtail checks `isinstance(pred, LambdaType)` and calls it, and has
+        in every version. The predicate-*object* protocol is what moved -- the
+        constructor keyword (`roleName` -> `role_name`, kept only by a
+        compatibility shim), the method the walk calls on it (`matches` ->
+        `satisfied_by_node`), and the role spelling it compares against -- so
+        constructing one here meant depending on all three. Passing a function
+        depends on none of them.
+        """
+        pred = _build_predicate(role, name, None, None, None, None)
         children = _run_bounded(_DEFAULT_CALL_TIMEOUT, self.node.findChildren, pred)
         return [Element(n, self._session) for n in children]
 

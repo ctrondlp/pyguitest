@@ -13,11 +13,23 @@ receives what is injected -- systematically fail on Mutter; every event
 this script sends instead lands wherever the compositor already considers
 focused (in that first run, the terminal running the script). Kept here
 because the design is still sound as an instrument on any compositor
-where an X window can genuinely take input focus (a real X11 session, or
-possibly KWin/wlroots under XWayland -- unmeasured), and because the
+where an X window can genuinely take input focus, and because the
 in-script checks below are the fastest way to notice if that has changed.
 On Mutter, expect it to fail exactly as described, not to indicate a
 regression.
+
+That soundness is no longer an argument: all 22 checks pass on a real X11
+session with no compositor arbitrating focus -- a private Xvfb, 2026-11-02,
+see validation.md's "XTest input on a real X11 session". So the two
+outcomes to expect are 22/22 where an X window can hold focus, and the
+documented 2-of-N failure on Mutter. KWin and the wlroots compositors
+under XWayland are still unmeasured.
+
+Note the window half of X11Backend is deliberately not exercised here:
+move_window/resize_window go through `_NET_MOVERESIZE_WINDOW` and do
+nothing without a window manager, which a bare Xvfb does not have. Those
+claims belong to scripts/headless-sway-session.sh and
+scripts/headless-session.sh.
 
 For input, this script's approach is: create its own X11 window with
 python-xlib, select the key, button and motion masks on it, take input

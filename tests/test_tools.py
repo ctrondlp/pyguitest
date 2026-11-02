@@ -110,6 +110,102 @@ class TestCompositorGatedTools(unittest.TestCase):
         self.assertEqual(tools.discover(group, compositor=None), tuple(group))
 
 
+class TestWaylandOnlyTools(unittest.TestCase):
+    """Regression: wl-copy was selected on a session with no Wayland at all.
+
+    wl-copy is first in CLIPBOARD_TOOLS and was gated on `mutter_incompatible`
+    alone, which answers "can this work on GNOME" and says nothing about
+    whether a Wayland compositor is running. So on an X11 session under any
+    other compositor -- Xfce, i3, MATE, Cinnamon, LXQt, KDE-on-X11 -- it was
+    chosen, every clipboard call failed with "Failed to connect to a Wayland
+    server", and xclip went untried though it was installed and next in line.
+    Reproduced on a private X server with both installed, where `doctor` also
+    reported CLIPBOARD available and "Nothing missing".
+    """
+
+    def test_wl_copy_is_flagged_and_the_x11_tools_are_not(self):
+        by_name = {t.name: t for t in tools.CLIPBOARD_TOOLS}
+        self.assertTrue(by_name["wl-copy"].wayland_only)
+        self.assertFalse(by_name["xclip"].wayland_only)
+        self.assertFalse(by_name["xsel"].wayland_only)
+        self.assertFalse(by_name["pbcopy"].wayland_only)
+
+    def test_discover_can_exclude_them(self):
+        fake = tools.ExternalTool(REAL_BINARY, frozenset(), wayland_only=True)
+        self.assertEqual(tools.discover([fake], allow_wayland_only=True), (fake,))
+        self.assertEqual(tools.discover([fake], allow_wayland_only=False), ())
+
+    def test_the_flag_is_independent_of_mutter_incompatible(self):
+        # The two answer different questions, and wl-copy carries both: it
+        # cannot work on Mutter even under Wayland, and it cannot work without
+        # Wayland even off Mutter. Either gate alone has to drop it.
+        fake = tools.ExternalTool(
+            REAL_BINARY, frozenset(), mutter_incompatible=True, wayland_only=True
+        )
+        self.assertEqual(
+            tools.discover(
+                [fake], allow_mutter_incompatible=False, allow_wayland_only=True
+            ),
+            (),
+        )
+        self.assertEqual(
+            tools.discover(
+                [fake], allow_mutter_incompatible=True, allow_wayland_only=False
+            ),
+            (),
+        )
+        self.assertEqual(
+            tools.discover(
+                [fake], allow_mutter_incompatible=True, allow_wayland_only=True
+            ),
+            (fake,),
+        )
+
+    def test_every_x11_only_clipboard_tool_is_the_mirror_of_a_wayland_only_one(self):
+        # The invariant behind the bug rather than the one tool that had it: a
+        # clipboard tool speaks one display protocol or the other, so exactly
+        # one of the two flags has to be set on each -- except the macOS entry,
+        # which speaks neither and is gated by being last.
+        for tool in tools.CLIPBOARD_TOOLS:
+            if tool.name == "pbcopy":
+                continue
+            with self.subTest(tool=tool.name):
+                self.assertNotEqual(
+                    tool.x11_only,
+                    tool.wayland_only,
+                    f"{tool.name} claims both protocols or neither",
+                )
+
+
+class TestWindowToolsAreCompositorGated(unittest.TestCase):
+    """Regression: `pyguitest doctor` named swaymsg on a GNOME session.
+
+    Every window tool is one desktop's own IPC client and can drive nothing
+    under a compositor that does not speak it, but the group was discovered
+    with no gate at all -- unlike the capture, input and clipboard groups
+    beside it. Observed on a Fedora 45 GNOME box with sway installed for
+    scripts/headless-sway-session.sh: the `tools` line, which is the one place
+    a reader looks to find out what the desktop can do, listed a window path
+    that did not exist.
+    """
+
+    def test_every_window_tool_names_the_compositors_it_can_drive(self):
+        for tool in tools.WINDOW_TOOLS:
+            with self.subTest(tool=tool.name):
+                self.assertIsNotNone(
+                    tool.compositors, f"{tool.name} is offered on every compositor"
+                )
+
+    def test_the_wlroots_clients_and_the_kwin_one_are_separated(self):
+        by_name = {t.name: t for t in tools.WINDOW_TOOLS}
+        for name in ("swaymsg", "hyprctl", "niri"):
+            self.assertEqual(by_name[name].compositors, frozenset({"wlroots"}), name)
+        self.assertEqual(by_name["kdotool"].compositors, frozenset({"kwin"}))
+
+    def test_none_of_them_is_offered_on_mutter(self):
+        self.assertEqual(tools.discover(tools.WINDOW_TOOLS, compositor="mutter"), ())
+
+
 class TestRootReadingToolsNeedARealXServer(unittest.TestCase):
     """x_root_only: stricter than x11_only, and separate from it.
 

@@ -82,6 +82,27 @@ class ExternalTool:
     """True if the tool talks to an X server and so cannot see native Wayland
     clients, even when an X display is reachable through XWayland."""
 
+    wayland_only: bool = False
+    """True if the tool speaks only the Wayland protocol, so it needs a Wayland
+    compositor to connect to and not merely a session that looks modern.
+
+    The mirror image of `x11_only`, and it exists because the asymmetry was a
+    live bug: `wl-copy` is first in CLIPBOARD_TOOLS and was gated on
+    `mutter_incompatible` alone, which answers "can this work on GNOME" and
+    nothing about whether a Wayland compositor is running at all. On any X11
+    session whose compositor is not Mutter -- Xfce, i3, MATE, Cinnamon, LXQt,
+    KDE-on-X11 -- with wl-clipboard installed, `_clipboard_factory` therefore
+    built a wl-copy backend, every clipboard call failed with "Failed to
+    connect to a Wayland server", and `xclip` was never tried though it was
+    installed and next in line. Confirmed on a private X server with both
+    tools present. `doctor` reported CLIPBOARD available and "Nothing
+    missing", which is the part that made it expensive rather than obvious.
+
+    Distinct from a `compositors` allowlist for the same reason
+    `mutter_incompatible` is: the question here is whether there is a Wayland
+    display to talk to, not which compositor is drawing it.
+    """
+
     x_root_only: bool = False
     """True if the tool captures by reading the X *root window*, which needs a
     real X server and not merely a reachable X display.
@@ -286,24 +307,46 @@ _WINDOW = frozenset(
     }
 )
 
+_WLROOTS = frozenset({"wlroots"})
+"""The compositor family sway, Hyprland, river, wayfire, labwc and niri all
+report as -- see `_WLROOTS_HINTS` in session.py.
+
+Every tool below is one desktop's own IPC client and can drive nothing under a
+compositor that does not speak it, so each carries an allowlist. Without one
+they were offered everywhere: a GNOME box with sway installed for the headless
+harness had `pyguitest doctor` list `swaymsg` among the tools it could use.
+
+Family-level, not per-compositor, because that is the granularity
+`Compositor` has -- all six of those sessions are one enum member, so this
+cannot say "sway but not niri" and does not pretend to. `for_compositor` in
+backends/windows.py makes the finer distinction where it actually matters, by
+each compositor's own environment signature (SWAYSOCK, HYPRLAND_INSTANCE_
+SIGNATURE, NIRI_SOCKET) rather than by which binaries are installed. So a
+wlroots session with all three on PATH still lists all three here, and still
+builds exactly one backend -- the one whose compositor is really running.
+"""
+
 WINDOW_TOOLS = (
     ExternalTool(
         "swaymsg",
         _WINDOW,
         "sway IPC; full window control including geometry, which no Wayland "
         "protocol exposes",
+        compositors=_WLROOTS,
     ),
-    ExternalTool("hyprctl", _WINDOW, "Hyprland IPC"),
+    ExternalTool("hyprctl", _WINDOW, "Hyprland IPC", compositors=_WLROOTS),
     ExternalTool(
         "niri",
         _WINDOW - {Capability.WINDOW_PLACEMENT},
         "niri IPC; a scrolling tiler sizes a window but never places one, so "
         "this is the one window tool that cannot move anything",
+        compositors=_WLROOTS,
     ),
     ExternalTool(
         "kdotool",
         _WINDOW,
         "KWin scripting over D-Bus; the only window path on KDE Plasma",
+        compositors=frozenset({"kwin"}),
     ),
     # wmctrl (EWMH) is deliberately not listed: no backend consumes it --
     # for_compositor() only handles WLROOTS and KWIN, and for_tool("wmctrl")
@@ -354,6 +397,7 @@ CLIPBOARD_TOOLS = (
         "this process exits.",
         also_needs="wl-paste",
         mutter_incompatible=True,
+        wayland_only=True,
     ),
     ExternalTool(
         "xclip",
@@ -393,6 +437,7 @@ def discover(
     allow_x11_only: bool = True,
     allow_x_root_only: bool = True,
     allow_mutter_incompatible: bool = True,
+    allow_wayland_only: bool = True,
     compositor: str | None = None,
 ) -> tuple[ExternalTool, ...]:
     """Every usable tool in `group`, in preference order.
@@ -410,6 +455,13 @@ def discover(
         on COSMIC -- is not offered; it would run, exit successfully, and do
         nothing, the worst failure of the three. None performs no compositor
         filtering, which `best()` relies on.
+    allow_wayland_only=False
+        drops tools that need a Wayland compositor to connect to. Pass False on
+        a session with no Wayland display -- a real X11 session -- where
+        wl-clipboard exits non-zero with "Failed to connect to a Wayland
+        server". The mirror of `allow_x11_only`, and on XWayland both are True,
+        which is right: both kinds of client are reachable there.
+
     allow_x_root_only=False
         drops tools that capture by reading the X root window. Pass False for
         anything but a real X11 session, XWayland included: the root is
@@ -430,6 +482,7 @@ def discover(
         and (compositor is None or t.compositors is None or compositor in t.compositors)
         and (allow_x_root_only or not t.x_root_only)
         and (allow_mutter_incompatible or not t.mutter_incompatible)
+        and (allow_wayland_only or not t.wayland_only)
     )
 
 

@@ -86,7 +86,7 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T")
 
-__version__ = "0.20.0"
+__version__ = "0.20.1"
 
 __all__ = [
     "connect",
@@ -2477,15 +2477,20 @@ class Session:
         A control whose toolkit publishes no checked state at all reports
         `Element.checked` as None, which equals neither True nor False -- so
         this times out and then says "but it is unchecked", because None is
-        falsey. Read `Element.checkable` first on a widget you do not know.
+        falsey. `Element.checkable` is the guard for a widget you do not know,
+        and what it rules out is a control that is not a check, radio or
+        toggle at all; a role-checkable widget whose toolkit still publishes
+        no state passes the guard and reaches the timeout above. Reading
+        `Element.checked` for None is the narrower test for that.
 
             gui.checkbox("Read only").click()
             gui.expect_checked(name="Read only", checked=True)
 
-            # Read `Element.checkable` first on a widget you do not know:
-            # a control whose toolkit publishes no checked state reports
-            # None, which matches neither bool, so this waits out the full
-            # timeout and then reports it as unchecked.
+            # Guard a widget you do not know. Note this answers "is this the
+            # kind of control that has a checked state", which is the useful
+            # question here -- not "does this toolkit publish one". GTK 3
+            # publishes no CHECKABLE state for any of its check boxes, so
+            # `checkable` falls back to the role; see its own docstring.
             if gui.checkbox("Read only").checkable:
                 gui.expect_checked(name="Read only", checked=True)
         """
