@@ -86,7 +86,7 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T")
 
-__version__ = "0.20.1"
+__version__ = "0.20.2"
 
 __all__ = [
     "connect",
