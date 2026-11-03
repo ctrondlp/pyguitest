@@ -7,6 +7,123 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.20.2] — 2026-11-03
+
+### Security
+
+- **The GNOME Shell extension's `CaptureWindow` wrote through a
+  caller-supplied path, so a destination naming a symlink had its *target*
+  overwritten — by gnome-shell, on behalf of whatever could reach the session
+  bus.** The method validates that the path is absolute, which reads like a
+  containment check and is not one: it exists because the Shell's working
+  directory is not the caller's. Both PNG writers then took that path and
+  opened it following symlinks (Cairo's `writeToPNG` on the pre-Mutter-51
+  path, GdkPixbuf's `savev` on the current one).
+
+  The image is now written to a randomly named, mode-0600 file beside the
+  destination and renamed over it. `rename` replaces a symlink rather than
+  following it, so a caller can no longer clobber a file it did not name; the
+  temp name is random and created `O_CREAT|O_EXCL`, so nothing can be planted
+  at it; and the write became atomic, where a failure partway through used to
+  leave a truncated PNG that a caller would read as the screenshot.
+
+  Confining the destination to one directory was the other option and was
+  rejected: the caller chooses the path — `backends/gnomeshell.py` hands over
+  a `mkstemp` name — so a fixed directory would break every existing caller
+  to restrict a path they already control. Validated inside a live GNOME
+  Shell 51.1: capture still produces a correct PNG at the window's own
+  dimensions, and a capture aimed at a symlink leaves the target's contents
+  untouched.
+
+- **The extension's exposure is now documented as measured rather than
+  assumed.** It was already stated that anything reaching the session bus can
+  capture any window with no prompt; what was missing is that the same
+  interface is a *file-write proxy*, and what that means for a confined
+  caller. Tested against a real Flatpak sandbox on GNOME Shell 51.1: an app
+  is blocked by default and with an ordinary portal-only `--talk-name`, and
+  reachable with `--talk-name=org.gnome.Shell` or `--socket=session-bus` —
+  permissions Flatpak itself treats as sandbox-weakening. In both reachable
+  cases a sandbox that could not see `~/.cache` had a screenshot of another
+  application's window written into it.
+
+  The extension cannot refuse such a caller, which is why this is documented
+  rather than filtered: Flatpak confines bus access with `xdg-dbus-proxy`,
+  and that proxy is a *host* process, so `GetConnectionUnixProcessID` returns
+  the proxy's pid rather than the application's and
+  `/proc/<pid>/root/.flatpak-info` — the usual way a service recognises a
+  sandboxed caller — is absent. Measured directly against `xdg-dbus-proxy
+  --filter --talk=org.gnome.Shell`.
+
+- **Added `SECURITY.md`**: a private reporting channel, a threat model that
+  separates "this library can control other applications" (the product) from
+  "a capability was obtained beyond its authorization" (a vulnerability), and
+  the known, deliberate exposures so they need not be re-reported.
+
+- **The extension's `version-name` is now `0.5.0-safewrite`**, up from
+  `0.4.0-appid`. Nothing reads it programmatically, but the shell keeps
+  running the code it loaded at login, so after this change an installed copy
+  and a loaded copy can differ for a whole session — and `version-name` is
+  what tells them apart. The older string is still named in the docs and in
+  `validate-gnome-extension.sh` as the build that *added* `wm_class` to
+  `ListWindows`; that boundary is unaffected by the bump.
+
+### Added
+
+- **`NAMED_ROLES` and `SESSION_CAPABILITIES` are exported.** Both carried
+  full public docstrings and `docs/api.md` already referred a reader to
+  `NAMED_ROLES` — "`roles` overrides NAMED_ROLES, which documents where the
+  default line is drawn" — while neither was in `__all__`, so
+  `from pyguitest import *` did not bring them and the generated reference
+  had nowhere for that sentence to point. Nothing new becomes reachable:
+  `pyguitest.NAMED_ROLES` already worked.
+
+### Fixed
+
+- **The generated API reference described module-level constants defined in
+  `__init__.py` with an empty cell.** `gen-api-docs.py`'s `note_for()`
+  searched `sys.modules` for names starting with `pyguitest.`, which excludes
+  the package root itself — so a constant *defined* in `__init__.py` had no
+  candidate module to read its attribute docstring from. `TIERS` hid this by
+  living in `capabilities` and merely being imported into `__init__`, where
+  the prefix filter found it anyway. The root is now searched too, first,
+  which costs nothing: a name only imported there carries no note and the
+  existing first-candidate-with-a-note rule moves on.
+
+- **`move_mouse_naturally`'s `rate` is documented as the floor it is.** The
+  docstring called it "events per second", which invites reading it as a cap;
+  the per-leg floor that guarantees every `via` waypoint is landed on can
+  push the total past `duration * rate`. The worst case is many unevenly
+  spaced waypoints over a short move, where one leg takes almost the whole
+  budget and every other leg still gets its one event: `n` legs emit up to
+  `2n+1` against a budget of `n+1`, approaching twice the rate without
+  reaching it. No behaviour change — the walk was always correct, and
+  landing on every waypoint requires it.
+
+### Tests
+
+- **The extension's JavaScript has automated coverage for the first time.**
+  Everything in `extension.js` imports `gi://Shell`, whose typelib ships with
+  gnome-shell, so none of it could be loaded off a GNOME machine and
+  `scripts/validate-gnome-extension.sh` was the only thing that ever
+  exercised it. The write path is now its own module, `safewrite.js`, needing
+  only GLib and Gio, and `gnome-shell-extension/safewrite-test.js` drives it
+  through `gjs` — the symlink case, the 0600 window before the rename,
+  cleanup after a failed write, long and multibyte destination names, and the
+  real Cairo and GdkPixbuf write sequences both capture paths use.
+  `tests/test_gnomeshell.py` runs it, skipping where `gjs` is absent or the
+  extension source is not in the tree (an installed copy, or the sdist, which
+  ships only the extension's README).
+
+### CI
+
+- **`ruff` and `mypy` are pinned in the lint job**, with a separate
+  `lint-next` job that runs the same checks against the newest releases and
+  is allowed to fail. Bare names resolved to whatever shipped that morning,
+  so a newly default-on rule or a tightened inference could turn `main` red
+  on a commit that changed nothing — and the fix then lands under time
+  pressure, which is the worst moment to judge whether a newly-flagged
+  pattern is worth fixing.
+
 ## [0.20.1] — 2026-11-02
 
 ### Fixed

@@ -67,9 +67,11 @@ shell keeps running the code it loaded at login, so a copy you have just
 overwritten still reports `ACTIVE` while behaving like the old one. The usual
 symptom is `UnknownMethod: No such method "CaptureWindow"` from pyguitest,
 and that error suggests logging out for this reason. `metadata.json`'s
-`version-name` (currently `0.4.0-appid`) tells builds apart, but
+`version-name` (currently `0.5.0-safewrite`) tells builds apart, but
 `gnome-extensions info` may report the installed copy rather than the loaded
-one.
+one. Note that the older `0.4.0-appid` is still named throughout the docs and
+the validation script as the build that *added* `wm_class` to `ListWindows`;
+that boundary is unchanged by later bumps.
 
 To check from Python that pyguitest can reach it:
 
