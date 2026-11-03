@@ -95,8 +95,10 @@ __all__ = [
     "detect",
     "quote_for_type",
     "Role",
+    "NAMED_ROLES",
     "Capability",
     "CapabilitySet",
+    "SESSION_CAPABILITIES",
     "Tier",
     "TIERS",
     "Environment",
@@ -1462,7 +1464,16 @@ class Session:
 
         `duration` is wall-clock seconds; left as None it comes from the
         distance and `pace` in pixels per second, clamped rather than scaling
-        linearly into absurdity on a long move. `rate` is events per second.
+        linearly into absurdity on a long move. `rate` is events per second,
+        and a lower bound on resolution rather than a cap: landing on every
+        waypoint needs at least one event per leg, so the per-leg floor below
+        can push the total past `duration * rate`. The worst case is many
+        unevenly spaced `via` points over a short move -- one leg takes
+        almost the whole budget while every other leg still gets its floor of
+        one, so n legs emit up to 2n+1 events against a budget of n+1, which
+        approaches twice the rate without reaching it. The `duration * rate`
+        term dominates and the overshoot disappears once it is comfortably
+        above the leg count.
         `latency` is the pause before the pointer starts moving, defaulting to
         the session's own `event_delay` so one knob paces the whole script,
         and `pause` inserts a single hesitation part-way through, which is

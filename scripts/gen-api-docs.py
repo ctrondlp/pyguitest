@@ -428,9 +428,18 @@ def note_for(name: str, obj) -> str:
     the result depend on which modules the interpreter had already imported,
     which the byte-comparison in tests/test_api_docs.py reported as the
     committed file being out of date.
+
+    The package root is searched too, and not only its submodules. `TIERS`
+    hid this: it is defined in `capabilities` and merely imported into
+    `__init__`, so a filter of `startswith("pyguitest.")` found it anyway --
+    while a constant *defined* in `__init__.py` has no module whose name
+    starts with that prefix at all, and came out blank. `NAMED_ROLES` and
+    `SESSION_CAPABILITIES` are both that case. Root first, which costs
+    nothing: a name only imported there carries no note, and the
+    first-with-a-note rule moves on.
     """
     for module_name in sorted(sys.modules):
-        if not module_name.startswith("pyguitest."):
+        if module_name != "pyguitest" and not module_name.startswith("pyguitest."):
             continue
         module = sys.modules[module_name]
         if module is None or vars(module).get(name) is not obj:

@@ -2,8 +2,15 @@
 
 Not exercised against a real gnome-shell or D-Bus connection anywhere: this
 checks the Python-side call construction and reply unpacking, which is the
-part unit tests can actually verify. The extension.js side has no test
-coverage at all -- there is no way to run gnome-shell in this environment.
+part unit tests can actually verify.
+
+The extension's JavaScript is nearly all in the same position -- it imports
+`gi://Shell`, whose typelib ships with gnome-shell, so there is no way to
+load it here, and `scripts/validate-gnome-extension.sh` is what exercises it
+live. The exception is `safewrite.js`, the PNG write path, which was split
+out precisely because it needs only GLib and Gio: `TestSafeWrite` below runs
+its gjs test suite, so the one security-relevant piece of the extension is
+checked on every run rather than only on a GNOME machine.
 """
 
 import sys
@@ -16,6 +23,9 @@ if sys.platform == "win32":  # pragma: no cover - platform guard
     )
 
 import os
+import pathlib
+import shutil
+import subprocess
 import sys
 import tempfile
 import types
@@ -925,3 +935,79 @@ class TestWindowEvents(GnomeShellTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSafeWrite(unittest.TestCase):
+    """The extension's PNG write path, run through gjs.
+
+    `safewrite.js` is the answer to a review finding: `CaptureWindow` takes
+    its destination from the caller and checks only that the path is
+    absolute, and both PNG writers open that path following symlinks -- so a
+    path naming a link had its target overwritten, by gnome-shell, for
+    whatever could reach the session bus. The write now goes to a randomly
+    named mode-0600 file beside the destination and is renamed over it.
+
+    Driven as one subprocess rather than a test per check. The assertions are
+    about Gio and GLib behaviour, which is what has to be exercised in gjs;
+    re-expressing each one here would mean a Python test that asserts
+    something Python never did. The JS prints a line per check, and those
+    lines are attached to the failure so the report names which one broke.
+
+    Skipped without gjs, the way the image tests skip without ImageMagick:
+    gjs ships with gnome-shell and GNOME-adjacent desktops but is not a
+    dependency of this package, and a developer on KDE or Windows should not
+    see a failure for it. It is present on the `compositor` CI job, which is
+    where this matters.
+
+    Skipped again when the extension source is simply not there. That is the
+    normal state of an installed copy, not a fault: MANIFEST.in ships only
+    the extension's README, deliberately, because the extension is installed
+    by hand into gnome-shell rather than by pip -- so the suite run against
+    the built sdist (see scripts/pre-commit-test.sh) has no JavaScript to
+    test. Asserting the file exists instead of skipping is what made that run
+    red, which is the inverse of the packaging decision.
+    """
+
+    SCRIPT = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "gnome-shell-extension"
+        / "safewrite-test.js"
+    )
+
+    def setUp(self):
+        if not self.SCRIPT.is_file():
+            self.skipTest(
+                "the extension source is not in this tree -- expected when "
+                "running against an installed copy or the sdist, which ships "
+                "only the extension's README (see MANIFEST.in)"
+            )
+
+    def test_the_gjs_suite_passes(self):
+        if shutil.which("gjs") is None:
+            self.skipTest("gjs is not installed; see TestSafeWrite's docstring")
+        # No `cwd`: the script imports `safewrite.js` with a relative
+        # specifier, and ESM resolves those against the importing module's
+        # own URL rather than the working directory -- confirmed by running
+        # it from /, /tmp and $HOME. Passing one would imply a dependency
+        # that is not there.
+        done = subprocess.run(  # noqa: S603
+            ["gjs", "-m", str(self.SCRIPT)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(
+            done.returncode,
+            0,
+            f"safewrite-test.js failed\n--- stdout ---\n{done.stdout}\n"
+            f"--- stderr ---\n{done.stderr}",
+        )
+        # A gjs that exits 0 having run nothing would otherwise pass: the
+        # script's own summary is the proof it got to the end.
+        self.assertIn("all checks passed", done.stdout, done.stdout)
+
+    def test_the_test_script_is_not_installed_into_the_shell(self):
+        """Both install routes copy `$UUID/*.js`; a test must not ride along."""
+        extension_dir = self.SCRIPT.parent / "pyguitest-window-control@pyguitest.local"
+        shipped = sorted(p.name for p in extension_dir.glob("*.js"))
+        self.assertEqual(shipped, ["extension.js", "safewrite.js"])
