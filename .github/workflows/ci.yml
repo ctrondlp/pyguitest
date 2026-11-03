@@ -68,7 +68,19 @@ jobs:
           # supported version are exactly the ones worth catching.
           python-version: "3.10"
 
-      - run: pip install ruff mypy
+      # Pinned, deliberately. Bare names resolve to whatever shipped that
+      # morning, and ruff ships a minor roughly every other week while mypy is
+      # past 2.x -- so a newly default-on rule or a tightened inference turns
+      # `main` red on a commit that changed nothing, and the fix ("pin it")
+      # then lands under time pressure, which is the worst moment to judge
+      # whether a newly-flagged pattern is worth fixing. Everything else in
+      # this job is pinned with visible care, down to the Python version two
+      # lines up; these were the exception.
+      #
+      # `lint-next` runs the same checks against the newest versions and is
+      # allowed to fail, so an upgrade is something to look at on purpose.
+      # Bump these when it reports clean.
+      - run: pip install 'ruff==0.16.5' 'mypy==2.3.1'
 
       # examples/ and scripts/ are linted too, not just the package. They
       # are the code a reader copies from, and being outside this check is
@@ -90,6 +102,35 @@ jobs:
       # ignore_missing_imports is set there because the optional backends
       # import libraries that may not be installed -- their absence is a
       # runtime condition this package handles, not a typing error.
+      - run: mypy
+
+  lint-next:
+    # `lint`'s checks against the newest ruff and mypy, allowed to fail. This
+    # is how a linter release becomes something to look at deliberately rather
+    # than a red `main` nobody asked for, and it gates nothing. Runs on the
+    # schedule too, since a drift probe is most useful when nobody pushed.
+    name: lint and types (newest, advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          # The floor, as `lint` uses, for the same reason: this probes the
+          # checkers, not the interpreter.
+          python-version: "3.10"
+
+      - run: pip install --upgrade ruff mypy
+
+      # Reported so a failure below can be read against a version without
+      # digging through the install log.
+      - run: |
+          ruff --version
+          mypy --version
+
+      - run: ruff check src tests examples scripts
+      - run: ruff format --check src tests examples scripts docs
       - run: mypy
 
   imagemagick:

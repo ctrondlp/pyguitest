@@ -159,6 +159,49 @@ disable it when you are not running tests:
 gnome-extensions disable pyguitest-window-control@pyguitest.local
 ```
 
+It is also a **file-write proxy**, which is worth stating separately because
+it is easy to miss. `CaptureWindow` takes its destination path from the
+caller, and gnome-shell writes there as you. For an ordinary unsandboxed
+process that grants nothing new — it could write that file itself. For a
+*confined* process it is a way out of the sandbox, and that is not
+hypothetical: it was tested on 2026-11-02 against a real Flatpak sandbox on
+GNOME Shell 51.1.
+
+| The caller's Flatpak permissions | Can it reach this interface? |
+|---|---|
+| default (no session-bus permission) | **no** — `ServiceUnknown` through `/run/flatpak/bus` |
+| `--talk-name=org.freedesktop.portal.Desktop` (a typical app) | **no** |
+| `--talk-name=org.gnome.Shell` | **yes** |
+| `--socket=session-bus` (unfiltered) | **yes** |
+
+In the two reachable cases the sandbox could not see `~/.cache` at all, and
+still had a 200 KB screenshot of another application's window written into
+it. So an app manifest that asks to talk to `org.gnome.Shell` is asking for
+the shell's reach over your files and your windows, not only for window
+control. Flatpak treats both of those permissions as sandbox-weakening for
+exactly this kind of reason; the default and the normal portal-only case are
+blocked by its D-Bus proxy.
+
+**The extension cannot tell a confined caller from an ordinary one**, which
+is why this is documented rather than refused. Flatpak confines bus access
+with `xdg-dbus-proxy`, and that proxy is a *host* process: asking the bus for
+a proxied connection's owner with `GetConnectionUnixProcessID` returns the
+proxy's pid, not the application's, and `/proc/<pid>/root/.flatpak-info` —
+the usual way a service recognises a sandboxed caller — is absent, because
+the proxy does not live in the sandbox. Measured directly against
+`xdg-dbus-proxy --filter --talk=org.gnome.Shell` on 2026-11-02. Anything
+built on parsing another process's command line would not be a security
+boundary, so there is no filtering to add here that would be worth trusting.
+
+What the write path *does* guarantee is narrower, and the symlink case is
+the part that was a defect rather than a documented power: the image goes to
+a randomly named, mode-0600 file beside the destination and is renamed over
+it, so a symlink at the destination is replaced instead of written through —
+a caller can no longer clobber a file it did not name — and a failed capture
+cannot leave a truncated PNG behind. It does **not** confine the destination
+directory, because pyguitest chooses the path (`backends/gnomeshell.py`
+hands over a `mkstemp` name).
+
 ## Window events
 
 `WindowEvent(change: s, id: u, title: s)` is a D-Bus signal, not a method:

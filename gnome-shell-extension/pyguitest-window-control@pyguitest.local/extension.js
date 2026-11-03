@@ -36,6 +36,10 @@ import Shell from 'gi://Shell';
 
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
+// The PNG write path, in its own module so it is testable without the
+// Shell typelib. See safewrite.js.
+import {commitTemp, discardTemp, reserveTempBeside} from './safewrite.js';
+
 const OBJECT_PATH = '/org/gnome/Shell/Extensions/Pyguitest';
 
 // How long a requested-but-not-yet-applied geometry stays authoritative
@@ -316,6 +320,17 @@ class PyguitestService {
         // relative path would be written somewhere neither of them
         // intended. Refusing is better than writing the right image to
         // the wrong place.
+        //
+        // This is a correctness check and not a containment one, which is
+        // worth saying because it reads like the latter: an absolute path
+        // can still name a symlink, or any file this account may write.
+        // What limits the damage is how the write happens -- beside the
+        // destination and renamed over it, see `reserveTempBeside` -- not
+        // this test. Confining the destination to one directory was the
+        // other option and was rejected: the caller chooses the path (see
+        // `backends/gnomeshell.py`, which hands over a `mkstemp` name),
+        // so a fixed directory would break every existing caller to
+        // restrict a path they already control.
         if (!path || !path.startsWith('/')) {
             reply(false, `path must be absolute, got ${JSON.stringify(path)}`);
             return;
@@ -414,7 +429,17 @@ class PyguitestService {
                 context.paint();
                 output.flush();
             }
-            output.writeToPNG(path);
+            // Beside the destination, then renamed over it: see
+            // `reserveTempBeside` for why a caller-supplied path is never
+            // written through directly.
+            const tmpPath = reserveTempBeside(path);
+            try {
+                output.writeToPNG(tmpPath);
+            } catch (e) {
+                discardTemp(tmpPath);
+                throw e;
+            }
+            commitTemp(tmpPath, path);
         } catch (e) {
             reply(false, `could not write ${path}: ${e}`);
             return;
@@ -536,7 +561,16 @@ class PyguitestService {
                         return;
                     }
                     try {
-                        pixbuf.savev(path, 'png', [], []);
+                        // As the legacy path: written beside the destination
+                        // and renamed over it, never through it.
+                        const tmpPath = reserveTempBeside(path);
+                        try {
+                            pixbuf.savev(tmpPath, 'png', [], []);
+                        } catch (e) {
+                            discardTemp(tmpPath);
+                            throw e;
+                        }
+                        commitTemp(tmpPath, path);
                     } catch (e) {
                         reply(false, `could not write ${path}: ${e}`);
                         return;
