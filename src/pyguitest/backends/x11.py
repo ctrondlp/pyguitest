@@ -479,20 +479,38 @@ class X11Backend(GUIBackend):
             return None
 
     def _title(self, window):
-        """A window's title, or empty string if it has none."""
+        """A window's title: "" if it has none, None if the window is gone.
+
+        The two are kept apart because `windows()` treats them differently:
+        an untitled window is still a window, while one whose name cannot be
+        read any more has closed between the listing and this read.
+        """
         try:
             return window.get_wm_name() or ""
         except Exception:
-            return ""
+            return None
 
     def windows(self):
-        """Every toplevel with a title, across all screens.
+        """Every managed toplevel, titled or not, across all screens.
 
         Prefers _NET_CLIENT_LIST_STACKING; falls back to a full tree walk only for a
         window manager that does not maintain it, which is also the only
         path where one application can appear more than once. The walk is
         filtered to the windows a window manager would have managed -- see
         `_managed` -- so the two paths answer alike.
+
+        An untitled window is reported with `title=""`, the way the win32
+        and Wayland backends already report one, rather than dropped. It
+        used to be dropped, and that made a whole class of dialog
+        unreachable by anything that goes through this list: GTK4's
+        `Gtk.AlertDialog` (a `dialog` with no accessible name and no WM_NAME,
+        measured live on GhostBSD's marco), and a GTK3 `GtkAssistant` the
+        application never titled. The accessibility backend places an
+        element on screen by the compositor's listing of its window, and
+        with the window missing from the list the AlertDialog's buttons
+        raised CapabilityUnsupported while the assistant's were placed by
+        the application's *main* window -- the only listing left with its
+        pid -- and so reported wrong.
         """
         self.require(Capability.WINDOW_LIST)
         found = []
@@ -502,21 +520,28 @@ class X11Backend(GUIBackend):
             if clients is not None:
                 candidates = clients
             else:
+                # The root is walked for its descendants but is never a
+                # toplevel itself: mapped, not override-redirect, and
+                # nameless, it would otherwise list as a screen-sized
+                # untitled window under every point.
                 candidates = [
-                    child for child in self._walk(root) if self._managed(child)
+                    child
+                    for child in self._walk(root)
+                    if child is not root and self._managed(child)
                 ]
             for child in candidates:
                 title = self._title(child)
-                if title:
-                    found.append(
-                        Window(
-                            handle=child,
-                            backend=self,
-                            title=title,
-                            app_id=self._app_id(child),
-                            pid=self._pid(child),
-                        )
+                if title is None:
+                    continue
+                found.append(
+                    Window(
+                        handle=child,
+                        backend=self,
+                        title=title,
+                        app_id=self._app_id(child),
+                        pid=self._pid(child),
                     )
+                )
         return found
 
     def _managed(self, window):
@@ -538,6 +563,12 @@ class X11Backend(GUIBackend):
         the popups are -- was listed the same way, giving one application
         several windows that can never be under the pointer.
 
+        Nor an InputOnly window: it has no pixels to show, a window manager
+        declines to manage one (Mutter says so by name), and GTK3 gives every
+        toplevel a mapped 1x1 InputOnly child to hold keyboard focus -- see
+        `_toplevel_of` -- which the walk would otherwise list as an untitled
+        window of its own, once per GTK3 toplevel, with no pid.
+
         Deliberately not applied to the `_NET_CLIENT_LIST_STACKING` path: that
         list is the window manager's own answer, and a minimized window on it
         is mapped-but-unviewable by design (the manager unmaps the client), so
@@ -549,6 +580,8 @@ class X11Backend(GUIBackend):
         except Exception:
             return True
         if getattr(attributes, "override_redirect", False):
+            return False
+        if getattr(attributes, "win_class", None) == self._X.InputOnly:
             return False
         return attributes.map_state != self._X.IsUnmapped
 
@@ -581,8 +614,78 @@ class X11Backend(GUIBackend):
         """The X window object for a Window or raw handle."""
         return window.handle if isinstance(window, Window) else window
 
+    def _frame_extents(self, handle):
+        """The shadow a client draws around its own visible window, or None.
+
+        `(left, right, top, bottom)` from the window's `_GTK_FRAME_EXTENTS`
+        -- the property a client-side-decorated GTK3 or GTK4 toplevel sets
+        under a compositing manager to say how much of its X window is
+        translucent shadow rather than window. The window manager treats
+        everything inside those margins as the window: that is the
+        rectangle it snaps, tiles, constrains to the work area and reports
+        as the frame, and what the user sees as the window's edge. None
+        for a window that sets no such property, or one whose four values
+        are all zero or not all non-negative (nothing to subtract, or
+        nothing to trust).
+
+        Measured on GhostBSD's marco with the GTK4 torture fixture: the X
+        window `(0, 28, 1024, 716)` on a 1024x768 screen carries
+        `[30, 30, 24, 41]`, and the window the user sees -- its header bar's
+        top edge at y=52, its content 964 wide -- is exactly the X window
+        with those taken off, and exactly the 964x651 the toolkit's own
+        accessible frame reports for itself.
+        """
+        try:
+            atom = self._display.intern_atom("_GTK_FRAME_EXTENTS")
+            prop = handle.get_full_property(atom, self._X.AnyPropertyType)
+        except Exception:
+            return None
+        if prop is None or len(prop.value) < 4:
+            return None
+        try:
+            extents = tuple(int(v) for v in prop.value[:4])
+        except (TypeError, ValueError):
+            return None
+        if min(extents) < 0 or not any(extents):
+            return None
+        return extents
+
+    @staticmethod
+    def _inside_extents(x, y, width, height, extents):
+        """The rectangle with its `_frame_extents` margin taken off.
+
+        Unchanged when there is no margin, and unchanged when the margin
+        would leave nothing: a window shrunk below its own declared
+        shadow (a client mid-unmap, a stale property) is reported whole
+        rather than as a negative or empty rectangle. `geometry()` and a
+        `window=` capture both go through here so the window one reports
+        is the window the other reads.
+        """
+        if extents is None:
+            return (x, y, width, height)
+        left, right, top, bottom = extents
+        if width <= left + right or height <= top + bottom:
+            return (x, y, width, height)
+        return (x + left, y + top, width - left - right, height - top - bottom)
+
     def geometry(self, window):
         """A window's (x, y, width, height), in screen (root) coordinates.
+
+        The rectangle is the window the user sees. An X11 client that draws
+        its own decorations under a compositing manager -- a GTK3 or GTK4
+        toplevel with a header bar -- makes its X window bigger than that
+        by a translucent shadow margin on every side, and declares the
+        margin in `_GTK_FRAME_EXTENTS` so the window manager can treat the
+        inside as the window; so does this (`_frame_extents`), which is
+        also what every Wayland backend reports, since a compositor answers
+        with the client's declared window geometry, shadow excluded, and
+        what `move_window`/`resize_window` and a `window=` capture then
+        agree with. Before 2026-11-04 the raw X window was reported, and
+        the element placement built on it (`AtspiBackend`, for a toolkit
+        that publishes no screen position of its own) read the 65px of
+        shadow in the height as a server-side titlebar and put every
+        control of the GTK4 torture fixture 10px too low on marco --
+        measured by a screenshot against the placed rectangle.
 
         get_geometry() alone reports position relative to the window's
         *parent*, which under any reparenting window manager is the
@@ -615,7 +718,13 @@ class X11Backend(GUIBackend):
             origin = geom.root.translate_coords(handle, 0, 0)
         except Exception as exc:
             raise WindowNotFound(f"window is gone: {exc}") from exc
-        return (origin.x, origin.y, geom.width, geom.height)
+        return self._inside_extents(
+            origin.x,
+            origin.y,
+            geom.width,
+            geom.height,
+            self._frame_extents(handle),
+        )
 
     _MOVERESIZE_GRAVITY_STATIC = 10
     """Position the window's own top-left corner exactly at (x, y),
@@ -645,8 +754,27 @@ class X11Backend(GUIBackend):
         that arrives before the manager has finished placing a newly mapped
         window is lost to that placement, which is why move_window's docstring
         says to wait for `is_window_viewable` first.
+
+        The corner StaticGravity positions is the X window's own, and for a
+        client that draws its shadow inside its X window that corner sits
+        a `_GTK_FRAME_EXTENTS` margin outside the window the user sees --
+        the one `geometry()` reports. The request is shifted and widened by
+        that margin, so `move_window(x, y)` puts the visible corner at
+        `(x, y)`, `resize_window(w, h)` makes the visible window `w` by
+        `h`, and each reads back through `geometry()` as asked.
         """
         handle = self._handle(window)
+        extents = self._frame_extents(handle)
+        if extents is not None:
+            left, right, top, bottom = extents
+            if x is not None:
+                x -= left
+            if y is not None:
+                y -= top
+            if width is not None:
+                width += left + right
+            if height is not None:
+                height += top + bottom
         flags = self._MOVERESIZE_GRAVITY_STATIC | self._MOVERESIZE_SOURCE_APPLICATION
         values = [0, 0, 0, 0]
         for i, value in enumerate((x, y, width, height)):
@@ -745,6 +873,63 @@ class X11Backend(GUIBackend):
         self.require(Capability.WINDOW_CURSOR_QUERY)
         return bool(self._handle(window).xtest_compare_cursor(self._font_cursor(shape)))
 
+    def _toplevel_of(self, window):
+        """The toplevel `window` is or sits inside, as `windows()` would list it.
+
+        X input focus is a window, not necessarily a toplevel. GTK3 gives
+        every toplevel a hidden 1x1 InputOnly child and sets keyboard focus
+        on *that*, so `get_input_focus()` answers a window nothing lists --
+        no title, no pid, no entry in the window manager's client list --
+        and a caller comparing it with the dialog that plainly holds focus
+        is told they differ. Measured live on GhostBSD's marco with Qt's
+        native (GTK3) file chooser: focus sat on 0x4200008, an unnamed child
+        of the listed 0x4200007 'Census File', while _NET_ACTIVE_WINDOW
+        named the toplevel itself; `wait_window_focus(dialog)` therefore
+        answered False for two seconds about a dialog the Escape that
+        followed closed. Qt-drawn dialogs focus their toplevel directly and
+        compared equal all along, which is why the Qt fixture's main window
+        never showed this and its GTK-backed file, colour and font dialogs
+        all did.
+
+        Climbs the tree to the nearest ancestor the window manager lists,
+        or -- on a display with no `_NET_CLIENT_LIST_STACKING` to consult --
+        to the child of the root, which is the toplevel wherever nothing
+        reparents. A window with no such ancestor (the root itself, or a
+        focused override-redirect popup no manager lists) is handed back as
+        it is, and so is one whose ancestry cannot be read -- an ancestor
+        destroyed mid-climb -- since the window focus is on is the one thing
+        still known to be true.
+        """
+        try:
+            tree = window.query_tree()
+        except Exception:
+            return window
+        root = tree.root
+        if root is None or window == root:
+            return window
+        listed = self._client_list(root)
+        current = window
+        # Bounded: a tree is finite, but a window destroyed mid-climb can
+        # make query_tree answer about a recycled id forever.
+        for _ in range(64):
+            if listed is not None:
+                if current in listed:
+                    return current
+            elif tree.parent == root:
+                return current
+            parent = tree.parent
+            if parent is None or parent == root and listed is not None:
+                # Reached the top without finding it on the manager's list:
+                # not a managed window, so there is nothing truer to report
+                # than the window focus is actually on.
+                return window
+            try:
+                tree = parent.query_tree()
+            except Exception:
+                return window
+            current = parent
+        return window
+
     def active_window(self):
         """The window holding input focus, or None per the base contract.
 
@@ -755,11 +940,17 @@ class X11Backend(GUIBackend):
         _title()'s bare except swallowed the resulting AttributeError and
         returned "", so the caller got Window('') with no indication
         anything was wrong.
+
+        The focused window is resolved to its toplevel first -- see
+        `_toplevel_of` -- so that what comes back is a window `windows()`
+        lists and `Window.__eq__` can match, rather than the focus-holding
+        child a toolkit may have put underneath it.
         """
         self.require(Capability.WINDOW_STATE)
         focus = self._display.get_input_focus().focus
         if isinstance(focus, int):
             return None
+        focus = self._toplevel_of(focus)
         # Carries the same identity fields as a listed window. Without them a
         # caller had to decide whether a window came from windows() or from
         # here before it could rely on `app_id` or `pid` being populated, and
@@ -767,7 +958,7 @@ class X11Backend(GUIBackend):
         return Window(
             handle=focus,
             backend=self,
-            title=self._title(focus),
+            title=self._title(focus) or "",
             app_id=self._app_id(focus),
             pid=self._pid(focus),
         )
@@ -943,7 +1134,7 @@ class X11Backend(GUIBackend):
             rows.append(bytes(out))
         return rows
 
-    def _drawable_size(self, drawable, window=None):
+    def _drawable_size(self, drawable, window=None) -> tuple[int, int]:
         """The drawable's (width, height), asked of the server.
 
         Deliberately not `screen.width_in_pixels`. That comes from the
@@ -1005,6 +1196,12 @@ class X11Backend(GUIBackend):
         backing store enabled, and GetImage on one raises rather than
         returning a blank frame.
 
+        The image is the window `geometry()` reports: a client that draws
+        its shadow inside its own X window (`_frame_extents`) has that
+        margin left out, so the PNG is the window the user sees and its
+        size matches the geometry -- not a larger picture with a band of
+        shadow pixels, drawn translucent over nothing, around it.
+
         Writes a PNG through this package's own encoder -- no image
         library and no screenshot tool involved, so this is the one capture
         path with nothing to install.
@@ -1027,9 +1224,15 @@ class X11Backend(GUIBackend):
 
         if region is not None:
             x, y, width, height = self._fit_within(region, bounds)
+        elif window is not None:
+            # The window inside its shadow margin -- a sub-rectangle of the
+            # drawable, so it cannot be out of bounds either.
+            x, y, width, height = self._inside_extents(
+                0, 0, *bounds, self._frame_extents(drawable)
+            )
         else:
-            # A window or whole-root capture is exactly the drawable's own
-            # rectangle, which cannot be out of bounds.
+            # A whole-root capture is exactly the drawable's own rectangle,
+            # which cannot be out of bounds.
             x, y = 0, 0
             width, height = bounds
 
@@ -1041,7 +1244,12 @@ class X11Backend(GUIBackend):
         return _png.write_rgb(path, width, height, rows)
 
     def window_at(self, x, y, screen=0):
-        """The topmost window covering a screen coordinate, or None."""
+        """The topmost window covering a screen coordinate, or None.
+
+        Covering by `geometry()`'s rectangle -- the window the user sees --
+        so a point in a client-drawn shadow margin is not inside that
+        window, just as a click there would reach whatever is beneath.
+        """
         self.require(Capability.WINDOW_AT_POINT)
         match = None
         for window in self.windows():

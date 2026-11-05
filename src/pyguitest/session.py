@@ -151,6 +151,48 @@ def _module(name: str) -> bool:
     return spec is not None and spec.loader is not None
 
 
+def _dogtail_gtk_conflict() -> str | None:
+    """The GTK version pinned in this process that conflicts with dogtail's.
+
+    None where there is no conflict (including: no conflict detectable,
+    because `gi` cannot even be imported).
+
+    `_module("dogtail")` only confirms the *package* has a valid spec and
+    loader; it never actually imports anything, so it cannot see a
+    process-state conflict that is invisible to any static check. dogtail
+    pins `gi.require_version("Gtk", "3.0")` the moment it is genuinely
+    imported (`dogtail.tree`, specifically), and if something else in this
+    same process already pinned GTK to a *different* version -- a caller's
+    own `gi.require_version("Gtk", "4.0")`, say, which a test exercising a
+    GTK4 application would do before ever calling `connect()` -- that
+    import raises `ValueError: Namespace Gtk is already loaded with
+    version 4.0` instead of succeeding.
+
+    Measured live: exactly that test process kept getting
+    `has_dogtail=True` from `detect()` throughout, because this check did
+    not exist -- `_module`'s spec-based answer stayed correct about the
+    package on disk and silently wrong about whether importing it would
+    work right now, in this interpreter.
+
+    Checked without importing dogtail itself, which is the whole point:
+    actually importing it to find out would pin GTK to 3.0 as a side
+    effect of merely *asking*, which could go on to create the identical
+    conflict for a caller who has not yet decided which GTK version it
+    wants. `gi.get_required_version` is read-only -- confirmed live,
+    calling it repeatedly and around a real `require_version` call changes
+    nothing on its own -- so asking this question costs nothing and commits
+    to nothing.
+    """
+    try:
+        import gi
+    except ImportError:
+        return None
+    pinned = gi.get_required_version("Gtk")
+    if pinned is None or pinned == "3.0":
+        return None
+    return pinned
+
+
 def _platform() -> str:
     """`sys.platform`, read through a call rather than a module constant.
 
@@ -1576,7 +1618,15 @@ def _compositor(env: Mapping[str, str], session_type: SessionType) -> Compositor
         return Compositor.COSMIC
     if any(h in haystack for h in _WLROOTS_HINTS) or env.get("SWAYSOCK"):
         return Compositor.WLROOTS
-    if env.get("HYPRLAND_INSTANCE_SIGNATURE"):
+    if env.get("HYPRLAND_INSTANCE_SIGNATURE") or env.get("NIRI_SOCKET"):
+        # Each of the three compositors' own IPC variable is proof enough
+        # on its own: `for_compositor` already selects the backend on it,
+        # and a session that never set a desktop name still reaches it.
+        # niri's was the one missing -- on KaOS, where the greetd-started
+        # niri carries no XDG_CURRENT_DESKTOP and only hands one to the
+        # clients it spawns, an ssh shell with NIRI_SOCKET recovered from
+        # the socket file still composed without the niri backend and
+        # reported `compositor other`, measured 2026-11-04.
         return Compositor.WLROOTS
     # WAYLAND_DISPLAY being set proves a compositor is running even when
     # none of the desktop-name variables identify which one -- NONE means
@@ -1806,7 +1856,14 @@ def detect(env: Mapping[str, str] | None = None) -> Environment:
     uinput_present, uinput_writable = _uinput()
     has_atspi = _lib("atspi")
     has_pygobject = _module("gi.repository")
-    has_dogtail = _module("dogtail")
+    dogtail_installed = _module("dogtail")
+    # Not folded into one expression: the note below needs to tell "not
+    # installed" apart from "installed, but GTK is already pinned to a
+    # version it conflicts with in this process" -- see
+    # _dogtail_gtk_conflict, which is only ever worth asking at all once
+    # the package itself is confirmed present.
+    gtk_conflict = dogtail_installed and _dogtail_gtk_conflict()
+    has_dogtail = dogtail_installed and not gtk_conflict
     has_evdev = _module("evdev")
     notes = []
 
@@ -1847,11 +1904,27 @@ def detect(env: Mapping[str, str] | None = None) -> Environment:
             "to use element automation"
         )
     if has_atspi and has_pygobject and not has_dogtail:
-        notes.append(
-            "libatspi and PyGObject are present but dogtail is not; install "
-            "the 'atspi' extra (pip install 'pyguitest[atspi]') to use "
-            "element automation"
-        )
+        if gtk_conflict:
+            # Reinstalling anything fixes nothing here -- the package is
+            # fine, the *process* is not. Named precisely so this is not
+            # mistaken for the "not installed" case right above it, whose
+            # advice (install the atspi extra) would do nothing for this
+            # one.
+            notes.append(
+                "dogtail cannot be imported in this process: something "
+                f"already pinned GTK to version {gtk_conflict}, and "
+                "dogtail requires 3.0 -- confirmed, this is not about "
+                "whether it is installed. Importing GTK before "
+                "connect(backend=['atspi']) causes this; import it after, "
+                "or run element automation in a separate process from "
+                "whichever GTK version the caller itself needs"
+            )
+        else:
+            notes.append(
+                "libatspi and PyGObject are present but dogtail is not; "
+                "install the 'atspi' extra (pip install 'pyguitest[atspi]') "
+                "to use element automation"
+            )
     if uinput_writable and not has_evdev:
         notes.append(
             "/dev/uinput is writable but python-evdev is not installed; "

@@ -1035,6 +1035,67 @@ class TestScreenSize(unittest.TestCase):
                 )
         self.assertEqual(size, (2560, 1440))
 
+    def test_niri_is_asked_over_its_own_ipc(self):
+        # The gap found live on KaOS 2026-11-04: niri ships neither swaymsg
+        # nor hyprctl, so the wlroots branch answered nothing and the uinput
+        # device was declared for 1920x1080 on a 1280x800 output -- every
+        # click landed at two thirds of the way to its target. The socket is
+        # the signature, as in `for_compositor`; no CLI needs to be on PATH.
+        transport = mock.Mock()
+        transport.outputs.return_value = {
+            "Virtual-1": {
+                "name": "Virtual-1",
+                "logical": {"x": 0, "y": 0, "width": 1280, "height": 800, "scale": 1.0},
+            },
+            "Virtual-2": {"name": "Virtual-2", "logical": None},
+        }
+        with mock.patch.dict(
+            "os.environ", {"NIRI_SOCKET": "/run/user/1000/niri.wayland-1.834.sock"}
+        ):
+            with mock.patch("pyguitest.ipc.connect_niri", return_value=transport):
+                with mock.patch("shutil.which", return_value=None):
+                    size = backends._screen_size(
+                        _env(
+                            session_type=SessionType.WAYLAND,
+                            compositor=Compositor.WLROOTS,
+                        )
+                    )
+        self.assertEqual(size, (1280, 800))
+        transport.close.assert_called_once()
+
+    def test_niri_outputs_are_laid_out_like_sway_ones(self):
+        transport = mock.Mock()
+        transport.outputs.return_value = {
+            "DP-1": {"logical": {"x": 0, "y": 0, "width": 2560, "height": 1440}},
+            "HDMI-A-1": {
+                "logical": {"x": 2560, "y": 200, "width": 1920, "height": 1080}
+            },
+        }
+        with mock.patch.dict("os.environ", {"NIRI_SOCKET": "/run/user/1000/niri.sock"}):
+            with mock.patch("pyguitest.ipc.connect_niri", return_value=transport):
+                size = backends._screen_size(
+                    _env(
+                        session_type=SessionType.WAYLAND,
+                        compositor=Compositor.WLROOTS,
+                    )
+                )
+        self.assertEqual(size, (4480, 1440))
+
+    def test_niri_refusing_falls_back_rather_than_raising(self):
+        transport = mock.Mock()
+        transport.outputs.side_effect = OSError("niri refused the request")
+        with mock.patch.dict("os.environ", {"NIRI_SOCKET": "/run/user/1000/niri.sock"}):
+            with mock.patch("pyguitest.ipc.connect_niri", return_value=transport):
+                with mock.patch("shutil.which", return_value=None):
+                    size = backends._screen_size(
+                        _env(
+                            session_type=SessionType.WAYLAND,
+                            compositor=Compositor.WLROOTS,
+                        )
+                    )
+        self.assertEqual(size, backends._FALLBACK_SCREEN_SIZE)
+        transport.close.assert_called_once()
+
     def test_mutter_display_config_is_asked_on_gnome(self):
         # The gap this whole method exists to close: a default GNOME
         # Wayland session matched none of the old branches and silently

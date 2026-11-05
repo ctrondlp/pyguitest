@@ -30,6 +30,10 @@ class Role:
     CHECK_BOX = "check box"
     RADIO_BUTTON = "radio button"
     LINK = "link"
+    SWITCH = "switch"
+    """A GTK4 `GtkSwitch`, measured live (4.24.1). Qt has no equivalent --
+    a QCheckBox is `check box` there -- which is why this is new rather
+    than an existing role simply being found."""
 
     # -- things you type into ----------------------------------------------
     TEXT = "text"
@@ -52,6 +56,20 @@ class Role:
     FRAME = "frame"
     WINDOW = "window"
     DIALOG = "dialog"
+    ALERT = "alert"
+    """A message box's toplevel -- `GtkMessageDialog` (GTK3) and
+    `QMessageBox` (Qt 6) both publish it as `alert`, not `dialog`,
+    measured live on seven desktops (GTK4's `Gtk.AlertDialog` is a plain
+    `dialog`). A toplevel in its own right: an application's direct
+    child, listed by `windows()` and ascended to as the window by element
+    geometry, which is why it is in `WINDOW_ROLES`."""
+    FILE_CHOOSER = "file chooser"
+    """A file dialog's toplevel -- `GtkFileChooserDialog`, and so Qt's
+    `QFileDialog` wherever it uses the GTK platform dialog -- publishes
+    as `file chooser` rather than `dialog`, measured live on GTK 3.24. In
+    `WINDOW_ROLES` for the same reason as `ALERT`: before it was, a Save
+    dialog's Cancel button had no window to be placed in and its
+    `extents()` were refused on every Wayland desktop."""
     PANEL = "panel"
     LAYERED_PANE = "layered pane"
     TOOL_BAR = "tool bar"
@@ -65,6 +83,13 @@ class Role:
     TABLE_COLUMN_HEADER = "table column header"
     TREE = "tree"
     TREE_ITEM = "tree item"
+    TREE_TABLE = "tree table"
+    """A GTK4 `GtkColumnView`, measured live (4.24.1) -- GTK's replacement
+    for the deprecated `GtkTreeView`, which reports as plain `tree`. Not an
+    alias of either existing role: a `GtkColumnView`'s own cells publish
+    `listitem.scroll-to` rather than `click`/`press`, so code written
+    against `tree`'s usual action-click pattern would silently find
+    nothing to act on if this matched that role instead of its own."""
     DOCUMENT_FRAME = "document frame"
     FILLER = "filler"
 
@@ -75,13 +100,22 @@ class Role:
     IMAGE = "image"
     ICON = "icon"
     PROGRESS_BAR = "progress bar"
+    LEVEL_BAR = "level bar"
+    """A GTK4 `GtkLevelBar`, measured live (4.24.1) -- a read-only value
+    display like `progress bar`, but a distinct role: GTK has no single
+    widget that is both, and nothing currently maps the two together."""
     SLIDER = "slider"
     DIAL = "dial"
     SCROLL_BAR = "scroll bar"
     SEPARATOR = "separator"
 
-    WINDOW_ROLES = (FRAME, WINDOW, DIALOG)
-    """Roles that count as a toplevel window when listing windows."""
+    WINDOW_ROLES = (FRAME, WINDOW, DIALOG, ALERT, FILE_CHOOSER)
+    """Roles that count as a toplevel window when listing windows.
+
+    In precedence order where one title matches several -- a main window
+    outranks a dialog of the same name. `ALERT` and `FILE_CHOOSER` are the
+    two toplevel roles GTK and Qt publish besides the classic three; see
+    each one's own note for the measurement."""
 
     TEXT_ROLES = (TEXT, ENTRY, PASSWORD_TEXT, SPIN_BUTTON)
     """Roles that accept typed text."""

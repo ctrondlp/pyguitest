@@ -70,6 +70,15 @@ class FakeWindow:
         # never set the property, which is what a bare X client looks like.
         self._wm_class = wm_class
         self._children = list(children)
+        # QueryTree answers the parent too, and the backend climbs it to find
+        # the toplevel a focus-holding child belongs to. Set by whichever
+        # window lists this one among its children; None for a root.
+        self._parent = None
+        for child in self._children:
+            child._parent = self
+        # InputOutput (1) unless a test makes it the InputOnly (2) focus child
+        # GTK3 keeps under each toplevel.
+        self.win_class = 1
         self._geom = geom
         # Absolute, root-relative position. Defaults to the geometry's own
         # x/y (no reparenting simulated); a test passes root_pos explicitly
@@ -91,9 +100,19 @@ class FakeWindow:
         # tree walk. A test sets this to the ids create_resource_object
         # should resolve, to exercise the EWMH path instead.
         self.client_list_ids = None
+        # _GTK_FRAME_EXTENTS: the (left, right, top, bottom) shadow margin a
+        # client-side-decorated GTK toplevel declares around the window the
+        # user sees. None (the default) means the property is not set -- a
+        # server-side-decorated or non-GTK client.
+        self.frame_extents = None
 
     def query_tree(self):
-        return types.SimpleNamespace(children=self._children)
+        root = self
+        while root._parent is not None:
+            root = root._parent
+        return types.SimpleNamespace(
+            children=self._children, parent=self._parent, root=root
+        )
 
     def get_wm_name(self):
         return self._name
@@ -138,6 +157,10 @@ class FakeWindow:
             if self.client_list_ids is None:
                 return None
             return types.SimpleNamespace(value=self.client_list_ids)
+        if atom == "_GTK_FRAME_EXTENTS":
+            if self.frame_extents is None:
+                return None
+            return types.SimpleNamespace(value=list(self.frame_extents))
         return types.SimpleNamespace(value=[4242])  # _NET_WM_PID
 
     def xtest_compare_cursor(self, cursor):
@@ -156,6 +179,7 @@ class FakeWindow:
         return types.SimpleNamespace(
             map_state=2 if self.mapped else 0,
             override_redirect=self.override_redirect,
+            win_class=self.win_class,
         )
 
     def get_image(self, x, y, width, height, format, plane_mask):
@@ -341,6 +365,8 @@ def install_fake_xlib(load_keysym_group=None):
     # Real values, not sequential like the above -- IsUnmapped=0 is
     # otherwise indistinguishable from a stub returning 0 by omission.
     X.IsUnmapped, X.IsUnviewable, X.IsViewable = 0, 1, 2
+    # Real too: CopyFromParent=0, InputOutput=1, InputOnly=2.
+    X.InputOutput, X.InputOnly = 1, 2
     # Also real: matches include/uapi and the X protocol spec, in case a
     # test ever needs to tell these apart from the sequential ones above.
     X.SubstructureNotifyMask, X.SubstructureRedirectMask = 1 << 19, 1 << 20
@@ -500,11 +526,127 @@ class TestActiveWindow(X11TestCase):
         )
         self.assertIsNone(self.gui.active_window())
 
+    def _focus_on_a_child_of(self, toplevel):
+        """GTK3's shape: focus on a hidden InputOnly child, not the toplevel."""
+        focus_child = FakeWindow("", geom=(-1, -1, 1, 1))
+        focus_child.win_class = 2  # InputOnly
+        toplevel._children.append(focus_child)
+        focus_child._parent = toplevel
+        self.gui._display.get_input_focus = lambda: types.SimpleNamespace(
+            focus=focus_child
+        )
+        return focus_child
+
+    def test_focus_on_a_toplevels_child_is_reported_as_the_toplevel(self):
+        # Measured live on GhostBSD's marco: a GTK3 dialog (Qt's native file
+        # chooser) sets X input focus on a 1x1 child it keeps for the
+        # purpose, so get_input_focus() answered a window with no title, no
+        # pid and no place on the window manager's list, and
+        # wait_window_focus(dialog) said False about a dialog that was
+        # plainly focused -- the Escape sent next closed it. Qt-drawn
+        # dialogs focus their toplevel directly, which is why only the
+        # GTK-backed ones showed it.
+        display = self.gui._display
+        display.root.client_list_ids = [100, 101]
+        self._focus_on_a_child_of(display.browser)
+        active = self.gui.active_window()
+        self.assertEqual(active.title, "Browser")
+        self.assertEqual(active, self.gui.windows()[1])
+        self.assertEqual(active.pid, 4242)
+
+    def test_the_climb_stops_at_the_managed_client_not_the_decoration(self):
+        # A reparenting window manager puts the client inside a frame of its
+        # own; the client is what the manager lists and what windows()
+        # hands out, so the climb must stop there and not go on to the
+        # frame above it.
+        display = self.gui._display
+        frame = FakeWindow("", geom=(800, 0, 400, 640))
+        display.root._children[1] = frame
+        frame._children.append(display.browser)
+        display.browser._parent = frame
+        display.root.client_list_ids = [100, 101]
+        self._focus_on_a_child_of(display.browser)
+        self.assertEqual(self.gui.active_window(), self.gui.windows()[1])
+
+    def test_a_focused_popup_no_manager_lists_is_reported_as_itself(self):
+        # Nothing truer to say about a focused override-redirect window than
+        # the window itself: it has no listed ancestor to resolve to.
+        display = self.gui._display
+        popup = FakeWindow("Popup", geom=(10, 10, 50, 50))
+        popup.override_redirect = True
+        display.root._children.append(popup)
+        popup._parent = display.root
+        display.root.client_list_ids = [100, 101]
+        display.get_input_focus = lambda: types.SimpleNamespace(focus=popup)
+        self.assertIs(self.gui.active_window().handle, popup)
+
+    def test_without_a_client_list_the_toplevel_is_the_child_of_the_root(self):
+        # A display with no window manager keeps no client list; there the
+        # toplevel is whatever sits directly under the root.
+        display = self.gui._display
+        self._focus_on_a_child_of(display.editor)
+        self.assertEqual(self.gui.active_window(), self.gui.windows()[0])
+
+    def test_a_tree_read_failing_mid_climb_reports_the_focused_window(self):
+        display = self.gui._display
+        focus_child = self._focus_on_a_child_of(display.browser)
+
+        def gone():
+            raise RuntimeError("BadWindow")
+
+        display.browser.query_tree = gone
+        display.root.client_list_ids = [100, 101]
+        self.assertIs(self.gui.active_window().handle, focus_child)
+
 
 class TestWindows(X11TestCase):
-    def test_only_named_windows_are_listed(self):
-        # The unnamed root is walked but not reported.
+    def test_the_root_is_walked_but_not_reported(self):
+        # Mapped, not override-redirect and nameless, the root would
+        # otherwise pass the tree walk's filter and list as a screen-sized
+        # untitled window under every point.
         self.assertEqual([w.title for w in self.gui.windows()], ["Editor", "Browser"])
+
+    def test_an_untitled_window_is_still_a_window(self):
+        # Measured live on GhostBSD's marco: GTK4's Gtk.AlertDialog sets no
+        # WM_NAME at all, and a GtkAssistant the application never titled
+        # sets none either. Dropping them from this list -- which is what a
+        # "titled toplevels only" filter did -- made both unreachable by
+        # everything built on it: the accessibility backend places an
+        # element by the listing of its window, so the AlertDialog's buttons
+        # were refused and the assistant's were placed by the application's
+        # main window instead. win32 and the Wayland backends already list
+        # an untitled window as title "".
+        untitled = FakeWindow("", geom=(300, 300, 400, 150), wm_class=("app", "App"))
+        self.gui._display.root._children.append(untitled)
+        self.assertEqual(
+            [w.title for w in self.gui.windows()], ["Editor", "Browser", ""]
+        )
+        listed = self.gui.windows()[2]
+        self.assertEqual((listed.app_id, listed.pid), ("App", 4242))
+        self.assertEqual(self.gui.window_at(350, 350).title, "")
+
+    def test_a_toplevels_input_only_focus_child_is_not_a_window(self):
+        # GTK3 keeps a mapped 1x1 InputOnly child under every toplevel to
+        # hold keyboard focus. It is not override-redirect and it is mapped,
+        # so the tree walk's filter passed it -- and with untitled windows
+        # now listed, every GTK3 toplevel on a display with no window
+        # manager would have been followed by a nameless, pid-less window
+        # of its own. A window manager never manages an InputOnly window.
+        focus_child = FakeWindow("", geom=(-1, -1, 1, 1))
+        focus_child.win_class = 2  # InputOnly
+        self.gui._display.editor._children.append(focus_child)
+        focus_child._parent = self.gui._display.editor
+        self.assertEqual([w.title for w in self.gui.windows()], ["Editor", "Browser"])
+
+    def test_an_untitled_window_on_the_window_managers_list_is_kept_too(self):
+        # The EWMH path is the one every real window manager takes, so it is
+        # the path the live finding was made on.
+        untitled = FakeWindow("", geom=(300, 300, 400, 150))
+        self.gui._display._by_id[102] = untitled
+        self.gui._display.root.client_list_ids = [100, 101, 102]
+        self.assertEqual(
+            [w.title for w in self.gui.windows()], ["Editor", "Browser", ""]
+        )
 
     def test_pid_comes_from_net_wm_pid(self):
         self.assertEqual(self.gui.windows()[0].pid, 4242)
@@ -693,7 +835,10 @@ class TestWindows(X11TestCase):
 
     def test_tree_walk_skips_a_window_destroyed_mid_scan(self):
         # query_tree() on a destroyed window raises BadWindow; the walk must
-        # skip that branch rather than aborting the whole scan.
+        # skip that branch rather than aborting the whole scan. The title
+        # read fails the same way, and that is what tells a window that has
+        # gone from one that merely has no title -- now that an untitled
+        # window is listed, a destroyed one must not list as untitled.
         class Destroyed:
             def query_tree(self):
                 raise Exception("BadWindow")
@@ -705,6 +850,17 @@ class TestWindows(X11TestCase):
         self.gui._display.root._children.append(gone)
         titles = [w.title for w in self.gui.windows()]
         self.assertEqual(titles, ["Editor", "Browser"])
+
+    def test_a_window_closing_between_the_managers_list_and_the_title_read_is_skipped(
+        self,
+    ):
+        class Destroyed(FakeWindow):
+            def get_wm_name(self):
+                raise Exception("BadWindow")
+
+        self.gui._display._by_id[102] = Destroyed("Closing")
+        self.gui._display.root.client_list_ids = [100, 101, 102]
+        self.assertEqual([w.title for w in self.gui.windows()], ["Editor", "Browser"])
 
     def test_minimize_unmaps(self):
         window = self.gui.windows()[0]
@@ -726,6 +882,159 @@ class TestWindows(X11TestCase):
 
         with self.assertRaises(WindowNotFound):
             self.gui.is_window_viewable(Destroyed())
+
+
+class TestClientDrawnShadow(X11TestCase):
+    """A client-side-decorated window is smaller than its X window.
+
+    Under a compositing manager a GTK3 or GTK4 toplevel draws a translucent
+    shadow inside its own X window and declares the margin in
+    _GTK_FRAME_EXTENTS. Measured live on GhostBSD's marco with the GTK4
+    torture fixture: the X window (0, 28, 1024, 716) carried [30, 30, 24, 41],
+    and the window the user sees -- header bar top edge at y=52, 964 wide --
+    was that rectangle with the margin taken off. Reporting the raw X window
+    had the accessibility backend read the 65px of shadow in the height as a
+    server-side titlebar and place every control 10px too low.
+
+    Every answer about the rectangle has to agree: geometry() reports the
+    visible window, window_at() hits by it, move_window/resize_window take it
+    (StaticGravity positions the X window's own corner, a margin away), and
+    a window capture reads it.
+    """
+
+    # The marco measurement, verbatim.
+    _X_WINDOW = (0, 28, 1024, 716)
+    _EXTENTS = (30, 30, 24, 41)
+    _VISIBLE = (30, 52, 964, 651)
+
+    def _shadowed(self, geom=_X_WINDOW, extents=_EXTENTS):
+        window = FakeWindow("Shadowed", geom=geom, wm_class=("app", "App"))
+        window.frame_extents = extents
+        return window
+
+    def test_geometry_is_the_window_inside_the_shadow(self):
+        self.assertEqual(self.gui.geometry(self._shadowed()), self._VISIBLE)
+
+    def test_a_window_declaring_no_margin_is_reported_whole(self):
+        self.assertEqual(
+            self.gui.geometry(self._shadowed(extents=None)), self._X_WINDOW
+        )
+        self.assertEqual(
+            self.gui.geometry(self._shadowed(extents=(0, 0, 0, 0))), self._X_WINDOW
+        )
+
+    def test_the_margin_is_read_fresh_on_every_call(self):
+        # The shadow is not a constant of the window: GTK drops it to zero
+        # when the window is maximized or tiled, clears it when the
+        # compositor goes away (no compositing, no translucent shadow), and
+        # resizes it with the theme. Each answer has to be for the window
+        # as it is now, so nothing about the margin may be cached.
+        window = self._shadowed()
+        self.assertEqual(self.gui.geometry(window), self._VISIBLE)
+        window.frame_extents = (0, 0, 0, 0)  # maximized, or compositing off
+        self.assertEqual(self.gui.geometry(window), self._X_WINDOW)
+        window.frame_extents = (10, 10, 8, 14)  # a theme with a tighter shadow
+        self.assertEqual(self.gui.geometry(window), (10, 36, 1004, 694))
+        self.gui.move_window(window, 100, 200)
+        self.assertEqual(_ROOT.sent_events[-1][0].data[1][1:3], [90, 192])
+        window.frame_extents = None  # the property withdrawn altogether
+        self.assertEqual(self.gui.geometry(window), self._X_WINDOW)
+        self.gui.move_window(window, 100, 200)
+        self.assertEqual(_ROOT.sent_events[-1][0].data[1][1:3], [100, 200])
+
+    def test_a_margin_that_would_swallow_the_window_is_ignored(self):
+        # A window shrunk below its own declared shadow -- a client mid-unmap
+        # or a stale property -- must not come back negative or empty.
+        self.assertEqual(
+            self.gui.geometry(self._shadowed(geom=(0, 28, 60, 65))), (0, 28, 60, 65)
+        )
+        self.assertEqual(
+            self.gui.geometry(self._shadowed(geom=(0, 28, 61, 65))), (0, 28, 61, 65)
+        )
+        self.assertEqual(
+            self.gui.geometry(self._shadowed(geom=(0, 28, 61, 66))),
+            (30, 52, 1, 1),
+        )
+
+    def test_a_malformed_property_is_ignored(self):
+        for extents in ((30, 30), (30, -1, 24, 41), ("30", "x", 24, 41)):
+            with self.subTest(extents=extents):
+                self.assertEqual(
+                    self.gui.geometry(self._shadowed(extents=extents)),
+                    self._X_WINDOW,
+                )
+
+    def test_a_property_read_that_fails_is_not_a_missing_window(self):
+        # get_geometry() has already answered, so the window exists; a
+        # property read failing after it (a client racing its own unmap)
+        # means no margin to subtract, not WindowNotFound.
+        class PropertyFails(FakeWindow):
+            def get_full_property(self, atom, kind):
+                if atom == "_GTK_FRAME_EXTENTS":
+                    raise Exception("BadWindow")
+                return super().get_full_property(atom, kind)
+
+        window = PropertyFails("Shadowed", geom=self._X_WINDOW)
+        window.frame_extents = self._EXTENTS
+        self.assertEqual(self.gui.geometry(window), self._X_WINDOW)
+
+    def test_hit_test_reaches_the_window_beneath_the_shadow(self):
+        # The shadow is translucent and a click in it reaches what is
+        # underneath, so a point there is not inside the shadowed window.
+        # X window (300, 300, 400, 300): visible (330, 324, 340, 235).
+        window = self._shadowed(geom=(300, 300, 400, 300))
+        self.gui._display.root._children.append(window)
+        self.assertEqual(self.gui.window_at(310, 310).title, "Editor")
+        self.assertEqual(self.gui.window_at(340, 340).title, "Shadowed")
+        self.assertEqual(self.gui.window_at(669, 558).title, "Shadowed")
+        self.assertEqual(self.gui.window_at(670, 559).title, "Editor")
+
+    def test_move_puts_the_visible_corner_at_the_point(self):
+        window = self._shadowed()
+        self.gui.move_window(window, 100, 200)
+        message, _mask = _ROOT.sent_events[0]
+        flags, x, y, width, height = message.data[1]
+        self.assertEqual((x, y), (70, 176))
+        self.assertTrue(flags & (1 << 8) and flags & (1 << 9))
+        self.assertFalse(flags & (1 << 10) or flags & (1 << 11))
+        # A manager honouring StaticGravity puts the X window's corner where
+        # the message said; geometry() then reads back what was asked for.
+        window._root_pos = (x, y)
+        self.assertEqual(self.gui.geometry(window)[:2], (100, 200))
+
+    def test_resize_sizes_the_visible_window(self):
+        window = self._shadowed()
+        self.gui.resize_window(window, 500, 400)
+        message, _mask = _ROOT.sent_events[0]
+        flags, x, y, width, height = message.data[1]
+        self.assertEqual((width, height), (560, 465))
+        self.assertFalse(flags & (1 << 8) or flags & (1 << 9))
+        self.assertTrue(flags & (1 << 10) and flags & (1 << 11))
+        window._geom = window._geom[:2] + (width, height)
+        self.assertEqual(self.gui.geometry(window)[2:], (500, 400))
+
+    def test_a_window_without_a_margin_moves_and_resizes_unshifted(self):
+        window = self._shadowed(extents=None)
+        self.gui.move_window(window, 100, 200)
+        self.gui.resize_window(window, 500, 400)
+        self.assertEqual(_ROOT.sent_events[0][0].data[1][1:3], [100, 200])
+        self.assertEqual(_ROOT.sent_events[1][0].data[1][3:], [500, 400])
+
+    def test_a_window_capture_is_the_window_inside_the_shadow(self):
+        editor = self.gui._display.editor  # 800x600 at the origin
+        editor.frame_extents = self._EXTENTS
+        path = self.gui.capture(window=self.gui.windows()[0])
+        self.addCleanup(os.unlink, path)
+        # Read from (30, 24) for 740x535 -- banded, so the first request is
+        # the first band and the bands add up to the visible height.
+        self.assertEqual(editor.image_requests[0][:3], (30, 24, 740))
+        self.assertEqual(sum(request[3] for request in editor.image_requests), 535)
+        width, height, rows = TestCapture._decode(self, path)
+        self.assertEqual((width, height), (740, 535))
+        self.assertEqual((width, height), self.gui.geometry(editor)[2:])
+        # The fake encodes each pixel's own position: the first pixel of the
+        # image is the one at (30, 24) of the drawable.
+        self.assertEqual(rows[0][0:3], bytes([30, 24, 0x40]))
 
 
 class TestInput(X11TestCase):
