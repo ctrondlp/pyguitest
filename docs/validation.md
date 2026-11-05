@@ -1219,7 +1219,8 @@ do: `_screen_coords_trustworthy` is `False`, the composite
 **not** offer `ELEMENT_GEOMETRY` while still offering `ELEMENT_TREE`, and
 `extents()` refuses with a typed `CapabilityUnsupported` naming the reason
 rather than answering. So the guard is correct and the caveat is precisely
-about *when it fires*, not about what it does.
+about *when it fires*, not about what it does. (0.21.0 added the
+per-application half that fires on those desktops; see the caveat.)
 
 **What this run does not cover.** Hyprland and niri, which speak variants of
 the same IPC shape and stay in "Not run live" — neither is installed on this
@@ -1332,6 +1333,12 @@ gnome-text-editor 48/49. The accessible tree itself is complete (108 nodes
 for the calculator), so this is a Component-interface gap rather than a
 missing bridge. `ELEMENT_GEOMETRY` is accurate about sizes and useless for
 positions here, and nothing above it can recover what was never published.
+*Since 0.21.0 that last sentence is no longer true*: the same nodes answer
+real positions in AT-SPI's WINDOW coordinate type, relative to their own
+toplevel, and the backend reads that for an application whose frame
+answers `(0, 0)` in both types and adds the window's position from the
+`x11` sibling — see "Known caveat: element geometry on native Wayland
+clients" below, which records the measurements.
 
 **Per-widget focus, by contrast, works on a bare X server.**
 `focus_tracking_works()` returns true and Tab walks real widgets — `text ''`
@@ -2325,13 +2332,15 @@ someone reproduces or debunks this.
 
 ## Known caveat: element geometry on native Wayland clients
 
-`AtspiBackend` withholds its geometry capabilities where AT-SPI's screen
-coordinates cannot be believed, and decides that **per session**:
-`_screen_coords_trustworthy` is false only for `SessionType.WAYLAND`, a
-session with no X connection at all. GNOME and KDE both run XWayland by
-default, so an ordinary Wayland desktop classifies as `XWAYLAND` and the
-coordinates are trusted — for every client on it, including the native
-Wayland ones they were never true for.
+**Resolved in 0.21.0 for every application the sibling geometry source can
+list; what follows is the measurement, the fix, and the one case left.**
+
+`AtspiBackend` decides whether AT-SPI's *screen* coordinates can be believed
+**per session** first: `_screen_coords_trustworthy` is false only for
+`SessionType.WAYLAND`, a session with no X connection at all. GNOME and KDE
+both run XWayland by default, so an ordinary Wayland desktop classifies as
+`XWAYLAND` and the coordinates are trusted — for every client on it,
+including the native Wayland ones they were never true for.
 
 Measured on GNOME Shell 51.rc, the same GTK3 application in the same place
 on screen, window at `(510, 183, 900, 747)`:
@@ -2343,38 +2352,191 @@ on screen, window at `(510, 183, 900, 747)`:
 
 The offset is constant across every widget in the window (26px, 23px: the
 frame rect against the client's own surface origin), which is what says this
-is a coordinate *space* difference rather than noise.
+is a coordinate *space* difference rather than noise. And nothing disagrees
+with it: `element_at(67, 46)` returns that `Open` button, because AT-SPI
+hit-tests in the same space it publishes extents in, so the answer is
+self-consistent and a click computed from it lands near the top-left of the
+screen with nothing raised anywhere.
 
-What makes it worth a caveat rather than a footnote is the same thing as the
-tier-6 one below: **nothing disagrees with it.** `element_at(67, 46)` returns
-that `Open` button, because AT-SPI hit-tests in the same space it publishes
-extents in — so the answer is self-consistent, every containment check
-passes, and a click computed from it lands near the top-left of the screen
-with nothing raised anywhere.
+**What 0.21.0 does about it.** The per-session verdict is now followed by
+a per-application one, reached without a listing: a toplevel that answers
+`(0, 0)` on screen *and* the same rectangle in AT-SPI's WINDOW coordinate
+type (`Atspi.CoordType.WINDOW`, relative to its own toplevel) has never
+been told where it is — the signature of every native Wayland client, and
+of GTK4 4.24.1 everywhere, measured on X11 and on all five compositors in
+the fleet. Such an application is *placed*, the way a pure Wayland session
+places every element: each node's WINDOW rectangle (which every toolkit
+measured fills in truthfully) plus the toplevel's real position from the
+sibling `WINDOW_GEOMETRY` backend, corrected for the decorations the two
+sides count differently (`_client_inset` in the backend: the 26/23px above
+is GTK3's CSD shadow, read off where the frame's children start). The
+opposite signature is believed outright too: a frame whose two rectangles
+*differ* has subtracted a real origin from the one it reports in WINDOW
+coordinates — GTK3 on X11 answers `(0, -37)` there for a frame at
+`(379, 306)` — and only a toolkit that knows where its window is can do
+that. Measured on GhostBSD's marco, where the one other way of deciding,
+the sibling's listing, had matched a `GtkAssistant` the application never
+titled against the *main* window 337px to its left and placed its button
+at `(139, 113)` instead of `(401, 359)`. A frame whose rectangles agree
+*away* from the origin is the only case left to the listing: checked
+against the sibling within 50px, with the verdict cached per application
+only when there was something to compare against. `element_at()` asks a
+placed application in WINDOW coordinates with the point moved by the same
+origin, so the hit test and the rectangle agree in screen space rather than
+in the client's.
 
-Reached by: `extents()`, `element_at()`, and `Element.double_click()`, which
-locates by rectangle. Not reached by `Element.click()`, `focus()`,
-`set_text()`, `select()` or `choose()` — each performs an accessible action
-and needs no coordinate — nor by `Session.geometry()`, which reads the
-compositor. pyguitest-recorder is unaffected in practice for a different
-reason: its resolver refuses an element whose rectangle does not fit inside
-the window it was looked up in, which is exactly what these fail, so it
-degrades to a coordinate and says so.
+Measured after the fix, the reference numbers the unit tests pin
+(`TestWaylandPlacement`, `TestAppCoordsTrustworthy`): the GTK3 CSD button
+at `(34, 93)` in a `472x289` frame the compositor lists as
+`(750, 438, 420, 237)` answers `(758, 508)`; Qt's at `(9, 165)` in a
+`420x200` frame listed `(429, 296, 422, 240)` under Mutter answers
+`(439, 500)`; under KWin, listed `(430, 263, 420, 228)`, GTK3's `(8, 33)`
+answers `(438, 324)`; GTK4's `(8, 71)` with the compositor agreeing on
+`420x200` at `(750, 456)` answers `(758, 527)`; and a GTK3 file chooser
+`1186x963` listed as `(92, 0, 1096, 873)` places its Cancel at `(45, 96)`
+to `(92, 51)`.
 
-**The guard itself is right; what is wrong is when it fires.** Confirmed on a
-headless sway with no XWayland, the only `SessionType.WAYLAND` session
-available here (2026-09-22, section above): there
-`_screen_coords_trustworthy` is `False`, `ELEMENT_GEOMETRY` is not offered at
-all, and `extents()` refuses with a typed `CapabilityUnsupported` naming the
-reason. So this caveat is not "the guard does the wrong thing" — it is that
-GNOME and KDE both run XWayland, classify as `XWAYLAND`, and never reach it.
+**What is left.** The sibling has to list the window. On an `XWAYLAND`
+session whose only `WINDOW_GEOMETRY` member is the `x11` backend — GNOME
+without the gnomeshell extension — a native Wayland client is not an X
+window and is listed by nobody, so `extents()` on it now refuses with a
+typed `CapabilityUnsupported` naming that (and the element's correct size),
+rather than answering the window-relative rectangle as if it were a screen
+one. With the extension, or on KDE and COSMIC, the sibling lists every
+toplevel and the element is placed — matched by pid where the source
+reports one (the extension, `x11`, `kdotool` on KDE), and among the pid
+holder's windows by title and then by how closely the listed size fits the
+frame's (a listing more than 160px off on either axis, or wider yet
+shorter, is not the same window). An untitled frame is matched by its
+*empty* title, which is how a nameless `GtkAssistant` on Debian and Ubuntu
+GNOME now lands on its own `409x133` listing instead of the `420x237` main
+window's. A source that reports no pids (COSMIC's, `kdotool`'s) falls back
+to the title alone, so an untitled frame there, or one whose accessible
+name is not its title — GTK3's `GtkMessageDialog` is named `Question` on
+COSMIC — refuses with the same typed `CapabilityUnsupported`. On niri the
+listing reports pids and the *floating* windows' positions — every dialog,
+assistant and alert — and refuses the tiled ones, whose
+`tile_pos_in_workspace_view` niri 26.04 leaves null (see the KaOS section
+below), so a main window is refused and its dialogs are placed. Prefer
+the action methods over coordinates on any Wayland desktop regardless;
+they are the better style.
 
-**Why this is documented and not fixed.** The honest fix is per-window rather
-than per-session — "is *this* element's toplevel an X client on this
-session's X server?" — which needs the window half and the element half to
-agree about one window, on every compositor backend, and is a larger change
-than the run that found it. Until then, prefer the action methods over
-coordinates on any Wayland desktop; they are the better style regardless.
+**Measured by clicking, not by arithmetic.** The placement above was
+checked on 2026-11-04 the only way that settles it: a census application
+(GTK3, GTK4 and Qt, nine to eleven toplevel kinds each) was driven to
+`move_mouse` + `click` at the centre of the rectangle `extents()` placed
+for one control in every toplevel, and reported back whether that control
+received the click — the button's own `clicked` signal, a dialog's
+`response`, an entry taking focus, or the toplevel leaving the bus. On
+niri/KaOS 22 of 22 placed controls landed, on KDE 21 of 21, on COSMIC 19
+of 19, on Hyprland/Omarchy 22 of 22; the controls refused were the
+documented classes (niri's tiled windows, popup menus, untitled frames
+on the pid-less sources, COSMIC's `Question`). The two X11 boxes, where
+the rectangles come from the X server's own listing rather than from the
+placement arithmetic above — though not "straight" from it: a
+compositing window manager's own translucent drop shadow around a GTK
+toplevel makes the X server's rectangle for the window bigger than the
+one a user would call "the window", a fact the backend was not yet
+reading when this census ran (fixed below, in the same batch of X11
+findings as `active_window()`'s) — landed as well: GhostBSD/marco 27 of 27
+and Mint/Cinnamon 17
+of 17 (Mint has no GTK4 typelib, so GTK3 and Qt only), re-confirmed
+afterward with no change in either count: the margin this census's
+centre-point clicks land well inside either way, so the shadow fix
+sharpens the rectangle without changing whether a click on it succeeds.
+One thing the
+X11 census first got wrong is worth knowing about any pid-scoped lookup:
+a Qt process under the `gtk3` platform theme owns *two* application
+objects on the bus — Qt's own bridge, and GTK's `atk-bridge` loaded
+in-process for the native file chooser, which carries that chooser and
+nothing else — and a probe that took the first application with the pid
+saw the chooser and none of the Qt windows. `windows()` and `elements()`
+walk every application and see both; nothing in the library takes the
+first. The run found three things the arithmetic alone had hidden, all
+fixed in 0.21.0:
+
+- **niri's pointer had never actually landed anywhere.** The 2026-10-14
+  KaOS run recorded `POINTER_MOVE` as true, and it was declared — the
+  uinput device was built — but no click was ever checked. The device's
+  absolute axes are declared for the screen size at creation, and the
+  wlroots branch of `_screen_size` asked only `swaymsg` and `hyprctl`,
+  neither of which KaOS ships, so the device was declared for the
+  1920x1080 constant on a 1280x800 output and libinput scaled every
+  `move_mouse(x, y)` to two thirds of `x` and three quarters of `y`: a
+  sweep of 121 clicks around a dialog button placed at `(227, 414)`
+  reached nothing, because the pointer was at `(151, 306)`. niri's own
+  IPC (`Outputs`, the request `screens()` already reads) is now the
+  source, chosen on `NIRI_SOCKET` the way `for_compositor` chooses the
+  backend; the same sweep then hit at `(0, 0)` with a 5px vertical error.
+  The same session also composed *without* the niri backend from an ssh
+  shell — niri on KaOS is started by greetd with no `XDG_CURRENT_DESKTOP`
+  and only hands one to the clients it spawns, so `_compositor` saw no
+  wlroots hint — and `NIRI_SOCKET` now counts as one, as `SWAYSOCK` and
+  `HYPRLAND_INSTANCE_SIGNATURE` already did.
+- **A `GtkAssistant`'s shadow margin was read off the wrong child.** The
+  CSD inset is recovered from where the frame's children start, and the
+  assistant's header panel reports no rectangle at all, so the first
+  child with one was the page's content at `(46, 80)`; clamped to the
+  52px size difference that put the button 30px too high (placed centre
+  `(203, 367)`, real `(203, 397)` by the sweep). The margin is now bounded
+  by *half* the difference — a shadow is symmetric or offset downward,
+  never toward the top-left, so the near side cannot exceed half — which
+  lands the assistant within 4px and leaves every margin measured before
+  (Adwaita's 26/23 of 52, COSMIC's 20 of 40, Breeze's 45 of 90) exactly
+  where it was.
+- **On Hyprland, one placed click was right and still went nowhere.** The
+  Omarchy census missed exactly one control, a GTK4 Open dialog's Cancel,
+  and missed it in two runs at the exact point where the Save dialog's
+  Cancel had just answered: the Save dialog closed on that click, the
+  Open dialog mapped under the pointer it left, `move_mouse()` to the
+  same point, click. A screenshot showed the pointer on the button. The
+  mechanism is two halves. The uinput device's `move_mouse()` writes
+  absolute values, and the kernel drops an absolute event whose value
+  equals the axis's current one before any handler sees it
+  (`input_handle_abs_event`), so a move to where the device last put the
+  pointer reaches neither libinput nor the compositor — it is not an
+  event at all. And Hyprland only re-picks the surface under the pointer
+  on motion, so the dialog that mapped beneath a stationary pointer was
+  never told the pointer was there, and the click went to the window
+  Hyprland last knew about. Measured with the same dialog opened twice,
+  the second time under the pointer parked by the first: GTK4 and GTK3
+  on Omarchy both ignored two clicks and answered a third after a
+  one-pixel nudge; KDE, COSMIC, niri, GNOME (uinput) and X11 (XTest) all
+  answered the first. The backend now steps one pixel aside before
+  writing a repeated position, so every `move_mouse()` is a motion the
+  compositor sees — 22 of 22 on Omarchy after, the other three boxes
+  unchanged — which also covers a pointer that another device moved in
+  between, where the repeated write would have left it where it was.
+
+The torture-test drivers run on the two X11 boxes the same day found a
+fourth, in the x11 backend and nothing to do with placement, which 0.21.0
+also fixes:
+
+- **`active_window()` on X11 answered a GTK3 toplevel's focus child, not
+  the toplevel.** Both drivers' Qt runs on GhostBSD/marco and Mint/Cinnamon
+  recorded the same four findings — the file, colour and font choosers
+  and the Open dialog "never took keyboard focus, so Escape went
+  elsewhere" — while the Escape closed every one of them. Qt draws none
+  of those itself under the `gtk3` platform theme: they are GTK3 dialogs,
+  and GDK3 gives every toplevel a mapped 1x1 InputOnly child at `(-1, -1)`
+  and sets the X input focus on *that*. `XGetInputFocus` answered the
+  child, an untitled, pid-less window that no listing holds, so
+  `wait_window_focus(dialog)` compared the dialog against a window that
+  could never equal it; Qt's own dialogs (the message box, the Qt-drawn
+  file dialog) focus their toplevel directly and were never affected.
+  Measured on marco with the census application's native file chooser:
+  focus on `0x4200008`, whose parent is `0x4200007` "Census File", the
+  window `windows()` lists. The backend now climbs from the focused window
+  to the nearest ancestor the manager lists in `_NET_CLIENT_LIST_STACKING`
+  (the child of the root where there is none), and leaves the InputOnly
+  child out of the tree-walk listing where it would otherwise have been a
+  second, untitled window of the same pid; `active_window()` answers
+  `0x4200007 'Census File'` with its pid now, `wait_window_focus` is True,
+  and both X11 boxes' Qt runs went from four dialog-focus failures each to
+  every control verified. 0.20.2 answers the same way, so this was not a
+  regression of the listing change above but a bug as old as the backend
+  — it had simply never been asked about a GTK3 dialog from a driver that
+  checked focus before pressing Escape.
 
 ## Known caveat: the tier-6 queries under XWayland
 
@@ -4333,6 +4495,22 @@ in `seat` but not `input`), so with `evdev` installed niri gets a real pointer
 *and* keyboard -- `POINTER_MOVE`, `POINTER_BUTTON`, `KEY_EVENT` and
 `TEXT_ENTRY` all true. That is a better input story than COSMIC or Debian,
 where no permission change helps.
+
+*Corrected 2026-11-04:* the four capabilities were true, but "true" here
+meant *declared* -- the device was created -- and no click was checked.
+When one finally was (the widget half had arrived by then: the gtk3
+typelib is in, `atspi` composes), every click landed at two thirds of its
+x and three quarters of its y, because the uinput device had been
+declared for the 1920x1080 fallback on this 1280x800 output: the wlroots
+branch of the screen-size lookup knew only `swaymsg` and `hyprctl`, and
+KaOS has neither. niri's own `Outputs` request is now the source, and the
+pointer lands where it is sent -- 22 of 22 placed controls clicked, in
+the census described under the native-Wayland geometry caveat above.
+The same run showed `connect()` from an ssh shell composing *without* the
+niri backend: the greetd-started niri carries no `XDG_CURRENT_DESKTOP`,
+so the `compositor wlroots (niri)` line above had come from a terminal
+niri itself spawned, and a shell with only `NIRI_SOCKET` reported
+`compositor other`. `NIRI_SOCKET` is now a wlroots signature on its own.
 
 ## Hyprland changed its dispatch syntax, and what was left after fixing it (2026-10-14)
 

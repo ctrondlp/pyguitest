@@ -613,6 +613,46 @@ def parameter_table(fn) -> list[str]:
     return out
 
 
+def return_type_text(fn) -> str:
+    """`fn`'s return type, formatted like a parameter's, or "" for nothing worth naming.
+
+    That is: no annotation at all, one that is `None`, or one naming a
+    private helper type (`_CaptureOnFailure` for `capture_on_failure()` is
+    the one case today) that a reader could never import and verify --
+    showing it would read as a typo or a leak of an internal, not as
+    documentation. Such a method's docstring is where its return value is
+    actually explained, same as before this function existed.
+
+    Generated from the signature for the same reason the Parameters table
+    is: every public return type here is annotated (checked live across
+    Session, Element, Application and the module-level functions), so this
+    cannot drift from `parameter_table`'s own source the way a hand-written
+    "Returns" paragraph could.
+    """
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return ""
+    ra = sig.return_annotation
+    if ra is inspect.Signature.empty:
+        return ""
+    text = re.sub(r"'([^']*)'", r"\1", inspect.formatannotation(ra))
+    if text == "None" or re.search(r"\b_[A-Za-z]", text):
+        return ""
+    return text
+
+
+def returns_table(fn) -> list[str]:
+    """The Returns line for a call, or [] for one with nothing to return."""
+    text = return_type_text(fn)
+    if not text:
+        return []
+    # Not cell(): that escapes `|` for a markdown *table* cell, and a union
+    # return type's `|` is not inside one here -- it would show up as a
+    # literal backslash, since backticks render their content verbatim.
+    return [f"**Returns** `{text}`", ""]
+
+
 def function_signature(fn) -> str:
     """A module-level function's signature, quotes stripped."""
     try:
@@ -966,15 +1006,17 @@ def session_details(names: list[str]) -> list[str]:
     for name in names:
         static = inspect.getattr_static(pyguitest.Session, name)
         detail = body(static)
-        params = (
-            []
-            if isinstance(static, property)
-            else parameter_table(getattr(pyguitest.Session, name))
-        )
-        # A call with neither prose nor parameters has nothing to show here;
-        # one with only parameters still does, which is why this is not the
-        # old `if not detail: continue`.
-        if not detail and not params:
+        if isinstance(static, property):
+            params: list[str] = []
+            returns = returns_table(static.fget) if static.fget else []
+        else:
+            fn = getattr(pyguitest.Session, name)
+            params = parameter_table(fn)
+            returns = returns_table(fn)
+        # A call with neither prose nor parameters nor a return type has
+        # nothing to show here; one with only one of those still does,
+        # which is why this is not the old `if not detail: continue`.
+        if not detail and not params and not returns:
             continue
         # The name alone, not the signature. The table above carries the
         # full one, and several run past 300 characters -- `elements()` takes
@@ -988,6 +1030,7 @@ def session_details(names: list[str]) -> list[str]:
         if not isinstance(static, property):
             out += signature_fence(signature(pyguitest.Session, name))
         out += params
+        out += returns
         out += detail
     return out
 
@@ -1091,15 +1134,20 @@ def render_types(out: list[str]) -> None:
             if static is None:
                 continue
             detail = body(static)
-            params = (
-                parameter_table(getattr(cls, member))
-                if inspect.isfunction(static)
-                else []
-            )
-            if not detail and not params:
+            if inspect.isfunction(static):
+                params = parameter_table(getattr(cls, member))
+                returns = returns_table(getattr(cls, member))
+            elif isinstance(static, property) and static.fget is not None:
+                params = []
+                returns = returns_table(static.fget)
+            else:
+                params = []
+                returns = []
+            if not detail and not params and not returns:
                 continue
             out += [f"#### `{member}`", ""]
             out += params
+            out += returns
             out += detail
 
 
@@ -1202,6 +1250,7 @@ def render_names(out: list[str]) -> None:
         out += [f"### `{name}`", ""]
         out += signature_fence(f"{name}{function_signature(obj)}")
         out += parameter_table(obj)
+        out += returns_table(obj)
         out += body(obj)
 
 

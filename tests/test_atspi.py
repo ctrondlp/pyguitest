@@ -28,6 +28,14 @@ from pyguitest.errors import (
 from pyguitest.roles import Role, spellings
 from pyguitest.session import SessionType, detect
 
+_FAKE_SCREEN_COORDS = 0
+"""`Atspi.CoordType.SCREEN`'s value, as a plain int: the fakes compare it
+numerically and never need the real enum."""
+
+_FAKE_WINDOW_COORDS = 1
+"""`Atspi.CoordType.WINDOW`'s value, likewise -- what `fake_pyatspi` names
+`WINDOW_COORDS`, and what `FakeNode.window_position` answers to."""
+
 
 class FakeState:
     """Stands in for a pyatspi StateSet."""
@@ -61,15 +69,15 @@ class FakeComponent:
         self.node = node
 
     def getExtents(self, coord_type):
-        x, y = self.node.position
+        x, y = self.node.rect_origin(coord_type)
         width, height = self.node.size
         return FakeRect(x, y, width, height)
 
     def getAccessibleAtPoint(self, x, y, coord_type):
-        if not self.node.covers(x, y):
+        if not self.node.covers(x, y, coord_type):
             return None
         for child in self.node.children:
-            if child.covers(x, y):
+            if child.covers(x, y, coord_type):
                 return child
         return None
 
@@ -92,6 +100,7 @@ class FakeNode:
         click_raises=None,
         state_set=(),
         value=False,
+        window_position=None,
     ):
         self.name = name
         self.text = None
@@ -100,6 +109,16 @@ class FakeNode:
         self.roleName = role
         self.children = list(children)
         self.position = position
+        self.window_position = window_position
+        """Where the node says it is in WINDOW coordinates -- relative to its
+        own toplevel -- where that differs from `position`, its SCREEN
+        answer. None models the common case, WINDOW == SCREEN: every
+        native Wayland client (never told where it is, so both are
+        window-relative), and an X11 toolkit for a window at the screen's
+        origin. The two differ for GTK4 everywhere (SCREEN is (0, 0) for
+        every node, WINDOW real) and for GTK3 and Qt under X11 (SCREEN real,
+        WINDOW relative to the client window); see
+        `atspi._gi_window_coords`."""
         self.size = size
         self.parent = None
         self.showing = True
@@ -121,8 +140,14 @@ class FakeNode:
         for child in self.children:
             child.parent = self
 
-    def covers(self, x, y):
-        left, top = self.position
+    def rect_origin(self, coord_type=_FAKE_SCREEN_COORDS):
+        """`position`, or `window_position` asked in WINDOW coordinates."""
+        if coord_type == _FAKE_WINDOW_COORDS and self.window_position is not None:
+            return self.window_position
+        return self.position
+
+    def covers(self, x, y, coord_type=_FAKE_SCREEN_COORDS):
+        left, top = self.rect_origin(coord_type)
         width, height = self.size
         return left <= x < left + width and top <= y < top + height
 
@@ -307,8 +332,8 @@ def fake_pyatspi():
     """
     module = types.ModuleType("pyatspi")
     module.STATE_ACTIVE = "STATE_ACTIVE"
-    module.DESKTOP_COORDS = 0
-    module.WINDOW_COORDS = 1
+    module.DESKTOP_COORDS = _FAKE_SCREEN_COORDS
+    module.WINDOW_COORDS = _FAKE_WINDOW_COORDS
     return module
 
 
@@ -1038,6 +1063,24 @@ class TestWindows(AtspiTestCase):
         self.assertEqual(windows[0].title, "Document - Editor")
         self.assertEqual(windows[0].app_id, "gedit")
 
+    def test_a_message_box_and_a_file_dialog_are_windows(self):
+        # Measured live on seven desktops: GTK3's GtkMessageDialog and Qt's
+        # QMessageBox publish `alert`, GtkFileChooserDialog (and so Qt's
+        # QFileDialog on a GTK platform theme) `file chooser` -- neither
+        # `dialog`. Before the two were in WINDOW_ROLES, windows() left
+        # them out and a driver waiting for a Save dialog to appear never
+        # saw it.
+        app = self.frame.parent
+        for role, title in (("alert", "Unsaved changes"), ("file chooser", "Save")):
+            toplevel = FakeNode(title, role, [], (0, 0), (400, 300))
+            toplevel.parent = app
+            app.children.append(toplevel)
+        gui = self.backend()
+        self.assertEqual(
+            [w.title for w in gui.windows()],
+            ["Document - Editor", "Unsaved changes", "Save"],
+        )
+
     def test_a_window_carries_its_process_id(self):
         # Confirmed live (Debian 13, GNOME Wayland, no gnomeshell extension
         # installed): windows() built every Window with pid=None, the
@@ -1079,11 +1122,6 @@ class TestWindows(AtspiTestCase):
         windows = gui.windows()
         self.assertEqual(len(windows), 1)
         self.assertEqual(windows[0].app_id, "gedit")
-
-
-_FAKE_SCREEN_COORDS = 0
-"""`Atspi.CoordType.SCREEN`'s value, as a plain int: the fakes compare it
-numerically and never need the real enum."""
 
 
 class TestActiveWindow(AtspiTestCase):
@@ -1237,22 +1275,54 @@ class _FakeWindow:
         self.title = title
 
 
+_FIXTURE_FRAME_SIZE = (800, 600)
+"""The fixture frame's size (see `build_tree`), which every fake geometry
+source below reports for the window it lists: a compositor that agrees
+with the toolkit about the window's size, so the only thing placement has
+to add is the position. A source reporting some other size is modelling a
+decoration, and `TestWaylandPlacement` does that on purpose."""
+
+
 class _FakeWindowGeometrySource:
     """A sibling backend standing in for `gnomeshell`.
 
     Knows one window's real screen position, keyed by pid, and nothing
-    else `atspi.py`'s `_window_offset` needs.
+    else `atspi.py`'s `_source_rects` needs.
     """
 
-    def __init__(self, pid, offset):
+    def __init__(self, pid, offset, size=_FIXTURE_FRAME_SIZE):
         self._pid = pid
         self._offset = offset
+        self._size = size
 
     def windows(self):
         return [_FakeWindow(self._pid)]
 
     def geometry(self, window):
-        return (*self._offset, 1280, 768)
+        return (*self._offset, *self._size)
+
+
+class _FakeManyWindowsGeometrySource:
+    """A sibling backend listing several toplevels for one application.
+
+    What the `x11` backend really answers for an application with a main
+    window and a dialog open: every toplevel, each carrying the same pid,
+    in whatever order the window manager stacks them.
+    """
+
+    def __init__(self, pid, offsets, titles=None, sizes=None):
+        titles = titles or [None] * len(offsets)
+        sizes = sizes or [_FIXTURE_FRAME_SIZE] * len(offsets)
+        self._listed = [
+            (_FakeWindow(pid, title=title), (*offset, *size))
+            for offset, title, size in zip(offsets, titles, sizes, strict=True)
+        ]
+
+    def windows(self):
+        return [window for window, _ in self._listed]
+
+    def geometry(self, window):
+        return next(rect for w, rect in self._listed if w is window)
 
 
 class _FakeTitleOnlyGeometrySource:
@@ -1266,15 +1336,16 @@ class _FakeTitleOnlyGeometrySource:
     source can ever offer.
     """
 
-    def __init__(self, title, offset):
+    def __init__(self, title, offset, size=_FIXTURE_FRAME_SIZE):
         self._title = title
         self._offset = offset
+        self._size = size
 
     def windows(self):
         return [_FakeWindow(None, title=self._title)]
 
     def geometry(self, window):
-        return (*self._offset, 1280, 768)
+        return (*self._offset, *self._size)
 
 
 class TestWaylandElementGeometry(AtspiTestCase):
@@ -1354,9 +1425,7 @@ class TestWaylandElementGeometry(AtspiTestCase):
                 ]
 
             def geometry(self, window):
-                return (
-                    (0, 32, 1280, 768) if window.pid == 4242 else (999, 999, 1280, 768)
-                )
+                return (0, 32, 800, 600) if window.pid == 4242 else (999, 999, 800, 600)
 
         self.frame._pid = 4242
         gui = self.backend(SessionType.WAYLAND)
@@ -1528,6 +1597,43 @@ class TestWaylandElementGeometry(AtspiTestCase):
         self.atspi.Element(node).click()
         self.assertEqual(node.actions_performed, [])
         self.assertTrue(node.clicked)
+
+    def test_activate_only_element_acts_through_it_when_not_text_bearing(self):
+        # The other side of the same fact: GTK4's GtkExpander publishes
+        # `activate` as its ONLY action -- no click, no press -- measured
+        # live on pyguitest-torture-test's Containers page ("More
+        # Options"). `activate` means "click me" there, not "the user
+        # pressed Enter", so a non-text role acts through it rather than
+        # falling to the coordinate route.
+        node = FakeNode(
+            name="More Options",
+            role="push button",
+            actions={"activate": {}},
+            click_raises=Exception("coordinates were used"),
+        )
+        self.atspi.Element(node).click()
+        self.assertEqual(node.actions_performed, ["activate"])
+        self.assertFalse(node.clicked)
+
+    def test_activate_is_tried_only_after_every_click_like_verb_misses(self):
+        # An element offering BOTH must still prefer the click-like verb --
+        # activate is the last resort, never a competing first choice.
+        node = FakeNode(
+            name="Toggle Me",
+            role="toggle button",
+            actions={"activate": {}, "toggle": {}},
+        )
+        self.atspi.Element(node).click()
+        self.assertEqual(node.actions_performed, ["toggle"])
+
+    def test_activate_via_action_with_no_click_like_verb_on_text_still_refuses(self):
+        # via="action" forbids the pointer fallback. A text role offering
+        # only `activate` must still refuse rather than silently treat
+        # activate as a click.
+        node = FakeNode(name="Name", role="text", actions={"activate": {}})
+        with self.assertRaises(ElementNotActionable):
+            self.atspi.Element(node).click(via="action")
+        self.assertEqual(node.actions_performed, [])
 
     def test_click_matches_an_action_name_case_insensitively(self):
         node = FakeNode(name="Gamma", role="menu item", actions={"CLICK": {}})
@@ -1872,6 +1978,624 @@ class TestWaylandElementGeometry(AtspiTestCase):
             self.atspi.Element(combo).choose("Gamma")
         self.assertIn("Alpha", str(caught.exception))
         self.assertIn("Beta", str(caught.exception))
+
+
+class TestWaylandPlacement(AtspiTestCase):
+    """Placing a WINDOW-coordinate rectangle: the decoration arithmetic.
+
+    Every number here was measured live before the rule that reproduces
+    it was written -- see `_client_inset` for the four cases and where
+    each was seen. The fixture tree is built per test rather than taken
+    from `build_tree`, because what is under test is the *shape* of a
+    toplevel: how big the toolkit says its frame is against how big the
+    compositor says the window is, and where the children start.
+    """
+
+    def install(self, toplevel, pid=4242):
+        """Make `toplevel` the one window of the one application."""
+        toplevel._pid = pid
+        app = FakeNode("census", "application", [toplevel])
+        root = FakeNode("desktop", "desktop frame", [app])
+        self.atspi_tree_root = root
+        sys.modules["dogtail.tree"].root = root
+
+    def placed(self, source, name="OK"):
+        gui = self.backend(SessionType.WAYLAND)
+        gui.set_window_geometry_source(source)
+        button = gui.find_element(name=name)
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            return gui.extents(button)
+
+    def test_a_client_side_shadow_is_read_off_the_children(self):
+        # GNOME, GTK3, Adwaita: the toolkit's frame is 472x289 for a window
+        # the compositor places as 420x237 at (750, 438), the 52px being
+        # the drop shadow GTK draws around a CSD window; the titlebar
+        # starts at (26, 23) and the content below it at (34, 68). The
+        # button at (34, 93) in the frame was measured at (758, 508) on
+        # screen -- and 750 - 26 + 34 = 758, 438 - 23 + 93 = 508.
+        button = FakeNode("OK", "push button", position=(34, 93), size=(80, 30))
+        titlebar = FakeNode("", "panel", position=(26, 23), size=(420, 37))
+        content = FakeNode("", "panel", [button], position=(34, 68), size=(404, 150))
+        frame = FakeNode("Census", "frame", [titlebar, content], (0, 0), (472, 289))
+        self.install(frame)
+        source = _FakeWindowGeometrySource(4242, (750, 438), size=(420, 237))
+        self.assertEqual(self.placed(source), (758, 508, 80, 30))
+
+    def test_a_server_side_border_is_split_and_the_rest_is_titlebar(self):
+        # GNOME, Qt: the compositor's window is 422x240 for a 420x200
+        # frame -- Mutter's own titlebar and 1px border around a client
+        # that draws neither. The border splits 1/1 between the sides and
+        # the remaining 39 is the titlebar, so the client's origin sits at
+        # (430, 335) inside the (429, 296) window; the button at (9, 165)
+        # was measured at (439, 500).
+        button = FakeNode("OK", "push button", position=(9, 165), size=(80, 30))
+        frame = FakeNode("Census", "frame", [button], (0, 0), (420, 200))
+        self.install(frame)
+        source = _FakeWindowGeometrySource(4242, (429, 296), size=(422, 240))
+        self.assertEqual(self.placed(source), (439, 500, 80, 30))
+
+    def test_a_titlebar_alone_insets_only_the_vertical_axis(self):
+        # KDE Breeze, every toolkit: 420x228 placed for a 420x200 frame,
+        # no side border at all, so the full 28 is titlebar and the
+        # horizontal axis is left exactly where the compositor put it.
+        # GTK3's button at (8, 33) was measured at (438, 324).
+        button = FakeNode("OK", "push button", position=(8, 33), size=(80, 30))
+        frame = FakeNode("Census", "frame", [button], (0, 0), (420, 200))
+        self.install(frame)
+        source = _FakeWindowGeometrySource(4242, (430, 263), size=(420, 228))
+        self.assertEqual(self.placed(source), (438, 324, 80, 30))
+
+    def test_a_window_the_compositor_and_toolkit_agree_on_is_added_as_is(self):
+        # GTK4 on GNOME: 420x200 on both sides, every element at (0, 0) on
+        # screen and at its real offset in the window -- nothing to inset,
+        # the window's position is the whole correction.
+        button = FakeNode("OK", "push button", position=(8, 71), size=(80, 30))
+        frame = FakeNode("Census", "frame", [button], (0, 0), (420, 200))
+        self.install(frame)
+        source = _FakeWindowGeometrySource(4242, (750, 456), size=(420, 200))
+        self.assertEqual(self.placed(source), (758, 527, 80, 30))
+
+    def test_a_shadow_margin_is_clamped_to_half_the_size_difference(self):
+        # The children start 100px in, but the frame is only 60px bigger
+        # than the window on each axis: a margin wider than the shadow's
+        # near side is not a shadow, it is content laid out with padding.
+        # A shadow is symmetric or offset downward, never toward the
+        # top-left, so the near side is at most half the difference -- 30.
+        button = FakeNode("OK", "push button", position=(100, 100), size=(80, 30))
+        frame = FakeNode("Census", "frame", [button], (0, 0), (480, 260))
+        self.install(frame)
+        source = _FakeWindowGeometrySource(4242, (500, 400), size=(420, 200))
+        self.assertEqual(self.placed(source), (570, 470, 80, 30))
+
+    def test_an_assistant_whose_header_has_no_rectangle_is_bounded_by_half(self):
+        # KaOS, niri, GTK 3.24: a GtkAssistant's frame is 335x209 for the
+        # 283x157 window niri places at (82, 322) -- the 52px CSD shadow
+        # again -- but its header panel reports no rectangle, so the first
+        # child with one is the page's own content at (46, 80). Taken as
+        # the margin that put the button 30px too high (measured by a
+        # click sweep: placed centre (203, 367), real (203, 397)); bounded
+        # by half the difference the button lands at (102, 376), 4px from
+        # where Adwaita's real (26, 23) margin would put it.
+        button = FakeNode(
+            "Assistant Button", "push button", position=(46, 80), size=(243, 34)
+        )
+        page = FakeNode("", "filler", [button], position=(46, 80), size=(243, 34))
+        actions = FakeNode("", "filler", position=(141, 140), size=(162, 34))
+        header = FakeNode("", "panel", component=False)
+        frame = FakeNode("", "frame", [page, actions, header], (0, 0), (335, 209))
+        self.install(frame)
+        source = _FakeWindowGeometrySource(4242, (82, 322), size=(283, 157))
+        self.assertEqual(
+            self.placed(source, name="Assistant Button"), (102, 376, 243, 34)
+        )
+
+    def test_a_shadow_no_child_measures_is_taken_as_symmetric(self):
+        # The frame's direct child has no rectangle to read a margin off
+        # (no Component interface), so the 60px difference is split
+        # evenly: the origin is 30 inside the compositor's corner.
+        button = FakeNode("OK", "push button", position=(100, 100), size=(80, 30))
+        holder = FakeNode("", "panel", [button], component=False)
+        frame = FakeNode("Census", "frame", [holder], (0, 0), (480, 260))
+        self.install(frame)
+        source = _FakeWindowGeometrySource(4242, (500, 400), size=(420, 200))
+        self.assertEqual(self.placed(source), (570, 470, 80, 30))
+
+    def test_a_toolkit_told_about_its_titlebar_needs_no_inset(self):
+        # GTK3 under X11 (Mint, Cinnamon): the frame reports itself as
+        # (0, -37, 420, 237) in WINDOW coordinates against a 420x200 client
+        # window the x11 backend lists at (40, 97) -- the toolkit was told
+        # about the 37px titlebar and put its WINDOW origin on the client's
+        # corner already. The size difference is the titlebar, not a
+        # shadow, and the origin says so; a shadow probe here would have
+        # read the children's padding as an inset and shifted everything.
+        gui = self.backend(SessionType.WAYLAND)
+        frame = FakeNode("Census", "frame", [], (40, 97), (420, 237))
+        self.assertEqual(
+            gui._client_inset(frame, (0, -37, 420, 237), (40, 97, 420, 200)), (0, 0)
+        )
+
+    def test_a_dialog_whose_role_is_not_a_window_role_is_still_a_window(self):
+        # AT-SPI hangs every toplevel straight off its application, so a
+        # control under an application's direct child has that child for
+        # its window whatever role the toolkit gave it -- a GTK3 `file
+        # chooser` and an `alert` before they were in WINDOW_ROLES, or a
+        # role no toolkit has published yet.
+        button = FakeNode("OK", "push button", position=(8, 33), size=(80, 30))
+        toplevel = FakeNode("Census", "custom toplevel", [button], (0, 0), (420, 200))
+        self.install(toplevel)
+        source = _FakeWindowGeometrySource(4242, (100, 100), size=(420, 200))
+        self.assertEqual(self.placed(source), (108, 133, 80, 30))
+
+    def test_a_file_chooser_is_placed_by_its_own_listing_not_the_main_window(self):
+        # KDE, GTK3: a Save dialog 1186x963 in the toolkit's reckoning
+        # (CSD shadow again, content at (45, 45)) over a main window of
+        # 420x200; the x11 backend lists both under one pid, main window
+        # first. The chooser's 1096x873 listing at (92, 0) is the only one
+        # within a decoration of its size, so its Cancel button at
+        # (45, 96) lands at (92, 51) rather than somewhere in the main
+        # window.
+        ok = FakeNode("OK", "push button", position=(8, 33), size=(80, 30))
+        main = FakeNode("Census", "frame", [ok], (0, 0), (420, 200))
+        cancel = FakeNode("Cancel", "push button", position=(45, 96), size=(80, 30))
+        header = FakeNode("", "panel", position=(45, 45), size=(1096, 40))
+        chooser = FakeNode(
+            "Save", "file chooser", [header, cancel], (0, 0), (1186, 963)
+        )
+        chooser._pid = 4242
+        self.install(main)
+        self.atspi_tree_root.children[0].children.append(chooser)
+        chooser.parent = self.atspi_tree_root.children[0]
+        source = _FakeManyWindowsGeometrySource(
+            4242, [(430, 263), (92, 0)], sizes=[(420, 228), (1096, 873)]
+        )
+        self.assertEqual(self.placed(source, name="Cancel"), (92, 51, 80, 30))
+        self.assertEqual(self.placed(source, name="OK"), (438, 324, 80, 30))
+
+    def test_the_listing_closest_in_size_outranks_the_first_listed(self):
+        # Two toplevels, one pid, no titles to go on: the one the frame's
+        # size fits is the frame, wherever the source listed it.
+        button = FakeNode("OK", "push button", position=(8, 33), size=(80, 30))
+        frame = FakeNode("Census", "frame", [button], (0, 0), (420, 200))
+        self.install(frame)
+        source = _FakeManyWindowsGeometrySource(
+            4242, [(300, 300), (100, 100)], sizes=[(300, 120), (420, 200)]
+        )
+        self.assertEqual(self.placed(source), (108, 133, 80, 30))
+
+    def test_the_listing_with_the_frames_own_title_outranks_the_rest(self):
+        # Measured on GNOME, KDE and COSMIC before the ranking existed: a
+        # dialog's controls placed by the main window's position, hundreds
+        # of pixels off. Same size on both listings here, so only the
+        # title can tell them apart.
+        self.frame._pid = 4242
+        source = _FakeManyWindowsGeometrySource(
+            4242, [(300, 300), (0, 32)], titles=["Preferences", "Document - Editor"]
+        )
+        self.assertEqual(self.placed(source), (10, 52, 80, 30))
+
+    def test_a_nameless_frame_ranks_its_untitled_listing_over_the_main_window(self):
+        # Debian GNOME, GTK3: a GtkAssistant the application never titled,
+        # 461x185 in the toolkit's reckoning (Mutter's 52px CSD shadow
+        # around a 409x133 window the compositor lists at (436, 332), title
+        # ""), with the application's main window 'Census gtk3' listed
+        # first as 420x237 at (430, 298). Both listings are within a
+        # decoration of the frame's size, and the main window's misfit
+        # (41 + 52) is the *smaller* one, so by size alone it won: the
+        # button at (46, 90) was placed at (450, 440), from the main
+        # window's corner, where it sat at (456, 399) -- 436 - 26 + 46 and
+        # 332 - 23 + 90, the shadow margin read off the titlebar at
+        # (26, 23). An empty name matches an empty title: the assistant's
+        # own listing ranks first, as a named frame's titled one would.
+        button = FakeNode("OK", "push button", position=(46, 90), size=(369, 34))
+        titlebar = FakeNode("", "panel", position=(26, 23), size=(409, 47))
+        frame = FakeNode("", "frame", [button, titlebar], (0, 0), (461, 185))
+        self.install(frame)
+        source = _FakeManyWindowsGeometrySource(
+            4242,
+            [(430, 298), (436, 332)],
+            titles=["Census gtk3", ""],
+            sizes=[(420, 237), (409, 133)],
+        )
+        self.assertEqual(self.placed(source), (456, 399, 369, 34))
+
+    def test_a_listing_wider_but_shorter_than_the_frame_is_not_a_candidate(self):
+        # The same assistant with its own listing missing -- as it was on
+        # every X11 box while the x11 backend dropped untitled windows. The
+        # main window is within `_MAX_DECORATION` on both axes, but 41
+        # narrower and 52 taller than the frame: decoration makes a window
+        # larger than its content on both axes or smaller on both, never
+        # one of each, so this is another toplevel and not a place to put
+        # the frame. Refused, rather than placed 41 pixels into the wrong
+        # window.
+        button = FakeNode("OK", "push button", position=(46, 90), size=(369, 34))
+        titlebar = FakeNode("", "panel", position=(26, 23), size=(409, 47))
+        frame = FakeNode("", "frame", [button, titlebar], (0, 0), (461, 185))
+        self.install(frame)
+        source = _FakeManyWindowsGeometrySource(
+            4242, [(430, 298)], titles=["Census gtk3"], sizes=[(420, 237)]
+        )
+        with self.assertRaises(CapabilityUnsupported) as caught:
+            self.placed(source)
+        self.assertIn("window-relative", str(caught.exception))
+
+    def test_a_nameless_frame_matches_no_title_on_a_source_without_pids(self):
+        # The fallback for a source that lists no pid at all (COSMIC's
+        # toplevel protocol has none) still needs a title to go on: an
+        # empty name must not match every untitled window on the desktop.
+        # Refused, the same as any frame that source cannot identify.
+        button = FakeNode("OK", "push button", position=(8, 33), size=(80, 30))
+        frame = FakeNode("", "frame", [button], (0, 0), (420, 200))
+        self.install(frame)
+        source = _FakeTitleOnlyGeometrySource("", (100, 100), size=(420, 200))
+        with self.assertRaises(CapabilityUnsupported):
+            self.placed(source)
+
+    def test_a_listing_of_an_implausible_size_is_not_a_place_to_put_it(self):
+        # The source lists the pid, but only a window nowhere near the
+        # frame's size -- another of the application's toplevels. Refused
+        # with the Wayland reason, the same as if nothing were listed, not
+        # placed into the wrong window.
+        self.frame._pid = 4242
+        source = _FakeWindowGeometrySource(4242, (0, 32), size=(1280, 768))
+        with self.assertRaises(CapabilityUnsupported) as caught:
+            self.placed(source)
+        self.assertIn("window-relative", str(caught.exception))
+        self.assertIn("is_window_viewable", str(caught.exception))
+
+    def test_a_window_moved_between_calls_is_followed(self):
+        self.frame._pid = 4242
+        gui = self.backend(SessionType.WAYLAND)
+        source = _FakeWindowGeometrySource(4242, (0, 32))
+        gui.set_window_geometry_source(source)
+        button = gui.find_element(name="OK")
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertEqual(gui.extents(button), (10, 52, 80, 30))
+            source._offset = (400, 300)
+            self.assertEqual(gui.extents(button), (410, 320, 80, 30))
+
+    def test_a_node_outside_any_application_has_no_window(self):
+        gui = self.backend(SessionType.WAYLAND)
+        root = sys.modules["dogtail.tree"].root
+        self.assertIsNone(gui._window_frame(root))
+        self.assertIsNone(gui._window_frame(root.children[0]))
+        self.assertIs(gui._window_frame(self.button), self.frame)
+
+
+class TestAppCoordsTrustworthy(AtspiTestCase):
+    """A toolkit that does not know where its window is, among ones that do.
+
+    GTK4, confirmed live on every desktop: every element it owns answers
+    (0, 0) in screen coordinates, frame and deeply nested child alike, on
+    X11 exactly as on Wayland. And any native Wayland client does the same
+    in a session this backend classifies as XWayland (`DISPLAY` and
+    `WAYLAND_DISPLAY` both set -- KDE Plasma, a GNOME terminal), where Qt
+    and GTK3 X11 clients in the same session report real positions.
+    `_screen_coords_trustworthy` alone says "yes" to all of them, because
+    the session is not Wayland; this is the narrower, per-application check
+    that still catches them -- and what it does with a catch is not refuse
+    the element but place it, the same way a Wayland session places every
+    element: by its own WINDOW-coordinate rectangle, which every toolkit
+    measured fills in truthfully, plus its toplevel's real position from
+    the sibling backend.
+
+    The fixture frame sits at (0, 0) and, unless a test says otherwise,
+    answers the same rectangle in WINDOW coordinates: the signature of a
+    toolkit never told where it is. A toolkit that *has* been told puts its
+    WINDOW origin on the client window -- `window_position=(0, -37)` is
+    GTK3 under X11 with a 37px titlebar, measured -- and is believed on
+    that alone, without the sibling backend being asked. The sibling's
+    listing decides only the remaining shape, a frame answering one and the
+    same rectangle for both coordinate types *away* from the origin, and
+    the tests of that path set `position` and `window_position` alike.
+    """
+
+    def test_a_toolkit_that_knows_its_screen_position_is_trusted(self):
+        # The frame's WINDOW rectangle differs from its screen one -- a
+        # toolkit that has been told where it is. extents() answers the
+        # raw screen rectangle, unmodified, and the verdict is remembered;
+        # the sibling backend's listing is never consulted (it lists the
+        # window at the far side of the screen here, and that changes
+        # nothing).
+        self.frame._pid = 4242
+        self.frame.window_position = (0, -37)
+        gui = self.backend(SessionType.X11)
+        gui.set_window_geometry_source(_FakeWindowGeometrySource(4242, (900, 700)))
+        button = gui.find_element(name="OK")
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertEqual(gui.extents(button), (10, 20, 80, 30))
+        self.assertEqual(gui._app_coords_verified, {4242: True})
+
+    def test_a_small_decoration_offset_is_within_tolerance(self):
+        # A window manager's own titlebar/border can genuinely separate
+        # what AT-SPI calls the frame from what the WM calls the window by
+        # a few tens of pixels -- real, and not the bug this is for. The
+        # frame answers the same rectangle for both coordinate types, off
+        # the origin, so the listing is what decides.
+        self.frame._pid = 4242
+        self.frame.position = (5, 5)
+        self.frame.window_position = (5, 5)
+        gui = self.backend(SessionType.X11)
+        gui.set_window_geometry_source(_FakeWindowGeometrySource(4242, (3, 28)))
+        button = gui.find_element(name="OK")
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertEqual(gui.extents(button), (10, 20, 80, 30))
+        self.assertEqual(gui._app_coords_verified, {4242: True})
+
+    def test_a_toolkit_that_knows_nothing_of_the_screen_is_placed(self):
+        # The measured GTK4 shape: the frame answers (0, 0) in both
+        # coordinate spaces, so the verdict needs no listing to compare
+        # against -- and the geometry source says the window is really at
+        # (200, 150). The button's own rectangle is good *within its
+        # window*, so the answer is that rectangle placed there, not a
+        # refusal.
+        self.frame._pid = 4242
+        gui = self.backend(SessionType.X11)
+        gui.set_window_geometry_source(_FakeWindowGeometrySource(4242, (200, 150)))
+        button = gui.find_element(name="OK")
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertEqual(gui.extents(button), (210, 170, 80, 30))
+        self.assertEqual(gui._app_coords_verified, {4242: False})
+
+    def test_a_window_genuinely_at_the_origin_is_answered_identically(self):
+        # The one shape the (0, 0)-in-both-spaces rule cannot tell from
+        # GTK4: an undecorated window really sitting at the screen's
+        # corner, whose WINDOW and SCREEN answers coincide for that reason.
+        # It is "placed" rather than trusted, and the placement is the same
+        # number the raw answer would have been -- the sibling backend
+        # confirms the window is at (0, 0), and that is what gets added.
+        self.frame._pid = 4242
+        gui = self.backend(SessionType.X11)
+        gui.set_window_geometry_source(_FakeWindowGeometrySource(4242, (0, 0)))
+        button = gui.find_element(name="OK")
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertEqual(gui.extents(button), (10, 20, 80, 30))
+        self.assertEqual(gui._app_coords_verified, {4242: False})
+
+    def test_a_placed_application_with_no_plausible_window_is_refused(self):
+        # Placed, but nothing to place against: the source lists a window
+        # for the pid whose size is nowhere near the frame's own -- one of
+        # the application's *other* toplevels -- so there is no position
+        # to add. The element is refused with the reason, not answered
+        # with the wrong window's corner, and not None either, which would
+        # read as "the element has no rectangle".
+        self.frame._pid = 4242
+        gui = self.backend(SessionType.X11)
+        gui.set_window_geometry_source(
+            _FakeWindowGeometrySource(4242, (200, 150), size=(1280, 768))
+        )
+        button = gui.find_element(name="OK")
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            with self.assertRaises(CapabilityUnsupported) as caught:
+                gui.extents(button)
+        self.assertIn("do not agree", str(caught.exception))
+        self.assertIn("plausible size", str(caught.exception))
+        self.assertIn("accessible action", str(caught.exception))
+        self.assertEqual(gui._app_coords_verified, {4242: False})
+
+    def test_no_geometry_source_leaves_x11_exactly_as_before(self):
+        # The common case: no sibling backend offers WINDOW_GEOMETRY at
+        # all, so there is nothing to check against, and every existing
+        # X11 behaviour (the whole rest of this test file) must be
+        # completely unaffected by this feature's existence.
+        self.frame._pid = 4242
+        gui = self.backend(SessionType.X11)
+        button = gui.find_element(name="OK")
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertEqual(gui.extents(button), (10, 20, 80, 30))
+
+    def test_the_sibling_backend_is_asked_only_once_per_application(self):
+        # The shape that needs the listing: one rectangle for both
+        # coordinate types, off the origin.
+        self.frame._pid = 4242
+        self.frame.position = (5, 5)
+        self.frame.window_position = (5, 5)
+        gui = self.backend(SessionType.X11)
+        source = _FakeWindowGeometrySource(4242, (0, 0))
+        calls = []
+        real_windows = source.windows
+
+        def counted_windows():
+            calls.append(1)
+            return real_windows()
+
+        source.windows = counted_windows
+        gui.set_window_geometry_source(source)
+        button = gui.find_element(name="OK")
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            gui.extents(button)
+            gui.extents(self.atspi.Element(self.frame))
+            gui.extents(button)
+        self.assertEqual(
+            len(calls),
+            1,
+            "the verdict is a fact about the application and must be "
+            "cached, not re-verified on every element inside it",
+        )
+
+    def test_a_placed_application_is_placed_afresh_on_every_call(self):
+        # The verdict is a fact about the application; the window's
+        # position is not, it moves. A placed application asks the sibling
+        # backend where its window is on every extents(), so a window
+        # dragged between two calls is followed rather than remembered.
+        self.frame._pid = 4242
+        gui = self.backend(SessionType.X11)
+        source = _FakeWindowGeometrySource(4242, (200, 150))
+        gui.set_window_geometry_source(source)
+        button = gui.find_element(name="OK")
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertEqual(gui.extents(button), (210, 170, 80, 30))
+            source._offset = (300, 350)
+            self.assertEqual(gui.extents(button), (310, 370, 80, 30))
+        self.assertEqual(gui._app_coords_verified, {4242: False})
+
+    def test_a_dialog_is_checked_against_its_own_window_not_the_first_listed(self):
+        # An application with several toplevels is listed several times by
+        # the sibling backend, all under one pid, and pid cannot say which
+        # of them the frame being checked is. The source here lists the
+        # main window first, at (300, 300); the fixture frame -- standing
+        # in for a dialog genuinely at (5, 5), answering that for both
+        # coordinate types so the listing is what decides -- must match the
+        # second listing rather than be condemned by the first, or every
+        # dialog that opens more than 50px from its main window would mark
+        # its whole application untrustworthy for the rest of the session.
+        self.frame._pid = 4242
+        self.frame.position = (5, 5)
+        self.frame.window_position = (5, 5)
+        gui = self.backend(SessionType.X11)
+        gui.set_window_geometry_source(
+            _FakeManyWindowsGeometrySource(4242, [(300, 300), (0, 0)])
+        )
+        button = gui.find_element(name="OK")
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertEqual(gui.extents(button), (10, 20, 80, 30))
+        self.assertEqual(gui._app_coords_verified, {4242: True})
+
+    def test_a_screen_answer_matching_no_listed_window_is_placed_by_the_best(self):
+        # Not a measured toolkit -- every real one caught so far answers
+        # (0, 0) and is caught by the rule above before any listing is
+        # read -- but the check's own contract: a frame answering one and
+        # the same rectangle for both coordinate types, off the origin and
+        # near none of its application's listed windows, is not believed,
+        # and its WINDOW rectangle (good: the toolkit's own) is placed by
+        # the best listing. With no title to go on and every listing the
+        # frame's size, best is the first; the frame's own (5, 5) is where
+        # its content starts inside that listing.
+        self.frame._pid = 4242
+        self.frame.position = (5, 5)
+        self.frame.window_position = (5, 5)
+        gui = self.backend(SessionType.X11)
+        gui.set_window_geometry_source(
+            _FakeManyWindowsGeometrySource(4242, [(300, 300), (120, 640)])
+        )
+        button = gui.find_element(name="OK")
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertEqual(gui.extents(button), (305, 315, 80, 30))
+        self.assertEqual(gui._app_coords_verified, {4242: False})
+
+    def test_a_toolkit_that_tells_the_two_coordinate_types_apart_is_believed(self):
+        # GhostBSD, marco, GTK3: an untitled GtkAssistant's frame at
+        # (379, 306) on screen and (0, -37) in WINDOW coordinates, with the
+        # compositor's listing holding only the application's main window
+        # -- the assistant itself was not listed, the x11 backend then
+        # dropping untitled windows. The main window was plausibly sized
+        # (within a decoration of the assistant's on both axes, in the same
+        # direction) and 337 pixels away, so the listing check condemned
+        # the application, cached the verdict, and placed the assistant's
+        # button by the main window: (139, 113) for a button at (401, 359).
+        # A toolkit can only answer the two types differently by
+        # subtracting an origin it was told, so the listing is not consulted
+        # at all: the screen answer stands, and the verdict is remembered.
+        self.frame._pid = 4242
+        self.frame.position = (379, 306)
+        self.frame.size = (266, 159)
+        self.frame.window_position = (0, -37)
+        self.button.position = (401, 359)
+        gui = self.backend(SessionType.X11)
+        gui.set_window_geometry_source(
+            _FakeWindowGeometrySource(4242, (42, 93), size=(420, 200))
+        )
+        button = gui.find_element(name="OK")
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertEqual(gui.extents(button), (401, 359, 80, 30))
+        self.assertEqual(gui._app_coords_verified, {4242: True})
+
+    def test_the_listing_with_the_frames_own_title_outranks_the_rest(self):
+        # Several toplevels, one pid, every one the frame's size: the
+        # listing whose title is the frame's own name is the one the frame
+        # is, wherever the source put it in its order.
+        self.frame._pid = 4242
+        gui = self.backend(SessionType.X11)
+        gui.set_window_geometry_source(
+            _FakeManyWindowsGeometrySource(
+                4242,
+                [(300, 300), (200, 150)],
+                titles=["Preferences", "Document - Editor"],
+            )
+        )
+        button = gui.find_element(name="OK")
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertEqual(gui.extents(button), (210, 170, 80, 30))
+
+    def test_an_application_the_sibling_does_not_list_yet_is_not_cached(self):
+        # Trusted for now, not for the session: a window the sibling
+        # backend has not listed yet (still being mapped when an
+        # `element_at` sweep passed over it) offers nothing to compare
+        # against. Caching that as a verdict would let one sweep's timing
+        # decide every later extents() on the application -- so the moment
+        # the sibling does list it, at a position the frame's own answer
+        # disagrees with, the disagreement must still be caught, and from
+        # then on the element is placed by the listing (the frame's own
+        # (5, 5) is where its content starts inside the listed window, so
+        # the listing's (200, 150) places the button at (205, 165)). The
+        # frame answers one rectangle for both coordinate types, off the
+        # origin: the one shape whose verdict needs the listing at all.
+        self.frame._pid = 4242
+        self.frame.position = (5, 5)
+        self.frame.window_position = (5, 5)
+        gui = self.backend(SessionType.X11)
+        source = _FakeWindowGeometrySource(0, (200, 150))
+        gui.set_window_geometry_source(source)
+        button = gui.find_element(name="OK")
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertEqual(gui.extents(button), (10, 20, 80, 30))
+            self.assertEqual(gui._app_coords_verified, {})
+            source._pid = 4242
+            self.assertEqual(gui.extents(button), (205, 165, 80, 30))
+        self.assertEqual(gui._app_coords_verified, {4242: False})
+
+    def test_element_at_asks_an_untrusted_toplevel_in_its_own_coordinates(self):
+        # The hit test asks every application; one whose screen rectangles
+        # cannot be believed is not passed over but asked in WINDOW
+        # coordinates, with the point moved into them by the window's real
+        # position. The GTK4 shape throughout: every node answers (0, 0)
+        # on screen and its real offset within the window. Measured for
+        # the caller that needs it -- the recorder's X11 capture resolving
+        # a click on a GTK4 window, which before this found nothing.
+        self.frame._pid = 4242
+        self.button.position = (0, 0)
+        self.button.window_position = (10, 20)
+        cancel = self.frame.children[1]
+        cancel.position = (0, 0)
+        cancel.window_position = (110, 20)
+        gui = self.backend(SessionType.X11)
+        gui.set_window_geometry_source(_FakeWindowGeometrySource(4242, (200, 150)))
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertEqual(gui.element_at(220, 180).name, "OK")
+            self.assertEqual(gui.element_at(320, 180).name, "Cancel")
+            # The point the toolkit *claims* every element is at, where
+            # nothing of this window really is.
+            self.assertIsNone(gui.element_at(20, 30))
+
+    def test_element_at_leaves_out_a_toplevel_the_source_cannot_place(self):
+        # Untrusted and unplaceable -- the source lists nothing of this
+        # window's size -- so the toplevel's (0, 0) frame must not claim
+        # the point and answer it with a widget that is nowhere near; the
+        # point stays unanswered rather than the whole call raising for a
+        # reason unrelated to what was asked about.
+        self.frame._pid = 4242
+        gui = self.backend(SessionType.X11)
+        gui.set_window_geometry_source(
+            _FakeWindowGeometrySource(4242, (200, 150), size=(1280, 768))
+        )
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertIsNone(gui.element_at(20, 30))
+            self.assertIsNone(gui.element_at(220, 180))
+
+    def test_wayland_is_unaffected_by_this_check_entirely(self):
+        # `_app_coords_trustworthy` must never even run on Wayland: that
+        # session places every element without asking, and this check's
+        # own tolerance-based comparison has no business deciding anything
+        # there.
+        self.frame._pid = 4242
+        gui = self.backend(SessionType.WAYLAND)
+        gui.set_window_geometry_source(_FakeWindowGeometrySource(4242, (0, 32)))
+        button = gui.find_element(name="OK")
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            # Unaffected means: still the Wayland placement, not a
+            # CapabilityUnsupported from the check and not the raw,
+            # uncorrected (10, 20, 80, 30) either.
+            self.assertEqual(gui.extents(button), (10, 52, 80, 30))
+        self.assertEqual(gui._app_coords_verified, {})
 
 
 class _DogtailSearchError(Exception):

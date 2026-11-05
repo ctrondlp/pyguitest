@@ -215,6 +215,20 @@ class TestCompositorDetection(unittest.TestCase):
         e = linux_detect(env(WAYLAND_DISPLAY="wayland-0", SWAYSOCK="/run/sway.sock"))
         self.assertIs(e.compositor, Compositor.WLROOTS)
 
+    def test_wlroots_by_each_compositors_own_ipc_variable(self):
+        # A session that never set a desktop name -- niri started by greetd
+        # on KaOS carries none and only hands one to the clients it spawns
+        # -- is still identified by the IPC variable its backend selects
+        # on. NIRI_SOCKET was the one of the three that did not count.
+        for variable, value in (
+            ("SWAYSOCK", "/run/sway.sock"),
+            ("HYPRLAND_INSTANCE_SIGNATURE", "abc123"),
+            ("NIRI_SOCKET", "/run/user/1000/niri.wayland-1.834.sock"),
+        ):
+            with self.subTest(variable=variable):
+                e = linux_detect(env(WAYLAND_DISPLAY="wayland-1", **{variable: value}))
+                self.assertIs(e.compositor, Compositor.WLROOTS)
+
     def test_mutter_warns_about_foreign_toplevel(self):
         e = linux_detect(env(WAYLAND_DISPLAY="wayland-0", XDG_CURRENT_DESKTOP="GNOME"))
         self.assertTrue(any("foreign-toplevel" in n for n in e.notes))
@@ -532,6 +546,110 @@ class TestAtspiDetection(unittest.TestCase):
             e, has_atspi=True, has_pygobject=True, has_dogtail=False
         )
         self.assertFalse(no_dogtail.can_use_atspi)
+
+
+class _FakeGi:
+    """Stands in for the real `gi` module, with a controllable pin.
+
+    Used instead of calling the real `gi.require_version` to probe this:
+    that call's effect is permanent for the life of the interpreter, so
+    exercising it for real in one test would leak into every other test
+    that happens to run in the same process afterward. Patched into
+    `sys.modules["gi"]` for the duration of one test and restored after,
+    the same way this suite fakes `dogtail`/`pyatspi` elsewhere.
+    """
+
+    def __init__(self, pinned):
+        self._pinned = pinned
+
+    def get_required_version(self, namespace):
+        assert namespace == "Gtk"
+        return self._pinned
+
+
+class TestDogtailGtkVersionConflict(unittest.TestCase):
+    """dogtail's own hard `gi.require_version("Gtk", "3.0")` pin.
+
+    And what happens when something else in the process already chose
+    differently.
+
+    `_module("dogtail")` only confirms the package has a spec and a loader
+    -- it never imports anything, so it cannot see this: a conflict is a
+    fact about *this interpreter's* state, not about what is installed on
+    disk. `_dogtail_gtk_conflict` is the part of `detect()` that can see
+    it, checked without ever calling the real `gi.require_version` --
+    see `_FakeGi` for why that distinction matters to how these are
+    written.
+    """
+
+    def test_no_conflict_when_gtk_was_never_pinned(self):
+        with mock.patch.dict("sys.modules", {"gi": _FakeGi(None)}):
+            self.assertIsNone(session._dogtail_gtk_conflict())
+
+    def test_no_conflict_when_gtk_is_pinned_to_dogtail_s_own_version(self):
+        with mock.patch.dict("sys.modules", {"gi": _FakeGi("3.0")}):
+            self.assertIsNone(session._dogtail_gtk_conflict())
+
+    def test_a_conflicting_pin_is_named(self):
+        # The exact scenario measured live: a caller's own GTK4 application
+        # under test pins the namespace before dogtail ever gets a chance
+        # to, which is the version this returns so a note can name it.
+        with mock.patch.dict("sys.modules", {"gi": _FakeGi("4.0")}):
+            self.assertEqual(session._dogtail_gtk_conflict(), "4.0")
+
+    def test_no_gi_at_all_is_not_itself_a_conflict(self):
+        # PyGObject genuinely absent is a different, already-reported fact
+        # (has_pygobject); this function's own question -- "does an
+        # *already-pinned* version disagree with dogtail's" -- has no
+        # answer without gi to ask, and must not be confused with "yes,
+        # there is a conflict".
+        with mock.patch.dict("sys.modules", {"gi": None}):
+            self.assertIsNone(session._dogtail_gtk_conflict())
+
+    def test_has_dogtail_is_false_when_the_package_is_installed_but_conflicted(self):
+        # The regression this whole fix is for: dogtail genuinely on disk
+        # (_module("dogtail") True) must still report has_dogtail=False
+        # when importing it right now would raise.
+        with mock.patch.object(session, "_module", lambda name: name == "dogtail"):
+            with mock.patch.dict("sys.modules", {"gi": _FakeGi("4.0")}):
+                e = linux_detect(env(WAYLAND_DISPLAY="wayland-0"))
+        self.assertFalse(e.has_dogtail)
+
+    def test_the_conflict_note_is_distinct_from_the_not_installed_note(self):
+        # Both read "dogtail is not usable" from has_dogtail alone; the
+        # note is what has to tell a reader which of two unrelated fixes
+        # applies -- reinstalling the atspi extra does nothing for a
+        # process-state conflict, and importing GTK later does nothing for
+        # a package that is genuinely missing.
+        with mock.patch.object(session, "_lib", return_value=True):
+            with mock.patch.object(
+                session, "_module", lambda name: name in ("dogtail", "gi.repository")
+            ):
+                with mock.patch.dict("sys.modules", {"gi": _FakeGi("4.0")}):
+                    conflicted = linux_detect(env(WAYLAND_DISPLAY="wayland-0"))
+            with mock.patch.object(
+                session, "_module", lambda name: name == "gi.repository"
+            ):
+                not_installed = linux_detect(env(WAYLAND_DISPLAY="wayland-0"))
+        # "pip install" alone is too broad to assert on: an unrelated note
+        # (python-evdev missing for /dev/uinput) also uses that phrase in
+        # this same minimal environment, for a package that has nothing
+        # to do with dogtail. The "atspi" extra specifically is the one
+        # this fix must not say when the real problem is a GTK version
+        # conflict, not a missing package.
+        self.assertTrue(any("already pinned" in n for n in conflicted.notes))
+        self.assertFalse(any("'atspi' extra" in n for n in conflicted.notes))
+        self.assertTrue(any("'atspi' extra" in n for n in not_installed.notes))
+        self.assertFalse(any("already pinned" in n for n in not_installed.notes))
+
+    def test_no_note_at_all_when_there_is_no_conflict(self):
+        with mock.patch.object(session, "_lib", return_value=True):
+            with mock.patch.object(session, "_module", return_value=True):
+                with mock.patch.dict("sys.modules", {"gi": _FakeGi(None)}):
+                    e = linux_detect(env(WAYLAND_DISPLAY="wayland-0"))
+        self.assertTrue(e.has_dogtail)
+        self.assertFalse(any("already pinned" in n for n in e.notes))
+        self.assertFalse(any("dogtail" in n for n in e.notes))
 
 
 class TestPortalDetectionHonoursTheFakeEnvironment(unittest.TestCase):

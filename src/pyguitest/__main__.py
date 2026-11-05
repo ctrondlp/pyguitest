@@ -61,7 +61,7 @@ def _extension_state(environment) -> str | None:
 
 
 # Env vars the desktop-detection logic in session.py actually reads
-# (session_type/compositor classification, plus the sway/Hyprland IPC
+# (session_type/compositor classification, plus the sway/Hyprland/niri IPC
 # sockets). Printed as-is: none of these carry secrets, unlike
 # DBUS_SESSION_BUS_ADDRESS, which is deliberately not on this list.
 _ENV_VARS_OF_INTEREST = (
@@ -73,6 +73,7 @@ _ENV_VARS_OF_INTEREST = (
     "DISPLAY",
     "SWAYSOCK",
     "HYPRLAND_INSTANCE_SIGNATURE",
+    "NIRI_SOCKET",
 )
 
 _RECORDER = "pyguitest_recorder"

@@ -182,6 +182,10 @@ class UinputBackend(GUIBackend):
         self._UInput, self._AbsInfo, self._ecodes = modules
         self.screen_size = screen_size
         self._device = device or self._create_device()
+        # Where this device's absolute axes stand: what the kernel compares
+        # the next ABS_X/ABS_Y against before it decides whether anything
+        # happened. A new device starts at the declared value, 0 on both.
+        self._position = (0, 0)
 
     def _create_device(self):
         """Register a virtual keyboard and absolute pointer with the kernel."""
@@ -298,12 +302,40 @@ class UinputBackend(GUIBackend):
             raise ValueError(f"unsupported button {button!r}") from None
 
     def move_mouse(self, x, y, screen=0):
-        """Move the pointer to an absolute position."""
+        """Move the pointer to an absolute position.
+
+        A move to where this device last put the pointer is stepped one
+        pixel aside first, so that it is a motion at all. The kernel drops
+        an absolute event whose value equals the axis's current one before
+        any handler sees it (`input_handle_abs_event`, and the SYN_REPORT
+        goes with it once nothing is pending), so writing the same pair
+        again reaches neither libinput nor the compositor: nothing moves,
+        nothing is told the pointer is there. A compositor that only
+        re-evaluates which surface is under the pointer on motion -- Hyprland,
+        measured 2026-11-04 -- then delivers the click that follows to the
+        surface it last knew about. The way it showed: a GTK file dialog
+        opened under the pointer left by the click that cancelled the
+        previous one, `move_mouse()` to its Cancel button's centre, and two
+        clicks there did nothing, while a third after a one-pixel nudge
+        answered; the same for GTK3 and GTK4, and the same sequence on KDE,
+        COSMIC, niri, GNOME and X11 answered the first click. The other
+        case this covers is a pointer moved by another device in between:
+        the compositor's pointer is elsewhere, this device's axes still say
+        `(x, y)`, and the repeated write would leave it elsewhere.
+        """
         self.require(Capability.POINTER_MOVE)
+        x, y = int(x), int(y)
+        if (x, y) == self._position:
+            self._write_position(x + 1 if x + 1 < self.screen_size[0] else x - 1, y)
+        self._write_position(x, y)
+
+    def _write_position(self, x, y):
+        """Write both axes and synchronise, remembering where they stand."""
         e = self._ecodes
-        self._device.write(e.EV_ABS, e.ABS_X, int(x))
-        self._device.write(e.EV_ABS, e.ABS_Y, int(y))
+        self._device.write(e.EV_ABS, e.ABS_X, x)
+        self._device.write(e.EV_ABS, e.ABS_Y, y)
         self._device.syn()
+        self._position = (x, y)
 
     def press_button(self, button):
         """Press a mouse button."""

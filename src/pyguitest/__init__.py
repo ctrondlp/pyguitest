@@ -86,7 +86,7 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T")
 
-__version__ = "0.20.2"
+__version__ = "0.21.0"
 
 __all__ = [
     "connect",
@@ -2385,12 +2385,56 @@ class Session:
             # thing outstaying its welcome is the failure you report.
             if not gui.wait_until_gone(name="Saving...", timeout=30):
                 raise AssertionError("the save never finished")
+
+        Matches a node that is still *present* but no longer *visible* as
+        gone, not merely one that no longer exists -- a just-closed menu or
+        popover can leave a stale node behind for a moment, `showing` False,
+        before the toolkit actually removes it from the tree. Measured
+        live: GTK4 under X11, closing a popover with Escape and asking
+        immediately found the menu's own node still answering to
+        `role="menu"`, un-showing, for long enough that a 2-second
+        `wait_until_gone(role="menu")` had something to find on its first
+        several polls. A caller watching a toast or a spinner disappear --
+        the two examples right above -- means "is it gone from my screen",
+        not "has every trace of its accessible representation finished
+        being garbage-collected", and the second question is not even one
+        most callers could usefully ask: a plain element, unlike a Window,
+        carries nothing a caller could check it against later to confirm
+        the specific node they mean is the one that is actually gone.
+
+        Filtered by reading each match's own `.visible` rather than by
+        asking the backend for an already-filtered list: `elements()`'s own
+        `visible` keyword is exactly that, but passing it unconditionally
+        here would mean passing a keyword no caller asked for into every
+        backend's (and every test fake's) `find_elements`, which `elements`
+        -- see its own docstring -- deliberately keeps from happening for a
+        filter nobody requested. Reading `.visible` off each already-bound
+        Element both avoids that and costs nothing extra on a backend that
+        answers it for free alongside everything else `elements()` already
+        read to build the Element in the first place. It also means "gone"
+        here is whatever `Element.visible` means on the platform: on
+        Windows (UIA) a row scrolled out of a long list is off-screen, and
+        so counts as gone, where at-spi's `showing` state says the same
+        and a Mac cannot tell.
         """
 
         def gone() -> bool | None:
-            """True once nothing matches any more, None while something does."""
+            """True once nothing *visible* matches, None while something does."""
             found = self.elements(role=role, name=name, within=within)
-            return True if not found else None
+            still_here = []
+            for element in found:
+                try:
+                    if element.visible:
+                        still_here.append(element)
+                except Exception:  # noqa: BLE001
+                    # A node that cannot even answer whether it is visible
+                    # is not one a caller is waiting to see disappear.
+                    # Treating the read failing as "gone" rather than
+                    # letting it raise out of a polling loop matches how
+                    # similar stale-node reads degrade everywhere else in
+                    # this package.
+                    continue
+            return True if not still_here else None
 
         return bool(self._poll_until(gone, timeout, interval))
 
@@ -3708,7 +3752,14 @@ class Session:
         `x, y` is the top-left corner. Whether decorations are included
         varies by window manager, so compare geometries read in one session
         rather than hard-coding pixel expectations, and re-read after any
-        move, resize or layout change instead of caching a snapshot.
+        move, resize or layout change instead of caching a snapshot. A
+        shadow the client draws around itself is never included: on X11 a
+        GTK header-bar window under a compositor makes its X window larger
+        than the window the user sees by a translucent margin, and the
+        rectangle reported is the visible window inside it, as on Wayland.
+        The margin is read afresh each call, so a window that is maximized,
+        a compositor switched off or a theme with a different shadow is
+        reflected by the next read.
 
         One known caveat worth reading before building on this: on GNOME's
         XWayland specifically, a geometry read straight after move_window()

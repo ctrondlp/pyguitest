@@ -426,13 +426,60 @@ def _xlib_size():
             connection.close()
 
 
+def _niri_output_rects():
+    """Each enabled niri output's logical rectangle, over niri's own IPC.
+
+    The same `Outputs` request `NiriBackend.screens()` reads, through the
+    same transport (`connect_niri`: the socket, else `niri msg`), opened
+    and closed here because `_screen_size` runs before any backend
+    exists. A disabled output has no logical rectangle and is skipped, as
+    `screens()` skips it.
+    """
+    from .. import ipc
+
+    transport = ipc.connect_niri()
+    if transport is None:
+        return []
+    try:
+        outputs = transport.outputs() or {}
+    finally:
+        transport.close()
+    rects = []
+    for output in outputs.values():
+        logical = output.get("logical")
+        if logical:
+            rects.append(
+                {
+                    "x": logical.get("x", 0),
+                    "y": logical.get("y", 0),
+                    "width": logical.get("width", 0),
+                    "height": logical.get("height", 0),
+                }
+            )
+    return rects
+
+
 def _wlroots_size():
-    """The output layout's bounding box on sway or Hyprland, or None."""
+    """The output layout's bounding box on sway, Hyprland or niri, or None.
+
+    niri is asked first, and on its own environment signature rather
+    than on which tool is installed, the way `for_compositor` selects the
+    backend: it has no `swaymsg`, and KaOS ships neither of the other two
+    CLIs, so until 2026-11-04 a niri session matched nothing here and the
+    uinput device was declared for the 1920x1080 constant on a 1280x800
+    output. Every `move_mouse(x, y)` then landed at two thirds of `x` and
+    three quarters of `y`, measured live: a sweep of 121 clicks around a
+    dialog button placed at (227, 414) reached nothing, because the
+    pointer was at (151, 306).
+    """
     import json
+    import os
     import shutil
 
     rects = []
-    if shutil.which("swaymsg"):
+    if os.environ.get("NIRI_SOCKET"):
+        rects = _niri_output_rects()
+    elif shutil.which("swaymsg"):
         rects = [
             o["rect"]
             for o in json.loads(_query(["swaymsg", "-t", "get_outputs", "-r"]))
@@ -531,11 +578,14 @@ def _screen_size(environment):
     to the historical constant, rather than guessing blind.
 
     There is no portable question to ask, so each compositor family gets the
-    source that can answer for it: swaymsg or hyprctl on wlroots, Mutter's
-    DisplayConfig on GNOME, kscreen-doctor on KDE. The last two were the
-    gap -- a default GNOME or KDE Wayland session matched none of the
-    branches here and silently took the constant, which is wrong on every
-    desktop that is not 1920x1080 and says nothing when it is.
+    source that can answer for it: swaymsg, hyprctl or niri's own IPC on
+    wlroots, Mutter's DisplayConfig on GNOME, kscreen-doctor on KDE. The
+    GNOME and KDE sources were the first gap -- a default GNOME or KDE
+    Wayland session matched none of the branches here and silently took
+    the constant, which is wrong on every desktop that is not 1920x1080
+    and says nothing when it is. niri was the second: it reached the
+    wlroots branch (once `NIRI_SOCKET` counted as a wlroots signature at
+    all) and found only the two CLIs it does not ship.
 
     A compositor-native source is tried first, ahead of xrandr, on purpose:
     GNOME and sway both size XWayland's X root to their own logical layout,

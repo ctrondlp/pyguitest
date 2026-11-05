@@ -1283,6 +1283,62 @@ class TestWaitUntilGone(unittest.TestCase):
         )
         self.assertGreaterEqual(len(calls), 3)
 
+    def test_a_still_present_but_invisible_match_counts_as_gone(self):
+        # Measured live, GTK4 under X11: closing a popover with Escape and
+        # asking immediately found the menu's own node still answering to
+        # role="menu", `showing` False, for long enough that a 2-second
+        # wait_until_gone(role="menu") had something to find on its first
+        # several polls. A caller watching a toast or a spinner disappear
+        # means "is it gone from my screen", not "has the toolkit finished
+        # tearing down every trace of its accessible node" -- the fixture's
+        # own "Save" button is already built invisible-but-present for
+        # exactly this case (see FakeBackend.elements above).
+        gui = session()
+        self.assertTrue(
+            gui.wait_until_gone(
+                role=Role.PUSH_BUTTON, name="Save", timeout=1, interval=0.01
+            )
+        )
+
+    def test_a_visible_match_is_not_mistaken_for_gone(self):
+        # The other direction, so the fix above is not simply "always
+        # return True": a genuinely visible, present match must still make
+        # this time out.
+        gui = session()
+        self.assertFalse(
+            gui.wait_until_gone(
+                role=Role.PUSH_BUTTON, name="OK", timeout=0.05, interval=0.01
+            )
+        )
+
+    def test_a_dead_node_that_cannot_answer_visible_also_counts_as_gone(self):
+        # A node that raises merely being asked whether it is visible is
+        # not one a caller is waiting to see disappear -- treating that
+        # read failing as "gone" rather than letting it raise out of a
+        # polling loop matches how similar stale-node reads degrade
+        # everywhere else in this package. A standalone object rather than
+        # a FakeElement subclass/monkeypatch, so nothing here can leak a
+        # class-level change into any other test.
+        class _StaleNode:
+            role = Role.PUSH_BUTTON
+            name = "Transient"
+            enabled = True
+            description = ""
+
+            @property
+            def visible(self):
+                raise RuntimeError("node is dead")
+
+        gui = session()
+        stale = _StaleNode()
+        gui.backend.elements.append(stale)
+        self.addCleanup(gui.backend.elements.remove, stale)
+        self.assertTrue(
+            gui.wait_until_gone(
+                role=Role.PUSH_BUTTON, name="Transient", timeout=1, interval=0.01
+            )
+        )
+
 
 class FakeImageBackend(GUIBackend):
     name = "fake-image"

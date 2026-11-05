@@ -214,6 +214,40 @@ class TestPointer(UinputTestCase):
         self.assertIn((1, 200), codes)  # ABS_Y
         self.assertEqual(self.device.syncs, 1)
 
+    def _motions(self):
+        """The (x, y) pairs written, one per sync."""
+        xs = [v for _, c, v in self.device.events if c == 0]
+        ys = [v for _, c, v in self.device.events if c == 1]
+        return list(zip(xs, ys, strict=True))
+
+    def test_a_move_to_the_last_position_steps_aside_first(self):
+        # evdev drops a repeated absolute value, so the second call would
+        # otherwise be no event at all -- and a compositor that re-picks the
+        # surface under the pointer only on motion (Hyprland) would send the
+        # click that follows to whatever was there before.
+        self.gui.move_mouse(100, 200)
+        self.device.events.clear()
+        self.gui.move_mouse(100, 200)
+        self.assertEqual(self._motions(), [(101, 200), (100, 200)])
+        self.assertEqual(self.device.syncs, 3)
+
+    def test_a_move_somewhere_else_is_one_motion(self):
+        self.gui.move_mouse(100, 200)
+        self.device.events.clear()
+        self.gui.move_mouse(100, 201)
+        self.assertEqual(self._motions(), [(100, 201)])
+
+    def test_the_first_move_to_the_origin_is_still_a_motion(self):
+        # A new device's axes start at the declared value, 0 on both.
+        self.gui.move_mouse(0, 0)
+        self.assertEqual(self._motions(), [(1, 0), (0, 0)])
+
+    def test_a_repeated_move_at_the_last_column_steps_left(self):
+        self.gui.move_mouse(1919, 5)
+        self.device.events.clear()
+        self.gui.move_mouse(1919, 5)
+        self.assertEqual(self._motions(), [(1918, 5), (1919, 5)])
+
     def test_button_press_and_release(self):
         self.gui.press_button(1)
         self.gui.release_button(1)

@@ -42,5 +42,58 @@ class TestCanonicalRole(unittest.TestCase):
         self.assertEqual(canonical_role("check box"), "check box")
 
 
+class TestGtk4Roles(unittest.TestCase):
+    """The three roles GTK4 publishes that no existing constant named.
+
+    Each measured live, GTK4 4.24.1 under at-spi2 -- see roles.py's own
+    comment on each for why it is not simply an alias of something that
+    already existed.
+    """
+
+    def test_switch(self):
+        self.assertEqual(Role.SWITCH, "switch")
+
+    def test_tree_table(self):
+        self.assertEqual(Role.TREE_TABLE, "tree table")
+
+    def test_level_bar(self):
+        self.assertEqual(Role.LEVEL_BAR, "level bar")
+
+    def test_none_of_the_three_is_aliased_to_an_existing_role(self):
+        for new_role in (Role.SWITCH, Role.TREE_TABLE, Role.LEVEL_BAR):
+            with self.subTest(role=new_role):
+                self.assertEqual(spellings(new_role), frozenset({new_role}))
+
+
+class TestToplevelRoles(unittest.TestCase):
+    """The two toplevel roles GTK and Qt publish besides frame/window/dialog.
+
+    Measured live on seven desktops -- see roles.py's own note on each.
+    Neither is an alias: a message box is not a dialog on the bus, and a
+    `dialog` search must not find one.
+    """
+
+    def test_alert(self):
+        self.assertEqual(Role.ALERT, "alert")
+
+    def test_file_chooser(self):
+        self.assertEqual(Role.FILE_CHOOSER, "file chooser")
+
+    def test_both_count_as_windows(self):
+        self.assertIn(Role.ALERT, Role.WINDOW_ROLES)
+        self.assertIn(Role.FILE_CHOOSER, Role.WINDOW_ROLES)
+
+    def test_a_main_window_still_outranks_them_by_position(self):
+        # WINDOW_ROLES is in precedence order where one title matches
+        # several toplevels; the classic three keep their places ahead of
+        # the two added.
+        self.assertEqual(Role.WINDOW_ROLES[:3], (Role.FRAME, Role.WINDOW, Role.DIALOG))
+
+    def test_neither_is_aliased_to_an_existing_role(self):
+        for new_role in (Role.ALERT, Role.FILE_CHOOSER):
+            with self.subTest(role=new_role):
+                self.assertEqual(spellings(new_role), frozenset({new_role}))
+
+
 if __name__ == "__main__":
     unittest.main()

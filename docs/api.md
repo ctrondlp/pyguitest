@@ -105,6 +105,8 @@ supports(capability: Capability)
 |-----------|------|---------|
 | `capability` | `Capability` | **required** |
 
+**Returns** `bool`
+
 For branching on what a desktop can do -- taking a screenshot where
 capture exists, skipping that assertion where it does not. Where the
 test simply cannot run without it, prefer require(), which raises at
@@ -133,6 +135,8 @@ way through a run.
 
 ### `capabilities`
 
+**Returns** `CapabilitySet`
+
 The backend's capabilities plus the tier-1 ones Session implements
 directly -- process launch and timing work regardless of which backend
 was selected, or whether one was found at all.
@@ -142,6 +146,8 @@ was selected, or whether one was found at all.
 ```python
 report()
 ```
+
+**Returns** `str`
 
 Appends the backend's own provider breakdown when it offers one --
 CompositeBackend.report() shows which member serves which
@@ -202,6 +208,8 @@ button(name: str, within: Element | None = None)
 | `name` | `str` | **required** |
 | `within` | `Element \| None` | `None` |
 
+**Returns** `Element`
+
 Push buttons only. A toolbar item, a tab, or a menu entry that looks
 like a button to a user usually publishes a different role -- reach
 for menu_item(), or element(role=...), rather than assuming this
@@ -219,6 +227,8 @@ text_field(name: str, within: Element | None = None)
 |-----------|------|---------|
 | `name` | `str` | **required** |
 | `within` | `Element \| None` | `None` |
+
+**Returns** `Element`
 
 Tries three roles in order -- ENTRY, TEXT, PASSWORD_TEXT -- because
 no single one covers every toolkit's idea of a text box: at-spi2
@@ -241,6 +251,8 @@ dropdown(name: str, within: Element | None = None)
 | `name` | `str` | **required** |
 | `within` | `Element \| None` | `None` |
 
+**Returns** `Element`
+
 A Qt combo box publishes its *current text* as the accessible name
 and discards the name set on it, so the stable name often travels in
 the accessible *description* instead. Try the description before
@@ -258,6 +270,8 @@ checkbox(name: str, within: Element | None = None)
 |-----------|------|---------|
 | `name` | `str` | **required** |
 | `within` | `Element \| None` | `None` |
+
+**Returns** `Element`
 
 Check boxes only, not radio buttons or toggle buttons -- each is its
 own role. Read the returned element's `checked` to see its state,
@@ -277,6 +291,8 @@ link(name: str, within: Element | None = None)
 | `name` | `str` | **required** |
 | `within` | `Element \| None` | `None` |
 
+**Returns** `Element`
+
 The link's text is its name. A Chromium or Electron application
 publishes no accessible tree at all until an assistive technology is
 announced, so this raising ElementNotFound on every link in such an
@@ -295,6 +311,8 @@ menu_item(name: str, within: Element | None = None)
 |-----------|------|---------|
 | `name` | `str` | **required** |
 | `within` | `Element \| None` | `None` |
+
+**Returns** `Element`
 
 Finding a menu item does not require its menu to be open -- the
 accessible tree publishes the whole structure -- so the usual way to
@@ -331,6 +349,8 @@ element(
 | `visible` | `bool \| None` | `None` |
 | `description` | `str \| re.Pattern[str] \| None` | `None` |
 | `predicate` | `Callable[[Element], bool] \| None` | `None` |
+
+**Returns** `Element`
 
 Raises ElementNotFound if nothing matches. See elements() for what
 each filter accepts.
@@ -373,6 +393,8 @@ elements(
 | `description` | `str \| re.Pattern[str] \| None` | `None` |
 | `predicate` | `Callable[[Element], bool] \| None` | `None` |
 
+**Returns** `list[Element]`
+
 `name`/`description` take a plain string (exact match) or a compiled
 regex, matched with `.search()` -- the same convention find_window
 uses for titles:
@@ -409,6 +431,8 @@ in one call took a few seconds, the walk's own cost either way.
 root_element()
 ```
 
+**Returns** `Element`
+
 The desktop-wide root: its children are *applications*, whose
 children are their windows. Rarely what a test wants directly --
 elements()/element() search from here already, and
@@ -429,6 +453,8 @@ window_element(title: str | re.Pattern[str])
 | Parameter | Type | Default |
 |-----------|------|---------|
 | `title` | `str \| re.Pattern[str]` | **required** |
+
+**Returns** `Element`
 
 Scopes an element search to one window via `within=`:
 
@@ -470,6 +496,8 @@ proxy, or a backend with no window list at all, sees no change.
 focused()
 ```
 
+**Returns** `Element | None`
+
 The active window's application is searched first and the whole
 desktop only if that finds nothing, so the answer does not depend on
 which application the tree happens to enumerate first. On a desktop
@@ -486,6 +514,8 @@ scoped before it is broadened.
 ```python
 focus_tracking_works()
 ```
+
+**Returns** `bool`
 
 AT-SPI's FOCUSED state is what focused(), assert_focused() and
 assert_tab_order() read, and some desktops never set it on
@@ -1091,6 +1121,8 @@ A `Window` stays usable as a handle, but its `title`, `app_id` and `pid` are rea
 windows()
 ```
 
+**Returns** `list[Window]`
+
 **Ordered bottom-to-top**, so the last entry is the topmost window
 and `windows()[-1]` is the one a user would say is in front. That
 convention is what find_window() and window_at() both resolve ties
@@ -1121,6 +1153,8 @@ find_window(title: str | re.Pattern[str] | None = None, app_id: str | Sequence[s
 |-----------|------|---------|
 | `title` | `str \| re.Pattern[str] \| None` | `None` |
 | `app_id` | `str \| Sequence[str] \| None` | `None` |
+
+**Returns** `Window`
 
 Raises WindowNotFound if nothing matches, so a script stops where the
 mistake is. See find_windows for how `title`/`app_id` combine and
@@ -1160,6 +1194,8 @@ find_windows(title: str | re.Pattern[str] | None = None, app_id: str | Sequence[
 | `title` | `str \| re.Pattern[str] \| None` | `None` |
 | `app_id` | `str \| Sequence[str] \| None` | `None` |
 
+**Returns** `list[Window]`
+
 At least one of `title`/`app_id` is required. Given both, a window
 must satisfy each. `title` takes a plain string (matched literally,
 as a substring -- see _title_pattern) or a compiled regex (matched
@@ -1178,6 +1214,8 @@ real identifier; an empty sequence matches nothing for that reason.
 ```python
 active_window()
 ```
+
+**Returns** `Window | None`
 
 What the *window manager* considers focused, which is not a promise
 about where injected keystrokes will land. The two can disagree:
@@ -1208,6 +1246,8 @@ window_at(x: int, y: int, screen: int = 0)
 | `y` | `int` | **required** |
 | `screen` | `int` | `0` |
 
+**Returns** `Window | None`
+
 The authoritative answer to "what will a click here actually hit",
 and worth asking before a coordinate click rather than after. A
 control's reported rectangle can lie outside its own window --
@@ -1233,6 +1273,8 @@ geometry(window: Window)
 |-----------|------|---------|
 | `window` | `Window` | **required** |
 
+**Returns** `tuple[int, int, int, int]`
+
 The most commonly missing capability (Capability.WINDOW_GEOMETRY),
 and raises CapabilityUnsupported where it is absent rather than
 guessing. Wayland gives a client no window coordinates of its own,
@@ -1244,7 +1286,14 @@ what is missing.
 `x, y` is the top-left corner. Whether decorations are included
 varies by window manager, so compare geometries read in one session
 rather than hard-coding pixel expectations, and re-read after any
-move, resize or layout change instead of caching a snapshot.
+move, resize or layout change instead of caching a snapshot. A
+shadow the client draws around itself is never included: on X11 a
+GTK header-bar window under a compositor makes its X window larger
+than the window the user sees by a translucent margin, and the
+rectangle reported is the visible window inside it, as on Wayland.
+The margin is read afresh each call, so a window that is maximized,
+a compositor switched off or a theme with a different shadow is
+reflected by the next read.
 
 One known caveat worth reading before building on this: on GNOME's
 XWayland specifically, a geometry read straight after move_window()
@@ -1362,6 +1411,8 @@ is_window_open(window: Window)
 |-----------|------|---------|
 | `window` | `Window` | **required** |
 
+**Returns** `bool`
+
 Asked of the list rather than of the handle, because a handle does
 not know it has died: reading geometry from a closed window raises
 from somewhere inside the backend -- "no window with id 106" is a
@@ -1378,6 +1429,8 @@ is_window_viewable(window: Window)
 | Parameter | Type | Default |
 |-----------|------|---------|
 | `window` | `Window` | **required** |
+
+**Returns** `bool`
 
 The honest test for "is this on screen", as against merely present
 in windows() -- which also lists off-screen and utility toplevels.
@@ -1398,6 +1451,8 @@ refresh_window(window: Window)
 | Parameter | Type | Default |
 |-----------|------|---------|
 | `window` | `Window` | **required** |
+
+**Returns** `Window | None`
 
 A `Window` is a snapshot: its title was true when it was taken, and
 the handle beneath it may since have gone. Both bite in practice --
@@ -1423,6 +1478,8 @@ window_events(timeout: float | None = None)
 |-----------|------|---------|
 | `timeout` | `float \| None` | `None` |
 
+**Returns** `Iterator[WindowEvent]`
+
 Needs Capability.WINDOW_EVENTS. wait_for_window and
 wait_window_close are what most callers want instead: they consume
 this where it exists and poll where it does not.
@@ -1444,6 +1501,8 @@ Capture is the one area where desktops differ most in what they permit; `screens
 ```python
 screens()
 ```
+
+**Returns** `list[Screen]`
 
 "Advertised order" is the display server's own, which is not a
 statement about which output the desktop calls primary -- there is
@@ -1474,6 +1533,8 @@ screenshot(
 | `path` | `str \| None` | `None` |
 | `window` | `Window \| None` | `None` |
 | `region` | `tuple[int, int, int, int] \| None` | `None` |
+
+**Returns** `str`
 
 With no arguments, captures the whole desktop to a temporary file.
 `window` captures one window; `region` captures an `(x, y, width,
@@ -1570,6 +1631,8 @@ locate(
 | `metric` | `str` | `'RMSE'` |
 | `threshold` | `float \| None` | `None` |
 
+**Returns** `ImageMatch | None`
+
 Returns None if no match clears `threshold`. Unlike locate_image,
 this searches a file rather than the live screen, and answers with
 None rather than raising -- no display connection is involved.
@@ -1593,6 +1656,8 @@ locate_image(
 | `within` | `Window \| None` | `None` |
 | `threshold` | `float \| None` | `None` |
 | `metric` | `str` | `'RMSE'` |
+
+**Returns** `ImageMatch`
 
 Captures the whole desktop and, with `within`, restricts the search
 to that window's rectangle, looked up via WINDOW_GEOMETRY. Either way
@@ -1663,6 +1728,8 @@ get_clipboard(primary: bool = False)
 |-----------|------|---------|
 | `primary` | `bool` | `False` |
 
+**Returns** `str`
+
 `primary=True` reads the X11/Wayland PRIMARY selection instead --
 what a middle-click paste inserts, and independent of the
 clipboard proper: writing one never touches the other.
@@ -1715,6 +1782,8 @@ start_app(command: str | Sequence[str], **kwargs: Any)
 | `command` | `str \| Sequence[str]` | **required** |
 | `**kwargs` |  | *any keyword* |
 
+**Returns** `Application`
+
 Returns an `Application`: a `subprocess.Popen` plus the lifecycle
 the bare one leaves to the caller. Use it as a context manager when
 the program should not outlive the block, which is almost always --
@@ -1758,6 +1827,8 @@ run_app(command: str | Sequence[str], **kwargs: Any)
 |-----------|------|---------|
 | `command` | `str \| Sequence[str]` | **required** |
 | `**kwargs` |  | *any keyword* |
+
+**Returns** `subprocess.CompletedProcess[Any]`
 
 Same shell and `env=` behaviour as :meth:`start_app`: a string runs
 through the shell, and `env=` replaces rather than extends the
@@ -1817,6 +1888,8 @@ sync(timeout: float = 1.0)
 |-----------|------|---------|
 | `timeout` | `float` | `1.0` |
 
+**Returns** `bool`
+
 The honest replacement for `wait()` after injection. Where a
 backend offers Capability.INPUT_SYNC (libei today, via its
 ping/pong round trip), this returns once the compositor has
@@ -1853,6 +1926,8 @@ wait_until(predicate: Callable[[], bool], timeout: float | None = None, interval
 | `timeout` | `float \| None` | `None` |
 | `interval` | `float` | `0.5` |
 
+**Returns** `bool`
+
 The general-purpose polling primitive behind element state waits --
 "wait until this button is enabled" is
 `gui.wait_until(lambda: button.enabled)` rather than a hand-rolled
@@ -1881,6 +1956,8 @@ wait_for_element(
 | `within` | `Element \| None` | `None` |
 | `timeout` | `float \| None` | `None` |
 | `interval` | `float` | `0.5` |
+
+**Returns** `Element | None`
 
 Poll-based only -- unlike wait_for_window, no backend currently
 offers element-level change events, so there is no event-driven
@@ -1911,6 +1988,8 @@ wait_until_gone(
 | `timeout` | `float \| None` | `None` |
 | `interval` | `float` | `0.5` |
 
+**Returns** `bool`
+
 Mirrors wait_window_close for elements -- waiting for a "Saving..."
 toast or a modal's spinner to disappear. Returns True once the
 element is gone, False if timeout elapses first while it is still
@@ -1925,6 +2004,37 @@ gui.wait_until_gone(name="Saving...", timeout=30)
 if not gui.wait_until_gone(name="Saving...", timeout=30):
     raise AssertionError("the save never finished")
 ```
+
+Matches a node that is still *present* but no longer *visible* as
+gone, not merely one that no longer exists -- a just-closed menu or
+popover can leave a stale node behind for a moment, `showing` False,
+before the toolkit actually removes it from the tree. Measured
+live: GTK4 under X11, closing a popover with Escape and asking
+immediately found the menu's own node still answering to
+`role="menu"`, un-showing, for long enough that a 2-second
+`wait_until_gone(role="menu")` had something to find on its first
+several polls. A caller watching a toast or a spinner disappear --
+the two examples right above -- means "is it gone from my screen",
+not "has every trace of its accessible representation finished
+being garbage-collected", and the second question is not even one
+most callers could usefully ask: a plain element, unlike a Window,
+carries nothing a caller could check it against later to confirm
+the specific node they mean is the one that is actually gone.
+
+Filtered by reading each match's own `.visible` rather than by
+asking the backend for an already-filtered list: `elements()`'s own
+`visible` keyword is exactly that, but passing it unconditionally
+here would mean passing a keyword no caller asked for into every
+backend's (and every test fake's) `find_elements`, which `elements`
+-- see its own docstring -- deliberately keeps from happening for a
+filter nobody requested. Reading `.visible` off each already-bound
+Element both avoids that and costs nothing extra on a backend that
+answers it for free alongside everything else `elements()` already
+read to build the Element in the first place. It also means "gone"
+here is whatever `Element.visible` means on the platform: on
+Windows (UIA) a row scrolled out of a long list is off-screen, and
+so counts as gone, where at-spi's `showing` state says the same
+and a Mac cannot tell.
 
 ### `wait_for_window`
 
@@ -1945,6 +2055,8 @@ wait_for_window(
 | `timeout` | `float \| None` | `None` |
 | `interval` | `float` | `0.5` |
 | `app_id` | `str \| Sequence[str] \| None` | `None` |
+
+**Returns** `Window | None`
 
 See find_windows for how `title`/`app_id` combine and what `title`
 accepts; at least one is required.
@@ -1990,6 +2102,8 @@ wait_window_close(window: Window, timeout: float | None = None, interval: float 
 | `timeout` | `float \| None` | `None` |
 | `interval` | `float` | `0.5` |
 
+**Returns** `bool`
+
 Replaces X11::GUITest's WaitWindowClose. Compares by `window.handle`,
 which is stable for the backend that produced it (see the Window
 docstring), rather than by title -- two windows can share a title,
@@ -2015,6 +2129,8 @@ wait_for_process(name: str | re.Pattern[str], timeout: float | None = None, inte
 | `name` | `str \| re.Pattern[str]` | **required** |
 | `timeout` | `float \| None` | `None` |
 | `interval` | `float` | `0.5` |
+
+**Returns** `int | None`
 
 `name` is `.search()`ed against the full command line, the same way
 Session.find_window matches window titles. Returns the matched
@@ -2079,6 +2195,8 @@ wait_for_idle(
 | `samples` | `int` | `3` |
 | `cpu_threshold` | `float` | `0.01` |
 
+**Returns** `bool`
+
 "Idle" means its CPU usage stayed under `cpu_threshold` (a fraction
 of one core) across `samples` consecutive polls -- CPU-idle, not
 "the UI stopped changing"; no backend here has an event stream to
@@ -2131,6 +2249,8 @@ wait_for_file(path: str, timeout: float | None = None, interval: float = 0.5)
 | `timeout` | `float \| None` | `None` |
 | `interval` | `float` | `0.5` |
 
+**Returns** `bool`
+
 For a process under test writing output somewhere -- an export, a
 log file -- rather than polling os.path.exists in a hand-rolled loop.
 
@@ -2170,6 +2290,8 @@ assert_focused(
 | `visible` | `bool \| None` | `None` |
 | `description` | `str \| re.Pattern[str] \| None` | `None` |
 | `predicate` | `Callable[[Element], bool] \| None` | `None` |
+
+**Returns** `Element`
 
 Filters mean the same as elements()'s. Returns the focused Element
 on success, so a caller can chain into it the same way element()
@@ -2433,6 +2555,8 @@ element_at(x: int, y: int)
 | `x` | `int` | **required** |
 | `y` | `int` | **required** |
 
+**Returns** `Element | None`
+
 What window_at is for windows, with no `screen` argument: the
 accessible tree is addressed in one desktop-wide coordinate space.
 
@@ -2514,6 +2638,8 @@ expect_element(
 | `within` | `Element \| None` | `None` |
 | `timeout` | `float \| None` | `None` |
 | `interval` | `float` | `0.5` |
+
+**Returns** `Element`
 
 The raising sibling wait_for_element deliberately lacks, for the
 same reason expect_window exists next to wait_for_window: a script
@@ -2614,6 +2740,8 @@ expect_window(
 | `timeout` | `float \| None` | `None` |
 | `app_id` | `str \| Sequence[str] \| None` | `None` |
 
+**Returns** `Window`
+
 The raising sibling wait_for_window deliberately lacks (see its
 docstring): a script that already knows the window it wants exist is
 an error, not a branch to handle, is the common case a generated
@@ -2641,6 +2769,8 @@ extents(element: Element)
 |-----------|------|---------|
 | `element` | `Element` | **required** |
 
+**Returns** `tuple[int, int, int, int] | None`
+
 None where the element occupies no screen space -- it publishes no
 rectangle, or reports an empty one because it is not showing.
 
@@ -2661,6 +2791,8 @@ focus_window(window: Window, attempts: int = 5)
 |-----------|------|---------|
 | `window` | `Window` | **required** |
 | `attempts` | `int` | `5` |
+
+**Returns** `bool`
 
 Three things activate_window() on its own does not do: it waits for
 the window's geometry to stop changing first (a still-animating
@@ -2704,6 +2836,8 @@ is_button_pressed(button: int)
 |-----------|------|---------|
 | `button` | `int` | **required** |
 
+**Returns** `bool`
+
 Same numbering as click() -- 1 left, 2 middle, 3 right -- and
 reports the *desktop's* state, so a button a user is physically
 holding reads as pressed too, not only one this session injected.
@@ -2720,6 +2854,8 @@ is_key_pressed(key: str)
 | Parameter | Type | Default |
 |-----------|------|---------|
 | `key` | `str` | **required** |
+
+**Returns** `bool`
 
 Takes the same backend-native key name as press_key. Useful for
 asserting a modifier was actually released after a combination; see
@@ -2738,6 +2874,8 @@ is_window_cursor(window: Window, shape: int)
 |-----------|------|---------|
 | `window` | `Window` | **required** |
 | `shape` | `int` | **required** |
+
+**Returns** `bool`
 
 Replaces IsWindowCursor. Impossible on Wayland, where cursor shape is
 negotiated privately between client and compositor.
@@ -2769,6 +2907,8 @@ active_window() if the next step depends on it.
 ```python
 pointer_position()
 ```
+
+**Returns** `tuple[int, int]`
 
 In the coordinate space `screens()` reports. Works on X11, Windows
 and macOS; see the note above for why an XWayland answer can be
@@ -2808,6 +2948,8 @@ row_values(row: Element)
 | Parameter | Type | Default |
 |-----------|------|---------|
 | `row` | `Element` | **required** |
+
+**Returns** `tuple[str, ...]`
 
 For a control that nests each row's cells beneath it as children --
 confirmed live against a UIA `ListView` (WinDirStat's real
@@ -2868,6 +3010,8 @@ tree_items(root: Element, role: str | None = None, max_depth: int = 24)
 | `root` | `Element` | **required** |
 | `role` | `str \| None` | `None` |
 | `max_depth` | `int` | `24` |
+
+**Returns** `list[Element]`
 
 `elements(within=root)` only ever sees what the accessibility tree
 already has *visible* -- a collapsed tree row's children are not
@@ -2972,6 +3116,8 @@ wait_for_pointer_activation(timeout: float | None = None)
 |-----------|------|---------|
 | `timeout` | `float \| None` | `None` |
 
+**Returns** `tuple[float, float] | None`
+
 Not a query, and deliberately not spelled `pointer_position()`:
 Capability.INPUT_CAPTURE (the `inputcapture` backend, opt-in --
 `connect(backend="inputcapture")`) can only ever answer this at the
@@ -3004,6 +3150,8 @@ wait_window_focus(window: Window, timeout: float | None = None, interval: float 
 | `window` | `Window` | **required** |
 | `timeout` | `float \| None` | `None` |
 | `interval` | `float` | `0.1` |
+
+**Returns** `bool`
 
 A window can exist -- wait_for_window has already returned it -- for
 a moment before the window manager actually gives it focus, e.g. a
@@ -3075,6 +3223,8 @@ One node of the accessible tree, as every backend agrees to expose it.
 
 #### `actions`
 
+**Returns** `list[str]`
+
 The names `do_action` takes. Treat it as a set, not a sequence: it
 comes back sorted on Linux and Windows but in AX's own preference
 order on macOS, so indexing into it means something different per
@@ -3083,6 +3233,8 @@ name -- what a widget publishes is the toolkit's choice, and an
 element that publishes none at all is why `click` has a pointer rung.
 
 #### `alive`
+
+**Returns** `bool`
 
 Every property above assumes this and raises from wherever it is
 touched otherwise -- an application redraw, a closed dialog, a row
@@ -3101,6 +3253,8 @@ the locator that found it in the first place to search again with.
 
 #### `checkable`
 
+**Returns** `bool`
+
 Read this before trusting `checked`, which has no state to report on
 an element that has none -- and answers `None` where the platform
 says so rather than inventing a False. How it is decided is the
@@ -3109,6 +3263,8 @@ the role plus a menu item's mark character on macOS -- but the
 question it answers is the same one everywhere.
 
 #### `checked`
+
+**Returns** `bool | None`
 
 `None` is a real answer, not a failure, and the annotation means it:
 on Windows an element with no Toggle pattern and no radio-selection
@@ -3126,12 +3282,16 @@ and treat `None` as "it did not say" rather than as False.
 | `role` | `str \| None` | `None` |
 | `name` | `str \| None` | `None` |
 
+**Returns** `Element | None`
+
 `find`'s first match, with the same recursive reach, and None rather
 than an exception where nothing matches -- the opposite convention
 from `Session.element`, which raises. Useful for a local lookup
 inside an element already in hand.
 
 #### `children`
+
+**Returns** `list[Element]`
 
 One level only: `find` and `child` are the recursive pair. The order
 is whatever the toolkit publishes rather than anything sorted here,
@@ -3189,6 +3349,8 @@ raises `CapabilityUnsupported` rather than doing nothing silently.
 
 #### `description`
 
+**Returns** `str`
+
 Always a string, empty where there is none. Where a control publishes
 no `name`, this is usually where its label went, which makes it the
 second thing to try in a locator. On macOS it falls back to the same
@@ -3240,6 +3402,8 @@ that happens today.
 
 #### `enabled`
 
+**Returns** `bool`
+
 True where the toolkit will not say, on all three backends -- the same
 leniency `visible` documents. Worth waiting on rather than asserting
 once: a Save button is disabled until the document is modified, which
@@ -3253,12 +3417,16 @@ not collapse what the first call opened.
 
 #### `expandable`
 
+**Returns** `bool`
+
 Read this before trusting `expanded`. On Windows and macOS it is the
 same signal `expand()` and `collapse()` act on. A collapsed branch's
 rows are not in the tree at all until something opens it, which is
 what `Session.tree_items` walks the tree expanding as it goes.
 
 #### `expanded`
+
+**Returns** `bool | None`
 
 Same caveat as `checked`: read `expandable` first.
 
@@ -3270,6 +3438,8 @@ Same caveat as `checked`: read `expandable` first.
 |-----------|------|---------|
 | `role` | `str \| None` | `None` |
 | `name` | `str \| None` | `None` |
+
+**Returns** `list[Element]`
 
 The recursive search, where `children` is one level. An empty list is
 how it reports no match, rather than raising. The elements it hands
@@ -3294,6 +3464,8 @@ the next step depends on it.
 
 #### `focused`
 
+**Returns** `bool`
+
 Not every desktop publishes per-widget focus, and one that does not
 reports False for everything rather than saying so -- which reads as
 a test failure when it is an unsupported desktop. Ask
@@ -3306,6 +3478,8 @@ a test failure when it is an unsupported desktop. Ask
 | Parameter | Type | Default |
 |-----------|------|---------|
 | `other` | `Element` | **required** |
+
+**Returns** `bool`
 
 Strictly inside: an element is not its own ancestor. Answered by
 walking upwards from `other` rather than descending, since the
@@ -3324,6 +3498,8 @@ test thinks it scoped the search to.
 
 #### `name`
 
+**Returns** `str`
+
 Always a string on every backend, never None. On Windows and macOS
 that is enforced on the way out: an application is free to put a
 non-string there, and coercing it is what stops a `TypeError`
@@ -3337,6 +3513,8 @@ in that case, which makes it the second thing a locator should try.
 
 #### `options`
 
+**Returns** `list[Element]`
+
 Menu items first, then list items, on every backend. An empty list is
 a truthful answer about a popup nobody has opened yet rather than a
 failure, so this is the diagnostic to reach for when `choose` cannot
@@ -3344,11 +3522,15 @@ find an option -- it prints what the control actually offers.
 
 #### `parent`
 
+**Returns** `Element | None`
+
 The direct parent only, and on Windows the parent in UIA's control
 view rather than its raw tree. The element handed back carries the
 same session this one did, so a walk upwards can still click.
 
 #### `pid`
+
+**Returns** `int | None`
 
 None where the accessibility bridge publishes none, which is common
 enough that a caller must handle it: it is the one field here that
@@ -3358,6 +3540,8 @@ scoped to the login session, not to a display, so on a machine
 running two of them the tree carries both.
 
 #### `role`
+
+**Returns** `str`
 
 The spelling is at-spi's on every platform, not the native layer's:
 UIA control types and macOS AX roles are both translated on the way
@@ -3382,11 +3566,15 @@ selection that happened. `selectable` is the question asked first.
 
 #### `selectable`
 
+**Returns** `bool`
+
 Read this before trusting `selected`, for `checkable`'s reason. On
 Windows and macOS it is the same signal `select()` acts on, so a
 False here is also the reason that call would refuse.
 
 #### `selected`
+
+**Returns** `bool | None`
 
 Same caveat as `checked`: read `selectable` first.
 
@@ -3410,6 +3598,8 @@ half of the answer.
 
 #### `text`
 
+**Returns** `str | None`
+
 None where the element holds no text at all -- and which elements
 those are is a platform answer, not a universal one: an at-spi label
 reports None while a macOS static text answers with its visible
@@ -3420,6 +3610,8 @@ pattern (an editable field), which is one property at-spi splits
 differently. `value` is the numeric sibling, not this.
 
 #### `value`
+
+**Returns** `float | None`
 
 A float where the control publishes a value, None where it does not,
 on every backend. Linux used to answer dogtail's raw `False` for
@@ -3441,6 +3633,8 @@ slider". Branch on the role: `checked` is the read for a tick and
 only once the role says the control has a position.
 
 #### `visible`
+
+**Returns** `bool`
 
 The one property whose meaning genuinely differs by platform, because
 no two of these layers answer the same question. at-spi has a
@@ -3483,6 +3677,10 @@ One output.
 | `size` | The output's (width, height) in pixels. |
 | `width: int` |  |
 
+#### `size`
+
+**Returns** `tuple[int, int]`
+
 ### ImageMatch
 
 Where a template image was found.
@@ -3517,6 +3715,8 @@ A program started by `Session.start_app`, and its lifecycle.
 
 #### `is_running`
 
+**Returns** `bool`
+
 A `poll()` underneath, so calling this is also what reaps an exited
 process and fills in `returncode`.
 
@@ -3538,6 +3738,8 @@ On Windows this *is* `terminate()` -- `subprocess` maps both to
 is doing the same thing twice there.
 
 #### `pid`
+
+**Returns** `int`
 
 The process `start_app` started, which is not always the process that
 draws the window. A launcher that spawns the real application and
@@ -3568,6 +3770,8 @@ pid matters: it runs no shell, so the pid is always the program's.
 
 #### `poll`
 
+**Returns** `int | None`
+
 Also the call that fills in `returncode`, so this is the one to reach
 for in a loop that is waiting without committing to a deadline.
 
@@ -3578,6 +3782,8 @@ for in a loop that is waiting without committing to a deadline.
 | Parameter | Type | Default |
 |-----------|------|---------|
 | `timeout` | `float` | `5.0` |
+
+**Returns** `Application`
 
 Returns self, so `app.restart().pid` reads. The new process replaces
 `.process`; the old one is stopped first by the rules above.
@@ -3592,6 +3798,8 @@ grandchild holding the pipe, and a drain would then block on it. Read
 `app.stdout` before calling this if the old output matters.
 
 #### `returncode`
+
+**Returns** `int | None`
 
 Read straight off the `Popen`, which means it is None both while the
 program is running *and* after it has exited but before anything
@@ -3626,17 +3834,23 @@ exited returns silently on both platforms.
 
 #### `stderr`
 
+**Returns** `IO[Any] | None`
+
 None unless the caller passed `stderr=subprocess.PIPE`. Worth piping
 when an application fails to appear at all: the reason is usually on
 this stream, and `restart()` closes it, so read it first.
 
 #### `stdin`
 
+**Returns** `IO[Any] | None`
+
 None is the ordinary answer: `start_app` passes `**kwargs` to
 `subprocess.Popen`, so a stream exists only where the caller asked
 for one with `stdin=subprocess.PIPE`.
 
 #### `stdout`
+
+**Returns** `IO[Any] | None`
 
 None unless the caller passed `stdout=subprocess.PIPE`, and a GUI
 program often writes nothing useful there anyway.
@@ -3657,6 +3871,8 @@ on a thread, if the output is wanted while the program is alive.
 | Parameter | Type | Default |
 |-----------|------|---------|
 | `timeout` | `float` | `5.0` |
+
+**Returns** `int | None`
 
 SIGTERM first, because a GUI program asked to quit politely gets to
 save its state; `SIGKILL` only if it has not gone within `timeout`.
@@ -3689,6 +3905,8 @@ been filled in.
 | Parameter | Type | Default |
 |-----------|------|---------|
 | `timeout` | `float \| None` | `None` |
+
+**Returns** `int`
 
 Unbounded with no `timeout`, which on a GUI program is a real risk
 rather than a theoretical one: an editor holding unsaved text answers
@@ -3744,6 +3962,8 @@ What the current login actually offers.
 
 #### `can_capture`
 
+**Returns** `bool`
+
 Three routes reach pixels and only one of them is a tool on PATH.
 X11Backend captures and encodes a PNG itself given python-xlib and
 an X connection, and the Screenshot portal needs nothing installed
@@ -3772,6 +3992,8 @@ outside this package's own model.
 
 #### `can_inject_input`
 
+**Returns** `bool`
+
 has_portal does not count on its own: nothing in this package can
 actually drive a portal transport yet, only external CLI tools and
 in-process uinput. Counting it would report "injectable" on a
@@ -3792,6 +4014,8 @@ input requires.
 
 #### `can_use_atspi`
 
+**Returns** `bool`
+
 Needs all three pieces: the libatspi service and the PyGObject
 binding, both from the distro, plus dogtail, the one part pip
 actually supplies (see the 'atspi' extra). The distro halves alone
@@ -3809,6 +4033,8 @@ different things on two platforms, which is the trap the rest of the
 Windows work exists to avoid.
 
 #### `can_use_clipboard`
+
+**Returns** `bool`
 
 On Linux and the BSDs there is one route and it is a CLI tool:
 nothing in this package speaks a clipboard protocol directly, so
@@ -3841,6 +4067,8 @@ was fixed for in 0.14.0.
 
 #### `input_transport`
 
+**Returns** `str | None`
+
 `preferred_input` answers the narrower question and is None on a
 machine served by in-process uinput -- which made `summary()`
 print "input none available" on a session whose own `mechanisms`
@@ -3862,10 +4090,16 @@ platform for the ranking below to choose between.
 
 #### `preferred_input`
 
+**Returns** `str | None`
+
 Deliberately narrow: it ranks `input_tools`, and a session that
 injects input perfectly well through no tool at all answers None
 here. `input_transport` is the wider question -- what will
 actually carry the events -- and is what `summary()` reports.
+
+#### `summary`
+
+**Returns** `str`
 
 ## Capabilities
 
@@ -3927,15 +4161,15 @@ provides the capability at all -- which today is nowhere.
 `Role` holds the AT-SPI role names `element(role=...)` matches on.
 
 ```
-CHECK_BOX  CHECK_MENU_ITEM  CHOICE_ROLES  COMBO_BOX  DIAL  DIALOG
-DOCUMENT_FRAME  ENTRY  FILLER  FRAME  HEADING  ICON  IMAGE  LABEL
-LAYERED_PANE  LINK  LIST  LIST_ITEM  MENU  MENU_ITEM  PAGE_TAB
-PAGE_TAB_LIST  PANEL  PARAGRAPH  PASSWORD_TEXT  PROGRESS_BAR
-PUSH_BUTTON  RADIO_BUTTON  RADIO_MENU_ITEM  SCROLL_BAR  SCROLL_PANE
-SEPARATOR  SLIDER  SPIN_BUTTON  SPLIT_PANE  STATUS_BAR  TABLE
-TABLE_CELL  TABLE_COLUMN_HEADER  TABLE_ROW  TEXT  TEXT_ROLES
-TOGGLE_BUTTON  TOOL_BAR  TREE  TREE_ITEM  VIEWPORT  WINDOW
-WINDOW_ROLES
+ALERT  CHECK_BOX  CHECK_MENU_ITEM  CHOICE_ROLES  COMBO_BOX  DIAL
+DIALOG  DOCUMENT_FRAME  ENTRY  FILE_CHOOSER  FILLER  FRAME  HEADING
+ICON  IMAGE  LABEL  LAYERED_PANE  LEVEL_BAR  LINK  LIST  LIST_ITEM
+MENU  MENU_ITEM  PAGE_TAB  PAGE_TAB_LIST  PANEL  PARAGRAPH
+PASSWORD_TEXT  PROGRESS_BAR  PUSH_BUTTON  RADIO_BUTTON
+RADIO_MENU_ITEM  SCROLL_BAR  SCROLL_PANE  SEPARATOR  SLIDER
+SPIN_BUTTON  SPLIT_PANE  STATUS_BAR  SWITCH  TABLE  TABLE_CELL
+TABLE_COLUMN_HEADER  TABLE_ROW  TEXT  TEXT_ROLES  TOGGLE_BUTTON
+TOOL_BAR  TREE  TREE_ITEM  TREE_TABLE  VIEWPORT  WINDOW  WINDOW_ROLES
 ```
 
 ## Exceptions
@@ -4026,6 +4260,8 @@ connect(
 | `backend_options` | `dict \| None` | `None` |
 | `**kwargs` |  | *any keyword* |
 
+**Returns** `Session`
+
 Detects the environment, selects a backend, and returns a Session. Never
 raises for a limited desktop -- a session with few capabilities is the
 normal case, and `supports()` is how you find out. Pass `backend` by name
@@ -4091,6 +4327,8 @@ detect(env: Mapping[str, str] | None = None) -> Environment
 |-----------|------|---------|
 | `env` | `Mapping[str, str] \| None` | `None` |
 
+**Returns** `Environment`
+
 Only affects the parts of detection that read environment variables:
 session classification, compositor identification, and portal detection.
 Library presence (has_libei, has_atspi, has_pygobject, has_dogtail,
@@ -4123,6 +4361,8 @@ quote_for_type(text: str | None) -> str | None
 | Parameter | Type | Default |
 |-----------|------|---------|
 | `text` | `str \| None` | **required** |
+
+**Returns** `str | None`
 
 Replaces X11::GUITest's QuoteStringForSendKeys, with the same behaviour
 plus the # fix noted above: each of ^ % + ~ # ( ) { } is wrapped in

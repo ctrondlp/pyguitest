@@ -114,6 +114,27 @@ forever. Deep enough for any real widget hierarchy; a tree that has not
 bottomed out by here is malformed, and the node reached is still a truthful
 answer, just not the deepest one."""
 
+_APPLICATION_ROLE = "application"
+"""The role of the node every toplevel hangs off -- what `_window_frame`
+stops under when no ancestor carries a window role at all."""
+
+_MAX_DECORATION = 160
+"""How far, per axis, a toolkit's own size for a toplevel may differ from
+the compositor's before the two rectangles are taken to describe different
+windows. Decorations are the whole of the difference where they describe
+the same one -- a client-side shadow the toolkit counts and the compositor
+does not (52px on GNOME's Adwaita, 40 on COSMIC, 90 on a GTK3 file chooser
+under KDE), or a server-side titlebar the compositor counts and the toolkit
+does not (28 on KDE Breeze, 36 on COSMIC, 40 on Mutter) -- all measured,
+none anywhere near this. Past it, the source's window is one of the
+application's *other* toplevels, and placing against it would put every
+control in the wrong window; see `_source_rects`."""
+
+_SHADOW_PROBE_CHILDREN = 8
+"""How many of a toplevel's direct children `_shadow_margins` reads before
+settling on a margin. GTK3 publishes two or three (titlebar, content box);
+the bound keeps an unusual toplevel from costing a bus round trip per child."""
+
 
 def _gi_component():
     """`Atspi.Component`, the class a Component-interface call is cast through.
@@ -138,12 +159,11 @@ def _gi_component():
     return Atspi.Component
 
 
-def _gi_screen_coords():
-    """`Atspi.CoordType.SCREEN`'s int value, the same constant `pyatspi` names.
+def _gi_coord_types():
+    """`Atspi.CoordType`, the enum both coordinate-space constants come from.
 
-    Specifically the one `pyatspi.DESKTOP_COORDS` names, from the same
-    underlying C enum, for when `pyatspi` itself is what is unavailable (see
-    `_pyatspi`), not just `queryComponent`.
+    For when `pyatspi` itself is what is unavailable (see `_pyatspi`), not
+    just `queryComponent`: the values are the same underlying C enum's.
     """
     import gi  # noqa: PLC0415 - optional dep, see _pyatspi
 
@@ -157,7 +177,28 @@ def _gi_screen_coords():
     gi.require_version("Atspi", "2.0")
     from gi.repository import Atspi
 
-    return Atspi.CoordType.SCREEN
+    return Atspi.CoordType
+
+
+def _gi_screen_coords():
+    """`Atspi.CoordType.SCREEN`, the constant `pyatspi.DESKTOP_COORDS` names."""
+    return _gi_coord_types().SCREEN
+
+
+def _gi_window_coords():
+    """`Atspi.CoordType.WINDOW`, the constant `pyatspi.WINDOW_COORDS` names.
+
+    The coordinate space `_placed_extents` reads in: relative to the
+    element's own toplevel. The one GTK4 fills in -- it answers (0, 0) in
+    SCREEN for every node it owns, on X11 and Wayland alike, measured on
+    4.24 across seven desktops, while WINDOW carries each node's real
+    offset within its window. GTK3 and Qt answer WINDOW and SCREEN
+    identically on Wayland (both window-relative, since the client is
+    never told where it is), and on X11 answer WINDOW relative to the
+    client window, which is what makes one placement rule work for all
+    three; see `_client_inset`.
+    """
+    return _gi_coord_types().WINDOW
 
 
 def _at_point(coords, node, x, y):
@@ -184,7 +225,10 @@ def _frame_pid(frame):
 
     The same read `Element.pid` does, duplicated here because `windows()`
     builds `base.Window` objects straight from a raw dogtail node, not an
-    `Element`.
+    `Element`. Not actually particular to frames: the pid belongs to the
+    application, libatspi answers it from the application's bus name for
+    any node of it, and `_app_coords_trustworthy` leans on exactly that to
+    ask a deep child without first walking up to its frame.
 
     `Window.pid` defaulted to `None` on every window this backend ever
     built, confirmed live (Debian 13, GNOME Wayland, no gnomeshell
@@ -903,6 +947,17 @@ class Element:
         up the same ladder. Three backends, one contract: an element that
         publishes an action is clicked through it, and one that publishes none
         is clicked by coordinate.
+
+        `activate` comes last of all, and only for a role that is not
+        text-bearing (`Role.TEXT_ROLES`). It means "click me" on most
+        things that offer it and nothing else -- GTK4's `GtkExpander`
+        publishes it alone, no click or press at all -- but on an entry,
+        text, password or spin button it means "the user pressed Enter",
+        which a caller calling `.click()` does not expect and should not
+        get. Measured live (pyguitest-torture-test's Containers page): a
+        plain `GtkEntry` publishes `activate` as its own only action too,
+        which is the reason this is gated by role rather than added
+        alongside click/press/toggle/show-menu outright.
         """
         route = resolve_click_route(self, via)
         if route == "pointer":
@@ -933,6 +988,30 @@ class Element:
             ),
             None,
         )
+        if name is None and self.role not in Role.TEXT_ROLES:
+            # 'activate' means "click me" everywhere except a text-bearing
+            # role, where it means "the user pressed Enter" instead -- so
+            # it is tried only as a last resort, after every role-neutral
+            # action above already failed to match, and never for an
+            # entry, text, password text or spin button, where firing it
+            # would silently submit or confirm rather than click.
+            #
+            # Measured live on GTK4 4.24.1 (pyguitest-torture-test's
+            # Containers page): a `GtkExpander` publishes `activate` as its
+            # ONLY action -- no click, no press -- so without this it fell
+            # straight through to the coordinate route below and, on a
+            # toolkit that publishes no usable screen position either
+            # (also measured there, separately), never actually drove the
+            # control at all. A plain `GtkEntry` publishes `activate` too,
+            # as its only action, and is exactly why this is role-gated
+            # rather than folded into the list above outright: a caller
+            # clicking an entry expects a click, and an entry offering no
+            # other action must still fall to the coordinate route, not
+            # silently fire its Enter-equivalent instead.
+            name = next(
+                (a for a in actions if a.lower() == "activate"),
+                None,
+            )
         if name is not None:
             # Bounded the same way every other Element property/backend
             # call in this module is -- confirmed live (Pop!_OS/COSMIC)
@@ -1584,6 +1663,10 @@ class AtspiBackend(GUIBackend):
         self.environment = environment
         self._window_geometry_source: Any = None
         self._call_timeout = call_timeout
+        # Verdicts from `_app_coords_trustworthy`, by pid. A fact about the
+        # application, asked once per session and remembered -- see that
+        # method.
+        self._app_coords_verified: dict[int, bool] = {}
 
     def set_window_geometry_source(self, backend):
         """Let `backend` correct this one's element coordinates on Wayland.
@@ -1591,7 +1674,7 @@ class AtspiBackend(GUIBackend):
         Wired by `backends/__init__.py::_combine` when a sibling backend in
         the same session (gnomeshell, say) provides `Capability.
         WINDOW_GEOMETRY` -- never by a caller directly. `backend` needs
-        `windows()` and `geometry(window)`; see `_window_offset` for how
+        `windows()` and `geometry(window)`; see `_placed_extents` for how
         they get used.
         """
         self._window_geometry_source = backend
@@ -1620,7 +1703,7 @@ class AtspiBackend(GUIBackend):
         position -- known accurately only through something that is *told*
         it, like the gnomeshell extension's `ListWindows` -- and the
         element rectangle becomes correct. `set_window_geometry_source`
-        is how one gets wired in; `_window_offset` does the lookup and the
+        is how one gets wired in; `_placed_extents` does the lookup and the
         add.
         """
         return (
@@ -1643,75 +1726,46 @@ class AtspiBackend(GUIBackend):
             caps.add(Capability.ELEMENT_GEOMETRY)
         return CapabilitySet(caps)
 
-    def _window_offset(self, node):
-        """The (x, y) to add to `node`'s own rectangle to make it absolute.
-
-        Via `_window_geometry_source`, or None. Walks up to the nearest
-        ancestor with a window role, reads *its* pid (`_frame_pid`, the
-        same read `windows()` uses), and matches that against the
-        geometry source's own window list -- the two backends' Window
-        objects are never the same object, so pid is normally the only
-        identity they share.
-
-        Falls back to matching by title when pid matching finds nothing --
-        confirmed live (COSMIC, Pop!_OS 24.04) that this is not merely a
-        missing pid on one frame but a structural gap in the geometry
-        source itself: `zcosmic_toplevel_info_v1` (the protocol
-        `cosmic.py`'s `windows()` is built on) has no pid-bearing event at
-        all in its v3 spec, confirmed directly against the protocol XML
-        (`cosmic-toplevel-info-unstable-v1.xml`), not just empirically --
-        every `Window` that backend returns has `pid=None`, always. Title
-        is a weaker identity than pid (two windows could share one), but
-        it is the only one this geometry source can ever offer, and this
-        project's own `windows()` matching elsewhere already accepts that
-        same tradeoff for title-only backends.
-        """
-        if self._window_geometry_source is None:
-            return None
-        frame = self._window_frame(node)
-        if frame is None:
-            return None
-        try:
-            windows = self._window_geometry_source.windows()
-        except Exception:  # noqa: BLE001 - a sibling backend's own failure is not ours
-            return None
-        pid = _frame_pid(frame)
-        if pid is not None:
-            for window in windows:
-                if getattr(window, "pid", None) == pid:
-                    return self._geometry_source_offset(window)
-        # Bounded like every other bus read in this module -- `_node_attr`'s
-        # own helper rather than a bare attribute read, so a frame whose name
-        # hangs cannot hang the geometry lookup that needed it.
-        title = _node_attr(frame, "name", None)
-        if title:
-            for window in windows:
-                if getattr(window, "title", None) == title:
-                    return self._geometry_source_offset(window)
-        return None
-
     def _window_frame(self, node):
-        """`node`'s nearest window-role ancestor, or None.
+        """`node`'s toplevel: the node every rectangle of its window hangs off.
+
+        The nearest ancestor with a window role, or -- where no ancestor
+        carries one -- the application's direct child `node` sits under,
+        whatever role that child publishes. None for a node outside any
+        application (the desktop itself, an application node).
+
+        The second stop is what makes the ascent complete rather than merely
+        usual. `windows()` lists an application's direct children by role,
+        and `Role.WINDOW_ROLES` now names every toplevel role GTK and Qt were
+        measured publishing; but a toolkit is free to invent another, and a
+        node under one of those still has a window -- the direct child is
+        it, by construction, since AT-SPI hangs every toplevel straight off
+        its application. Before this, a GTK3 `file chooser` or an `alert`
+        was ascended straight *through*, the walk ran out at the application
+        and every control in a Save or message dialog had no window to be
+        placed in; measured live on all seven desktops.
 
         One bounded call for the whole ascent rather than one per level:
-        both `.roleName` (read every iteration, in the loop condition) and
-        `.parent` are live bus round trips of exactly the shape
-        `_run_bounded` exists for, and bounding each of them separately
-        would pay for a worker thread per level of the tree.
+        `.roleName` and `.parent` are live bus round trips of exactly the
+        shape `_run_bounded` exists for, and bounding each separately would
+        pay for a worker thread per level of the tree.
         """
 
         def ascend():
             frame = node
-            depth = 0
-            while frame is not None and frame.roleName not in Role.WINDOW_ROLES:
+            for _ in range(_MAX_DEPTH + 1):
+                if frame.roleName in Role.WINDOW_ROLES:
+                    return frame
                 try:
-                    frame = frame.parent
+                    parent = frame.parent
                 except Exception:  # noqa: BLE001 - a reaped node has no parent
                     return None
-                depth += 1
-                if depth > _MAX_DEPTH:
+                if parent is None:
                     return None
-            return frame
+                if parent.roleName == _APPLICATION_ROLE:
+                    return frame
+                frame = parent
+            return None
 
         try:
             return _run_bounded(self._call_timeout, ascend)
@@ -1720,15 +1774,296 @@ class AtspiBackend(GUIBackend):
         except Exception:  # noqa: BLE001 - a reaped node cannot be walked up from
             return None
 
-    def _geometry_source_offset(self, window):
-        """`(x, y)` from `_window_geometry_source.geometry(window)`, or None."""
+    def _source_rects(self, frame, size=None):
+        """Every rectangle the geometry source has for `frame`, best first.
+
+        The windows carrying `frame`'s pid, or -- only when no window
+        carries it at all -- the ones sharing its title; each as the
+        `(x, y, width, height)` the source reports, with any whose
+        geometry cannot be read left out, so an application with one
+        unreadable toplevel is still placed by its others.
+
+        Pid is normally the only identity the two backends share -- their
+        Window objects are never the same object -- and the title fallback
+        is not a nicety for a frame missing its pid but a structural gap in
+        one source: `zcosmic_toplevel_info_v1`, the protocol `cosmic.py`'s
+        `windows()` is built on, has no pid-bearing event at all in its v3
+        spec, confirmed against the protocol XML, so every Window that
+        backend returns has `pid=None`, always. Title is a weaker identity
+        (two windows could share one), but it is the only one that source
+        can ever offer, and this project's own `windows()` matching
+        elsewhere already accepts the same tradeoff.
+
+        But pid names an *application*, not a window, and an application
+        with a dialog up has two. Measured live on GNOME, KDE and COSMIC:
+        the source listed the main window first, every control in the
+        dialog was placed by the main window's position, and a dialog's
+        OK button came back hundreds of pixels from where it was. So the
+        list is ranked, not taken in listing order: a window whose title
+        matches the frame's own name first, then by how closely its size
+        matches `size` (the frame's own, in the toolkit's reckoning). And
+        with `size` given, a window further from it than `_MAX_DECORATION`
+        on either axis is not a candidate at all -- it is one of the
+        application's other toplevels, and the caller is better told there
+        is nothing to place against than placed in the wrong window.
+
+        Two refinements to that, both from the same live measurement -- a
+        GTK3 `GtkAssistant` the application never titled, on Debian and
+        Ubuntu GNOME, placed by the application's main window and reported
+        forty pixels off:
+
+        An *empty* title matches an empty one. Within the pid-matched set
+        the frame's name and the window's title are compared as they are,
+        so a nameless frame ranks its application's untitled window above
+        its titled main window the same way a named frame ranks the window
+        carrying its name first. Only the fallback for a source that lists
+        no pid at all still needs a non-empty title, since there an empty
+        one would match every untitled window on the desktop.
+
+        And a window whose size differs from `size` in *opposite directions*
+        on the two axes -- wider but shorter, or narrower but taller -- is
+        not a candidate either, whatever the magnitudes. Decoration can only
+        make a window larger than its content on both axes (server-side
+        titlebar and borders) or smaller than the toolkit's shadow-inclusive
+        reckoning on both (client-side shadows), never one of each; a
+        listing that is one of each is a different window that happened to
+        fall within `_MAX_DECORATION`, which the assistant's main window did
+        (41 narrower, 52 taller) with a smaller misfit than the assistant's
+        own listing, 52 off on both axes for Mutter's shadow.
+        """
+        if self._window_geometry_source is None:
+            return []
+        try:
+            windows = self._window_geometry_source.windows()
+        except Exception:  # noqa: BLE001 - a sibling backend's own failure is not ours
+            return []
+        pid = _frame_pid(frame)
+        # Bounded like every other bus read in this module -- `_node_attr`'s
+        # own helper rather than a bare attribute read, so a frame whose
+        # name hangs cannot hang the geometry lookup that needed it.
+        title = _node_attr(frame, "name", None) or ""
+        matched = []
+        if pid is not None:
+            matched = [w for w in windows if getattr(w, "pid", None) == pid]
+        if not matched and title:
+            matched = [w for w in windows if getattr(w, "title", None) == title]
+        ranked = []
+        for window in matched:
+            rect = self._source_rect(window)
+            if rect is None:
+                continue
+            misfit = 0
+            if size is not None:
+                dw = size[0] - rect[2]
+                dh = size[1] - rect[3]
+                if abs(dw) > _MAX_DECORATION or abs(dh) > _MAX_DECORATION:
+                    continue
+                if (dw > 0 and dh < 0) or (dw < 0 and dh > 0):
+                    continue
+                misfit = abs(dw) + abs(dh)
+            same_title = (getattr(window, "title", None) or "") == title
+            ranked.append(((0 if same_title else 1, misfit), rect))
+        # A stable sort: windows the ranking cannot separate keep the
+        # source's own order, which is all the old first-listed rule was.
+        ranked.sort(key=lambda item: item[0])
+        return [rect for _, rect in ranked]
+
+    def _source_rect(self, window):
+        """`(x, y, width, height)` the geometry source reports for `window`, or None."""
         try:
             geom = self._window_geometry_source.geometry(window)
         except Exception:  # noqa: BLE001 - a sibling backend's own failure is not ours
             return None
         if geom is None:
             return None
-        return (geom[0], geom[1])
+        return (geom[0], geom[1], geom[2], geom[3])
+
+    def _shadow_margins(self, frame):
+        """How far in from `frame`'s own top-left its content starts, per axis.
+
+        `(left, top)` in the frame's WINDOW coordinates -- the smallest x
+        and the smallest y among its first `_SHADOW_PROBE_CHILDREN` direct
+        children that have a rectangle -- or None on an axis no child
+        answers for.
+
+        What a client-side-decorated GTK3 toplevel does not say about
+        itself and its children do: the frame's own rectangle counts the
+        drop shadow GTK draws around a CSD window, so it is bigger than the
+        window the compositor places, and the content sits inset from its
+        corner by the shadow's width. Measured live on GNOME (Adwaita): a
+        472x289 frame for a 420x237 window, the titlebar at (26, 23); on
+        COSMIC a 460x277 frame for 420x237, content at (20, 20); on KDE
+        a GTK3 file chooser 1186x963 for 1096x873, content at (45, 45).
+        No node reports the margin as such, but the children all start at
+        it, which is why the minimum over them recovers it -- when one of
+        the probed children is the titlebar. A `GtkAssistant`'s header
+        panel reports no rectangle at all (niri, GTK 3.24), so the minimum
+        there is the first page's content at (46, 80), which is why
+        `_client_inset` bounds the answer by half the size difference
+        rather than trusting it outright.
+        """
+        try:
+            children = _run_bounded(
+                self._call_timeout,
+                lambda: list(frame.children)[:_SHADOW_PROBE_CHILDREN],
+            )
+        except BackendCallTimeout:
+            raise
+        except Exception:  # noqa: BLE001 - a dead frame has no children
+            return (None, None)
+        left = top = None
+        for child in children:
+            rect = self._raw_extents(child, window=True)
+            if rect is None:
+                continue
+            left = rect[0] if left is None else min(left, rect[0])
+            top = rect[1] if top is None else min(top, rect[1])
+        return (left, top)
+
+    def _client_inset(self, frame, own, placed):
+        """Where the compositor's rectangle sits in the toolkit's, per axis.
+
+        `(dx, dy)` such that `placed`'s origin, minus it, is the screen
+        position of `own`'s WINDOW-coordinate origin -- the point every
+        WINDOW-coordinate rectangle in the frame is measured from. `own` is
+        `frame`'s own rectangle in WINDOW coordinates, `placed` the geometry
+        source's rectangle for the same window; the two differ by exactly
+        the window's decorations, which is what this reads off them, one
+        axis at a time from the size difference `d = own - placed`:
+
+        * `d < 0`: the compositor's window is *bigger* -- server-side
+          decorations, a titlebar and border the toolkit never sees (28px
+          on KDE Breeze, 36 on COSMIC, 40 on Mutter, measured for both GTK3
+          and Qt). The border is split evenly between the two sides and
+          the rest is the titlebar, so the client's origin is that far
+          *inside* the compositor's rectangle.
+        * `d == 0`: nothing decorates either rectangle differently, and
+          the frame's own WINDOW origin is the whole story -- (0, 0) for
+          a native Wayland client or a GTK4 one (measured: the compositor
+          and the toolkit agree on 420x200 exactly), or wherever a toolkit
+          puts it.
+        * `d > 0` with a non-zero origin: the toolkit's rectangle is the
+          bigger one *and it says by how much* -- GTK3 under X11 reports
+          its frame as (0, -37, 420, 237) in WINDOW coordinates against a
+          (420, 200) client window, the 37 being the window manager's
+          titlebar it was told about. The WINDOW origin already sits on
+          the client's corner, so no inset is needed.
+        * `d > 0` from (0, 0): the toolkit's rectangle is bigger and says
+          nothing about why -- a client-side shadow, GTK3's CSD, which
+          `_shadow_margins` reads off the children instead. Clamped to
+          *half* the size difference: the top-left margin is the shadow's
+          near side, and a shadow is drawn symmetric or offset downward
+          (Adwaita's is 26 left of 52 and 23 top of 52), never toward the
+          top-left, so a child starting further in than half the
+          difference is content laid out with padding, not the shadow.
+          The clamp was the whole difference until 2026-11-04, when a
+          `GtkAssistant` on niri -- whose header reports no rectangle, so
+          the first child with one was the page's content at (46, 80) --
+          placed its button 30px too high, measured by a click sweep;
+          half the difference puts it within 4px. Half the difference
+          outright where no child answers at all.
+
+        Every case was measured live before it was written down -- see
+        `tests/test_atspi.py`'s placement tests for the numbers -- and the
+        four together are what let one placement rule serve GTK3, GTK4 and
+        Qt on five compositors and X11 alike.
+        """
+        inset = [0, 0]
+        margins = None
+        dw = own[2] - placed[2]
+        dh = own[3] - placed[3]
+        for axis, d in enumerate((dw, dh)):
+            if d < 0:
+                side = (-dw) // 2 if dw < 0 else 0
+                inset[axis] = -side if axis == 0 else -max((-dh) - side, 0)
+            elif d == 0:
+                inset[axis] = own[axis]
+            elif own[axis] != 0:
+                inset[axis] = 0
+            else:
+                if margins is None:
+                    margins = self._shadow_margins(frame)
+                margin = margins[axis]
+                inset[axis] = d // 2 if margin is None else max(0, min(margin, d // 2))
+        return (inset[0], inset[1])
+
+    def _window_origin(self, frame):
+        """The screen position of `frame`'s WINDOW-coordinate origin, or None.
+
+        What turns a WINDOW-coordinate rectangle anywhere in `frame` into a
+        screen one by addition: the geometry source's best rectangle for
+        the frame (`_source_rects`), corrected for the decorations the two
+        sides count differently (`_client_inset`). None where the source
+        lists nothing plausibly this window, or the frame has no rectangle
+        of its own to compare against.
+        """
+        own = self._raw_extents(frame, window=True)
+        if own is None:
+            return None
+        rects = self._source_rects(frame, size=own[2:])
+        if not rects:
+            return None
+        inset = self._client_inset(frame, own, rects[0])
+        return (rects[0][0] - inset[0], rects[0][1] - inset[1])
+
+    def _placed_extents(self, node):
+        """`node`'s screen rectangle, placed by its window rather than reported.
+
+        For an element whose toolkit does not know where it is on screen:
+        its rectangle in WINDOW coordinates -- relative to its own toplevel,
+        the one coordinate space every toolkit measured fills in truthfully
+        -- plus the toplevel's real screen position from the geometry
+        source, via `_window_origin`. None where the node has no rectangle
+        at all; CapabilityUnsupported where it has one and the window
+        cannot be placed, which is a different fact and must not read as
+        the first.
+
+        Not None in that case because None means "this element has no
+        rectangle", which a caller reads as a fact about the element. Here
+        the element has a perfectly good window-relative rectangle and the
+        *window* has no position to add, so nothing can turn it into a
+        screen one. Returning None conflates the two and lands in the
+        caller as `TypeError: cannot unpack non-iterable NoneType object`
+        from unpacking the result, which names neither cause. Confirmed
+        live on niri 26.04, where `tile_pos_in_workspace_view` is null even
+        for an on-screen tiled window (see NiriBackend._rect) and so every
+        element in the tree hit this path.
+        """
+        rect = self._raw_extents(node, window=True)
+        if rect is None:
+            return None
+        frame = self._window_frame(node)
+        origin = None if frame is None else self._window_origin(frame)
+        if origin is None:
+            size = f"{rect[2]}x{rect[3]}"
+            if not self._screen_coords_trustworthy:
+                raise CapabilityUnsupported(
+                    Capability.ELEMENT_GEOMETRY,
+                    self.name,
+                    "this element's AT-SPI rectangle is window-relative on "
+                    "a native Wayland session and the compositor reports no "
+                    "position for its window, so it cannot be made "
+                    "screen-absolute. The element itself is fine: its size "
+                    f"is {size}. Ask "
+                    "is_window_viewable whether the window is on screen, and "
+                    "drive the element through its accessible action rather "
+                    "than a coordinate",
+                )
+            raise CapabilityUnsupported(
+                Capability.ELEMENT_GEOMETRY,
+                self.name,
+                "this element's application reports AT-SPI Component "
+                "extents that do not agree with its real window position "
+                "from a sibling backend -- a toolkit that is never told "
+                "where its window is (GTK4 answers (0, 0) for every element "
+                "it owns, on X11 as on Wayland) -- and that backend lists no "
+                "window of a plausible size to place the element's own, "
+                "window-relative rectangle against. The element itself is "
+                f"fine: its size is {size}. Wait for the window to be "
+                "mapped, or drive the element through its accessible action "
+                "or keyboard focus instead of a coordinate",
+            )
+        return (rect[0] + origin[0], rect[1] + origin[1], rect[2], rect[3])
 
     # -- elements ----------------------------------------------------------
 
@@ -1840,73 +2175,102 @@ class AtspiBackend(GUIBackend):
         extents at all drops out for the same reason, since nothing it says
         can be checked.
 
+        A toplevel whose application cannot be believed about its screen
+        position (`_app_coords_trustworthy` -- GTK4 on X11, a native
+        Wayland client in an XWayland session) is not skipped but asked in
+        its own terms: the point is moved into the toplevel's WINDOW
+        coordinates by `_window_origin` and the whole descent, hit test and
+        containment check alike, runs in that space, where the toolkit's
+        answers are good. Measured for the caller that needs it: the
+        recorder's X11 capture resolving a click on a GTK4 window, which
+        before this found nothing under the pointer at all. A toplevel
+        the geometry source cannot place is left out, not believed.
+
         A whole application is skipped rather than believed if it raises --
         an application that exits mid-walk is ordinary, and taking the hit
         test down with it would make this fail for reasons having nothing
         to do with the point asked about.
 
-        Requires genuinely trustworthy coordinates, not merely
-        `Capability.ELEMENT_GEOMETRY` -- `_element_coords_trustworthy` can
-        be true from a window-geometry source correcting `extents()`, but
-        `x`/`y` here are screen-absolute from the caller, compared directly
-        against every node's own, still window-relative rectangle; adding
-        a per-window offset to the point *and* to each candidate node
-        (which is in a different window every iteration) is a real piece
-        of work this has not been given. Left to `extents()`'s own fix
-        for now, since this driver's own work never calls `element_at`.
+        Still refused on a pure Wayland session, where every toplevel on
+        the desktop would need placing before any could be asked and the
+        answer would be the compositor's to give -- the sweep costs a
+        geometry-source round trip per window across every application,
+        for a result that still carries no stacking order. `extents()`
+        places one element at a time there, which is what the drivers use.
         """
         if not self._screen_coords_trustworthy:
             raise CapabilityUnsupported(
                 Capability.ELEMENT_GEOMETRY, self.name, _WAYLAND_COORDS
             )
-        try:
-            coords = self._pyatspi(Capability.ELEMENT_GEOMETRY).DESKTOP_COORDS
-        except CapabilityUnsupported:
-            # Same reasoning `extents` records below, and the same single
-            # constant: a pyatspi whose own import fails (Debian 13,
-            # Pop!_OS/COSMIC -- confirmed live) would otherwise make this
-            # method unusable on a desktop whose accessibility stack is
-            # fine. `Atspi.CoordType.SCREEN` is that constant's value from
-            # the same C enum, so nothing here really needs the module.
-            coords = _gi_screen_coords()
         best = None
         best_area = None
         applications = _run_bounded(
             self._call_timeout, lambda: list(self._tree.root.applications())
         )
         for app in applications:
-            for node in self._hits_in(coords, app, x, y):
-                area = self._area(node)
+            for node, window in self._hits_in(app, x, y):
+                area = self._area(node, window)
                 if best is None or area < best_area:
                     best, best_area = node, area
         return Element(best) if best is not None else None
 
-    def _hits_in(self, coords, app, x, y):
-        """The deepest believable node under each of one app's toplevels."""
-        found = []
+    def _hits_in(self, app, x, y):
+        """The deepest believable node under each of one app's toplevels.
+
+        Each paired with whether it was found in WINDOW coordinates, which
+        `_area` needs to read its rectangle in the same space. The point
+        is moved into that space once per toplevel, up front, and every
+        step below -- `_descend`, `_past_a_container`, `_covers` -- then
+        compares like with like without knowing which space it is in.
+
+        A toplevel that raises is skipped on its own rather than taking its
+        application's others with it: a dead application fails at the
+        child listing and contributes nothing either way, but a popup the
+        geometry source does not list, or a frame reaped mid-walk, must not
+        cost the main window beside it its answer.
+        """
+        found: list[tuple[Any, bool]] = []
         try:
             frames = _run_bounded(self._call_timeout, lambda: list(app.children))
-            for frame in frames:
-                if self._covers(frame, x, y):
-                    found.append(self._descend(coords, frame, x, y))
         except BackendCallTimeout:
             raise
         except Exception:  # noqa: BLE001 - a dead application is not an error
             return found
+        for frame in frames:
+            try:
+                if self._app_coords_trustworthy(frame):
+                    window, px, py = False, x, y
+                else:
+                    origin = self._window_origin(frame)
+                    if origin is None:
+                        continue
+                    window, px, py = True, x - origin[0], y - origin[1]
+                if self._covers(frame, px, py, window):
+                    found.append((self._descend(frame, px, py, window), window))
+            except BackendCallTimeout:
+                raise
+            except Exception:  # noqa: BLE001 - a frame gone mid-walk is not an error
+                continue
         return found
 
-    def _descend(self, coords, node, x, y):
-        """Follow the point down to the deepest node that really covers it."""
+    def _descend(self, node, x, y, window=False):
+        """Follow the point down to the deepest node that really covers it.
+
+        `x`/`y` are in the space `window` names -- screen, or `node`'s
+        toplevel's WINDOW coordinates -- and so is every rectangle read on
+        the way down.
+        """
+        coords = self._coord_type(window)
         for _ in range(_MAX_DEPTH):
             child = _at_point(coords, node, x, y)
-            if child is None or not self._covers(child, x, y):
-                child = self._past_a_container(coords, node, x, y)
+            if child is None or not self._covers(child, x, y, window):
+                child = self._past_a_container(coords, node, x, y, window)
             if child is None:
                 return node
             node = child
         return node
 
-    def _past_a_container(self, coords, node, x, y):
+    def _past_a_container(self, coords, node, x, y, window=False):
         """A covering node one level further down, where the walk dead-ends.
 
         The descent assumes the tree nests geometrically: that a node
@@ -1933,8 +2297,8 @@ class AtspiBackend(GUIBackend):
         than searching the subtree, so it adds one level of fan-out and not
         a walk. The node it returns still has to cover the point, which is
         the invariant `element_at` rests on: a toolkit reporting widgets in
-        window coordinates -- a native Wayland client cannot do otherwise --
-        is refused here exactly as it was before.
+        window coordinates while being asked in screen ones is refused
+        here exactly as it was before.
         """
         try:
             children = _run_bounded(self._call_timeout, lambda: list(node))
@@ -1955,25 +2319,49 @@ class AtspiBackend(GUIBackend):
                 raise
             except Exception:  # noqa: BLE001 - try the next child instead
                 continue
-            if found is not None and self._covers(found, x, y):
+            if found is not None and self._covers(found, x, y, window):
                 return found
         return None
 
-    def _covers(self, node, x, y):
-        """Whether the node's own rectangle contains the point."""
-        rect = self._extents(node)
+    def _covers(self, node, x, y, window=False):
+        """Whether the node's own rectangle contains the point, in one space."""
+        rect = self._raw_extents(node, window=window)
         if rect is None:
             return False
         left, top, width, height = rect
         return left <= x < left + width and top <= y < top + height
 
-    def _area(self, node):
+    def _area(self, node, window=False):
         """How much screen the node covers. Only asked of a node that does."""
-        rect = self._extents(node)
+        rect = self._raw_extents(node, window=window)
         return 0 if rect is None else rect[2] * rect[3]
 
-    def _extents(self, node):
-        """One node's screen rectangle, or None where it has no useful one.
+    def _coord_type(self, window=False):
+        """The AT-SPI constant naming a coordinate space: SCREEN, or WINDOW.
+
+        From pyatspi where it imports, from `Atspi.CoordType` where it does
+        not: python3-pyatspi 2.46.1 against a newer PyGObject (Debian 13,
+        confirmed live) fails inside its own `import pyatspi` -- see
+        `_pyatspi` -- which would make ELEMENT_GEOMETRY entirely
+        unavailable there if anything here actually needed the module. All
+        it ever wanted was one integer constant, and the GI enum is the
+        same value from the same underlying C enum, so there is no real
+        dependency on the broken import to route around.
+        """
+        try:
+            pyatspi = self._pyatspi(Capability.ELEMENT_GEOMETRY)
+        except CapabilityUnsupported:
+            return _gi_window_coords() if window else _gi_screen_coords()
+        return pyatspi.WINDOW_COORDS if window else pyatspi.DESKTOP_COORDS
+
+    def _raw_extents(self, node, window=False):
+        """One node's own reported rectangle, uncorrected.
+
+        `(x, y, width, height)`, or None where it has no useful one -- see
+        `_extents` for what "uncorrected" leaves open. In screen
+        coordinates, or with `window=True` in WINDOW coordinates: relative
+        to the node's own toplevel, the space `_placed_extents` reads in
+        and `_gi_window_coords` describes.
 
         Goes to the Component interface rather than dogtail's own
         `Node.extents`, which retries in *window* coordinates whenever the
@@ -1981,24 +2369,19 @@ class AtspiBackend(GUIBackend):
         Wayland client, which reports (0, 0) for everything -- but it hands
         back a rectangle in a different coordinate space with nothing to
         say so, and a caller comparing element rectangles against
-        `geometry()`'s window one cannot tell the two apart. This backend
-        answers in screen coordinates or not at all; ELEMENT_GEOMETRY is
-        withheld in the session where they would be meaningless.
+        `geometry()`'s window one cannot tell the two apart. Here the
+        caller names the space it wants and gets that one or nothing.
+
+        What "no useful one" means is purely about *this node*: a dead
+        node, an unplaced one, one with no Component interface at all.
+        Whether the number this returns can be *believed* as a screen
+        position is `_extents`'s question, asked once this has answered;
+        keeping that question out of here is what lets `_app_coords_
+        trustworthy` call this on a frame to get its raw, uncorrected
+        position to check against ground truth, without it looping back
+        into the same correction it is trying to verify.
         """
-        try:
-            pyatspi = self._pyatspi(Capability.ELEMENT_GEOMETRY)
-            coords = pyatspi.DESKTOP_COORDS
-        except CapabilityUnsupported:
-            # python3-pyatspi 2.46.1 against a newer PyGObject (Debian 13,
-            # confirmed live) fails inside its own `import pyatspi` -- see
-            # `_pyatspi` -- which would make ELEMENT_GEOMETRY entirely
-            # unavailable there if this method actually needed the module.
-            # It only ever wanted one integer constant from it, and
-            # `Atspi.CoordType.SCREEN` is the same value from the same
-            # underlying C enum, so there is no real dependency on the
-            # broken import to route around.
-            pyatspi = None
-            coords = _gi_screen_coords()
+        coords = self._coord_type(window)
 
         def _get_extents():
             return node.queryComponent().getExtents(coords)
@@ -2055,42 +2438,180 @@ class AtspiBackend(GUIBackend):
         # Shell 51.rc; see docs/validation.md.
         if rect.x <= _UNPLACED or rect.y <= _UNPLACED:
             return None
-        x, y = rect.x, rect.y
+        return (rect.x, rect.y, rect.width, rect.height)
+
+    def _extents(self, node):
+        """One node's screen rectangle, or None where it has no useful one.
+
+        Gets the raw, uncorrected rectangle from `_raw_extents` and then
+        decides whether it means what it says -- two ways it might not,
+        with one fix between them:
+
+        **Wayland.** The rectangle is window-relative, not screen-absolute
+        -- see `_element_coords_trustworthy` -- because a pure Wayland
+        client is never told its own screen position. The *relative*
+        numbers underneath are themselves good: a child really is offset
+        from its window's top-left by what it reports, so adding the
+        window's real position recovers it.
+
+        **A toolkit that does not know where its window is, on a session
+        where others do.** GTK4 answers `(0, 0)` in screen coordinates for
+        every element it owns -- frame and deeply nested child alike, with
+        correct sizes throughout -- on X11 exactly as on Wayland, measured
+        on 4.24.1 across seven desktops; and any native Wayland client
+        does the same in a session this backend classifies as XWayland
+        (both `DISPLAY` and `WAYLAND_DISPLAY` set -- KDE Plasma, a GNOME
+        terminal), where Qt and GTK3 X11 clients in the same session
+        report real positions. Neither is a session-wide fact the way
+        Wayland's is, so `_app_coords_trustworthy` decides per
+        application, by checking the frame's own reported position against
+        a sibling backend's independently-known real one -- cheaply
+        wrong-looking (zero) is not evidence on its own, since a window
+        legitimately sitting at (0, 0) must not be "corrected" into being
+        wrong.
+
+        Both are then the same problem with the same fix, which is why
+        there is one: the element's rectangle in *WINDOW* coordinates --
+        the space every toolkit measured fills in truthfully, GTK4
+        included -- placed by its toplevel's real screen position from the
+        geometry source. `_placed_extents` does that; the earlier belief
+        that GTK4's answer was unrecoverable rested on reading only screen
+        coordinates, where it is.
+        """
         if not self._screen_coords_trustworthy:
-            # The rectangle above is window-relative, not screen-absolute --
-            # see _element_coords_trustworthy -- so it needs a real window
-            # position added before it means anything as a screen point.
-            # Only reached at all when that capability was granted, which
-            # only happens with a geometry source wired in, so this offset
-            # is never silently skipped for one this method actually needed.
-            offset = self._window_offset(node)
-            if offset is None:
-                # Not None: that answer means "this element has no
-                # rectangle", which a caller reads as a fact about the
-                # element. This is a different fact -- the element has a
-                # perfectly good window-relative rectangle and the *window*
-                # has no position to add, so nothing here can turn it into
-                # a screen one. Returning None conflates the two and lands
-                # in the caller as `TypeError: cannot unpack non-iterable
-                # NoneType object` from unpacking the result, which names
-                # neither cause. Confirmed live on niri 26.04, where
-                # `tile_pos_in_workspace_view` is null even for an
-                # on-screen tiled window (see NiriBackend._rect) and so
-                # every element in the tree hit this path.
-                raise CapabilityUnsupported(
-                    Capability.ELEMENT_GEOMETRY,
-                    self.name,
-                    "this element's AT-SPI rectangle is window-relative on "
-                    "a native Wayland session and the compositor reports no "
-                    "position for its window, so it cannot be made "
-                    "screen-absolute. The element itself is fine: its size "
-                    f"is {rect.width}x{rect.height}. Ask "
-                    "is_window_viewable whether the window is on screen, and "
-                    "drive the element through its accessible action rather "
-                    "than a coordinate",
-                )
-            x, y = x + offset[0], y + offset[1]
-        return (x, y, rect.width, rect.height)
+            # Only reached at all when ELEMENT_GEOMETRY was granted, which
+            # only happens with a geometry source wired in, so the placement
+            # is never silently skipped for a session that actually needed it.
+            return self._placed_extents(node)
+        if self._app_coords_trustworthy(node):
+            return self._raw_extents(node)
+        return self._placed_extents(node)
+
+    def _app_coords_trustworthy(self, node):
+        """Whether `node`'s application can be believed about its own position.
+
+        Verified against a sibling backend's independent answer rather
+        than guessed from the value.
+
+        Only ever asked when `_screen_coords_trustworthy` already says yes
+        -- this narrows a session that is not Wayland but whose particular
+        application still cannot be believed; see `_extents` for the full
+        reasoning and the measurement behind it. False does not refuse the
+        element: it sends it down the same placement path a Wayland
+        session uses, `_placed_extents`.
+
+        Deliberately not a per-value heuristic ("it's zero, so it must be
+        wrong"): a window can legitimately sit at (0, 0), and dogtail's own
+        retry-at-origin trick is rejected elsewhere in this module for
+        exactly that reason -- it cannot tell a genuine (0, 0) from a wrong
+        one. This checks the one thing that actually can: the window's own
+        reported position against ground truth from a backend that never
+        goes through the same, possibly-broken Component call at all.
+
+        Cached per pid -- a fact about the application, asked once per
+        session and remembered, not re-verified on every element inside it.
+        Only a real verdict is cached, though: a frame the sibling backend
+        does not list yet (an application still mapping its first window
+        when `element_at` swept past it) is trusted *for now*, not for the
+        rest of the session, or one sweep's timing would decide every
+        later `extents()` on that application.
+
+        The pid is read off `node` itself rather than off its frame -- it
+        is the application's, so any of its nodes answers it, and the read
+        goes to the bus daemon, not the application. That keeps the cached
+        path at one bounded call per `extents()`; the walk up to the frame
+        is paid only on a miss. Without a geometry source there is nothing
+        this could ever check against, so that path costs nothing at all
+        -- the strict majority of sessions, and every existing X11
+        behaviour in them, stays exactly as it was.
+        """
+        if self._window_geometry_source is None:
+            return True
+        pid = _frame_pid(node)
+        if pid is None:
+            return True
+        verdict = self._app_coords_verified.get(pid)
+        if verdict is None:
+            frame = self._window_frame(node)
+            if frame is None:
+                return True
+            verdict = self._verify_app_coords(frame)
+            if verdict is None:
+                return True
+            self._app_coords_verified[pid] = verdict
+        return verdict
+
+    def _verify_app_coords(self, frame):
+        """The one-time check behind `_app_coords_trustworthy`.
+
+        True or False where there was something to decide on, None where
+        there was not -- no geometry source, nothing plausibly this window
+        listed for the application, no readable rectangle on the frame
+        itself -- so the caller can tell "verified fine" from "could not
+        be checked" and cache only the former.
+
+        The frame's two rectangles decide it on their own where they can,
+        before any listing is consulted. A frame at (0, 0) in screen
+        coordinates whose WINDOW-coordinate rectangle is the very same is
+        False: that is the signature of a toolkit that has never been told
+        where its window is, and it is complete in itself -- a toolkit
+        that *has* been told puts the WINDOW origin on its client window
+        and the screen origin on the screen, and the two agree only for an
+        undecorated window actually at the screen's corner, which the
+        placement path answers identically anyway. GTK4 shows it on every
+        desktop; a native Wayland GTK3 or Qt client shows it in an
+        XWayland-classified session. Measured on every box, and the one
+        verdict the listing could never reach: a window still unmapped is
+        unlisted, and before this the broken toolkit was trusted *for now*
+        and every `extents()` on it answered its window's corner.
+
+        And two rectangles that *differ* are True, by the same reasoning
+        run forwards: a toolkit can only answer the two coordinate types
+        differently by subtracting an origin it knows, so the screen answer
+        is one it was told, not one it made up. GTK3 on X11 puts its frame
+        at (0, -titlebar) in WINDOW coordinates and at its real position in
+        SCREEN; Qt on X11 subtracts the toplevel's origin. Measured live on
+        GhostBSD's marco, where the listing check below condemned exactly
+        such an application: a GTK3 `GtkAssistant` the application never
+        titled was absent from the compositor's listing (the x11 backend
+        then dropped untitled windows), so the only plausibly-sized
+        toplevel left for its pid was the main window, 337 pixels to its
+        left -- and the whole application was placed by that main window
+        from then on, the assistant's button reported at (139, 113) where
+        it sat at (401, 359).
+
+        Only a frame whose rectangles agree *away* from (0, 0) -- a
+        toolkit answering the screen rectangle for both types -- is left
+        for the listing: compared against every toplevel the source lists
+        for the application that is plausibly this one, `_source_rects`
+        with the frame's own size, since pid alone cannot say which of an
+        application's windows `frame` is. A dialog checked against its own
+        main window's position would disagree by the dialog's whole offset
+        and condemn an application whose coordinates are perfectly good;
+        with the main window filtered out by size, a dialog the source has
+        not listed yet is "could not be checked", not "wrong".
+        """
+        raw = self._raw_extents(frame)
+        if raw is None:
+            return None
+        own = self._raw_extents(frame, window=True)
+        if own is not None and own != raw:
+            return True
+        if raw[0] == 0 and raw[1] == 0 and own == raw:
+            return False
+        rects = self._source_rects(frame, size=raw[2:])
+        if not rects:
+            return None
+        # Decoration offsets between what AT-SPI calls the frame and what a
+        # window manager calls the window are real but small; 50px is
+        # comfortably past any of those while still catching the measured
+        # case, which is wrong by the application's *entire* screen
+        # position, not by a titlebar's height.
+        tolerance = 50
+        return any(
+            abs(raw[0] - x) <= tolerance and abs(raw[1] - y) <= tolerance
+            for x, y, _, _ in rects
+        )
 
     # -- windows -----------------------------------------------------------
 

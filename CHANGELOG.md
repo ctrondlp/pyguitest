@@ -7,6 +7,384 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.21.0] — 2026-11-04
+
+Everything here was found by driving a GTK4 (4.24.1) application through
+the public API on the fleet — the first GTK4 fixture pyguitest-torture-test
+has had — and each fix was then re-run live against it on Debian GNOME,
+Pop!_OS/COSMIC, Omarchy/Hyprland and KaOS/niri. The placement work was then
+re-measured with a census application that opens every kind of toplevel
+GTK3, GTK4 and Qt have (file, message, colour, font and about dialogs, a
+plain dialog, a second window, an assistant/wizard, a popup menu) on those
+four plus Ubuntu GNOME, Fedora KDE, and X11 under Linux Mint's Cinnamon and
+GhostBSD's marco — and finally checked the only way that settles placement,
+by clicking at every placed rectangle and asking the control whether the
+click arrived (22 of 22 on niri, 21 of 21 on KDE, 19 of 19 on COSMIC, 22
+of 22 on Hyprland — the last of those a miss until the uinput fix below,
+which that census is what found — and, over the X server's own
+rectangles, 27 of 27 on GhostBSD and 17 of 17 on Mint). A minor
+rather than a patch because `Element.click()`,
+`extents()`, `wait_until_gone()` and the x11 backend's `windows()` and
+`active_window()` all answer differently in cases they answered before, and
+because `Role` gains members (which is what pins the recorder's `PROFILE`
+to this line).
+
+### Added
+
+- **`Role.SWITCH`, `Role.TREE_TABLE` and `Role.LEVEL_BAR`.** The roles a
+  GTK4 `GtkSwitch`, `GtkColumnView` and `GtkLevelBar` report, measured live.
+  None is an alias of an existing member: Qt has no switch (a `QCheckBox` is
+  `check box`), a `GtkColumnView` is GTK's replacement for the deprecated
+  `GtkTreeView` yet reports `tree table` rather than `tree`, and its cells
+  publish `listitem.scroll-to` rather than `click`/`press`, so code written
+  against `tree`'s action-click pattern would find nothing to act on if the
+  two were folded together. A level bar is a read-only value display like a
+  `progress bar`, but a distinct role with nothing mapping the two.
+
+- **`Element.click()` takes a control's `activate` action as a last resort.**
+  Only after every click-like verb (`click`, `press`, `toggle`, `show-menu`)
+  has failed to match, and only on a role that is not text-bearing
+  (`Role.TEXT_ROLES`). A GTK4 `GtkExpander` publishes `activate` and nothing
+  else — no `click`, no `press` — so `click()` fell straight through to the
+  coordinate route, and on a session where the toolkit publishes no usable
+  screen position either it never drove the control at all; the
+  torture-test driver had been routing `do_action("activate")` itself to
+  paper over that, which is now gone. The role gate is the point: a plain
+  `GtkEntry` publishes `activate` as *its* only action too, and there it
+  means "the user pressed Enter", so an entry still takes the coordinate
+  route (or refuses, where there is none) rather than silently submitting a
+  form on a call that asked for a click. Measured live on all four Wayland
+  boxes: the expander opens (`Toggled: More Options = open`), the entry's
+  status is untouched.
+
+### Changed
+
+- **`extents()` places an element whose toolkit does not know where its
+  window is, instead of believing it.** GTK4 4.24.1, measured live on every
+  desktop in the fleet: every one of its AT-SPI nodes — the frame and the
+  deepest child alike — reports its *screen* position as `(0, 0)` with a
+  correct size, on X11 exactly as on Wayland, while Qt and GTK3 in the same
+  X11 session report real positions. Before, that answer was taken at its
+  word and every control of such an application was reported at the
+  screen's corner, confidently. The same nodes answer truthfully in AT-SPI's
+  *window* coordinate type (`Atspi.CoordType.WINDOW`, relative to their own
+  toplevel) — measured for GTK3, GTK4 and Qt, under Mutter, KWin, COSMIC,
+  Hyprland, niri and X11 — so that is what the backend now reads for an
+  application it cannot believe, and adds the toplevel's real screen
+  position from the sibling `WINDOW_GEOMETRY` backend (`x11` on such a
+  session; `gnomeshell`, `kwin`, `cosmic` on their desktops). The verdict
+  is per application and, for every toolkit measured, needs no listing to
+  reach: a frame answering `(0, 0)` on screen *and* the same rectangle in
+  window coordinates has never been told where it is, and a frame whose two
+  rectangles *differ* has — a toolkit can only answer the two coordinate
+  types differently by subtracting an origin it was told (GTK3 on X11 puts
+  its frame at `(0, -titlebar)` in window coordinates, Qt subtracts the
+  toplevel's origin), so its screen answer is believed on that alone. Only a
+  frame answering one rectangle for both types, off the origin, is checked
+  against every toplevel the sibling lists for its pid, within 50 px, and
+  only a real comparison is cached — a window the sibling has not listed yet
+  is trusted for now, not for the session. The second rule was added after
+  the listing check condemned a sound application on GhostBSD: a GTK3
+  assistant the application never titled was missing from the x11 listing
+  (see below), the only plausibly-sized toplevel left for its pid was the
+  main window 337 px away, and the whole application was placed by that main
+  window from then on — the assistant's button reported at `(139, 113)`
+  where it sat at `(401, 359)`. The one shape the first rule cannot tell
+  from GTK4 is a window genuinely at the screen's corner, and it is placed
+  to the same number its raw answer would have been. A session with
+  no sibling geometry source is exactly as before. `element_at()` asks such
+  an application in window coordinates, with the point moved into them by
+  the window's real position, rather than passing it over — the recorder's
+  X11 capture resolving a click on a GTK4 window found nothing before.
+  Where the sibling lists no window of a plausible size for the frame, the
+  answer is `CapabilityUnsupported(ELEMENT_GEOMETRY)` with the element's
+  (correct) size and the advice to wait for the window or drive the control
+  through its action, not `(0, 0, w, h)` and not `None` (which means the
+  element has no rectangle). `geometry()` on such an application's own
+  AT-SPI `Window` still answers what the toolkit says.
+
+- **On Wayland, an element in a dialog is placed by the dialog's own
+  position, and a client-side-decorated window's by where its content
+  starts.** Two placement bugs measured together on GNOME, KDE and COSMIC,
+  for GTK3 and Qt alike, by opening every kind of toplevel each toolkit has.
+  First, pid names an application, not a window: the sibling backend lists
+  a main window and its open dialog under one pid, main window first, and
+  every control in the dialog was placed by the main window's position —
+  a dialog's OK button came back hundreds of pixels from where it was. The
+  sibling's listings are now ranked, a window carrying the frame's own
+  title first and then by how closely its size fits the frame's, and a
+  listing further than 160 px from the frame's size on either axis is not
+  a candidate at all. Two refinements from the census, both for a GTK3
+  assistant the application never titled, which on Debian and Ubuntu GNOME
+  was placed by the application's main window and reported 41 px off: an
+  empty name matches an empty title, so a nameless frame ranks its
+  application's untitled window above its titled main window the way a
+  named frame ranks the window carrying its name (the fallback for a source
+  that lists no pid at all, COSMIC's, still needs a non-empty title, or an
+  empty one would match every untitled window on the desktop); and a
+  listing wider but shorter than the frame, or narrower but taller, is not
+  a candidate whatever the magnitudes — decoration makes a window larger
+  than its content on both axes or smaller on both, never one of each, and
+  the main window was 41 narrower and 52 taller with a *smaller* misfit
+  than the assistant's own listing, 52 off on both axes for Mutter's
+  shadow. What that leaves unplaceable, on a source with no pids, is a
+  frame the source cannot name: an untitled one, or one whose accessible
+  name is not its window title — GTK3's `GtkMessageDialog` reports its
+  name as `Question` on COSMIC whatever its title — and there the answer
+  is the typed `CapabilityUnsupported`, not a guess. Second, the two sides
+  count decorations differently
+  and the difference was ignored: a GTK3 client-side-decorated toplevel
+  reports itself 52 px bigger than the window Mutter places (its drop
+  shadow, content starting at `(26, 23)` inside), a Qt window under Mutter
+  is 40 px *smaller* than the compositor's (a server-side titlebar and 1 px
+  border), under KWin 28 px (titlebar alone), and GTK4 agrees with the
+  compositor exactly. Each shape is now read off the size difference and,
+  for a shadow, off where the frame's children start, so a button at
+  `(34, 93)` in a GTK3 frame listed at `(750, 438)` is answered at
+  `(758, 508)` — the point it is actually drawn at — where it used to be
+  answered at `(784, 531)`. The arithmetic is one rule for X11 and Wayland;
+  see `_client_inset` in the atspi backend for the four cases and the
+  measurements behind each. One correction from the click census: the
+  shadow margin read off the children is bounded by *half* the size
+  difference, not the whole of it. A `GtkAssistant`'s header panel reports
+  no rectangle, so the first child with one was the page's content at
+  `(46, 80)`, and clamped to the 52 px difference that placed the button
+  30 px too high on niri — a shadow is symmetric or offset downward, never
+  toward the top-left, so its near side cannot exceed half, which lands
+  the assistant within 4 px and moves no margin measured before (26/23 of
+  52, 20 of 40, 45 of 90).
+
+### Fixed
+
+- **On niri, every `move_mouse()` landed at two thirds of its x and three
+  quarters of its y.** The uinput device's absolute axes are declared for
+  the screen size when it is created, and the wlroots branch of that lookup
+  asked only `swaymsg` and `hyprctl` — neither of which a niri desktop has
+  — so the device was declared for the 1920x1080 fallback on KaOS's
+  1280x800 output and libinput scaled every position onto it. The
+  2026-10-14 KaOS validation had recorded `POINTER_MOVE` true, and it was:
+  the device was created; no click had been checked. niri's own `Outputs`
+  request, the one `screens()` already reads, is now the source, chosen on
+  `NIRI_SOCKET` the way the backend itself is. Measured by a sweep of 121
+  clicks around a placed dialog button: none arrived before, the centre
+  arrives now.
+
+- **A uinput `move_mouse()` to where it last put the pointer was no event
+  at all, and on Hyprland the click after it went to the wrong window.**
+  The kernel drops an absolute event whose value equals the axis's current
+  one before any handler sees it, so writing the same pair again reached
+  neither libinput nor the compositor. Most compositors tell a window that
+  maps under a stationary pointer that the pointer is there; Hyprland only
+  re-picks the surface under the pointer on motion, so a dialog opened
+  under the pointer left by the click that cancelled the previous one got
+  the next click delivered to the window beneath it. The census was what
+  showed it: the one miss on Omarchy, a GTK4 Open dialog's Cancel at the
+  exact point the Save dialog's Cancel had just answered, two clicks
+  ignored and a third after a one-pixel nudge answered — the same for
+  GTK3, and the same sequence on KDE, COSMIC, niri, GNOME and X11
+  answering the first click. The backend now steps one pixel aside before
+  a repeated position, so every `move_mouse()` is a motion; that also
+  covers a pointer moved by another device in between, which the repeated
+  write would have left where it was. 22 of 22 on Hyprland after.
+
+- **`NIRI_SOCKET` on its own makes the session a wlroots one, as `SWAYSOCK`
+  and `HYPRLAND_INSTANCE_SIGNATURE` already did.** niri on KaOS is started
+  by greetd with no `XDG_CURRENT_DESKTOP` and only hands one to the clients
+  it spawns, so a `connect()` from an ssh shell — `NIRI_SOCKET` recovered
+  from the socket file — reported `compositor other` and composed without
+  the niri backend, which is why `extents()` there refused every element
+  with "the compositor reports no position" while the compositor was
+  happily reporting positions. `pyguitest debug`'s environment block now
+  prints `NIRI_SOCKET` beside the other two.
+
+- **The x11 backend's `windows()` lists an untitled window, as `title=""`,
+  instead of dropping it.** Its listing was "every toplevel with a title",
+  which is not what the base contract (every toplevel currently known) or
+  any other backend answers: win32 and the Wayland backends have always
+  listed an untitled window as `""`. Measured live on GhostBSD's marco with
+  the census application, two whole dialogs were unreachable by everything
+  built on the list — `find_windows`, `window_at`, and the placement above,
+  which puts an element on screen by the listing of its window. GTK4's
+  `Gtk.AlertDialog` sets no WM_NAME at all (and no accessible name), so its
+  buttons' `extents()` raised `CapabilityUnsupported`; a GTK3
+  `GtkAssistant` the application never titled was placed by the
+  application's main window, the only listing left with its pid, and
+  reported 262 px off. Both now place correctly on GhostBSD and Mint. The
+  root window is still not a toplevel on the tree-walk path (mapped,
+  non-override-redirect and nameless, it would otherwise list as a
+  screen-sized window under every point), and a window that closes between
+  the listing and its title read is still skipped rather than listed as
+  untitled — `_title` now tells the two apart.
+
+- **The x11 backend's `active_window()` answers with the toplevel the
+  listing knows, not the toolkit's focus child.** GDK3 gives every toplevel
+  a mapped 1x1 InputOnly child at (-1, -1) and sets the X input focus on
+  *that*, so `XGetInputFocus` answered an untitled, pid-less window nothing
+  lists, and `wait_window_focus()` on a GTK3 dialog stayed False for as long
+  as the dialog held focus — while the Escape sent on the strength of that
+  answer closed the dialog anyway, which is how the torture-test driver
+  recorded four "never took keyboard focus" findings per run on GhostBSD's
+  marco and Mint's Cinnamon, against Qt's own file, colour and font
+  choosers, which are GTK3 dialogs under the `gtk3` platform theme. A
+  Qt-drawn dialog focuses its toplevel directly and never showed it. The
+  focused window is now climbed to the nearest ancestor the window manager
+  lists (`_NET_CLIENT_LIST_STACKING`), or to the child of the root where
+  there is no list; the root itself, a popup no manager lists, and an
+  ancestry that cannot be read are handed back as they were. Pre-existing
+  — 0.20.2 answers the same — and measured on marco: focus on `0x4200008`,
+  the InputOnly child of `0x4200007` "Census File", reported as the dialog
+  now, and both drivers' Qt runs went from four dialog-focus failures each
+  to every control verified. The same InputOnly window is also no longer a
+  toplevel on the tree-walk listing path: it is mapped and not
+  override-redirect, so without a client list it would have been listed
+  beside its parent as a second, untitled window of the same pid.
+
+- **`Role.ALERT` and `Role.FILE_CHOOSER`, and both count as windows.** What
+  a message box and a file dialog really publish on the bus, measured live
+  on seven desktops: GTK3's `GtkMessageDialog` and Qt's `QMessageBox` are
+  `alert`, `GtkFileChooserDialog` (and so Qt's `QFileDialog` on a GTK
+  platform theme) is `file chooser` — neither is `dialog`, and GTK4's
+  `Gtk.AlertDialog` is a plain `dialog`. Before, `windows()` listed neither,
+  so a driver waiting for a Save dialog never saw it, and the walk from a
+  control up to its window passed straight through either to the
+  application: every control in a Save or message dialog had no window to
+  be placed in and its `extents()` were refused on every Wayland desktop.
+  Both are in `Role.WINDOW_ROLES` now, and the ascent also stops at an
+  application's direct child whatever role it publishes — AT-SPI hangs every
+  toplevel straight off its application, so that child *is* the window, for
+  roles no toolkit has published yet.
+
+- **`wait_until_gone()` treats a match that is present but no longer visible
+  as gone.** Closing a GTK4 popover with Escape leaves the menu's node in
+  the tree, `showing` False, for long enough that a 2-second
+  `wait_until_gone(role="menu")` had something to find on its first several
+  polls and timed out. A caller watching a toast or a spinner disappear
+  means "gone from my screen", not "every trace garbage-collected" — and a
+  plain `Element`, unlike a `Window`, carries nothing a caller could re-check
+  the specific node against anyway. Each match's own `.visible` is read
+  rather than passing `visible=` into every backend's `find_elements` for a
+  filter nobody asked for; a node that cannot even answer counts as gone,
+  the way stale-node reads degrade everywhere else. Measured live: True in
+  ~0.13 s on all four boxes.
+
+- **`detect()` says *why* dogtail is unusable when the process has already
+  pinned GTK to another version.** `has_dogtail` came from a spec-and-loader
+  check that never imports anything, so a test that did
+  `gi.require_version("Gtk", "4.0")` before `connect()` kept getting
+  `has_dogtail=True` right up to the `ValueError: Namespace Gtk is already
+  loaded with version 4.0` that dogtail's own import then raised. It is now
+  False there, with a note naming the pinned version and the fix (import GTK
+  after `connect(backend=["atspi"])`, or run element automation in a
+  separate process) — distinct from the "not installed" note, whose advice
+  (install the `atspi` extra) would do nothing for this. Asked through
+  `gi.get_required_version`, which is read-only, so finding out does not
+  itself pin GTK to 3.0 on a caller that has not yet chosen.
+
+- **The x11 backend's `geometry()`, `window_at()`, `move_window()`/
+  `resize_window()` and `capture(window=)` now agree about where a
+  client-side-decorated window's own edge is, instead of each answering a
+  different rectangle that includes the compositor's translucent drop
+  shadow.** A GTK3 or GTK4 toplevel under a compositing window manager on
+  X11 (measured on marco) makes its actual X window bigger on every side
+  than the window the user sees, and declares the margin itself as
+  `_GTK_FRAME_EXTENTS` (`CARDINAL[4]`: left, right, top, bottom) — a fact
+  the x11 backend was not reading at all, so `geometry()` answered the
+  X window's own, shadow-inflated rectangle, `window_at()` treated a click
+  in the shadow as landing inside the window, a `move_window()`/
+  `resize_window()` positioned the X window's corner rather than the
+  corner the user would recognize as the window's, and a `window=` capture
+  included a translucent border around the real content. Measured: an X
+  window at `(0, 28, 1024, 716)` with extents `(30, 30, 24, 41)` is really a
+  `(30, 52, 964, 651)` window, and all four now agree on that rectangle
+  through one shared helper. The property is read fresh on every call,
+  never cached: a maximized window has GTK zero its own extents (so the
+  whole X window is the answer, correctly), a window launched with no
+  compositor running declares no property at all (GTK draws a 1 px solid
+  outline *inside* the X window instead of a shadow outside it, so nothing
+  needs subtracting), and toggling compositing live is reflected on the
+  next read. A margin that would swallow the window entirely — larger than
+  the X window itself, which should not happen but is not trusted blindly
+  — is ignored rather than producing a negative or inverted rectangle. The
+  atspi backend's own placement work above is unaffected: for a GTK4
+  toplevel it already computes a zero inset against this backend's
+  `geometry()`, which is what made the shadow invisible from the accessible
+  tree's own numbers while being very visible to anything that asked the
+  X server directly — a driver's `element_at()` for a point just outside
+  the visible window, in the shadow, used to find the window's own
+  controls; it now correctly finds nothing, or whatever the desktop has
+  there.
+
+### Tests
+
+- `wait_until_gone`'s visibility filter, the `activate` fallback and its role
+  gate, the per-application coordinate verdict and placement on X11 (a
+  toolkit that knows its position trusted without the listing being
+  consulted, one that tells the two coordinate types apart believed over a
+  listing that would have condemned it, one that knows nothing placed, a
+  window genuinely at the origin, decoration tolerance, no geometry source,
+  the verdict cached once per pid but the position re-read every call, a
+  dialog matched to its own listing among several, title ranking, an
+  unlisted application not cached, `element_at` hit-testing in window
+  coordinates and leaving out an unplaceable toplevel, Wayland untouched),
+  the placement arithmetic on Wayland with each measured shape as its own
+  test (CSD shadow, split border, titlebar alone, exact agreement, a
+  margin clamped to half the difference, the niri assistant whose header
+  has no rectangle, a symmetric fallback, a titlebar the toolkit was told
+  about, a file chooser placed by its own listing, size and title ranking,
+  a nameless frame ranking its untitled listing over the main window, a
+  listing wider-but-shorter refused as a candidate, an empty name matching
+  nothing on a pid-less source, an implausible listing refused, a moved
+  window followed), the x11 listing of an untitled window on both the EWMH
+  and tree-walk paths with the root still left out and a window gone
+  between the listing and its title read still skipped, the x11 active
+  window climbed from a toplevel's InputOnly focus child (stopping at the
+  managed client rather than its reparenting frame, a popup no manager
+  lists reported as itself, the child of the root without a client list,
+  a tree read failing mid-climb handing back the focused window) and that
+  child left out of the tree-walk listing, the two toplevel
+  roles in `windows()` and `Role`, the five GTK4 roles and their
+  non-aliasing, the dogtail GTK-pin conflict in `detect()`, each of the
+  three wlroots compositors' own IPC variable classifying the session on
+  its own, the uinput screen size asked of niri over its IPC (a disabled
+  output skipped, a two-output layout boxed, a refusal falling back), and
+  a repeated uinput position stepping aside first (a different position
+  still one motion, the first move to the origin still a motion, the last
+  column stepping left) — across `test_session.py`, `test_atspi.py`,
+  `test_x11.py`, `test_roles.py`, `test_backends.py`, `test_uinput.py`
+  and `test_api.py`.
+
+### Documentation
+
+- **The generated API reference names what a call returns, not only what it
+  takes.** 0.20.1 gave every call a Parameters table generated from
+  `inspect.signature` so the required/optional split could not drift from
+  the code; the return side had no equivalent, so a reader learned it only
+  from whatever prose the docstring happened to carry -- present for some
+  calls, absent for others, and the thing most worth a table of its own:
+  `Element.value`, `Element.visible` and `Application.returncode` are
+  exactly the members whose per-platform return shape this project has
+  spent real effort getting right and wrong and right again (see 0.20.0
+  above). `scripts/gen-api-docs.py` now reads `inspect.signature(fn)
+  .return_annotation` the same way it reads parameters, and prints a
+  **Returns** line right under the Parameters table for every Session
+  method, Element/Application property and method, and module-level
+  function -- checked live: all 91 Session methods and its one property,
+  all 32 Element members (13 methods and 19 properties, `value` and
+  `visible` among them), all 13 Application members (8 methods and 5
+  properties, `returncode` among them) and every module-level function
+  already carry a return annotation, so nothing here needed a docstring
+  change to work. A call whose annotation is `None` gets no line, the
+  same way a call with no arguments gets no Parameters table, rather than
+  cluttering the page with "Returns `None`" on the 36 of 91 Session
+  methods that are side-effect only. One method, `capture_on_failure`,
+  returns a private helper class (`_CaptureOnFailure`) that no caller can
+  import or is meant to name -- printing it verbatim would read as a
+  leaked internal, not documentation
+  -- so a return annotation naming any underscore-prefixed type is treated
+  the same as no annotation at all and the method's own docstring, which
+  already explains the context-manager usage, remains the only place that
+  return value is described.
+
 ## [0.20.2] — 2026-11-03
 
 ### Security
