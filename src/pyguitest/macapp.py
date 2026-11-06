@@ -22,8 +22,10 @@ a caller might hand one to Popen fail — measured live on macOS 26.7
 This module is the supported path: `NSWorkspace` launches the bundle (the
 same machinery Finder uses), reports the real process, and
 :class:`BundleProcess` wraps that process in the `Popen` surface
-`Application` already speaks — so `start_app("/path/To.app")` hands back
+`Application` already speaks — so `start_app(["/path/To.app"])` hands back
 an `Application` whose `pid`/`is_running()`/`stop()` mean what they say.
+(The list form, since a string command goes through the shell by
+`start_app`'s contract and is never a bundle launch.)
 
 AppKit is imported lazily, inside the launch, for the reason `_macapi`
 gives for avoiding framework loads on every `Environment`: only the caller
@@ -66,6 +68,31 @@ def _bundle_executable(bundle: Path) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _is_bundle_executable(bundle: Path, path: Path) -> bool:
+    """Whether `path` *is* `bundle`'s own `Contents/MacOS/<CFBundleExecutable>`.
+
+    Asked with `os.path.samefile` rather than by comparing path components,
+    because the comparison has to answer to the filesystem and not to the
+    spelling. APFS volumes are case-insensitive by default, so
+    `.../MacOS/textedit` and `.../Contents/macos/TextEdit` are the very same
+    file as the plist's `TextEdit` -- and a name comparison called those
+    different, dropping them onto the exact Popen path this module exists to
+    replace (measured as SIGKILL at launch for a system app). `samefile`
+    compares device and inode, so every spelling the filesystem accepts
+    resolves, while a *different* file -- a helper beside the executable, a
+    distinct case variant on a case-sensitive volume -- stays on the Popen
+    path, where launching the whole application in its place would run
+    something the caller did not name.
+    """
+    executable = _bundle_executable(bundle)
+    if executable is None:
+        return False
+    try:
+        return os.path.samefile(path, bundle / "Contents" / "MacOS" / executable)
+    except OSError:
+        return False  # one of them is not there; not a bundle launch
+
+
 def _application_path(name: str) -> str | None:
     """The .app bundle LaunchServices resolves `name` to, or None.
 
@@ -81,7 +108,9 @@ def _application_path(name: str) -> str | None:
     return str(found) if found else None
 
 
-def bundle_target(command: str | Sequence[str]) -> tuple[str, list[str]] | None:
+def bundle_target(
+    command: str | Sequence[str], env: dict[str, str] | None = None
+) -> tuple[str, list[str]] | None:
     """The (.app bundle, arguments) a list-form command names, or None.
 
     None is the common answer and means "not a bundle launch — Popen it the
@@ -101,6 +130,14 @@ def bundle_target(command: str | Sequence[str]) -> tuple[str, list[str]] | None:
       ``start_app(["TextEdit"])``. PATH wins on purpose — a real executable
       named like an app keeps launching exactly as before — so this only
       engages where Popen was guaranteed to raise FileNotFoundError.
+
+    `env` is the environment the same command would have been Popen'd with,
+    and it is consulted for one thing only: the PATH that decides the third
+    spelling above. It has to be the *effective* search path rather than
+    this process's own, because `Popen(env=...)` searches the PATH in `env`
+    -- so a caller who put a real `TextEdit` executable on their own PATH
+    would otherwise get the installed application launched instead of their
+    program, the precise inversion of the PATH-wins rule.
     """
     if not _DARWIN or isinstance(command, str) or not command:
         return None
@@ -116,19 +153,66 @@ def bundle_target(command: str | Sequence[str]) -> tuple[str, list[str]] | None:
     for parent in path.parents:
         if parent.suffix.lower() != ".app":
             continue
-        relative = path.relative_to(parent)
-        if (
-            relative.parts[:2] == ("Contents", "MacOS")
-            and len(relative.parts) == 3
-            and relative.parts[2] == _bundle_executable(parent)
-        ):
+        if _is_bundle_executable(parent, path):
             return str(parent), list(rest)
         return None  # inside a bundle, but not its main executable
-    if "/" not in first and shutil.which(first) is None:
+    # os.get_exec_path(env) is exactly what Popen's own POSIX exec path
+    # search uses, env=None included (it falls back to os.environ, then to
+    # os.defpath) -- so "is it on PATH?" is asked here the same way the
+    # launch that would otherwise happen asks it.
+    search_path = os.pathsep.join(os.get_exec_path(env))
+    if "/" not in first and shutil.which(first, path=search_path) is None:
         found = _application_path(first)
         if found is not None:
             return found, list(rest)
     return None
+
+
+def _exit_watch(pid: int) -> Any | None:
+    """A kqueue watching `pid`'s process for exit, or None if unavailable.
+
+    `EVFILT_PROC` with `NOTE_EXIT` is the BSD/macOS way to be told that a
+    process one did not fork has exited. Registration resolves the pid to a
+    process *once*, here, and the kernel holds that reference -- which is the
+    whole point: it makes the watch an identity for the process rather than
+    for the number, so `BundleProcess` cannot signal a stranger that later
+    inherits the pid.
+
+    None where there is no `kqueue` (every non-BSD platform, which is where
+    the off-mac tests run) or where the registration is refused -- a process
+    this user may not watch, or one already gone. The caller falls back to
+    the pid probe, so a None here costs the identity guarantee and nothing
+    else.
+
+    The `select` members are reached through `getattr` rather than named
+    directly, for the reason `winapp._last_error` reads `get_last_error`
+    that way: they exist only on the BSDs, and a direct reference is an
+    attribute error waiting on every other platform -- and an unresolvable
+    name to a type checker running on one.
+    """
+    try:
+        import select  # noqa: PLC0415 -- lazy: only a bundle launch needs it
+    except ImportError:  # pragma: no cover -- select is always built in
+        return None
+    kqueue = getattr(select, "kqueue", None)
+    kevent = getattr(select, "kevent", None)
+    filter_proc = getattr(select, "KQ_FILTER_PROC", None)
+    note_exit = getattr(select, "KQ_NOTE_EXIT", None)
+    add = getattr(select, "KQ_EV_ADD", 0) | getattr(select, "KQ_EV_ENABLE", 0)
+    if kqueue is None or kevent is None or filter_proc is None or note_exit is None:
+        return None
+    try:
+        queue = kqueue()
+    except OSError:
+        return None
+    try:
+        queue.control(
+            [kevent(pid, filter=filter_proc, flags=add, fflags=note_exit)], 0, 0
+        )
+    except OSError:
+        queue.close()
+        return None
+    return queue
 
 
 class BundleProcess:
@@ -153,12 +237,19 @@ class BundleProcess:
       the same answer a pipe-less Popen gives; there is no pipe to a
       process something else spawned. `start_app` refuses stream kwargs
       for a bundle launch rather than dropping them silently.
-    - **The pid is only a pid.** A real Popen's identity survives pid
-      reuse through `waitpid`; this object has nothing but the number, and
-      launchd reaps immediately, so a long-lived handle to an app that
-      exited can watch a recycled pid belonging to someone else. Keep the
-      `Application` inside its `with` block and stop it promptly rather
-      than holding one across a long run.
+    - **Identity is the process, not the pid — where the kernel will say
+      so.** A real Popen's identity survives pid reuse through `waitpid`,
+      which is not available for someone else's child. The stand-in is a
+      `kqueue` `EVFILT_PROC`/`NOTE_EXIT` registration taken at
+      construction: the kernel binds that watch to *this* process, so the
+      exit it reports is this application's exit and a later process that
+      inherits the recycled pid number can never be mistaken for it --
+      which matters because `stop()` signals through this object, and a
+      pid-number check would aim SIGTERM at whatever now holds it. Where
+      the registration cannot be taken (no `kqueue`, or a process this
+      user may not watch) the probe falls back to `os.kill(pid, 0)`, which
+      *is* only the number: hold such an `Application` inside its `with`
+      block and stop it promptly rather than across a long run.
     """
 
     stdin = None
@@ -175,17 +266,54 @@ class BundleProcess:
         self.pid = pid
         self.args = list(args)
         self.returncode: int | None = None
+        self._exit_watch = _exit_watch(pid)
 
     def poll(self) -> int | None:
         """0 once the process is observed gone, None while it runs."""
-        if self.returncode is None:
-            try:
-                os.kill(self.pid, 0)
-            except ProcessLookupError:
-                self.returncode = 0
-            except PermissionError:
-                pass  # alive, just not ours to signal
+        if self.returncode is None and self._observed_gone():
+            self.returncode = 0
         return self.returncode
+
+    def _observed_gone(self) -> bool:
+        """Whether *this* process -- not merely its pid number -- has exited.
+
+        The kqueue watch answers first where there is one: its NOTE_EXIT is
+        the kernel reporting the exit of the process registered at
+        construction, so a recycled pid cannot read as alive and cannot be
+        signalled. `os.kill(pid, 0)` is the fallback, and the honest
+        difference is documented on the class.
+        """
+        watch = self._exit_watch
+        if watch is not None:
+            # A one-shot read: NOTE_EXIT is delivered once, and poll()
+            # latches `returncode` from it, so the event is never needed
+            # twice. Nothing here blocks -- timeout 0.
+            try:
+                return bool(watch.control(None, 1, 0))
+            except OSError:
+                self._exit_watch = None  # fall through to the pid probe
+        try:
+            os.kill(self.pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            pass  # alive, just not ours to signal
+        return False
+
+    def __del__(self) -> None:
+        """Close the kqueue descriptor; the process itself is not touched.
+
+        Everything is swallowed for `winapp.PackagedAppProcess.__del__`'s
+        reason: this can run at interpreter shutdown, where a traceback
+        only buries whatever the program was actually saying.
+        """
+        try:
+            watch = getattr(self, "_exit_watch", None)
+            if watch is not None:
+                watch.close()
+                self._exit_watch = None
+        except Exception:  # noqa: BLE001 -- shutdown-time cleanup
+            pass
 
     def wait(self, timeout: float | None = None) -> int:
         """Block until it exits; `subprocess.TimeoutExpired` past `timeout`."""
@@ -201,11 +329,16 @@ class BundleProcess:
         """Send `sig`, silently doing nothing once the process is gone.
 
         `PermissionError` is swallowed for the reason `poll()` swallows it
-        (alive, not ours to signal -- a recycled pid, an app that
-        re-execed): this call runs inside `Application.stop()`, whose
-        contract is to never raise from cleanup, and a signal that cannot
-        be delivered is a fact to tolerate there, not an error to raise
-        over the failure actually being cleaned up after.
+        (alive, not ours to signal -- an app that re-execed under another
+        identity, a sandbox refusal): this call runs inside
+        `Application.stop()`, whose contract is to never raise from
+        cleanup, and a signal that cannot be delivered is a fact to
+        tolerate there, not an error to raise over the failure actually
+        being cleaned up after. A refusal does leave the process running,
+        including after `kill()` -- which is why `Application.stop()`
+        bounds the wait that follows its own `kill()` and reports the
+        process as still running rather than blocking on an exit that a
+        refused SIGKILL guarantees will never come.
         """
         if self.poll() is not None:
             return
@@ -245,6 +378,26 @@ class BundleProcess:
         return f"<BundleProcess pid={self.pid} {state}>"
 
 
+def _terminate_abandoned(application: Any) -> None:
+    """Stop an application nobody will ever hold a handle to.
+
+    Reached only when a launch completed after its waiter gave up, where the
+    alternative is a window on the user's desktop that no `Application` can
+    close. `terminate()` first -- the application may have state to save --
+    and `forceTerminate()` only if it declines, since there is nobody left
+    to answer a "Save changes?" dialog. Failures are swallowed: this runs on
+    an AppKit queue with no caller to raise to, and the launch it is
+    cleaning up after has already been reported as a timeout.
+    """
+    if application is None:
+        return
+    try:
+        if not application.terminate():
+            application.forceTerminate()
+    except Exception:  # noqa: BLE001 -- no caller left to raise to
+        pass
+
+
 def launch_bundle(
     bundle: str,
     args: Sequence[str] = (),
@@ -263,11 +416,18 @@ def launch_bundle(
     Raises FileNotFoundError for a path that is not there — the error
     Popen raises for a missing executable, kept so a caller's handling
     does not fork by platform — and OSError when LaunchServices refuses
-    or the launch never completes within `timeout`. A timeout does not
-    *cancel* the launch: the application can still appear afterwards,
-    untracked, which is exactly the leaked-window shape `app.py`'s
-    docstring warns about — treat a timeout here as "go look at the
-    machine", not "nothing happened".
+    or the launch never completes within `timeout`.
+
+    A timeout cannot *cancel* the launch — LaunchServices offers no such
+    call — so what it does instead is disown it: the completion handler
+    stays registered, and if the application does arrive after the wait
+    gave up, the handler terminates it rather than leaving a window on
+    screen that no `Application` will ever stop. That is the
+    leaked-window shape `app.py`'s docstring warns about, closed on the
+    one path that can still see the application. The handoff is taken
+    under a lock, so a completion that lands in the same instant as the
+    timeout is either owned by the caller (and returned normally) or
+    cleaned up — never both and never neither.
 
     `env` is handed to `NSWorkspaceOpenConfiguration.environment`; whether
     the platform merges it over launchd's own inherited environment or
@@ -293,17 +453,41 @@ def launch_bundle(
 
     done = threading.Event()
     outcome: dict[str, Any] = {}
+    handoff = threading.Lock()
+    abandoned = False
 
     def _finished(application: Any, error: Any) -> None:
-        outcome["application"] = application
-        outcome["error"] = error
-        done.set()
+        """Take the launch result, or clean it up if nobody is waiting.
+
+        Runs on a queue of AppKit's choosing, after
+        `openApplicationAtURL_...` has returned -- so by the time it fires
+        the waiter below may already have timed out and raised. `handoff`
+        is what makes the two exclusive.
+        """
+        with handoff:
+            if not abandoned:
+                outcome["application"] = application
+                outcome["error"] = error
+                done.set()
+                return
+        _terminate_abandoned(application)
 
     NSWorkspace.sharedWorkspace().openApplicationAtURL_configuration_completionHandler_(
         NSURL.fileURLWithPath_(str(bundle)), configuration, _finished
     )
     if not done.wait(timeout):
-        raise OSError(f"launching {bundle!r} did not complete within {timeout}s")
+        with handoff:
+            # Not simply `abandoned = True`: the handler may have taken the
+            # lock first and already published a successful launch, in which
+            # case that application is the caller's and disowning it would
+            # terminate the very app they asked for.
+            abandoned = not outcome
+        if abandoned:
+            raise OSError(
+                f"launching {bundle!r} did not complete within {timeout}s; "
+                "the launch is disowned, and an application that arrives "
+                "after this point is terminated rather than left untracked"
+            )
     application = outcome.get("application")
     if application is None:
         error = outcome.get("error")

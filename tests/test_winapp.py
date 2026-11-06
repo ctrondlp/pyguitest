@@ -161,6 +161,128 @@ class TestPackagedAppProcessSurface(unittest.TestCase):
                 winapp.PackagedAppProcess(bad, ["probe"])
 
 
+class _FakeKernel32:
+    """The three kernel32 calls `PackagedAppProcess` makes, scripted.
+
+    `waits` is the sequence `WaitForSingleObject` returns, and every
+    millisecond it was asked for is recorded -- which is the point for the
+    timeout tests, where the bug was a value *handed to Windows*, not a
+    wrong answer coming back.
+    """
+
+    def __init__(self, waits=(), terminate_ok=True, exit_code=1):
+        self.waits = list(waits)
+        self.terminate_ok = terminate_ok
+        self.exit_code = exit_code
+        self.asked_ms = []
+        self.terminations = 0
+
+    def WaitForSingleObject(self, _handle, ms):  # noqa: N802 -- Win32's spelling
+        self.asked_ms.append(ms)
+        return self.waits.pop(0) if self.waits else winapp._WAIT_TIMEOUT
+
+    def GetExitCodeProcess(self, _handle, code):  # noqa: N802
+        code._obj.value = self.exit_code
+        return 1
+
+    def TerminateProcess(self, _handle, _code):  # noqa: N802
+        self.terminations += 1
+        return 1 if self.terminate_ok else 0
+
+
+def packaged(kernel32):
+    """A `PackagedAppProcess` over scripted kernel32, no real handle.
+
+    Built with `object.__new__` rather than through `__init__`, which would
+    `OpenProcess` -- so the wait and terminate logic is exercised on every
+    platform rather than only where the suite happens to run on Windows.
+    """
+    process = object.__new__(winapp.PackagedAppProcess)
+    process.pid = 4242
+    process.args = ["probe"]
+    process.returncode = None
+    process._k32 = kernel32
+    process._handle = 1
+    return process
+
+
+class TestWaitTimeouts(unittest.TestCase):
+    """The DWORD conversion, where the sentinel sits inside a caller's range."""
+
+    def test_a_huge_finite_timeout_is_never_sent_as_infinite(self):
+        """4294967.295s converted to exactly INFINITE: a wait with no end.
+
+        The deadline is reached by the second call here, so the test also
+        shows the slicing terminating rather than looping forever.
+        """
+        kernel32 = _FakeKernel32(waits=[winapp._WAIT_TIMEOUT, winapp._WAIT_TIMEOUT])
+        process = packaged(kernel32)
+        with mock.patch.object(
+            winapp.time, "monotonic", side_effect=[0.0, 0.0, 1e9, 1e9]
+        ):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                process.wait(timeout=4294967.295)
+        self.assertNotIn(winapp._INFINITE, kernel32.asked_ms)
+        self.assertLessEqual(max(kernel32.asked_ms), winapp._MAX_WAIT_MS)
+
+    def test_a_timeout_past_a_dword_does_not_wrap_to_a_short_wait(self):
+        kernel32 = _FakeKernel32(waits=[winapp._WAIT_TIMEOUT])
+        process = packaged(kernel32)
+        with mock.patch.object(winapp.time, "monotonic", side_effect=[0.0, 0.0, 1e12]):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                process.wait(timeout=1e9)
+        self.assertEqual(kernel32.asked_ms, [winapp._MAX_WAIT_MS])
+
+    def test_an_ordinary_timeout_is_one_wait_of_that_length(self):
+        kernel32 = _FakeKernel32(waits=[winapp._WAIT_OBJECT_0])
+        process = packaged(kernel32)
+        self.assertEqual(process.wait(timeout=5), 1)
+        self.assertEqual(kernel32.asked_ms, [5000])
+
+    def test_no_timeout_still_waits_infinitely_in_one_call(self):
+        kernel32 = _FakeKernel32(waits=[winapp._WAIT_OBJECT_0])
+        process = packaged(kernel32)
+        self.assertEqual(process.wait(), 1)
+        self.assertEqual(kernel32.asked_ms, [winapp._INFINITE])
+
+    def test_a_signal_across_several_slices_resolves(self):
+        kernel32 = _FakeKernel32(
+            waits=[winapp._WAIT_TIMEOUT, winapp._WAIT_OBJECT_0], exit_code=3
+        )
+        process = packaged(kernel32)
+        with mock.patch.object(
+            winapp.time, "monotonic", side_effect=[0.0, 0.0, 1.0, 2.0]
+        ):
+            self.assertEqual(process.wait(timeout=4294967.295), 3)
+
+    def test_a_failed_wait_is_raised_not_read_as_an_exit_code(self):
+        kernel32 = _FakeKernel32(waits=[winapp._WAIT_FAILED])
+        with self.assertRaises(OSError):
+            packaged(kernel32).wait(timeout=1)
+
+
+class TestTerminationRace(unittest.TestCase):
+    """An application that exits between the poll and the TerminateProcess."""
+
+    def test_an_exit_in_the_race_window_is_not_an_error(self):
+        """stop() must not throw while unwinding someone else's exception."""
+        kernel32 = _FakeKernel32(
+            waits=[winapp._WAIT_TIMEOUT, winapp._WAIT_OBJECT_0],
+            terminate_ok=False,
+            exit_code=7,
+        )
+        process = packaged(kernel32)
+        process.terminate()  # must not raise
+        self.assertEqual(process.returncode, 7)
+
+    def test_a_process_that_really_is_still_running_still_raises(self):
+        kernel32 = _FakeKernel32(
+            waits=[winapp._WAIT_TIMEOUT, winapp._WAIT_TIMEOUT], terminate_ok=False
+        )
+        with self.assertRaises(OSError):
+            packaged(kernel32).terminate()
+
+
 class _FakeProcess:
     """Popen-shaped enough for Application's stop()/pid on any platform."""
 
@@ -183,6 +305,131 @@ class WindowedBackend(GUIBackend):
 
     def windows(self):
         return [Window("a", self, title="Calculator", pid=4242)]
+
+
+class _FakeComtypes:
+    """Just the comtypes surface `launch_app_id` touches.
+
+    A stand-in rather than the real thing so the activation logic -- the
+    COM reference count it owes, and the ownership question it has to ask
+    about the pid that comes back -- is tested on every platform. The COM
+    call itself is what the live Windows run in docs/validation.md covers.
+    """
+
+    CLSCTX_LOCAL_SERVER = 4
+
+    def __init__(self, pid=4242, changed_mode=False):
+        self.pid = pid
+        self.changed_mode = changed_mode
+        self.initializes = 0
+        self.uninitializes = 0
+        self.released = False
+        self.activations = []
+
+    def GUID(self, text):  # noqa: N802 -- comtypes' own spelling
+        return text
+
+    def CoInitialize(self):  # noqa: N802
+        if self.changed_mode:
+            # RPC_E_CHANGED_MODE: this thread is already in an apartment, so
+            # nothing was initialized and nothing is owed.
+            raise OSError("RPC_E_CHANGED_MODE")
+        self.initializes += 1
+
+    def CoUninitialize(self):  # noqa: N802
+        self.uninitializes += 1
+
+    def CoCreateInstance(self, _clsid, interface=None, clsctx=None):  # noqa: N802
+        return _FakeManager(self)
+
+
+class _FakeManager:
+    """The activation manager, which reports a pid and notes its release."""
+
+    def __init__(self, comtypes):
+        self._comtypes = comtypes
+
+    def ActivateApplication(self, app_id, arguments, options):  # noqa: N802
+        self._comtypes.activations.append((app_id, arguments, options))
+        return self._comtypes.pid
+
+    def __del__(self):
+        self._comtypes.released = True
+
+
+class _FakeTracked:
+    """Stands in for PackagedAppProcess, with a scripted creation time."""
+
+    def __init__(self, created):
+        self._created = created
+        self.pid = 4242
+
+    def created_at(self):
+        return self._created
+
+
+class TestActivation(unittest.TestCase):
+    """What `launch_app_id` owes COM, and what it refuses to own."""
+
+    def activate(self, comtypes, created, **kwargs):
+        """Run launch_app_id against the fakes, with `created` as the pid's."""
+        with mock.patch.dict(sys.modules, {"comtypes": comtypes}):
+            with mock.patch.object(winapp, "_activation_manager_class"):
+                with mock.patch.object(winapp, "_now_filetime", return_value=1000):
+                    with mock.patch.object(
+                        winapp,
+                        "PackagedAppProcess",
+                        return_value=_FakeTracked(created),
+                    ):
+                        return winapp.launch_app_id(AUMID, **kwargs)
+
+    def test_every_initialize_that_returns_is_balanced(self):
+        """S_FALSE counts too, which is what an app.restart() loop leaks."""
+        comtypes = _FakeComtypes()
+        self.activate(comtypes, created=2000)
+        self.assertEqual(comtypes.initializes, 1)
+        self.assertEqual(comtypes.uninitializes, 1)
+
+    def test_a_refused_initialize_owes_nothing(self):
+        """RPC_E_CHANGED_MODE initialized nothing, so it balances nothing."""
+        comtypes = _FakeComtypes(changed_mode=True)
+        self.activate(comtypes, created=2000)
+        self.assertEqual(comtypes.uninitializes, 0)
+
+    def test_the_balance_holds_when_activation_fails(self):
+        comtypes = _FakeComtypes()
+        with mock.patch.object(
+            _FakeManager, "ActivateApplication", side_effect=OSError("no such AUMID")
+        ):
+            with self.assertRaises(OSError):
+                self.activate(comtypes, created=2000)
+        self.assertEqual(comtypes.uninitializes, 1)
+
+    def test_the_manager_is_released_before_the_apartment_closes(self):
+        comtypes = _FakeComtypes()
+        self.activate(comtypes, created=2000)
+        self.assertTrue(comtypes.released)
+
+    def test_a_freshly_launched_process_is_owned(self):
+        """Created after the activation began: ours to stop."""
+        app = self.activate(_FakeComtypes(), created=2000)
+        self.assertEqual(app.pid, 4242)
+
+    def test_an_instance_that_was_already_running_is_not_adopted(self):
+        """Terminating it would close a window this session never opened."""
+        with self.assertRaises(OSError) as caught:
+            self.activate(_FakeComtypes(), created=500)
+        self.assertIn("already running", str(caught.exception))
+        self.assertIn("adopt_existing", str(caught.exception))
+
+    def test_an_existing_instance_can_be_adopted_deliberately(self):
+        app = self.activate(_FakeComtypes(), created=500, adopt_existing=True)
+        self.assertEqual(app.pid, 4242)
+
+    def test_an_unreadable_creation_time_does_not_block_the_launch(self):
+        """A failed probe must not fail a launch that may be perfectly fine."""
+        app = self.activate(_FakeComtypes(), created=None)
+        self.assertEqual(app.pid, 4242)
 
 
 class TestStartAppRouting(unittest.TestCase):

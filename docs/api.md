@@ -1876,15 +1876,22 @@ Calculator and exits (measured: `is_running()` False with the
 window up, `terminate()` touching nothing) -- a stub cannot be
 told from a real program until it has already exited, so launch
 packaged applications by AUMID instead. `pyguitest.winapp`
-carries the mechanism and two platform behaviours to know: a
-single-instance packaged app already running is reactivated and
-its existing pid returned, since this API, unlike macOS's, cannot
-force a fresh instance; and a packaged app's *window* belongs to
-`ApplicationFrameHost.exe`, not to the app's own process --
-measured on Windows 10: the Calculator's window reported the frame
-host's pid -- so find it by `title`, not by `pid=app.pid` (which
-stays the right filter for classic executables, and for the
-lifecycle calls here, which do act on the real app).
+carries the mechanism and two platform behaviours to know. A
+single-instance packaged app that is *already running* is
+reactivated rather than launched, and this API, unlike macOS's,
+cannot force a fresh instance -- so that case raises rather than
+handing back a process this session did not start and would
+terminate on the way out of the `with` block. And a packaged app's
+window may not belong to the app's own process: a UWP-hosted one
+is drawn in `ApplicationFrameHost.exe` -- measured on Windows 10,
+where the Calculator's window reported the frame host's pid -- so
+`pid=app.pid` finds nothing for those and `title` is the filter to
+use. It is only the hosted ones: a packaged full-trust (desktop
+bridge) app creates its own windows, where `pid=app.pid` works and
+is the better filter, since a title can collide with another
+window carrying the same one. Try `pid=` first and fall back to
+`title` -- or check with `pyguitest inspect`. The lifecycle calls
+here act on the real application either way.
 
 ### `run_app`
 
@@ -3883,6 +3890,14 @@ left open, each was only reclaimed by the garbage collector, with a
 grandchild holding the pipe, and a drain would then block on it. Read
 `app.stdout` before calling this if the old output matters.
 
+Raises `PyGUITestError` if the old process could not be stopped --
+see `stop()` for the one case that happens in, a signal the kernel
+refuses. Starting the replacement anyway would leave two instances
+running with only the new one reachable, which is the leak this
+class exists to prevent; the old `.process` is left in place, so a
+caller can look at it rather than having it replaced out from under
+them.
+
 #### `returncode`
 
 **Returns** `int | None`
@@ -3971,6 +3986,17 @@ live run).
 Idempotent, and never raises: this is what runs while an exception
 is already unwinding, and a cleanup path that throws replaces the
 real failure with its own. Returns the exit status.
+
+**`None` means it is still running**, which is the one answer worth
+checking for. A SIGKILL to a child cannot be declined, so on the
+ordinary `start_app` path this never happens -- but the macOS
+application path signals a process this one did not fork, and the
+kernel can refuse that outright (`EPERM`: an application that
+re-execed under another identity, a sandbox refusal). The wait after
+`kill()` is bounded for exactly that case: an exit that a refused
+SIGKILL guarantees will never come is reported, not waited on, since
+blocking forever inside cleanup is how a suite wedges with no
+message at all.
 
 #### `terminate`
 

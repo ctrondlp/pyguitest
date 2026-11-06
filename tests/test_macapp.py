@@ -132,6 +132,84 @@ class TestBundleTarget(unittest.TestCase):
                 self.assertIsNone(macapp.bundle_target(["./probe"]))
         resolver.assert_not_called()
 
+    def test_the_executable_resolves_however_the_volume_spells_it(self):
+        """A case variant is the same file where the filesystem says it is.
+
+        APFS is case-insensitive by default, so `.../MacOS/probe` names the
+        very file the plist calls `Probe` -- and comparing component text
+        called those different, dropping the launch onto the Popen path this
+        module exists to replace. The assertion forks on what the volume
+        running the test actually does, because that is the only honest
+        answer: the same path string is one file on APFS and two on a
+        case-sensitive volume.
+        """
+        binary = self.bundle / "Contents" / "MacOS" / "Probe"
+        variant = self.bundle / "Contents" / "MacOS" / "probe"
+        target = macapp.bundle_target([str(variant)])
+        if os.path.exists(variant):  # case-insensitive volume: the same file
+            self.assertEqual(target, (str(self.bundle), []))
+        else:  # case-sensitive: a different file, and not the app
+            self.assertIsNone(target)
+        self.assertEqual(macapp.bundle_target([str(binary)]), (str(self.bundle), []))
+
+    def test_a_bare_name_is_resolved_against_the_env_that_will_launch_it(self):
+        """PATH wins means the PATH Popen would search, not this process's.
+
+        `Popen(env=...)` searches the PATH inside `env`, so detection has to
+        ask the same question the launch will. Asked against os.environ
+        instead, a caller's own executable lost to an installed application
+        of the same name -- the PATH-wins rule, inverted.
+
+        The search is asserted through `which`'s own `path=` argument rather
+        than by planting a real file: what counts as executable is
+        platform-specific (an extensionless `Probe` is not on Windows, where
+        `PATHEXT` decides, and this file's detection tests otherwise all run
+        everywhere), while the path handed to the search is the fix itself.
+        """
+        tools = self.root / "tools"
+        with mock.patch.object(
+            macapp, "_application_path", return_value=str(self.bundle)
+        ):
+            with mock.patch.object(macapp.shutil, "which", return_value=None) as which:
+                macapp.bundle_target(["Probe"], env={"PATH": str(tools)})
+        self.assertEqual(which.call_args.kwargs["path"], str(tools))
+
+    def test_the_env_search_path_falls_back_the_way_popen_does(self):
+        """env=None searches this process's PATH, which is Popen's rule too."""
+        with mock.patch.object(
+            macapp, "_application_path", return_value=str(self.bundle)
+        ):
+            with mock.patch.object(macapp.shutil, "which", return_value=None) as which:
+                macapp.bundle_target(["Probe"])
+        self.assertEqual(
+            which.call_args.kwargs["path"], os.pathsep.join(os.get_exec_path(None))
+        )
+
+    def test_an_executable_on_the_envs_path_beats_the_installed_app(self):
+        """The behaviour the search path exists for, where `which` can see it.
+
+        POSIX-only: it plants a real executable, and an extensionless file
+        is not one on Windows. The assertion above covers the plumbing
+        everywhere; this one covers the outcome where it can be had.
+        """
+        if os.name != "posix":
+            self.skipTest("an extensionless file is not executable on Windows")
+        tools = self.root / "tools"
+        tools.mkdir()
+        executable = tools / "Probe"
+        executable.write_text("#!/bin/sh\n")
+        executable.chmod(0o755)
+        with mock.patch.object(
+            macapp, "_application_path", return_value=str(self.bundle)
+        ):
+            # On the env's PATH: the caller's own program, left to Popen.
+            self.assertIsNone(macapp.bundle_target(["Probe"], env={"PATH": str(tools)}))
+            # Not on it: nothing for Popen to find, so the app resolves.
+            self.assertEqual(
+                macapp.bundle_target(["Probe"], env={"PATH": str(self.root)}),
+                (str(self.bundle), []),
+            )
+
 
 @unittest.skipUnless(
     os.name == "posix",
@@ -187,6 +265,32 @@ class TestBundleProcess(unittest.TestCase):
             wrapped.terminate()  # must not raise
         self.assertIsNone(wrapped.returncode)
 
+    def test_the_exit_watch_binds_to_the_process_not_the_pid(self):
+        """The identity that keeps stop() off a recycled pid.
+
+        Where kqueue is available the watch is registered against the
+        process at construction, so once that process has gone the object
+        reports it gone *and stays that way* -- the pid number answering
+        `kill(0)` again later (a recycled pid) cannot make it read as
+        alive, which is what would otherwise aim SIGTERM at a stranger.
+        """
+        real = self.child()
+        wrapped = macapp.BundleProcess(real.pid, ["probe"])
+        if wrapped._exit_watch is None:
+            self.skipTest("no kqueue here; the pid-probe fallback is in force")
+        real.kill()
+        real.wait(timeout=10)
+        self.assertEqual(wrapped.poll(), 0)
+        # A pid that answers kill(0) must not revive it: the watch already
+        # reported this process's exit, and poll() has latched it.
+        with mock.patch("os.kill", return_value=None):
+            self.assertEqual(wrapped.poll(), 0)
+
+    def test_a_pid_that_cannot_be_watched_falls_back_to_the_probe(self):
+        wrapped = macapp.BundleProcess(999999, ["probe"])
+        self.assertIsNone(wrapped._exit_watch)
+        self.assertEqual(wrapped.poll(), 0)  # ProcessLookupError: gone
+
 
 class TestBundleProcessSurface(unittest.TestCase):
     """The parts of the surface that touch no process, on every platform."""
@@ -213,6 +317,52 @@ class TestBundleProcessSurface(unittest.TestCase):
             wrapped.communicate(input=b"x")
         wrapped.returncode = 0  # already gone, so the wait is immediate
         self.assertEqual(wrapped.communicate(), (None, None))
+
+
+class _Launched:
+    """An NSRunningApplication-shaped object for the disown path."""
+
+    def __init__(self, declines: bool = False) -> None:
+        self.declines = declines
+        self.calls: list[str] = []
+
+    def terminate(self) -> bool:
+        self.calls.append("terminate")
+        return not self.declines
+
+    def forceTerminate(self) -> bool:  # noqa: N802 -- Cocoa's own spelling
+        self.calls.append("forceTerminate")
+        return True
+
+
+class TestAbandonedLaunchCleanup(unittest.TestCase):
+    """What happens to an application that arrives after the wait gave up.
+
+    LaunchServices cannot be told to cancel a launch, so the only place the
+    late application can still be reached is the completion handler --
+    which is why it, and not the caller, does the cleaning up. NSWorkspace
+    itself is off-mac unreachable; what is asserted here is the disown
+    decision and the termination it leads to.
+    """
+
+    def test_an_application_that_declines_to_quit_is_forced(self):
+        application = _Launched(declines=True)
+        macapp._terminate_abandoned(application)
+        self.assertEqual(application.calls, ["terminate", "forceTerminate"])
+
+    def test_one_that_quits_politely_is_not_forced(self):
+        application = _Launched()
+        macapp._terminate_abandoned(application)
+        self.assertEqual(application.calls, ["terminate"])
+
+    def test_nothing_to_clean_up_is_not_an_error(self):
+        macapp._terminate_abandoned(None)  # must not raise
+
+    def test_a_termination_that_itself_fails_is_swallowed(self):
+        """There is no caller left to raise to on an AppKit queue."""
+        broken = mock.Mock()
+        broken.terminate.side_effect = OSError("gone")
+        macapp._terminate_abandoned(broken)  # must not raise
 
 
 class WindowedBackend(GUIBackend):
@@ -302,6 +452,15 @@ class TestStartAppRouting(unittest.TestCase):
                         ["/Apps/Probe.app"], stdout=subprocess.PIPE
                     )
         launcher.assert_called_once_with("/Apps/Probe.app", [], env={"A": "1"})
+
+    def test_the_env_that_will_launch_it_reaches_the_detection(self):
+        """Detection has to search the PATH the launch would search."""
+        with mock.patch.object(macapp, "bundle_target", return_value=None) as detector:
+            with self.session().start_app(
+                [sys.executable, "-c", "pass"], env={**os.environ, "A": "1"}
+            ) as app:
+                app.wait(timeout=10)
+        self.assertEqual(detector.call_args.kwargs["env"]["A"], "1")
 
     def test_restart_launches_a_fresh_instance(self):
         processes = [

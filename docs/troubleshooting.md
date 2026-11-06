@@ -345,10 +345,20 @@ window, and `terminate()` touching nothing. Launch the application by its
 AUMID instead (`start_app(["Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"])`,
 the identifier PowerShell's `Get-StartApps` lists, or the
 `shell:AppsFolder\` spelling): that goes through `ActivateApplication` and
-tracks the application's real process, with its real exit code. One caveat
-that stays even then: the packaged app's *window* belongs to
-`ApplicationFrameHost.exe`, so find it by `title`, not `pid=app.pid` — the
-lifecycle calls act on the real app regardless.
+tracks the application's real process, with its real exit code.
+
+Two caveats stay even then. The first is finding the window. A *UWP-hosted*
+packaged app is drawn in `ApplicationFrameHost.exe` rather than in its own
+process — Calculator, measured — so `pid=app.pid` matches nothing for those
+and `title` is the filter that works. That is not every packaged app: a
+full-trust (desktop bridge) one creates its own windows, where `pid=app.pid`
+works and is the filter to prefer, since a title can match some other window
+carrying the same text. Try `pid=` first, fall back to `title`, or settle it
+with `pyguitest inspect`. The lifecycle calls act on the real application
+either way. The second caveat is that a single-instance packaged app which is
+*already running* gets reactivated rather than launched, and `start_app`
+raises instead of handing back a process it did not start — stop that
+instance yourself first, or drive it by window title.
 
 ## `wait_for_process` matches only the program name on Windows
 
@@ -400,7 +410,9 @@ time through `GetProcessTimes` and only ever wanted a pid. The one caveat on
 the window route is `WINDOW_PID`'s own: a Store (UWP) application's toplevel
 belongs to `ApplicationFrameHost.exe`, so `window.pid` is the host's rather
 than the application's. Where that matters, ask the element tree instead —
-UI Automation reports the real process, so `element.pid` is right there.
+UI Automation reports the real process, so `element.pid` is right there. A
+packaged app that is *not* UWP-hosted — a full-trust desktop-bridge one —
+owns its windows, and `window.pid` is the application's there as usual.
 
 ## A window operation returns without error and nothing moves
 

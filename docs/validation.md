@@ -4885,9 +4885,13 @@ the interactive session through the usual Scheduled-Task path:
 - **The frame-host fact, measured**: the Calculator's window reported
   `ApplicationFrameHost.exe`'s pid, not the app's, so
   `wait_for_window(pid=app.pid)` answers None for a UWP-hosted window —
-  find those by `title`. The `pid=` filter works as intended for classic
-  executables (the same session verified `notepad.exe` end to end by pid),
-  and the lifecycle calls act on the real application regardless.
+  find those by `title`. Measured on a UWP app specifically; a packaged
+  full-trust (desktop bridge) app owns its windows and was not among what
+  this session drove, so `pid=` is documented as the filter to prefer
+  where it works rather than as broken for everything packaged. The `pid=`
+  filter works as intended for classic executables (the same session
+  verified `notepad.exe` end to end by pid), and the lifecycle calls act
+  on the real application regardless.
 - **The adapter's own unit tests ran on real Windows**: the suite on the
   box (2302 passed, 84 skipped) includes the four handle-backed
   `PackagedAppProcess` tests, which only execute on `nt` — including the
@@ -4898,4 +4902,65 @@ on one Windows 10 box; Windows 11 (whose `notepad.exe` is itself
 store-packaged) has not been tried. The single-instance reactivation
 behaviour — an already-running instance's existing pid coming back — is
 documented from the API's contract and one accidental encounter with a
-leftover instance, not from a dedicated measurement.
+leftover instance, not from a dedicated measurement; the creation-time
+check that now refuses to adopt such an instance is therefore reasoned
+from `GetProcessTimes` and unit-tested, with its live encounter still
+owed. No desktop-bridge (packaged full-trust) application has been driven
+either, which is why the window-lookup guidance distinguishes the hosted
+case it did measure from the one it did not.
+
+## The review fixes to both application-launch paths (2026-11-06)
+
+**macOS 26 Tahoe (Darwin 25.6.0) and Windows 10 22H2, both green** — the
+live half of the fixes made to the two modules above after review. Each item
+is the thing that was actually wrong, measured working:
+
+- **The case-variant bundle executable, on a real system app.** The old
+  text comparison against `CFBundleExecutable` sent
+  `/System/Applications/TextEdit.app/Contents/MacOS/textedit` to `Popen`,
+  the exact path measured earlier as SIGKILL-at-launch. The volume was
+  confirmed case-insensitive (the variant `os.path.exists`), and the
+  `samefile` check now resolves it to the bundle — while a helper beside
+  the executable still does not.
+- **The `kqueue` exit watch, against a launchd-owned process.** The watch
+  registered on a real TextEdit launch, answered `None` while the app was
+  up, reported the exit within 0.1s of `terminate()`, and stayed latched
+  afterwards. A pid nothing may watch (`999999`) correctly falls back to
+  the `os.kill` probe.
+- **The disowned launch cleans up after itself.** `launch_bundle(timeout=0.001)`
+  raised, and the application it had already asked for *was* seen running
+  (`pgrep` found it) and was then terminated by the completion handler 0.2s
+  later — the leaked-window shape, closed. Repeated with `pgrep` before,
+  during and after: nothing left behind.
+- **A finite Windows timeout is no longer a sentinel.** `timeout=4294967.296`
+  and `timeout=4294967.295` both used to convert into a wait Windows reads
+  as zero or as forever; both now keep waiting past five seconds, as a
+  ~fifty-day timeout should, and the same wait returns the real exit code
+  (1) promptly once the process is killed. An ordinary `timeout=1.0` still
+  raises `TimeoutExpired` at 1.00s, and a 5,000,000-second wait was still
+  blocking after six seconds and then resolved on the kill — so the slicing
+  neither expires early nor delays the signal.
+- **`terminate()` on an already-exited packaged process no longer raises.**
+  The process was killed out from under the adapter and `terminate()`
+  returned silently, with the real exit code preserved.
+- **Repeated activate/stop cycles, with COM balanced.** Four full
+  activate-terminate-wait cycles ran back to back on one thread, each
+  reporting its own pid and the real exit code, after the
+  `CoInitialize`/`CoUninitialize` pairing was corrected. Nothing in Python
+  can observe the apartment's reference count, so what this shows is that
+  balancing it did not break activation.
+
+Two things this deliberately did **not** show. Calculator's second
+activation returned a *new* pid rather than its existing one, so the
+single-instance reactivation the creation-time check exists for still has
+no live encounter — what the run does establish is the absence of false
+positives: a freshly activated instance was never mistaken for a
+pre-existing one, across six separate activations. And `adopt_existing=True`
+was exercised, but on an instance that was itself fresh.
+
+The unit suites for all three touched modules were also run on both boxes
+(`test_macapp.py`, `test_winapp.py`, `test_app.py`): green on each. One
+test of mine was genuinely wrong and Windows caught it — a planted
+extensionless file is not executable there, since `PATHEXT` decides, so the
+PATH-search assertion now checks the search path handed to `shutil.which`
+and the file-planting variant is POSIX-only.

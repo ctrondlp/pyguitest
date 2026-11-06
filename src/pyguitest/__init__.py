@@ -983,15 +983,22 @@ class Session:
         window up, `terminate()` touching nothing) -- a stub cannot be
         told from a real program until it has already exited, so launch
         packaged applications by AUMID instead. `pyguitest.winapp`
-        carries the mechanism and two platform behaviours to know: a
-        single-instance packaged app already running is reactivated and
-        its existing pid returned, since this API, unlike macOS's, cannot
-        force a fresh instance; and a packaged app's *window* belongs to
-        `ApplicationFrameHost.exe`, not to the app's own process --
-        measured on Windows 10: the Calculator's window reported the frame
-        host's pid -- so find it by `title`, not by `pid=app.pid` (which
-        stays the right filter for classic executables, and for the
-        lifecycle calls here, which do act on the real app).
+        carries the mechanism and two platform behaviours to know. A
+        single-instance packaged app that is *already running* is
+        reactivated rather than launched, and this API, unlike macOS's,
+        cannot force a fresh instance -- so that case raises rather than
+        handing back a process this session did not start and would
+        terminate on the way out of the `with` block. And a packaged app's
+        window may not belong to the app's own process: a UWP-hosted one
+        is drawn in `ApplicationFrameHost.exe` -- measured on Windows 10,
+        where the Calculator's window reported the frame host's pid -- so
+        `pid=app.pid` finds nothing for those and `title` is the filter to
+        use. It is only the hosted ones: a packaged full-trust (desktop
+        bridge) app creates its own windows, where `pid=app.pid` works and
+        is the better filter, since a title can collide with another
+        window carrying the same one. Try `pid=` first and fall back to
+        `title` -- or check with `pyguitest inspect`. The lifecycle calls
+        here act on the real application either way.
         """
         # A kwarg passed as None is a no-op the classic path would ignore
         # (Popen treats env=None/stdout=None as "inherit"/"no pipe"), so the
@@ -1019,7 +1026,11 @@ class Session:
 
             return Application(launch_packaged(), command, launch_packaged)
 
-        bundle = macapp.bundle_target(command)
+        # env= is handed to the detection, not just to the launch: it
+        # carries the PATH a plain Popen would search, and PATH is what
+        # decides whether a bare name is the caller's own executable or an
+        # installed application.
+        bundle = macapp.bundle_target(command, env=kwargs.get("env"))
         if bundle is not None:
             bundle_path, bundle_args = bundle
             unsupported = set_kwargs - {"env"}

@@ -33,11 +33,13 @@ should pay for (or need) COM.
 from __future__ import annotations
 
 import contextlib
+import math
 import os
 import re
 import shutil
 import signal
 import subprocess
+import time
 from collections.abc import Sequence
 from typing import Any
 
@@ -64,6 +66,12 @@ _WAIT_OBJECT_0 = 0x0
 _WAIT_TIMEOUT = 0x102
 _WAIT_FAILED = 0xFFFFFFFF
 _INFINITE = 0xFFFFFFFF
+_MAX_WAIT_MS = 0xFFFFFFFE
+"""The longest *finite* wait `WaitForSingleObject` can be asked for: one
+millisecond below `INFINITE`, which shares its encoding with the largest
+`DWORD`. `wait()` slices long timeouts against this rather than converting
+them in one step, where `timeout=4294967.295` would land exactly on the
+sentinel and wait forever."""
 _PROCESS_RIGHTS = 0x0001 | 0x1000 | 0x00100000
 """PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE —
 the three things the adapter does, and nothing it does not."""
@@ -116,6 +124,25 @@ def _last_error() -> int:
     return 0 if getter is None else int(getter())
 
 
+def _now_filetime() -> int:
+    """The current time as a FILETIME tick count, for `created_at`'s clock.
+
+    `GetSystemTimeAsFileTime` rather than anything in `time`: a process's
+    creation time is reported as a FILETIME, and the comparison has to
+    happen in that clock's own units to mean anything. Its granularity is
+    the system timer tick, and it truncates -- so a timestamp taken here is
+    never *later* than the real instant, which is the direction that
+    matters: a process created after this call can never read as older
+    than it.
+    """
+    import ctypes  # noqa: PLC0415
+    from ctypes import wintypes  # noqa: PLC0415
+
+    now = wintypes.FILETIME()
+    _winapi.kernel32().GetSystemTimeAsFileTime(ctypes.byref(now))
+    return (now.dwHighDateTime << 32) | now.dwLowDateTime
+
+
 class PackagedAppProcess:
     """A `Popen` look-alike over a packaged application's process handle.
 
@@ -163,6 +190,29 @@ class PackagedAppProcess:
             )
         self._handle = handle
 
+    def created_at(self) -> int | None:
+        """When this process started, as a FILETIME tick count, or None.
+
+        The number is only ever compared against another one from the same
+        clock (`_now_filetime`), which is what lets `launch_app_id` tell an
+        application it started from one that was already running. None
+        where `GetProcessTimes` fails -- a handle whose rights were revoked,
+        a process gone between the open and this call -- and the caller
+        treats that as "cannot tell" rather than as either answer.
+        """
+        import ctypes  # noqa: PLC0415
+        from ctypes import wintypes  # noqa: PLC0415
+
+        created = wintypes.FILETIME()
+        unused = (wintypes.FILETIME(), wintypes.FILETIME(), wintypes.FILETIME())
+        if not self._k32.GetProcessTimes(
+            self._handle,
+            ctypes.byref(created),
+            *(ctypes.byref(each) for each in unused),
+        ):
+            return None
+        return (created.dwHighDateTime << 32) | created.dwLowDateTime
+
     def _exit_code_now(self) -> int:
         """The exit code, read only after the handle is known signalled.
 
@@ -198,13 +248,46 @@ class PackagedAppProcess:
         return self.returncode
 
     def wait(self, timeout: float | None = None) -> int:
-        """Block on the handle; `subprocess.TimeoutExpired` past `timeout`."""
+        """Block on the handle; `subprocess.TimeoutExpired` past `timeout`.
+
+        A finite `timeout` is waited out in bounded slices rather than in
+        one call, because `dwMilliseconds` is a `DWORD` and the sentinel
+        for "wait forever" is a value inside the range a caller can ask
+        for: `timeout=4294967.295` converts to exactly `INFINITE`, which
+        would turn a bounded wait into a permanent one, and anything larger
+        wraps to a *short* wait that expires early. Both are silent. The
+        deadline is tracked in `time.monotonic()` across the slices, so the
+        timeout a caller asked for is the timeout they get.
+        """
         if self.returncode is not None:
             return self.returncode
-        ms = _INFINITE if timeout is None else max(0, int(timeout * 1000))
+        if timeout is None:
+            self._wait_slice(_INFINITE, None)
+            assert self.returncode is not None
+            return self.returncode
+        deadline = time.monotonic() + timeout
+        while self.returncode is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(self.args, timeout)
+            # Rounded up, not truncated: `int()` turns the sub-millisecond
+            # the deadline arithmetic itself costs into a wait a tick
+            # shorter than the caller asked for, and a timeout that expires
+            # early is the bug this method is otherwise fixing. The deadline
+            # re-check above is what keeps the rounding from overshooting.
+            slice_ms = min(math.ceil(remaining * 1000), _MAX_WAIT_MS)
+            self._wait_slice(slice_ms, timeout)
+        return self.returncode
+
+    def _wait_slice(self, ms: int, timeout: float | None) -> None:
+        """One `WaitForSingleObject`, latching `returncode` if it signalled.
+
+        A `WAIT_TIMEOUT` here is not the caller's timeout expiring -- it is
+        one slice of a longer wait ending -- so it simply returns and lets
+        `wait()` re-check the deadline. `timeout` is carried only to name it
+        in the `TimeoutExpired` an `INFINITE` slice can never raise.
+        """
         state = self._k32.WaitForSingleObject(self._handle, ms)
-        if state == _WAIT_TIMEOUT:
-            raise subprocess.TimeoutExpired(self.args, timeout or 0)
         if state == _WAIT_FAILED:
             # Not fed to the exit read: a failed wait says nothing about
             # the exit code, and treating it as "signalled" is how a bogus
@@ -212,8 +295,12 @@ class PackagedAppProcess:
             raise OSError(
                 f"waiting on process {self.pid} failed (WinError {_last_error()})"
             )
-        self.returncode = self._exit_code_now()
-        return self.returncode
+        if state == _WAIT_OBJECT_0:
+            self.returncode = self._exit_code_now()
+        elif ms == _INFINITE:
+            # An unbounded wait that neither signalled nor failed has no
+            # honest retry: report it rather than looping on it.
+            raise subprocess.TimeoutExpired(self.args, timeout or 0)
 
     def terminate(self) -> None:
         """Stop the application outright -- Popen's own meaning here.
@@ -225,13 +312,24 @@ class PackagedAppProcess:
         `wait()` and hang forever on a process it could not kill (a
         protected process, or revoked handle rights). A visible error beats
         a wedged suite. Already-gone is a no-op, idempotent as before.
+
+        The poll is repeated *after* a failed `TerminateProcess`, because
+        the ordinary way for that call to fail is the application having
+        exited on its own in the window between the first poll and the
+        call -- Windows rejects terminating an already-dead process. Raising
+        there would mean `Application.stop()` throwing while unwinding
+        someone else's exception, replacing the real failure with a
+        complaint about an application that had, in fact, stopped. The error
+        is read before the second poll so that a process still running is
+        still reported with the error that actually belongs to it.
         """
         if self.poll() is not None:
             return
         if not self._k32.TerminateProcess(self._handle, 1):
-            raise OSError(
-                f"could not terminate process {self.pid} (WinError {_last_error()})"
-            )
+            error = _last_error()
+            if self.poll() is not None:
+                return
+            raise OSError(f"could not terminate process {self.pid} (WinError {error})")
 
     def kill(self) -> None:
         """The same `TerminateProcess` -- Popen's own equivalence here."""
@@ -335,19 +433,26 @@ def _activation_manager_class() -> Any:
 def launch_app_id(
     app_id: str,
     args: Sequence[str] = (),
+    adopt_existing: bool = False,
 ) -> PackagedAppProcess:
     """Activate `app_id` and wrap the real process it reports.
 
     `ActivateApplication` returns the activated application's process id
-    directly — the half the `calc.exe` stub can never offer. One behaviour
-    to know, the platform's rather than this module's: a *single-instance*
-    packaged application that is already running is brought to the front
-    and its **existing** pid returned, so the `Application` built on this
-    may own a process the caller did not start. `restart()` is safe either
-    way — it stops that instance first — but a test that must not disturb
-    a user's open instance should check for one before launching, the same
-    consideration `macapp` sidesteps only because macOS allows forcing a
-    new instance and this API does not.
+    directly — the half the `calc.exe` stub can never offer.
+
+    **An application that was already running is not adopted.** A
+    *single-instance* packaged application is brought to the front and its
+    **existing** pid returned, and this API, unlike macOS's, cannot force a
+    fresh instance. Handing that back as a launched process would make it
+    test-owned: leaving the `with` block, or `restart()`, would terminate a
+    window the test never opened and lose whatever was unsaved in it. So the
+    process's creation time is compared against the instant before
+    activation, and an older one raises OSError rather than being returned.
+    The application has been activated by then — that cannot be undone — but
+    it is left running. Pass `adopt_existing=True` to take it anyway, for a
+    caller who knows the instance is theirs (a reconnect, a fixture that
+    deliberately reuses one); where the creation time cannot be read at all,
+    the launch proceeds rather than failing on a probe.
 
     Raises OSError when activation fails (no such AUMID, COM refusal), with
     the HRESULT in the message. If activation succeeds but the reported
@@ -364,17 +469,55 @@ def launch_app_id(
     # the same way, so a comtypes build without CoInitialize is tolerated
     # rather than raising AttributeError out of a launch.
     initialize = getattr(comtypes, "CoInitialize", None)
+    initialized = False
     if initialize is not None:
-        with contextlib.suppress(OSError):
+        try:
             initialize()
-    manager = comtypes.CoCreateInstance(
-        comtypes.GUID(_CLSID_ApplicationActivationManager),
-        interface=_activation_manager_class(),
-        clsctx=comtypes.CLSCTX_LOCAL_SERVER,
-    )
-    arguments = subprocess.list2cmdline([str(a) for a in args]) if args else None
+        except OSError:
+            pass  # RPC_E_CHANGED_MODE: this thread is already in an apartment
+        else:
+            # S_FALSE -- already initialized on this thread -- does not raise
+            # and still counts, so every call that returns owes a
+            # CoUninitialize. An `app.restart()` loop activates repeatedly on
+            # one thread, and leaving the count high there is what keeps the
+            # apartment from ever being torn down.
+            initialized = True
     try:
-        pid = manager.ActivateApplication(app_id, arguments, 0)
-    except OSError as exc:
-        raise OSError(f"Windows refused to activate {app_id!r}: {exc}") from exc
-    return PackagedAppProcess(int(pid), [app_id, *args])
+        manager = comtypes.CoCreateInstance(
+            comtypes.GUID(_CLSID_ApplicationActivationManager),
+            interface=_activation_manager_class(),
+            clsctx=comtypes.CLSCTX_LOCAL_SERVER,
+        )
+        arguments = subprocess.list2cmdline([str(a) for a in args]) if args else None
+        before = _now_filetime()
+        try:
+            pid = manager.ActivateApplication(app_id, arguments, 0)
+        except OSError as exc:
+            raise OSError(f"Windows refused to activate {app_id!r}: {exc}") from exc
+        finally:
+            # Released inside the try, so the interface pointer is gone
+            # before the CoUninitialize in the finally below runs: dropping
+            # a COM reference after its apartment has been uninitialized is
+            # the ordering that makes a teardown crash.
+            del manager
+    finally:
+        if initialized:
+            uninitialize = getattr(comtypes, "CoUninitialize", None)
+            if uninitialize is not None:
+                with contextlib.suppress(OSError):
+                    uninitialize()
+
+    process = PackagedAppProcess(int(pid), [app_id, *args])
+    created = process.created_at()
+    if not adopt_existing and created is not None and created < before:
+        raise OSError(
+            f"{app_id!r} was already running as process {process.pid} and has "
+            "been brought to the front rather than launched: this packaged "
+            "app is single-instance, and Windows offers no way to force a "
+            "new one. It is left running, since stopping it would close a "
+            "window this session did not open -- stop it yourself first, "
+            "drive the existing instance by window title, or pass "
+            "adopt_existing=True to pyguitest.winapp.launch_app_id if that "
+            "instance is yours to own."
+        )
+    return process

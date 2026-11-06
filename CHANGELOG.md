@@ -63,15 +63,22 @@ staging.
   live Calculator returned 1, `TerminateProcess`'s code — measured) with
   no observed-exit sentinel, and `wait()` blocks on the handle rather than
   polling. No Popen kwargs apply, `env=` included (activation offers no
-  environment control): any kwarg raises rather than being dropped. Two
-  platform behaviours ride along, documented on `pyguitest.winapp`: a
-  single-instance packaged app already running is reactivated and its
-  existing pid returned (this API cannot force a fresh instance), and a
-  packaged app's *window* belongs to `ApplicationFrameHost.exe` rather
-  than the app's own process — measured: Calculator's window carried the
-  frame host's pid — so find it by `title`; `pid=` below stays right for
-  classic executables, and the lifecycle calls act on the real app either
-  way.
+  environment control): any kwarg raises rather than being dropped.
+
+  Two platform behaviours ride along, documented on `pyguitest.winapp`.
+  A single-instance packaged app that is *already running* is reactivated
+  rather than launched, and this API cannot force a fresh instance — so
+  that case raises rather than handing back a process the session did not
+  start, which leaving a `with` block would then terminate, closing a
+  window the test never opened (`launch_app_id(..., adopt_existing=True)`
+  takes it anyway, for a caller who knows the instance is theirs). And a
+  *UWP-hosted* packaged app's window belongs to `ApplicationFrameHost.exe`
+  rather than to the app's own process — measured: Calculator's window
+  carried the frame host's pid — so `pid=` finds nothing for one of those
+  and `title` is the filter to use. A packaged full-trust (desktop bridge)
+  app owns its windows, where `pid=` works and is the better filter, a
+  title being able to collide with another window carrying it. The
+  lifecycle calls act on the real app either way.
 
 - **`find_windows`, `find_window`, `wait_for_window` and `expect_window`
   take `pid=`.** The filter to reach for when a window's title is not
@@ -85,7 +92,83 @@ staging.
   nothing on a backend that cannot fill `Window.pid`, rather than
   everything.
 
+### Changed
+
+- **`Application.stop()` bounds the wait after its own `kill()`, and
+  answers `None` when the program is still running.** A SIGKILL to a child
+  cannot be declined, so the previously unbounded wait was safe for
+  everything `start_app` used to return — but the macOS application path
+  signals a process this one did not fork, and the kernel can refuse that
+  outright (`EPERM`), leaving `stop()` waiting for an exit that was never
+  coming. Blocking forever inside cleanup, while an exception is already
+  unwinding, is a suite that wedges with no message at all; `None` says so
+  instead. `restart()` now raises `PyGUITestError` in that same case rather
+  than launching a second instance on top of the one it could not stop,
+  which would leave the first orphaned with only the new one reachable.
+
 ### Fixed
+
+- **A bundle's own executable named with different capitalisation fell
+  through to `Popen`.** The check compared the path's last component against
+  `CFBundleExecutable` as text, and APFS volumes are case-insensitive by
+  default — so `.../MacOS/textedit` is the very same file the plist calls
+  `TextEdit`, and routing it to `Popen` hit precisely the SIGKILL-at-launch
+  measured above. The comparison is now `os.path.samefile`, which answers to
+  the filesystem rather than to the spelling: every spelling a volume accepts
+  resolves, while a genuinely different file — a helper beside the
+  executable, a distinct case variant on a case-sensitive volume — stays on
+  the `Popen` path, where launching the whole application in its place would
+  run something the caller did not name.
+
+- **Bundle detection searched this process's `PATH`, not the one the launch
+  would use.** `start_app(["TextEdit"], env=...)` resolves a bare name
+  against the `PATH` in `env`, because that is what `Popen` would search —
+  so an executable on the caller's own `PATH` now wins over an installed
+  application of the same name, which is the PATH-wins rule the detection
+  documents, previously inverted whenever `env=` carried a different `PATH`.
+
+- **A macOS bundle launch that timed out could leave an untracked
+  application on screen.** LaunchServices offers no way to cancel a launch,
+  so a timeout now *disowns* it: the completion handler stays registered and
+  terminates an application that arrives after the waiter gave up, rather
+  than leaving a window no `Application` will ever close. The handoff is
+  taken under a lock, so a completion landing in the same instant as the
+  timeout is either returned to the caller or cleaned up — never both, and
+  never neither.
+
+- **`BundleProcess` identified its application by pid number alone.** A pid
+  the kernel has recycled reads as alive, and `stop()` signals through that
+  same check — so a long-held handle to an application that had exited could
+  aim SIGTERM at an unrelated process. Identity is now a `kqueue`
+  `EVFILT_PROC`/`NOTE_EXIT` registration taken at construction, which the
+  kernel binds to *that* process, so the exit it reports is the
+  application's own and a recycled pid can never be mistaken for it. Where
+  the registration cannot be taken the probe falls back to the pid, and the
+  class documents which guarantee is in force.
+
+- **`PackagedAppProcess.wait()` could block forever on a finite timeout.**
+  `dwMilliseconds` is a `DWORD` whose "wait forever" sentinel sits inside the
+  range a caller can ask for: `timeout=4294967.295` converted to exactly
+  `INFINITE`, and anything larger wrapped to a *short* wait that expired
+  early. Both silently. Long finite waits are now sliced against a deadline
+  tracked in `time.monotonic()`, so the timeout asked for is the one that
+  applies.
+
+- **`PackagedAppProcess.terminate()` raised for an application that had
+  already exited.** Windows rejects terminating a dead process, which is the
+  ordinary outcome when the application exits between the poll and the
+  `TerminateProcess` — and raising there meant `Application.stop()` throwing
+  while unwinding someone else's exception, replacing the real failure with a
+  complaint about an application that had, in fact, stopped. The process is
+  re-polled after a failed call, with the original error preserved for one
+  that really is still running.
+
+- **Repeated packaged-app activations left COM initialisation unbalanced.**
+  Every `CoInitialize` that returns owes a `CoUninitialize`, `S_FALSE`
+  included; an `app.restart()` loop added one per iteration and released
+  none, which keeps the apartment from ever being torn down. The count is
+  now balanced on every path, with the activation manager released before the
+  apartment it came from.
 
 - **`xkb.available()` returned `True` on a `libxkbcommon` too old to use.**
   `available()` only checked that `libxkbcommon.so.0` could be `dlopen`ed,

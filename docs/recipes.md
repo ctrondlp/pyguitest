@@ -172,9 +172,11 @@ with gui.start_app(["TextEdit"]) as app:
 # Windows: the AUMID (what PowerShell's Get-StartApps lists), bare or in
 # the shell:AppsFolder spelling.
 with gui.start_app(["Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"]) as app:
-    # A packaged app's window belongs to ApplicationFrameHost, not the
-    # app's own process -- find it by title; app.pid is still the right
-    # process for wait_for_idle and the lifecycle calls.
+    # A UWP-hosted app's window belongs to ApplicationFrameHost, not to the
+    # app's own process, so pid= finds nothing for one of those -- find it
+    # by title. A full-trust (desktop bridge) packaged app owns its windows,
+    # where pid=app.pid works and is the better filter. app.pid is the real
+    # application either way, for wait_for_idle and the lifecycle calls.
     window = gui.wait_for_window("Calculator", timeout=15)
 ```
 

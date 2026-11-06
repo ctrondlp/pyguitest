@@ -754,6 +754,22 @@ def _declare_kernel32(lib):
     lib.TerminateProcess.restype = wintypes.BOOL
     lib.CloseHandle.argtypes = (wintypes.HANDLE,)
     lib.CloseHandle.restype = wintypes.BOOL
+    # The creation time, which is how `winapp` tells an application it just
+    # launched from one that was already running when it asked -- a
+    # single-instance packaged app hands back its *existing* pid, and
+    # terminating that on a `with` block's exit would close a window the
+    # test never opened. Only the first FILETIME out of the four is read;
+    # the other three are required out-parameters.
+    lib.GetProcessTimes.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+    )
+    lib.GetProcessTimes.restype = wintypes.BOOL
+    lib.GetSystemTimeAsFileTime.argtypes = (ctypes.POINTER(wintypes.FILETIME),)
+    lib.GetSystemTimeAsFileTime.restype = None
 
 
 def _declare_gdi32(lib):
