@@ -7,6 +7,101 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.23.0] — 2026-11-06
+
+A minor rather than a patch because `Element.role` answers differently on
+macOS: two AX roles are now read in the context of their container, so a Qt
+tab reports `page tab` where it reported `radio button`, and a Qt list row
+reports `list item` where it reported `table row`. Code that matched the old
+spelling has to accept the new one — `pyguitest-torture-test`'s macOS driver
+is the known case, and it now accepts either.
+
+Everything here came out of replaying one recorded script across seven
+desktops; the measurements are in `docs/validation.md`.
+
+### Fixed
+
+- **Keystrokes other than typed text did nothing on COSMIC.** `wtype` claims
+  `KEY_EVENT` and `TEXT_ENTRY`, and composition order put it ahead of
+  `uinput`, so it served both. Its typing does reach an application there —
+  its *named keys* do not: `wtype -k Return` exits zero and nothing receives
+  it. A recorded Return was therefore lost in silence, with a backend that
+  could have sent it sitting unused in the same composite. `ExternalTool`
+  grew `withheld_on` for this: on COSMIC `wtype` keeps `TEXT_ENTRY`, which is
+  the only keymap-safe way to type there, and gives up its claim on
+  `KEY_EVENT` so `uinput` serves it. Measured before and after on the same
+  box: a `set_text` followed by Return committed nothing at any delay, and
+  commits reliably now. wlroots is unaffected — the same call works there,
+  which is why this is per-compositor rather than a change to the tool's
+  capabilities.
+
+- **`role="page tab"` and `role="list item"` matched nothing on macOS.** AX
+  publishes a tab as an `AXRadioButton` inside an `AXTabGroup` and a list row
+  as an `AXRow` inside an `AXList`, with no subrole on either to tell it from
+  an ordinary radio button or table row — measured; both subroles are empty.
+  `_AX_PARENT_ROLES` reads those two in the context of their parent, so they
+  report the names every other backend uses, and a search for either no
+  longer returns the other. The cost is one parent read, and only for an
+  element whose own role is one of those two.
+
+- **A Qt list row on macOS had no accessible name at all.** The `AXRow`
+  publishes an empty title, description *and* value, while the text a person
+  reads sits on an `AXStaticText` child — so a row plainly visible on screen
+  could not be found by its own name. `Element.name` falls back to its cells'
+  text for a row that names nothing itself.
+
+- **`Element.select()` on macOS refused the controls it was most needed
+  for.** It wrote `kAXSelectedAttribute` and raised where none was published
+  — which is every Qt tab, and a Qt list row publishes no press either. For
+  the roles whose activation *is* their selection (page tab, list item, table
+  row, radio button) it now ends at `click()`, which already knows to try
+  `AXPress`, then a value write, then the selected write, then the element's
+  rectangle. A push button still refuses: clicking one is not selecting it.
+
+Together these take a recorded script from driving three of six controls on
+macOS to all six, and from five of six to all six on COSMIC.
+
+## [0.22.1] — 2026-11-06
+
+A patch: no API is added or removed. What changes is which backends a plain
+`connect()` composes on macOS, and it changes because the old answer was a
+defect.
+
+### Fixed
+
+- **macOS input injection reaches a plain `connect()`.** `macquartz` was
+  registered `opt_in`, so automatic composition skipped it -- and it is the
+  only input backend on that platform. A session opened without naming
+  backends therefore reported no `KEY_EVENT`, `POINTER_BUTTON`,
+  `POINTER_MOVE`, `POINTER_SCROLL` or `TEXT_ENTRY` at all, on the one
+  platform of the three whose input backend was left out of automatic
+  composition: `win32` and the Linux `input`/`pointer` backends are all
+  composed by default. Anything that typed or clicked on a Mac had to know
+  to write `connect(backend=["macquartz", "macos"])` first, and every script
+  pyguitest-recorder generates opens a plain `connect()` and then declares
+  what it needs with `gui.require(...)` -- so each one raised
+  `CapabilityUnsupported` on its first statement and drove nothing.
+
+  The flag was there because the constructor *asked* for the PostEvent
+  grant, which is exactly what `register`'s `opt_in` reserves it for. That
+  request now lives behind a `request` option
+  (`connect(backend="macquartz", backend_options={"request": True})`),
+  which is how `macos` has always gated the Accessibility grant -- ADR 004
+  §4's preflight/prompt split spelled as an option rather than as a registry
+  flag. Constructing asks for nothing, and `capabilities` reads
+  `CGPreflightPostEventAccess`, the non-prompting form, live. So the two
+  macOS backends now follow one rule instead of two, and automatic
+  composition has no side effect left to guard against.
+
+  A machine that has not granted PostEvent is refused exactly as clearly as
+  before: the preflight says no, `capabilities` is empty, and `require()`
+  names the capability rather than letting an injected event go quietly
+  nowhere. Verified on macOS 26.7 (Tahoe): a plain `connect()` now composes
+  `macos+macquartz+capture:screencapture+clipboard:pbcopy` and reports the
+  input capabilities, and a recorder-generated script that previously failed
+  on its first statement now runs.
+
+
 ## [0.22.0] — 2026-11-05
 
 A minor rather than a patch because `start_app` gains behaviour on two

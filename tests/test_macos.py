@@ -374,11 +374,21 @@ class TestMacquartz(unittest.TestCase):
         with mock.patch.dict(sys.modules, {"Quartz": None}):
             self.assertFalse(self.macquartz.available())
 
-    def test_constructing_asks_for_the_post_event_grant(self):
+    def test_constructing_asks_for_nothing_by_default(self):
+        # The default is silence, which is what lets this backend be composed
+        # automatically -- it is the only input backend on a Mac, and a plain
+        # `connect()` that cannot type is what stopped every generated script
+        # there. See `_macquartz_factory`.
+        self.build()
+        self.assertNotIn(
+            "CGRequestPostEventAccess", [name for name, _ in self.quartz.calls]
+        )
+
+    def test_request_true_asks_for_the_post_event_grant(self):
         # The request is made, and that is all it is: measured live, the call
         # showed no dialog on macOS 26.7, so this pins the call rather than a
         # prompt that anything could answer.
-        self.build()
+        self.macquartz.MacquartzBackend(None, request=True)
         self.assertIn(
             "CGRequestPostEventAccess", [name for name, _ in self.quartz.calls]
         )
@@ -995,14 +1005,18 @@ class TestRegistration(unittest.TestCase):
         registry = mock.patch.object(backends, "_REGISTRY", [])
         registry.start()
         self.addCleanup(registry.stop)
-        backends.register(
-            backends._macquartz_factory, "macquartz", priority=70, opt_in=True
-        )
+        backends.register(backends._macquartz_factory, "macquartz", priority=70)
 
     def test_macquartz_is_registered_by_name(self):
         self.assertIn("macquartz", backends.available())
 
-    def test_it_is_opt_in_so_a_plain_connect_never_asks(self):
+    def test_a_plain_connect_composes_it_without_asking(self):
+        # The pair of properties that replaced `opt_in`. It has to be in
+        # automatic composition, because it is the only input backend on this
+        # platform and a plain `connect()` that cannot type is what stopped
+        # every generated script on a Mac. And it still must not ask for the
+        # grant unbidden -- so composing it calls the *preflight* and never
+        # `CGRequestPostEventAccess`.
         quartz = FakeQuartz()
         with (
             mock.patch.dict(sys.modules, {"Quartz": quartz}),
@@ -1011,18 +1025,64 @@ class TestRegistration(unittest.TestCase):
             ),
         ):
             selected = backends.select(darwin_environment())
-            # Automatic composition never even constructs it, so the request is
-            # never made: `opt_in`'s whole purpose, and worth asserting now
-            # that the request is known to be silent -- a side effect that
-            # leaves no window on screen is the one nobody would notice.
-            self.assertNotIsInstance(selected, backends.MacquartzBackend)
+            self.assertIsInstance(selected, backends.MacquartzBackend)
             self.assertNotIn(
                 "CGRequestPostEventAccess", [name for name, _ in quartz.calls]
             )
-            # Naming it is the caller asking for the grant.
+
+    def test_the_request_happens_only_when_a_caller_asks_for_it(self):
+        quartz = FakeQuartz()
+        with (
+            mock.patch.dict(sys.modules, {"Quartz": quartz}),
+            mock.patch(
+                "pyguitest.backends._macapi.post_event_allowed", return_value=True
+            ),
+        ):
+            # Naming it is not the request either, now that the option is what
+            # carries it: a caller who names the backend to pair it with
+            # another one has not asked for a grant.
             named = backends.select(darwin_environment(), "macquartz")
             self.assertIsInstance(named, backends.MacquartzBackend)
+            self.assertNotIn(
+                "CGRequestPostEventAccess", [name for name, _ in quartz.calls]
+            )
+            # `request=True` is the caller asking.
+            backends.select(darwin_environment(), "macquartz", {"request": True})
         self.assertIn("CGRequestPostEventAccess", [name for name, _ in quartz.calls])
+
+    def test_input_capabilities_reach_a_plain_session_on_a_mac(self):
+        # The gap this change closed, stated as the capability a script asks
+        # for: `gui.require(Capability.KEY_EVENT)` is the first statement of
+        # every recorder-generated script, and it used to raise here.
+        quartz = FakeQuartz()
+        with (
+            mock.patch.dict(sys.modules, {"Quartz": quartz}),
+            mock.patch(
+                "pyguitest.backends._macapi.post_event_allowed", return_value=True
+            ),
+        ):
+            selected = backends.select(darwin_environment())
+            for capability in (
+                Capability.KEY_EVENT,
+                Capability.TEXT_ENTRY,
+                Capability.POINTER_BUTTON,
+                Capability.POINTER_MOVE,
+            ):
+                self.assertIn(capability, selected.capabilities)
+
+    def test_an_ungranted_mac_is_still_refused(self):
+        # Composing it automatically must not turn a missing grant into a
+        # silent no-op: the preflight says no, `capabilities` is empty, and
+        # `require()` then fails with the capability named.
+        quartz = FakeQuartz()
+        with (
+            mock.patch.dict(sys.modules, {"Quartz": quartz}),
+            mock.patch(
+                "pyguitest.backends._macapi.post_event_allowed", return_value=False
+            ),
+        ):
+            selected = backends.select(darwin_environment())
+            self.assertNotIn(Capability.KEY_EVENT, selected.capabilities)
 
 
 if __name__ == "__main__":

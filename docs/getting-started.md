@@ -43,9 +43,9 @@ A few platform steps `doctor` will point you to, so they are no surprise:
   see [input.md](input.md).
 - **Windows:** nothing further for most tests. Run the suite from the
   logged-in desktop session, not a service or an SSH shell.
-- **macOS:** grant **Accessibility** and **Screen Recording** under System
-  Settings > Privacy & Security, and pass
-  `connect(backend=["macquartz", "macos"])` when the script injects input —
+- **macOS:** grant **Accessibility**, **Screen Recording** and, for scripts
+  that inject input, **PostEvent** under System Settings > Privacy &
+  Security. A plain `connect()` composes input along with everything else —
   see [install.md](install.md#on-macos).
 
 ## 2. See what this desktop can do
@@ -135,7 +135,7 @@ what an outside program may do.
 | **Wayland** (GNOME, KDE, sway, Hyprland, niri) | Elements and input, plus whatever window control that specific compositor exposes. Input injection needs consent or device permission | Window operations vary *by compositor*, not by "Wayland". GNOME and sway are as different from each other as either is from X11 |
 | **XWayland** | An X11 client inside a Wayland session. X11 operations work for X11 clients only, and native Wayland clients are invisible to them | The one that catches people out: `xdotool` sees half your desktop and reports success |
 | **Windows** | Window control, input, capture and elements, through Win32 and UI Automation, with no daemon or permission to set up | Injected input into an elevated window is dropped silently unless the test runs elevated too |
-| **macOS** | Elements, windows, capture and input, each behind a privacy grant in System Settings | Injected input is opt-in: a plain `connect()` has no pointer or keyboard until `macquartz` is named |
+| **macOS** | Elements, windows, capture and input, each behind a privacy grant in System Settings | Every capability is gated on a grant made by hand, and a missing one is withdrawn rather than raised: `supports()` is the only honest answer |
 
 `pyguitest` reports which one you are on:
 

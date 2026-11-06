@@ -103,6 +103,14 @@ class FakeElement:
         if pid is not None:
             self.pid = pid
         self.children = list(children)
+        # Every child is told who contains it, because AX elements do publish
+        # `kAXParentAttribute` and the backend reads it -- `Element.parent`,
+        # and `Element.role` for the two roles AX only distinguishes by their
+        # container (an AXRadioButton in an AXTabGroup is a page tab). A fake
+        # that left this out made every such element read as though it had no
+        # parent, which is not a shape any real tree has.
+        for child in self.children:
+            child.attrs.setdefault("kAXParentAttribute", self)
         # An application publishes its windows as both its children and its
         # `kAXWindowsAttribute`; a window element has children and no windows attribute.
         # Defaulting one to the other keeps the fixtures from having to say it twice.
@@ -2332,3 +2340,176 @@ class TestTheDesktopRoot(BackendTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRolesReadInContext(BackendTestCase):
+    """The two AX roles whose meaning depends on their container.
+
+    AX gives a tab and a list row the same role names it gives a radio button
+    and a table row, with no subrole to tell them apart -- measured on a Qt
+    window, where every subrole was empty. So the container is the only
+    signal, and `role="page tab"` matched nothing at all on a Mac before this.
+    """
+
+    def _window(self):
+        """A window holding a tab group and a list, shaped as AX reports them."""
+        tabs = FakeElement(
+            role="AXTabGroup",
+            attrs={"kAXTitleAttribute": "Main Tabs"},
+            children=[
+                FakeElement(
+                    role="AXRadioButton",
+                    attrs={"kAXTitleAttribute": name},
+                    actions=["AXPress"],
+                )
+                for name in ("Controls", "Choices")
+            ],
+        )
+        # A standalone radio group: the same AX role, a different container,
+        # so it must keep reading as a radio button.
+        options = FakeElement(
+            role="AXGroup",
+            children=[
+                FakeElement(
+                    role="AXRadioButton",
+                    attrs={"kAXTitleAttribute": "Option B"},
+                    actions=["AXPress"],
+                )
+            ],
+        )
+        rows = FakeElement(
+            role="AXList",
+            attrs={"kAXTitleAttribute": "Row List"},
+            children=[
+                FakeElement(
+                    role="AXRow",
+                    children=[
+                        FakeElement(
+                            role="AXStaticText", attrs={"kAXTitleAttribute": "Row Two"}
+                        )
+                    ],
+                )
+            ],
+        )
+        table_row = FakeElement(
+            role="AXTable",
+            children=[FakeElement(role="AXRow")],
+        )
+        return FakeElement(
+            role="AXWindow",
+            attrs={"kAXTitleAttribute": "PortFixture"},
+            children=[tabs, options, rows, table_row],
+        )
+
+    def _backend(self):
+        app = FakeElement(
+            role="AXApplication",
+            attrs={"kAXTitleAttribute": "PortFixture"},
+            children=[self._window()],
+            pid=4242,
+        )
+        listed = window(1, 4242, "PortFixture", (0, 0, 980, 620))
+        return self.make(
+            applications={4242: app}, onscreen=[listed], everything=[listed]
+        )
+
+    def test_a_radio_button_in_a_tab_group_is_a_page_tab(self):
+        backend = self._backend()
+        tab = backend.find_element(role=Role.PAGE_TAB, name="Choices")
+        self.assertEqual(tab.role, Role.PAGE_TAB)
+
+    def test_a_radio_button_outside_a_tab_group_stays_a_radio_button(self):
+        # The half that makes the rule a rule rather than a rename.
+        backend = self._backend()
+        radio = backend.find_element(role=Role.RADIO_BUTTON, name="Option B")
+        self.assertEqual(radio.role, Role.RADIO_BUTTON)
+
+    def test_a_page_tab_search_does_not_return_ordinary_radio_buttons(self):
+        # `_ax_roles` widens the walk to AXRadioButton so tabs are visited at
+        # all; the predicate is what keeps Option B out of the results.
+        backend = self._backend()
+        names = {e.name for e in backend.find_elements(role=Role.PAGE_TAB)}
+        self.assertEqual(names, {"Controls", "Choices"})
+
+    def test_a_radio_button_search_does_not_return_the_tabs(self):
+        backend = self._backend()
+        names = {e.name for e in backend.find_elements(role=Role.RADIO_BUTTON)}
+        self.assertEqual(names, {"Option B"})
+
+    def test_a_row_in_a_list_is_a_list_item(self):
+        backend = self._backend()
+        row = backend.find_element(role=Role.LIST_ITEM, name="Row Two")
+        self.assertEqual(row.role, Role.LIST_ITEM)
+
+    def test_a_row_in_a_table_stays_a_table_row(self):
+        backend = self._backend()
+        rows = backend.find_elements(role=Role.TABLE_ROW)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].role, Role.TABLE_ROW)
+
+    def test_a_row_takes_its_name_from_its_cells(self):
+        # A Qt list row reaches AX with an empty title, description and value;
+        # the text a person reads is on an AXStaticText child. Without this the
+        # row has no name at all and cannot be found by one.
+        backend = self._backend()
+        row = backend.find_element(role=Role.LIST_ITEM, name="Row Two")
+        self.assertEqual(row.name, "Row Two")
+
+    def test_an_element_with_its_own_title_does_not_borrow_one(self):
+        backend = self._backend()
+        tab = backend.find_element(role=Role.PAGE_TAB, name="Controls")
+        self.assertEqual(tab.name, "Controls")
+
+
+class TestSelectFallsBackToClicking(BackendTestCase):
+    """`select()` where AX publishes no selection to write.
+
+    A Qt tab publishes no `kAXSelectedAttribute` and a Qt list row publishes
+    neither that nor a press -- measured. Refusing both would mean a recorded
+    tab or row click could never replay on a Mac, so for the roles whose
+    activation *is* their selection `select()` ends at `click()`.
+    """
+
+    def _backend(
+        self, *, actions=(), selected=None, role="AXRadioButton", parent="AXTabGroup"
+    ):
+        attrs = {"kAXTitleAttribute": "Choices"}
+        if selected is not None:
+            attrs["kAXSelectedAttribute"] = selected
+        self.target = FakeElement(role=role, attrs=attrs, actions=list(actions))
+        container = FakeElement(role=parent, children=[self.target])
+        top = FakeElement(
+            role="AXWindow",
+            attrs={"kAXTitleAttribute": "PortFixture"},
+            children=[container],
+        )
+        app = FakeElement(
+            role="AXApplication",
+            attrs={"kAXTitleAttribute": "PortFixture"},
+            children=[top],
+            pid=99,
+        )
+        listed = window(1, 99, "PortFixture", (0, 0, 980, 620))
+        return self.make(applications={99: app}, onscreen=[listed], everything=[listed])
+
+    def test_a_published_selection_is_still_written(self):
+        backend = self._backend(selected=False)
+        backend.find_element(role=Role.PAGE_TAB, name="Choices").select()
+        self.assertIn(
+            ("kAXSelectedAttribute", True),
+            [(name, value) for name, value in self.target.written],
+        )
+
+    def test_a_tab_with_no_selection_attribute_is_pressed_instead(self):
+        backend = self._backend(actions=["AXPress"])
+        backend.find_element(role=Role.PAGE_TAB, name="Choices").select()
+        self.assertIn("AXPress", self.target.performed)
+
+    def test_a_push_button_still_refuses_to_be_selected(self):
+        # The guard that keeps this a rule about selection rather than a
+        # silent alias for clicking: pressing a button is not selecting it.
+        backend = self._backend(actions=["AXPress"], role="AXButton", parent="AXGroup")
+        button = backend.find_element(role=Role.PUSH_BUTTON, name="Choices")
+        with self.assertRaises(CapabilityUnsupported):
+            button.select()
+        self.assertEqual(self.target.performed, [])

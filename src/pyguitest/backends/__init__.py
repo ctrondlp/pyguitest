@@ -1066,13 +1066,37 @@ def _macquartz_factory(environment, **options):
     test of its own. Priority 70 puts it beside `win32` and the Linux
     tool-backed input backends, the band for "injects input".
 
-    `opt_in` is the one place ADR 004 reverses ADR 003. Constructing this asks
-    for the PostEvent grant, which is what `register`'s docstring reserves the
-    flag for: a plain `connect()` composes no backend that asks for anything on
-    a caller's behalf, and `connect(backend="macquartz")` is the caller asking
-    for it. The request has been measured *not* to raise a dialog -- see
-    `macquartz.request_post_event` -- so what the flag guards is the side effect
-    of asking rather than a window nobody can miss.
+    Deliberately **not** `opt_in`, which it was until this backend was found
+    to be the reason no generated script could run on a Mac.
+
+    It was opt-in because constructing it *asked* for the PostEvent grant, and
+    that flag exists for a constructor with a side effect no caller should hit
+    by surprise. The side effect is now behind `request=True`
+    (`connect(backend="macquartz", backend_options={"request": True})`), the
+    way `macos` below has always done it with Accessibility -- ADR 004 §4's
+    preflight/prompt split spelled as an option rather than as a registry
+    flag. Construction asks nothing, and `capabilities` reads
+    `CGPreflightPostEventAccess`, the non-prompting form, live. So automatic
+    composition has no side effect left for the flag to guard.
+
+    What the flag *cost* is the reason for the change. This is the only input
+    backend on macOS, so while it was opt-in a plain `connect()` there
+    reported no `KEY_EVENT`, `POINTER_BUTTON`, `POINTER_MOVE`,
+    `POINTER_SCROLL` or `TEXT_ENTRY` -- on the one platform of the three whose
+    input backend was not composed automatically, where `win32` (70) and the
+    Linux `input` (70) and `pointer` (65) backends all are. Measured on macOS
+    26.7: every script pyguitest-recorder generates opens `pyguitest.connect()` and
+    declares what it needs with `gui.require(...)`, so each one raised
+    `CapabilityUnsupported` on its first statement and drove nothing at all.
+    An ungranted machine is still refused, and refused just as clearly --
+    `capabilities` is empty when the preflight says no, so `require()` fails
+    with the capability named rather than with an injected event going
+    quietly nowhere.
+
+    Priority 70 puts it below `macos` at 90, which matters not at all here:
+    the two serve disjoint capabilities -- input against elements and windows
+    -- so neither can shadow the other whichever order composition builds
+    them in.
 
     Construction can still raise `BackendUnavailable` -- a Quartz that imports
     without the entry points, which is a PyObjC older than this backend -- and
@@ -1082,10 +1106,10 @@ def _macquartz_factory(environment, **options):
 
     if not _macquartz.available():
         return None
-    return _macquartz.MacquartzBackend(environment)
+    return _macquartz.MacquartzBackend(environment, **options)
 
 
-register(_macquartz_factory, "macquartz", priority=70, opt_in=True)
+register(_macquartz_factory, "macquartz", priority=70)
 
 
 def _macos_factory(environment, **options):
@@ -1100,16 +1124,20 @@ def _macos_factory(environment, **options):
     are acted on through Accessibility itself rather than through coordinates or
     injected input, and only one of the three is ever applicable on a given machine.
 
-    Deliberately **not** `opt_in`, which is where it parts company with `macquartz`
-    above. That flag exists for a constructor with a side effect no caller should hit
-    by surprise, and `macquartz` constructs by *asking* for its grant. This one
-    preflights instead -- `AXIsProcessTrusted` through `_macapi`, which is ctypes and
-    needs no binding -- and asks only when a caller passes `request=True`
+    Deliberately **not** `opt_in`. That flag exists for a constructor with a side
+    effect no caller should hit by surprise; this one preflights instead --
+    `AXIsProcessTrusted` through `_macapi`, which is ctypes and needs no binding --
+    and asks only when a caller passes `request=True`
     (`connect(backend="macos", backend_options={"request": True})`). A plain
     `connect()` on a Mac has to get elements, so this backend has to be in automatic
     composition; what it must not do is put a dialog on screen for someone who never
     asked, and `request` is that rule spelled as an option rather than as a registry
     flag.
+
+    This used to be the place that noted `macquartz` parting company by being
+    opt-in. It no longer does: `macquartz` now gates its own request behind the
+    same `request` option, for the reasons its factory gives, so the two
+    backends on this platform follow one rule rather than two.
 
     Construction can still raise `BackendUnavailable` for a reason `available()`
     cannot see -- a binding that imports without the entry points, which is a PyObjC

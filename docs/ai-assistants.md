@@ -107,11 +107,13 @@ rules below are one shape of that mistake.
     is real and useful, but it breaks on theme, font and scaling changes.
     Reach for it only when there is nothing accessible to match.
 
-17. **On macOS, input is opt-in.** A plain `connect()` there has elements and
-    windows but no pointer or keyboard. A script that injects input on a Mac
-    connects with `pyguitest.connect(backend=["macquartz", "macos"])`, and
-    the user must grant Accessibility (and Screen Recording, for capture) in
-    System Settings — code cannot grant them.
+17. **On macOS, every capability is gated on a grant the user makes by
+    hand.** A plain `connect()` composes elements, windows, capture and input
+    alike, but each backend reports its capabilities only where the grant is
+    already there — Accessibility for elements, PostEvent for input, Screen
+    Recording for capture. Code cannot grant them, so check `supports()` and
+    let `require()` fail by name. (Input was opt-in before 0.22.1, and older
+    scripts naming `["macquartz", "macos"]` still work unchanged.)
 
 ## A correct script, end to end
 

@@ -11,6 +11,12 @@ What follows is in the order it happened, which is the right order for
 reading how something was found and the wrong one for asking "has my desktop
 been tried at all". The same record sorted that way instead:
 
+- **Seven desktops at once, recorded on two of them** — [the
+  cross-platform replay matrix](#macos-input-in-automatic-composition-and-a-cross-platform-replay-matrix-2026-11-06):
+  whether a script recorded on one desktop drives the same controls on
+  another, judged by the application's own journal rather than by exit
+  status. It is also what found macOS reporting no input capabilities at all
+  from a plain `connect()`.
 - **GNOME Shell 50.4, Wayland** — [the first full
   pass](#run-live-on-gnome-shell-504-wayland): the composite assembled live,
   AT-SPI elements, window control through the Shell extension, `eiinput` over
@@ -4964,3 +4970,140 @@ test of mine was genuinely wrong and Windows caught it — a planted
 extensionless file is not executable there, since `PATHEXT` decides, so the
 PATH-search assertion now checks the search path handed to `shutil.which`
 and the file-planting variant is POSIX-only.
+
+## macOS input in automatic composition, and a cross-platform replay matrix (2026-11-06)
+
+The question was whether a script recorded on one desktop drives the *same
+controls* when replayed on another, and the measurement was built to answer it
+without taking a script's exit status as evidence: one Qt fixture of pinned
+size, with every control's accessible name set by hand, writing a JSONL
+journal of each interaction it actually received. A recording's journal
+against a replay's journal is the verdict — which matters, because a
+coordinate click that lands on the wrong widget still exits zero.
+
+Recorded on Linux Mint (X11, XRecord) and on Windows 10 (win32 hooks),
+then each generated script replayed on seven desktops: Mint X11, GhostBSD
+X11, Ubuntu GNOME under XWayland, COSMIC, Hyprland, Windows 10 and macOS 26.7.
+
+**What this found in pyguitest.** `macquartz` was registered `opt_in`, and it
+is the only input backend on macOS, so a plain `connect()` there reported no
+`KEY_EVENT`, `POINTER_BUTTON`, `POINTER_MOVE`, `POINTER_SCROLL` or
+`TEXT_ENTRY` — the one platform of the three whose input backend was left out
+of automatic composition. Every script pyguitest-recorder generates opens a
+plain `connect()` and then `gui.require(...)`, so each raised
+`CapabilityUnsupported` on its first statement and drove nothing at all. The
+flag guarded the constructor's PostEvent *request*; that moved behind
+`request=True` and the flag went, which is what `macos` had already done with
+Accessibility. Verified after the change: a plain `connect()` composes
+`macos+macquartz+capture:screencapture+clipboard:pbcopy` and reports the
+input capabilities, and a Mac without the PostEvent grant still reports none
+of them, so `require()` refuses by name rather than letting an injected event
+go nowhere.
+
+Checked for regression on the other six, since the factory now runs
+everywhere: on Mint, Hyprland and GhostBSD `_macquartz_factory` answers None
+as it must, the composed backend string is unchanged, and all five non-macOS
+boxes still replay the whole sequence.
+
+**Where the replay matrix stands.** Ten of fourteen box-and-direction
+combinations drive all six controls in the recorded order. Mint X11, GhostBSD
+X11, Ubuntu GNOME/XWayland, Hyprland and Windows 10 pass from both recording
+origins; the two scripts render identical calls.
+
+The two that do not, and why:
+
+- **COSMIC** drives five of six, losing the text field every run. `focus()`
+  reports the field focused and `set_text` lands its text there, both
+  confirmed by reading the element back; what goes missing is the Return that
+  commits it. Not the window activation before it — all three orderings were
+  0/3 here and 3/3 on Mint — so it reads as a keystroke-delivery race on this
+  compositor and is not yet explained.
+- **macOS** drives three of six and then cannot find the page tab. Qt's AX
+  bridge publishes a tab as a bare `AXRadioButton` under an `AXTabGroup`,
+  with an empty subrole, and a list row as an `AXRow` carrying no title at
+  all — its text lives on a descendant `AXStaticText`. Reporting the tab as a
+  `page tab` is affordable (four radio buttons in the whole window, so the
+  parent read is bounded to a rare role) but it would change `Element.role`
+  on this platform, and `pyguitest-torture-test`'s macOS driver filters tab
+  children on `role == "radio button"` and documents that as a platform fact.
+  So it is a coordinated change rather than a patch, and it is not made here.
+
+**One platform behaviour worth recording on its own.** On macOS, two
+accessible actions issued less than about 200ms apart are observed by the
+application **out of order**. Reproduced with both elements resolved in
+advance so the calls are back to back: at a 0ms and a 50ms gap the later
+action's effect is journaled first, every time; at 200ms the order is
+correct. `AXUIElementPerformAction` returns in about 2ms and the effect is
+delivered on the application's own runloop, so a push button's press can land
+after a check box's toggle that was asked for later. It does not change which
+controls are driven, but ordering between two rapid actions is not guaranteed
+there — which is an argument for the recorder emitting the waits it observed
+rather than compressing them away.
+
+## Closing the gaps the replay matrix left open (2026-11-06)
+
+The [matrix entry above](#macos-input-in-automatic-composition-and-a-cross-platform-replay-matrix-2026-11-06)
+left two desktops short: COSMIC drove five of six controls and macOS three.
+Both were root-caused by measurement rather than reasoning, and both are
+fixed. Every box-and-direction combination now drives all six.
+
+**COSMIC was losing every key that was not typed text.** The symptom was a
+`set_text` whose committing Return never arrived. It was not timing — no
+delay up to three seconds helped — and not keyboard focus, which was proved
+by typing an ordinary character into the same field straight afterwards and
+watching it land. What separated it was comparing the two paths: `type_text`
+followed by Return committed every time, and `set_text` followed by Return
+never did. `type_text` goes through `wtype`; so, it turned out, did
+`tap_key`. On this compositor `wtype -k Return` exits zero and nothing
+receives it, while its typing arrives normally — and `uinput`, which can send
+the key, was sitting in the same composite shadowed by it, because both claim
+`KEY_EVENT` and composition order preferred `wtype`. Forcing the session to
+compose `uinput` instead took the commit from none to every time, which is
+what identified the shadowing as the bug rather than the compositor.
+
+`ExternalTool.withheld_on` is the fix: a per-compositor, per-capability
+withholding, because dropping `wtype` outright on COSMIC would have cost the
+only keymap-safe way to type there. It keeps `TEXT_ENTRY` and gives up
+`KEY_EVENT`. Verified afterwards on the box: `KEY_EVENT` served by `uinput`,
+`TEXT_ENTRY` still served by `input:wtype`. sway and Hyprland are untouched,
+and Hyprland — which had always passed — still does.
+
+**macOS could not find a tab or a list row, and could not select either.**
+Three separate things, measured from the AX tree directly:
+
+- A tab is an `AXRadioButton` inside an `AXTabGroup`, and a list row an
+  `AXRow` inside an `AXList`. Neither carries a subrole — both were empty —
+  so the container is the only thing distinguishing them from an ordinary
+  radio button and a table row. `role="page tab"` and `role="list item"`
+  therefore matched nothing at all on a Mac.
+- The `AXRow` publishes an empty title, description *and* value. The text a
+  person reads sits on an `AXStaticText` child, so a row plainly visible on
+  screen had no accessible name to be found by.
+- `Element.select()` wrote `kAXSelectedAttribute` and refused where none was
+  published — which is every Qt tab. A Qt list row publishes no press either,
+  so only its rectangle is left.
+
+Reading those two roles in context costs one parent read, and only for an
+element whose own role is one of the two — four `AXRadioButton`s in the whole
+fixture window. `select()` now ends at `click()` for the roles whose
+activation is their selection, which already knew to try `AXPress`, a value
+write, the selected write, and then the rectangle. A push button still
+refuses to be selected.
+
+`pyguitest-torture-test`'s macOS driver read tabs as `radio button` and
+documented that as a platform fact; it now accepts either spelling, so it
+works against both sides of this change.
+
+**What is left is not a defect but a property worth knowing.** On both
+Windows and macOS the order in which an application *observes* two
+accessible actions issued in quick succession is not guaranteed. Measured:
+macOS inverted a button-then-checkbox pair at a 0ms and a 50ms gap, every
+time, and ordered it correctly at 200ms — `AXUIElementPerformAction` returns
+in about two milliseconds while the effect is delivered on the application's
+own run loop. In the full replay macOS inverted that same pair by 83ms and
+Windows inverted a radio-then-row pair by 78ms, though Windows ordered the
+button-and-checkbox pair correctly even back to back, so it is pair-dependent
+there rather than universal. All six controls are driven on every desktop
+either way; a test whose *meaning* depends on the order of two rapid actions
+needs a wait between them, which is also why a recorded script keeps the
+pauses the recording observed rather than compressing them away.

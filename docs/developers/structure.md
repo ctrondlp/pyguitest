@@ -177,7 +177,7 @@ whatever answers. Priority decides who wins a contested capability.
 | 80 | `inputcapture` *(opt-in)* | the pointer position at a screen-edge crossing, via the InputCapture portal |
 | 70 | `input` | pointer and keyboard through a CLI tool, or uinput |
 | 70 | `win32` | windows, window events, screens, input, capture and the clipboard on Windows, in plain `ctypes` |
-| 70 | `macquartz` *(opt-in)* | pointer and keyboard on macOS, via `CGEventPost` |
+| 70 | `macquartz` | pointer and keyboard on macOS, via `CGEventPost`; the PostEvent *request* is behind `backend_options={"request": True}`, so composing it asks for nothing |
 | 65 | `pointer` | uinput or ydotool, only where `input`'s keymap-safe winner is typing-only (wtype on COSMIC/wlroots), so the session still has a pointer |
 | 60 | `capture` | screenshots |
 | 58 | `clipboard` | clipboard text through `wl-clipboard`, `xclip`, `xsel` or `pbcopy`/`pbpaste` |

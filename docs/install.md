@@ -280,19 +280,26 @@ cases measured so far (macOS 26.7), so grant that one by hand.
 
 ### Connecting with input
 
-`macquartz` is **opt-in**: a plain `connect()` never composes it, so that no
-session requests the PostEvent grant unless you asked. A plain `connect()` on
-a Mac therefore gives elements, windows, screenshots and the clipboard, but no
-pointer or keyboard input. Name the backends to add it:
+A plain `connect()` composes input along with everything else:
 
 ```python
-gui = pyguitest.connect(backend=["macquartz", "macos"])
+gui = pyguitest.connect()
 ```
 
-That pair is the combination validated on a real Mac. Naming backends
-composes exactly the ones named, so add `"capture"` and `"clipboard"` to that
-list if the script also takes screenshots or uses the clipboard, and
-`"imagesearch"` if it uses `locate_image` (which needs ImageMagick).
+`macquartz` supplies the pointer and keyboard; `macos` supplies elements and
+windows; `screencapture` and `pbcopy` supply capture and the clipboard. None
+of them asks for a grant by being composed — each one *preflights*, and
+reports the capability only where the grant is already there. So a Mac with
+PostEvent granted can type, and one without it has no `KEY_EVENT` in
+`supports()` and `require()` says so by name rather than letting an injected
+event go quietly nowhere.
+
+`macquartz` was opt-in until 0.22.1, which meant a plain `connect()` on a Mac
+had no pointer or keyboard at all and every script had to name backends.
+Scripts that still do are unaffected — naming backends composes exactly the
+ones named, so add `"capture"`, `"clipboard"` or `"imagesearch"` to the list
+if the script takes screenshots, uses the clipboard, or calls
+`locate_image`.
 
 ## Distribution packages (pip cannot supply these)
 

@@ -174,6 +174,16 @@ packages it yet, so it has to be built from source. On sway and Hyprland,
 `wtype` is keymap-safe and packaged; it does **not** work on GNOME or KDE,
 whose compositors lack the protocol it needs.
 
+**On COSMIC, `wtype` types but does not send named keys.** Measured there:
+its typing reaches an application, while `wtype -k Return` exits zero and
+nothing receives it. So from 0.23.0 `wtype` keeps `TEXT_ENTRY` on COSMIC and
+gives up `KEY_EVENT`, and the `uinput` backend beside it serves keys instead
+— which means COSMIC wants the `uinput` extra installed for anything that
+presses a key rather than typing text, and `pyguitest report` shows the two
+capabilities served by different members. wlroots compositors are
+unaffected: the same call works on sway and Hyprland, which is why this is
+scoped to the one compositor rather than taken off the tool.
+
 `pyguitest doctor` prints whichever of these apply to your machine.
 
 ### On Windows: virtual keys, scan codes and Unicode
@@ -219,12 +229,17 @@ does not on Windows: `macquartz` types through
 `CGEventKeyboardSetUnicodeString`, so `type_text` never asks what layout is
 active, and `allow_keymap_unsafe` is accepted and ignored rather than refusing.
 
-`macquartz` is **opt-in**, so a plain `connect()` has no pointer or keyboard
-input on a Mac. Name it alongside the element and window backend:
+A plain `connect()` composes `macquartz` along with the element and window
+backend, so input needs nothing named:
 
 ```python
-gui = pyguitest.connect(backend=["macquartz", "macos"])
+gui = pyguitest.connect()
 ```
+
+It was opt-in until 0.22.1. Composing it asks for nothing — the PostEvent
+*request* is behind `connect(backend="macquartz", backend_options={"request":
+True})` — and the capability is reported only where the preflight says the
+grant is already there.
 
 Injection needs the **PostEvent** grant (`kTCCServicePostEvent`), not
 Accessibility, although System Settings lists it in the same pane, Privacy &

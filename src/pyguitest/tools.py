@@ -26,8 +26,9 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
+from types import MappingProxyType
 
 from .capabilities import Capability
 
@@ -77,6 +78,23 @@ class ExternalTool:
     which both implement, while `grim` needs `wlr-screencopy`, which only
     wlroots implements. A tool with this set is dropped when `discover()`'s
     `compositor` argument names a compositor not in it."""
+
+    withheld_on: Mapping[str, frozenset[Capability]] = MappingProxyType({})
+    """Capabilities this tool must not be credited with on a given compositor,
+    by `Compositor.value`. Applied by `discover()` when it is told which
+    compositor the session is on.
+
+    Finer-grained than `compositors`, and needed because a tool can be
+    genuinely usable on a compositor for one capability and silently useless
+    for another. `wtype` on COSMIC is the measured case: its *typing* reaches
+    a Qt application there, and its *named keys* do not -- `wtype -k Return`
+    exits successfully and nothing receives it. Dropping the whole tool is the
+    wrong answer, because wtype is also the only keymap-safe way to type on
+    that compositor; what has to go is its claim on `KEY_EVENT`, so the
+    uinput backend beside it serves that instead.
+
+    Nothing hashes an `ExternalTool`, so a mapping here is safe; the default
+    is a shared read-only empty one."""
 
     x11_only: bool = False
     """True if the tool talks to an X server and so cannot see native Wayland
@@ -229,8 +247,10 @@ INPUT_TOOLS = (
     ExternalTool(
         "wtype",
         frozenset({Capability.KEY_EVENT, Capability.TEXT_ENTRY}),
-        "wlr virtual-keyboard; typing only, on wlroots and COSMIC",
+        "wlr virtual-keyboard; typing only, on wlroots and COSMIC. Its named "
+        "keys do not arrive on COSMIC, so KEY_EVENT is withheld there",
         compositors=frozenset({"wlroots", "cosmic"}),
+        withheld_on=MappingProxyType({"cosmic": frozenset({Capability.KEY_EVENT})}),
     ),
     ExternalTool(
         "ydotool",
@@ -473,8 +493,12 @@ def discover(
         screenshot API. Distinct from the compositor allowlist: KWin needs this
         flag rather than that one, being neither a wlroots compositor nor a
         Mutter one.
+    A tool whose `withheld_on` names the given compositor is handed back with
+    those capabilities removed rather than dropped, so the rest of what it can
+    do is still used. With no `compositor` named nothing is withheld, which is
+    what `best()` relies on.
     """
-    return tuple(
+    usable = tuple(
         t
         for t in group
         if t.present
@@ -483,6 +507,14 @@ def discover(
         and (allow_x_root_only or not t.x_root_only)
         and (allow_mutter_incompatible or not t.mutter_incompatible)
         and (allow_wayland_only or not t.wayland_only)
+    )
+    if compositor is None:
+        return usable
+    return tuple(
+        replace(t, capabilities=t.capabilities - t.withheld_on[compositor])
+        if compositor in t.withheld_on
+        else t
+        for t in usable
     )
 
 

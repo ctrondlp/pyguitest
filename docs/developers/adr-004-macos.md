@@ -3,13 +3,31 @@
 Status: accepted · 2026-09-22 · follows [ADR 001](adr-001-dependencies.md),
 [ADR 002](adr-002-transports.md) and [ADR 003](adr-003-windows.md)
 
-> **Amended since:** only `macquartz` is `opt_in` now. The `macos` backend
-> joins automatic composition: it preflights with `AXIsProcessTrusted`, which
-> shows nothing, and asks for the Accessibility grant only when a caller
-> passes `backend_options={"request": True}` — so a plain `connect()` on a
-> Mac gets elements without anything appearing on screen. `_macos_factory`'s
-> docstring in `backends/__init__.py` has the reasoning. §3 and the
-> consequences below record the original decision.
+> **Amended since (0.22.1):** *neither* backend is `opt_in` any more, and
+> §3's title is no longer the design. Both now join automatic composition and
+> both gate their *request* behind `backend_options={"request": True}`, which
+> is §4's preflight/prompt split expressed as an option rather than as a
+> registry flag.
+>
+> `macos` went first: it preflights with `AXIsProcessTrusted`, which shows
+> nothing, so a plain `connect()` on a Mac gets elements without anything
+> appearing on screen.
+>
+> `macquartz` followed, because leaving it opt-in turned out to cost more
+> than the flag protected. It is the only input backend on this platform, so
+> a plain `connect()` reported no `KEY_EVENT`, `POINTER_BUTTON`,
+> `POINTER_MOVE`, `POINTER_SCROLL` or `TEXT_ENTRY` at all — the only one of
+> the three desktops whose input backend was left out of automatic
+> composition. Every script pyguitest-recorder generates opens a plain
+> `connect()` and then `gui.require(...)`, so each one raised
+> `CapabilityUnsupported` on its first statement and drove nothing. What the
+> flag guarded was the constructor's `CGRequestPostEventAccess` call, which
+> is now behind `request=True`; `capabilities` always read the non-prompting
+> `CGPreflightPostEventAccess`, so an ungranted Mac is refused exactly as
+> clearly as before.
+>
+> The two factories' docstrings in `backends/__init__.py` carry the
+> reasoning. §3 and the consequences below record the original decision.
 
 ## Context
 

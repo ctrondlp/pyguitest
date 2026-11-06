@@ -440,6 +440,61 @@ def _ax_role(name: str) -> str:
     return _AX_ROLES.get(name) or _camel_words(name)
 
 
+_AX_SELECT_BY_PRESS = frozenset(
+    {Role.PAGE_TAB, Role.LIST_ITEM, Role.TABLE_ROW, Role.RADIO_BUTTON}
+)
+"""Roles whose activation *is* their selection, for `Element.select()`.
+
+AX publishes `kAXSelectedAttribute` on some selectable things and not others
+-- a Qt tab has none, measured -- and for these four pressing is what a
+person does to select one. Everything else keeps the typed refusal: pressing
+a push button is not selecting it.
+"""
+
+_AX_ROW_ROLES = frozenset({"AXRow"})
+"""AX roles whose text lives on their cells rather than on themselves.
+
+Scopes `Element._name_from_cells`, so nothing else pays for a row's problem.
+"""
+
+_AX_PARENT_ROLES = {
+    "AXRadioButton": {"AXTabGroup": Role.PAGE_TAB},
+    "AXRow": {"AXList": Role.LIST_ITEM},
+}
+"""Roles AX only tells apart by what contains them: (own role, parent role).
+
+Two AX roles mean different things depending on their container, and both
+cases are ones a portable script asks for by the *other* name:
+
+- **A tab is an `AXRadioButton` inside an `AXTabGroup`.** That is not a Qt
+  quirk -- AppKit models an `NSTabView`'s tabs the same way -- and there is no
+  subrole to tell one from an ordinary radio button, measured: the subrole is
+  empty on both. So `role="page tab"` matched nothing at all on a Mac, and a
+  script recorded anywhere else died at its first tab.
+- **A list row is an `AXRow` inside an `AXList`.** An `AXRow` inside an
+  `AXTable` or `AXOutline` really is a table row, which is what the flat
+  table reports; inside a list it is what at-spi and UIA both call a list
+  item.
+
+The cost is one parent read, and only for an element whose own role is a key
+here -- so it is paid on radio buttons and rows, never on the static text and
+groups that make up the bulk of a tree. Measured on the fixture window: four
+`AXRadioButton`s in the whole window.
+
+Deliberately not solved by widening `_AX_ROLES`: these two AX names still
+mean radio button and table row in every other container, and reporting them
+as tabs and list items everywhere would be a different wrong answer.
+"""
+
+
+def _ax_role_in_context(raw: str, parent_raw: str | None) -> str | None:
+    """The role for `raw` given its parent's raw role, or None if unaffected."""
+    by_parent = _AX_PARENT_ROLES.get(raw)
+    if by_parent is None or parent_raw is None:
+        return None
+    return by_parent.get(parent_raw)
+
+
 _AX_ACTIONS = {
     "AXPress": "click",
     "AXShowMenu": "show menu",
@@ -557,6 +612,14 @@ def _ax_roles(role: str | Sequence[str] | None):
     names = (role,) if isinstance(role, str) else tuple(role)
     wanted = spellings(role)
     named = {name for name, reported in _AX_ROLES.items() if reported in wanted}
+    # The two context-dependent roles: an AXRadioButton can be a page tab and
+    # an AXRow can be a list item, so a search for either has to *visit* those
+    # AX names. Which of them actually match is then decided per element by
+    # `_build_predicate`, which compares the role read in context -- otherwise
+    # asking for a page tab would return every radio button on the desktop.
+    for raw, by_parent in _AX_PARENT_ROLES.items():
+        if wanted & set(by_parent.values()):
+            named.add(raw)
     for one in names:
         if one.startswith("AX"):
             named.add(one)
@@ -701,10 +764,41 @@ class Element:
         name rather than becoming a `TypeError` inside a search.
         """
         ax = self._ax
-        return _text_of(
+        own = _text_of(
             self._read(ax.kAXTitleAttribute, "")
             or self._read(ax.kAXDescriptionAttribute, "")
         )
+        if own:
+            return own
+        return self._name_from_cells()
+
+    def _name_from_cells(self):
+        """The text of a row that publishes none of its own, or "".
+
+        A Qt list row reaches AX as an `AXRow` with an empty title, an empty
+        description *and* an empty value -- measured -- while the text a person
+        reads sits on an `AXStaticText` child of it. So a row that is perfectly
+        visible on screen had no name at all here, and `gui.element(role=...,
+        name="Row Two")` could not find it however it was spelled.
+
+        Only for a row, and only when the row named nothing itself, so no
+        other element pays for this. One level of children, not a full
+        descendant walk: a cell's own text is its child, and recursing would
+        let a row borrow a name from something nested arbitrarily deep inside
+        it. Several cells join with a space, which is what makes a
+        multi-column row addressable by the text it shows.
+        """
+        if _raw_role(self) not in _AX_ROW_ROLES:
+            return ""
+        texts = []
+        for child in self.children:
+            text = _text_of(
+                child._read(self._ax.kAXTitleAttribute, "")
+                or child._read(self._ax.kAXValueAttribute, "")
+            )
+            if text:
+                texts.append(text)
+        return " ".join(texts)
 
     @property
     def role(self):
@@ -713,8 +807,24 @@ class Element:
         Translated from AX's role through the table at the top of this module,
         which is why the answer is an at-spi role name rather than AX's, and
         `unknown` only where nothing could be read at all.
+
+        Two AX roles are read in context rather than straight off the table,
+        because AX distinguishes them only by their container: a tab is an
+        `AXRadioButton` inside an `AXTabGroup`, and a list row is an `AXRow`
+        inside an `AXList`. `_AX_PARENT_ROLES` has the measurements; the
+        parent read it costs happens only for an element whose own role is one
+        of those two.
         """
-        return _ax_role(self._read(self._ax.kAXRoleAttribute, ""))
+        raw = self._read(self._ax.kAXRoleAttribute, "")
+        if raw in _AX_PARENT_ROLES:
+            parent = self._backend._parent(self.node)
+            if parent is not None:
+                in_context = _ax_role_in_context(
+                    raw, _raw_role(Element(parent, self._backend, self._session))
+                )
+                if in_context is not None:
+                    return in_context
+        return _ax_role(raw)
 
     @property
     def parent(self):
@@ -1150,18 +1260,46 @@ class Element:
     def select(self):
         """Select this element, for a list item, tab, or menu entry.
 
-        A typed refusal rather than a silent no-op where the element publishes
-        no `kAXSelectedAttribute`, for the same reason `set_text` refuses: a
-        caller who asked for a selection and got nothing has no way to tell that
-        apart from a selection that happened.
+        `kAXSelectedAttribute` where the element publishes one. Where it does
+        not, and the element is one of the roles whose *activation is* its
+        selection, `AXPress` instead -- because pressing a tab is how a tab
+        gets selected, and refusing would be refusing the only route the
+        platform offers.
+
+        That second path is why a Mac can replay a recorded tab or row click at
+        all. Measured on a Qt tab: AX publishes no `kAXSelectedAttribute` for
+        one, so `selectable` is False and the write above has nothing to write
+        to, while `AXPress` selects it exactly as a person clicking would. A Qt
+        list row is worse again -- an `AXRow` whose only action is `AXRaise`,
+        no press and no selection -- and `click()` is what knows to end up at
+        the pointer for an element AX left actionless, which is how a person
+        selects that row too.
+
+        Delegating to `click()` rather than reimplementing a press is the
+        point: it already tries `AXPress`, then a value write, then the
+        selected write, then the rectangle, and it refuses rather than falls
+        through when a route it *found* says no. The roles are restricted to
+        `_AX_SELECT_BY_PRESS` rather than allowed for anything, because
+        clicking is not selecting in general -- clicking a push button
+        activates it, and silently turning a refused `select()` into a click
+        on one would be the kind of agreement-by-accident this backend exists
+        to avoid.
+
+        Still a typed refusal where neither route exists, for the same reason
+        `set_text` refuses: a caller who asked for a selection and got nothing
+        has no way to tell that apart from a selection that happened.
         """
-        if not self.selectable:
-            raise CapabilityUnsupported(
-                Capability.ELEMENT_ACTION,
-                self._backend.name,
-                f"{self!r} publishes no selection, so it cannot be selected",
-            )
-        self._write(self._ax.kAXSelectedAttribute, True, f"select {self!r}")
+        if self.selectable:
+            self._write(self._ax.kAXSelectedAttribute, True, f"select {self!r}")
+            return
+        if self.role in _AX_SELECT_BY_PRESS:
+            self.click()
+            return
+        raise CapabilityUnsupported(
+            Capability.ELEMENT_ACTION,
+            self._backend.name,
+            f"{self!r} publishes no selection, so it cannot be selected",
+        )
 
     def expand(self):
         """Open this tree item or similar disclosure control.
@@ -2387,9 +2525,25 @@ class MacosBackend(GUIBackend):
         """
         wanted = _ax_roles(role)
 
+        asked = None if role is None else spellings(role)
+
         def matches(element):
             """Whether this element has the wanted role and matches the filters."""
-            if wanted is not None and _raw_role(element) not in wanted:
+            raw = _raw_role(element)
+            if wanted is not None and raw not in wanted:
+                return False
+            # `_ax_roles` widened the walk to include the AX names whose role
+            # depends on their container, so the ones that are not actually
+            # what was asked for are rejected here -- by the role read in
+            # context, which is the same answer `Element.role` gives. Without
+            # this, asking for a page tab returns every radio button, and
+            # asking for a radio button returns the tabs.
+            if (
+                asked is not None
+                and raw in _AX_PARENT_ROLES
+                and element.role not in asked
+                and raw not in asked
+            ):
                 return False
             if name is not None and not _matches_text(element.name, name):
                 return False
