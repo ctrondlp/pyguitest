@@ -220,7 +220,7 @@ first: it names every grant this process lacks.
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | Element queries find nothing | the Accessibility grant | System Settings > Privacy & Security > Accessibility |
-| `move_mouse()`, `click()` or `type_text()` raise `CapabilityUnsupported` | `macquartz` is opt-in, so a plain `connect()` has no input | `connect(backend=["macquartz", "macos"])` |
+| `move_mouse()`, `click()` or `type_text()` raise `CapabilityUnsupported` | the PostEvent grant is missing, so `macquartz` withdraws every input capability | Privacy & Security > Accessibility — the PostEvent grant, granted against the application that launched the process. (Before 0.22.1 the cause was `macquartz` being opt-in; it is composed by a plain `connect()` now) |
 | Input calls return but nothing moves or types | the PostEvent grant | Privacy & Security > Accessibility — the same pane, a separate grant |
 | `PermissionRequired` naming Screen Recording | the Screen Recording grant | Privacy & Security > Screen Recording |
 

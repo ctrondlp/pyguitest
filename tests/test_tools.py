@@ -97,6 +97,85 @@ class TestCompositorGatedTools(unittest.TestCase):
         self.assertIsNone(by_name["ydotool"].compositors)
         self.assertIsNone(by_name["wdotool"].compositors)
 
+    def test_wtype_does_not_claim_key_events_on_cosmic(self):
+        # Measured on COSMIC: wtype's *typing* reaches a Qt application and its
+        # named keys do not -- `wtype -k Return` exits zero and nothing gets
+        # it, so a recorded Return was silently lost while `uinput`, sitting
+        # right beside it in the composite and able to send one, was shadowed.
+        # Dropping the whole tool would be wrong: it is also the only
+        # keymap-safe way to type on that compositor, which is why this is a
+        # per-capability withholding and not a compositor exclusion.
+        by_name = {t.name: t for t in tools.INPUT_TOOLS}
+        wtype = by_name["wtype"]
+        self.assertEqual(wtype.withheld_on["cosmic"], frozenset({Capability.KEY_EVENT}))
+        # The claim itself is unchanged -- it is wlroots-correct.
+        self.assertIn(Capability.KEY_EVENT, wtype.capabilities)
+        self.assertIn(Capability.TEXT_ENTRY, wtype.capabilities)
+
+    def test_the_withheld_on_default_is_not_a_dataclass_default(self):
+        # A regression test for a break CI found and this machine could not.
+        # `withheld_on = MappingProxyType({})` written as the default is
+        # rejected at *import* time on Python 3.11, whose dataclasses refuse
+        # any default whose class is unhashable -- while 3.10 accepted it
+        # (it tested `isinstance(default, (list, dict, set))`) and 3.12+
+        # accept it again (a mappingproxy became hashable). So the suite was
+        # green on 3.10, 3.12, 3.13, 3.14 and the 3.15 this was written on,
+        # and every test errored on 3.11.
+        #
+        # Asserting the *mechanism* rather than the symptom, because the
+        # symptom cannot be reproduced on an interpreter that allows it: what
+        # has to stay true is that the field carries a factory and no default.
+        import dataclasses
+
+        by_name = {f.name: f for f in dataclasses.fields(tools.ExternalTool)}
+        withheld = by_name["withheld_on"]
+        self.assertIs(withheld.default, dataclasses.MISSING)
+        self.assertIsNot(withheld.default_factory, dataclasses.MISSING)
+
+    def test_a_tool_withholds_nothing_by_default(self):
+        tool = tools.ExternalTool("anything", frozenset())
+        self.assertEqual(dict(tool.withheld_on), {})
+        # Immutable, so the shared default cannot be edited by one caller into
+        # every other tool's answer.
+        with self.assertRaises(TypeError):
+            tool.withheld_on["cosmic"] = frozenset()
+
+    def test_discover_withholds_a_capability_on_the_named_compositor(self):
+        group = [
+            tools.ExternalTool(
+                REAL_BINARY,
+                frozenset({Capability.KEY_EVENT, Capability.TEXT_ENTRY}),
+                withheld_on={"cosmic": frozenset({Capability.KEY_EVENT})},
+            )
+        ]
+        # On the named compositor the tool is kept, minus what it cannot do.
+        (narrowed,) = tools.discover(group, compositor="cosmic")
+        self.assertEqual(narrowed.capabilities, frozenset({Capability.TEXT_ENTRY}))
+        # Everywhere else, and with no compositor named, nothing is withheld.
+        for compositor in ("wlroots", None):
+            (kept,) = tools.discover(group, compositor=compositor)
+            self.assertEqual(
+                kept.capabilities,
+                frozenset({Capability.KEY_EVENT, Capability.TEXT_ENTRY}),
+            )
+
+    def test_withholding_leaves_the_tool_otherwise_identical(self):
+        # `replace` rather than a hand-built copy, so a field added to
+        # ExternalTool later cannot be quietly dropped on this path.
+        group = [
+            tools.ExternalTool(
+                REAL_BINARY,
+                frozenset({Capability.KEY_EVENT, Capability.TEXT_ENTRY}),
+                "a note",
+                keymap_safe=False,
+                withheld_on={"cosmic": frozenset({Capability.KEY_EVENT})},
+            )
+        ]
+        (narrowed,) = tools.discover(group, compositor="cosmic")
+        self.assertEqual(narrowed.name, REAL_BINARY)
+        self.assertEqual(narrowed.note, "a note")
+        self.assertFalse(narrowed.keymap_safe)
+
     def test_discover_excludes_it_when_the_compositor_lacks_the_protocol(self):
         group = [
             tools.ExternalTool(

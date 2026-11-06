@@ -179,7 +179,7 @@ is what `connect()` reports, what `backend.providers()` lists, and what
 | Any desktop with a portal | the RemoteDesktop portal (`portal`) | — | — | the Screenshot portal (`portalcapture`) |
 | Unattended CI | `x11` under Xvfb, or a headless session | AT-SPI, where a bus is running | `gnomeshell` on a headless GNOME | `x11` |
 | Windows | `win32` (`SendInput`) | `uia`, via the `windows` extra (UI Automation) | `win32` (`EnumWindows`, plus window events through `SetWinEventHook`) | `win32` (GDI `BitBlt`, and `PrintWindow` for one window un-occluded) |
-| macOS | `macquartz`, via the `macos` extra (`CGEventPost`) — opt-in, and the PostEvent grant is made by hand in System Settings | `macos`, via the `macos` extra (the Accessibility tree) — the Accessibility grant is made by hand in System Settings | `macos`, joined to CoreGraphics for the on-screen list; titles need the Screen Recording grant | `screencapture`, which ships with the OS, and `-l` for one window un-occluded |
+| macOS | `macquartz`, via the `macos` extra (`CGEventPost`) — composed automatically, and the PostEvent grant is made by hand in System Settings | `macos`, via the `macos` extra (the Accessibility tree) — the Accessibility grant is made by hand in System Settings | `macos`, joined to CoreGraphics for the on-screen list; titles need the Screen Recording grant | `screencapture`, which ships with the OS, and `-l` for one window un-occluded |
 
 Two things the table cannot say. Whether an application publishes anything to
 its accessibility layer is up to the application; [testable-guis.md][testable-guis]
@@ -268,8 +268,10 @@ if gui.supports(Capability.WINDOW_GEOMETRY):
 ```
 
 `connect()` never raises on a limited desktop — a session with few capabilities
-is the normal case, and `supports()` is how you find out. On macOS, pointer and
-keyboard input is opt-in: `pyguitest.connect(backend=["macquartz", "macos"])`.
+is the normal case, and `supports()` is how you find out. That includes macOS,
+where every capability is gated on a grant made by hand in System Settings: the
+backends are all composed by a plain `connect()`, and each reports a capability
+only where its grant is already there.
 
 A session is usually several backends at once: elements from AT-SPI, injection
 from a CLI adapter, capture from another. `CompositeBackend` merges their

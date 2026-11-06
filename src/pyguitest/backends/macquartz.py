@@ -136,9 +136,10 @@ def request_post_event() -> bool:
     reader may be told that naming this backend offers them something to
     click. The grant comes from System Settings.
 
-    Still called, and only from a named backend's constructor, because it is
-    where the request belongs: a caller who has already granted it gets True
-    back, which is what `capabilities` reads to keep a live grant honest.
+    Still called, and only from a constructor a caller passed `request=True`
+    to, because that is where the request belongs. Everything automatic reads
+    `_macapi.post_event_allowed` instead -- the preflight -- which is what
+    `capabilities` uses to keep a live grant honest.
     """
     quartz = client()
     return bool(quartz.CGRequestPostEventAccess())
@@ -491,10 +492,11 @@ class MacquartzBackend(GUIBackend):
     """Pointer, buttons, scroll, keys and text, over `CGEventPost`.
 
     Registered at 70, beside `win32` and the Linux tool-backed input backends,
-    and `opt_in` because constructing it *asks* for the PostEvent grant -- see
-    `register`'s docstring on what that flag is for, and `request_post_event`
-    on why asking is not measurable as prompting on a Mac. Nothing here reads
-    an AX attribute, which is what keeps it off the Accessibility grant.
+    and -- like both of those -- composed automatically rather than named.
+    Constructing it asks for nothing: the PostEvent *request* is behind
+    `request=True` (see `__init__`), and `capabilities` reads the
+    non-prompting preflight. Nothing here reads an AX attribute, which is what
+    keeps it off the Accessibility grant.
     """
 
     name = "macquartz"
@@ -563,19 +565,37 @@ class MacquartzBackend(GUIBackend):
     naming the key instead of quietly pressing a different one.
     """
 
-    def __init__(self, environment=None):
-        """Open Quartz, and ask for the PostEvent grant.
+    def __init__(self, environment=None, request=False):
+        """Open Quartz, and ask for the PostEvent grant only if asked to.
 
-        `opt_in` is what makes asking defensible: this constructor runs only
-        for a caller who named `macquartz`, so `connect(backend="macquartz")`
-        **is** the request. A plain `connect()` never reaches it, and so never
-        asks for anything on anyone else's behalf.
+        `request` is ADR 004 §4's preflight/prompt split spelled as an option,
+        which is exactly what `macos.py` does with the Accessibility grant --
+        and this constructor used to be the one place on this platform that
+        did it with a registry flag instead. Constructing preflights nothing
+        and asks nothing; `capabilities` reads
+        `CGPreflightPostEventAccess` live, which is the non-prompting form
+        §4 reserves for anything automatic. So a plain `connect()` can compose
+        this backend without asking anyone for anything, and a caller who
+        wants the request makes it:
 
-        No dialog is expected -- `request_post_event` records what the call
-        actually did on the one machine it has been measured on -- so this is
-        not a way to grant anything, and no message should send a reader
-        looking for a prompt it will not find. `capabilities` is where the
-        answer shows up, and System Settings is where the grant is made.
+            connect(backend="macquartz", backend_options={"request": True})
+
+        That is what lets the backend leave `opt_in` behind -- see the
+        factory -- and it matters because `macquartz` is the *only* input
+        backend on this platform. While it was opt-in, a plain `connect()` on
+        a Mac had no `KEY_EVENT`, `POINTER_BUTTON` or `TEXT_ENTRY` at all,
+        where `win32` and the Linux input backends are composed
+        automatically at this same priority. Measured: every script
+        pyguitest-recorder generates opens `pyguitest.connect()` and then
+        `gui.require(...)`, so every one of them failed on its first
+        statement on macOS and drove nothing.
+
+        No dialog is expected even when `request` is true --
+        `request_post_event` records what the call actually did on the one
+        machine it has been measured on -- so this is not a way to grant
+        anything, and no message should send a reader looking for a prompt it
+        will not find. `capabilities` is where the answer shows up, and
+        System Settings is where the grant is made.
         """
         self._q = client()
         self.environment = environment
@@ -589,7 +609,8 @@ class MacquartzBackend(GUIBackend):
         # (button, when, x, y, count) of the last press, for the click count a
         # Cocoa application reads a double-click from. See `_click_count`.
         self._last_press: tuple[int, float, int, int, int] | None = None
-        request_post_event()
+        if request:
+            request_post_event()
 
     @property
     def capabilities(self):
