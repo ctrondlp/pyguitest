@@ -71,10 +71,9 @@ class TestMigrationTable(unittest.TestCase):
                 self.assertIsNotNone(fn.replacement)
         self.assertEqual(len(unavailable()), 6)
 
-    def test_only_two_functions_have_no_spelling_at_all(self):
-        self.assertEqual(
-            {fn.name for fn in unported()}, {"GetScreenDepth", "GetWindowsFromPid"}
-        )
+    def test_only_one_function_has_no_spelling_at_all(self):
+        # GetWindowsFromPid left this set when find_windows gained pid=.
+        self.assertEqual({fn.name for fn in unported()}, {"GetScreenDepth"})
 
     def test_unported_and_unavailable_are_different_questions(self):
         # Tier.NO_PATH is a statement about Wayland, not about availability:
@@ -241,9 +240,12 @@ class TestReplacementsResolve(unittest.TestCase):
     Regression: the migration table pointed at ten names with no definition
     anywhere in the package (Window.geometry, .move, .resize, .activate,
     .minimize, .restore, .alive, .visible, .wait_closed, a bare `desktop`)
-    plus two real names given fictitious keyword arguments
-    (find_windows(pid=), wait_for_window(visible=True)) -- the one table a
-    migrating user is told to trust, silently wrong.
+    plus a real name given a fictitious keyword argument
+    (wait_for_window(visible=True)) -- the one table a migrating user is
+    told to trust, silently wrong. (find_windows(pid=) was in that second
+    group too, until pyguitest 0.22.0 made the keyword real; it is now the
+    live replacement for GetWindowsFromPid, which this test confirms
+    resolves rather than merely claiming.)
     """
 
     def test_every_non_none_replacement_exists_in_the_live_package(self):

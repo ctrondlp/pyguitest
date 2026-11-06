@@ -33,6 +33,8 @@ import subprocess
 from collections.abc import Callable, Sequence
 from typing import IO, Any, Literal
 
+from .errors import PyGUITestError
+
 __all__ = ["Application"]
 
 
@@ -83,7 +85,11 @@ class Application:
         macOS `open -a`, a wrapper script -- reads as *not* running while the
         window it opened is still on screen. Where that matters, wait on the
         window or an element rather than on this. See `pid` for the same
-        distinction.
+        distinction. The macOS case has a real fix rather than a caveat:
+        `start_app` given a `.app` bundle (or a bare installed-app name)
+        launches it through LaunchServices and tracks the application's own
+        process, so this answers truthfully there -- pass that instead of
+        `open -a`.
         """
         return self.process.poll() is None
 
@@ -101,6 +107,17 @@ class Application:
         Idempotent, and never raises: this is what runs while an exception
         is already unwinding, and a cleanup path that throws replaces the
         real failure with its own. Returns the exit status.
+
+        **`None` means it is still running**, which is the one answer worth
+        checking for. A SIGKILL to a child cannot be declined, so on the
+        ordinary `start_app` path this never happens -- but the macOS
+        application path signals a process this one did not fork, and the
+        kernel can refuse that outright (`EPERM`: an application that
+        re-execed under another identity, a sandbox refusal). The wait after
+        `kill()` is bounded for exactly that case: an exit that a refused
+        SIGKILL guarantees will never come is reported, not waited on, since
+        blocking forever inside cleanup is how a suite wedges with no
+        message at all.
         """
         process = self.process
         if process.poll() is not None:
@@ -110,7 +127,10 @@ class Application:
             return process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             process.kill()
-            return process.wait()
+            try:
+                return process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                return None
 
     def restart(self, timeout: float = 5.0) -> Application:
         """Stop the program and start it again, same command, same options.
@@ -126,8 +146,21 @@ class Application:
         `communicate()`: a program started through the shell can leave a
         grandchild holding the pipe, and a drain would then block on it. Read
         `app.stdout` before calling this if the old output matters.
+
+        Raises `PyGUITestError` if the old process could not be stopped --
+        see `stop()` for the one case that happens in, a signal the kernel
+        refuses. Starting the replacement anyway would leave two instances
+        running with only the new one reachable, which is the leak this
+        class exists to prevent; the old `.process` is left in place, so a
+        caller can look at it rather than having it replaced out from under
+        them.
         """
-        self.stop(timeout)
+        if self.stop(timeout) is None:
+            raise PyGUITestError(
+                f"cannot restart {self.command!r}: process {self.pid} is "
+                "still running after both a terminate and a kill, so "
+                "launching another instance would leave this one orphaned"
+            )
         old = self.process
         for stream in (old.stdin, old.stdout, old.stderr):
             if stream is not None:
@@ -166,7 +199,12 @@ class Application:
         handler -- leaves this pointing at the launcher, so it will not match
         the `Element.pid` or `Window.pid` of the application on screen. Check
         with `pyguitest inspect` when a pid-scoped element query comes back
-        empty for an application that is plainly running.
+        empty for an application that is plainly running. On macOS, launch
+        the `.app` bundle (or the bare installed-app name) through
+        `start_app` instead of spelling out `open -a` yourself: that path
+        tracks the application's real process, so this pid matches the
+        window's and `wait_for_window(pid=app.pid)` finds it regardless of
+        title.
 
         The string form of `command` is a common cause, and which way it
         goes depends on what `/bin/sh` is on the machine. Measured three

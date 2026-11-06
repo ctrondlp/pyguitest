@@ -137,6 +137,67 @@ class TestStopping(unittest.TestCase):
         self.assertEqual(app.stop(), 0)
 
 
+class _Unkillable:
+    """A Popen-shaped process whose signals the kernel refuses.
+
+    Not reachable with a real child -- SIGKILL to one's own child cannot be
+    declined -- but exactly what the macOS application path can meet, where
+    the process was forked by launchd and `os.kill` can answer EPERM.
+    `macapp.BundleProcess` swallows that refusal by design (cleanup must not
+    raise), so from `stop()`'s side the process simply never exits: which is
+    what used to make the wait after `kill()` unbounded.
+    """
+
+    stdin = stdout = stderr = None
+    pid = 4242
+    returncode = None
+
+    def __init__(self):
+        self.signalled = []
+
+    def poll(self):
+        return None
+
+    def terminate(self):
+        self.signalled.append("terminate")
+
+    def kill(self):
+        self.signalled.append("kill")
+
+    def wait(self, timeout=None):
+        if timeout is None:
+            raise AssertionError("stop() must not wait unbounded on a refusal")
+        raise subprocess.TimeoutExpired(["unkillable"], timeout)
+
+
+class TestAProcessThatCannotBeStopped(unittest.TestCase):
+    """What `stop()` and `restart()` do when the kernel refuses the signals."""
+
+    def application(self):
+        process = _Unkillable()
+        return process, Application(process, ["unkillable"], lambda: _Unkillable())
+
+    def test_stop_bounds_its_wait_and_reports_still_running(self):
+        process, app = self.application()
+        started = time.monotonic()
+        self.assertIsNone(app.stop(timeout=0.2))
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertEqual(process.signalled, ["terminate", "kill"])
+
+    def test_restart_refuses_rather_than_orphaning_the_old_process(self):
+        """Launching a second instance would leave the first unreachable."""
+        _, app = self.application()
+        with self.assertRaises(pyguitest.PyGUITestError) as caught:
+            app.restart(timeout=0.2)
+        self.assertIn("still running", str(caught.exception))
+
+    def test_the_old_process_is_left_in_place_for_the_caller_to_see(self):
+        process, app = self.application()
+        with self.assertRaises(pyguitest.PyGUITestError):
+            app.restart(timeout=0.2)
+        self.assertIs(app.process, process)
+
+
 class TestState(unittest.TestCase):
     def test_is_running_follows_the_process(self):
         gui = session()

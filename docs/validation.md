@@ -84,6 +84,18 @@ been tried at all". The same record sorted that way instead:
   mid-drag release verified by the OS's own button state on X11 (three
   servers), Windows (two) and macOS — including the first runs ever on
   Windows 10 and on a Fedora 19 museum piece.
+- **macOS 26.7 (Tahoe)** — [launching a native application as
+  one](#launching-a-native-macos-application-as-one-textedit-end-to-end-2026-11-05):
+  the two measured ways `start_app` failed on a `.app` bundle (the binary
+  SIGKILLed at launch; `open -a` tracked by its launcher), and the bundle
+  launch that replaces them verified end to end on real TextEdit — real
+  pid, working lifecycle, `wait_for_window(pid=...)`, a typed round trip.
+- **Windows 10 22H2** — [launching a packaged application as
+  one](#launching-a-windows-packaged-application-as-one-calculator-end-to-end-2026-11-05):
+  the measured `calc.exe` stub trap (the Windows twin of `open -a`), and
+  the AUMID launch that replaces it verified end to end on the real
+  Calculator — real pid, real exit codes off the process handle, both
+  spellings, and the ApplicationFrameHost window-pid fact measured.
 - **[Not run live](#not-run-live)** is the half worth reading first: it is
   what stops anything above being a promise about your desktop.
 
@@ -4797,3 +4809,158 @@ provides in about a second. Note that a window manager *is* needed to
 exercise `move_window`/`resize_window` from the same script, since those go
 through `_NET_MOVERESIZE_WINDOW` and do nothing without one — those claims are
 covered by the sway and GNOME harnesses instead.
+
+## Launching a native macOS application as one: TextEdit, end to end (2026-11-05)
+
+**macOS 26.7 (Tahoe), real TextEdit, every check green** — the live half of
+`tests/test_macapp.py`, whose own docstring points here. The two measured
+failures that motivated `pyguitest.macapp` first, reproduced deliberately on
+this box before the fix existed:
+
+- `start_app([".../TextEdit.app/Contents/MacOS/TextEdit"])` — the binary,
+  exec'd the way example 04 launches gedit — was **killed with SIGKILL at
+  launch**: exit status 137, deterministic across repeated runs, no crash
+  report written, no window. The measured shape of launch-constraint
+  enforcement, whatever the exact kernel path.
+- `start_app(["open", "-a", "TextEdit"])` launched the app, but the
+  `Application` tracked `open` itself: `pid` named a process that exited
+  within a second (`returncode` 0), `is_running()` answered False under a
+  live window, and `terminate()` left the real TextEdit — a different pid —
+  running, measured by `pgrep` after the call.
+
+With the bundle launch in place, on the same box, the same day:
+
+- **All three spellings launch and track the real process**: the bare name
+  (`["TextEdit"]`), the bundle (`["/System/Applications/TextEdit.app"]`),
+  and the bundle's own binary — the one that used to die — each produced an
+  `Application` whose `pid` matched `pgrep -x TextEdit` exactly.
+- **The lifecycle means what it says now**: `is_running()` True under the
+  window; leaving the `with` block really quit the app (`pgrep` empty);
+  `restart()` produced a fresh instance (new pid, old one gone) — new
+  instances every time, so nothing reactivates a copy the caller does not
+  own.
+- **`wait_for_window(pid=app.pid)` found the window every time, titled
+  `'Untitled'`** — the title that makes name-based waiting fail silently for
+  a document-based app, and the reason the `pid=` filter exists.
+- **A typed round trip landed**: with the input backend composed in
+  (`connect(backend=["macos", "macquartz"])`, TEXT_ENTRY True), text typed
+  at the focused window came back out of TextEdit's own AX tree.
+
+**What this does not cover.** One application, Apple's own, on one box: a
+third-party (non-SIP) bundle has not been tried, so whether the direct-exec
+SIGKILL is specific to `/System/Applications` bundles is unmeasured — moot
+for the fix, which never execs the binary, but open as a fact. `returncode`
+on this path is 0 for any observed exit by design (launchd is the parent;
+the real status is not observable from here), and that caveat is asserted in
+the unit tests rather than here.
+
+## Launching a Windows packaged application as one: Calculator, end to end (2026-11-05)
+
+**Windows 10 22H2, real Calculator, every check green** — the live half of
+`tests/test_winapp.py`, same day and same shape as the macOS TextEdit entry
+above. The measured failure that motivated it first, reproduced
+deliberately before the fix existed:
+
+- `start_app(["calc.exe"])` launched a Calculator, but the `Application`
+  tracked the System32 stub: `is_running()` answered False with
+  `returncode` 0 within three seconds of a live window, the window's pid
+  did not match `app.pid`, and `app.terminate()` left the Calculator
+  running — a different pid, confirmed by `tasklist` after the call. The
+  Windows twin of `open -a`.
+
+With the AUMID launch in place, on the same box, the same day, driven from
+the interactive session through the usual Scheduled-Task path:
+
+- **Both spellings launch and track the real process**: the bare AUMID
+  (`Get-StartApps`' `Microsoft.WindowsCalculator_8wekyb3d8bbwe!App`) and
+  the Explorer spelling (`shell:AppsFolder\<AUMID>`) each produced an
+  `Application` whose `pid` matched the running `Calculator.exe` exactly.
+- **The lifecycle means what it says, with real exit codes**: `stop()`
+  genuinely ended the instance this session started and returned 1 —
+  `TerminateProcess`'s code, read off the process handle, not a sentinel;
+  `restart()` produced a fresh instance (new pid, old one gone); leaving
+  the `with` block stopped the Explorer-spelling instance the same way.
+- **Popen kwargs are refused loudly**: `env=` raised the documented
+  ValueError naming the limitation, rather than being dropped.
+- **The frame-host fact, measured**: the Calculator's window reported
+  `ApplicationFrameHost.exe`'s pid, not the app's, so
+  `wait_for_window(pid=app.pid)` answers None for a UWP-hosted window —
+  find those by `title`. Measured on a UWP app specifically; a packaged
+  full-trust (desktop bridge) app owns its windows and was not among what
+  this session drove, so `pid=` is documented as the filter to prefer
+  where it works rather than as broken for everything packaged. The `pid=`
+  filter works as intended for classic executables (the same session
+  verified `notepad.exe` end to end by pid), and the lifecycle calls act
+  on the real application regardless.
+- **The adapter's own unit tests ran on real Windows**: the suite on the
+  box (2302 passed, 84 skipped) includes the four handle-backed
+  `PackagedAppProcess` tests, which only execute on `nt` — including the
+  real-exit-code assertion.
+
+**What this does not cover.** One packaged application, Microsoft's own,
+on one Windows 10 box; Windows 11 (whose `notepad.exe` is itself
+store-packaged) has not been tried. The single-instance reactivation
+behaviour — an already-running instance's existing pid coming back — is
+documented from the API's contract and one accidental encounter with a
+leftover instance, not from a dedicated measurement; the creation-time
+check that now refuses to adopt such an instance is therefore reasoned
+from `GetProcessTimes` and unit-tested, with its live encounter still
+owed. No desktop-bridge (packaged full-trust) application has been driven
+either, which is why the window-lookup guidance distinguishes the hosted
+case it did measure from the one it did not.
+
+## The review fixes to both application-launch paths (2026-11-06)
+
+**macOS 26 Tahoe (Darwin 25.6.0) and Windows 10 22H2, both green** — the
+live half of the fixes made to the two modules above after review. Each item
+is the thing that was actually wrong, measured working:
+
+- **The case-variant bundle executable, on a real system app.** The old
+  text comparison against `CFBundleExecutable` sent
+  `/System/Applications/TextEdit.app/Contents/MacOS/textedit` to `Popen`,
+  the exact path measured earlier as SIGKILL-at-launch. The volume was
+  confirmed case-insensitive (the variant `os.path.exists`), and the
+  `samefile` check now resolves it to the bundle — while a helper beside
+  the executable still does not.
+- **The `kqueue` exit watch, against a launchd-owned process.** The watch
+  registered on a real TextEdit launch, answered `None` while the app was
+  up, reported the exit within 0.1s of `terminate()`, and stayed latched
+  afterwards. A pid nothing may watch (`999999`) correctly falls back to
+  the `os.kill` probe.
+- **The disowned launch cleans up after itself.** `launch_bundle(timeout=0.001)`
+  raised, and the application it had already asked for *was* seen running
+  (`pgrep` found it) and was then terminated by the completion handler 0.2s
+  later — the leaked-window shape, closed. Repeated with `pgrep` before,
+  during and after: nothing left behind.
+- **A finite Windows timeout is no longer a sentinel.** `timeout=4294967.296`
+  and `timeout=4294967.295` both used to convert into a wait Windows reads
+  as zero or as forever; both now keep waiting past five seconds, as a
+  ~fifty-day timeout should, and the same wait returns the real exit code
+  (1) promptly once the process is killed. An ordinary `timeout=1.0` still
+  raises `TimeoutExpired` at 1.00s, and a 5,000,000-second wait was still
+  blocking after six seconds and then resolved on the kill — so the slicing
+  neither expires early nor delays the signal.
+- **`terminate()` on an already-exited packaged process no longer raises.**
+  The process was killed out from under the adapter and `terminate()`
+  returned silently, with the real exit code preserved.
+- **Repeated activate/stop cycles, with COM balanced.** Four full
+  activate-terminate-wait cycles ran back to back on one thread, each
+  reporting its own pid and the real exit code, after the
+  `CoInitialize`/`CoUninitialize` pairing was corrected. Nothing in Python
+  can observe the apartment's reference count, so what this shows is that
+  balancing it did not break activation.
+
+Two things this deliberately did **not** show. Calculator's second
+activation returned a *new* pid rather than its existing one, so the
+single-instance reactivation the creation-time check exists for still has
+no live encounter — what the run does establish is the absence of false
+positives: a freshly activated instance was never mistaken for a
+pre-existing one, across six separate activations. And `adopt_existing=True`
+was exercised, but on an instance that was itself fresh.
+
+The unit suites for all three touched modules were also run on both boxes
+(`test_macapp.py`, `test_winapp.py`, `test_app.py`): green on each. One
+test of mine was genuinely wrong and Windows caught it — a planted
+extensionless file is not executable there, since `PATHEXT` decides, so the
+PATH-search assertion now checks the search path handed to `shutil.which`
+and the file-planting variant is POSIX-only.

@@ -7,6 +7,185 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.22.0] — 2026-11-05
+
+A minor rather than a patch because `start_app` gains behaviour on two
+platforms (a macOS `.app` bundle and a Windows packaged application each
+launch as an application) and the window lookups gain a parameter
+(`pid=`). The xkb fix below rode along from what began as a 0.21.1
+staging.
+
+### Added
+
+- **`start_app` launches a macOS application bundle as one.** Both ways a
+  caller could previously reach for failed, measured live on macOS 26.7
+  against TextEdit rather than inferred: the bundle's own binary, exec'd
+  directly the way example 04 launches gedit, is SIGKILLed at launch
+  (exit status 137, deterministic, no crash report, no window) -- the
+  measured shape of launch-constraint enforcement; and `open -a` launches
+  the app but hands `Application` a launcher that exits in under a
+  second, so `pid` named a dead process, `is_running()` answered False
+  under a live window, and `terminate()` left the real application
+  untouched (measured: TextEdit outlived it).
+
+  A list command naming a `.app` bundle -- the bundle itself, its own
+  `CFBundleExecutable` (any other file inside a bundle is left to Popen:
+  launching the whole app in a helper's place would run something the
+  caller did not name), or a bare installed-application name that is not
+  on PATH (PATH wins, so a real executable named like an app launches
+  exactly as before) -- now goes through LaunchServices
+  (`NSWorkspace`, a new instance every time, so a copy already running
+  elsewhere is not reactivated and handed over), and the returned
+  `Application` tracks the application's *real* process. Two documented
+  differences remain on that path, both consequences of launchd being the
+  parent: `returncode` is 0 for any observed exit, and there are no
+  pipes, so of Popen's kwargs only `env=` applies -- anything else raises
+  rather than being dropped silently. The new `pyguitest.macapp` module
+  carries the mechanism and the full measurements.
+
+- **`start_app` launches a Windows packaged application as one.** The same
+  gap in a different costume, measured live on Windows 10 22H2: the
+  System32 `calc.exe` is a stub that hands off to the packaged Calculator
+  and exits, so the `Application` built on it reported `is_running()`
+  False under a live window, a pid matching nothing on screen, and a
+  `terminate()` that touched nothing (the Calculator outlived it). A stub
+  cannot be told from a real program until it has already exited, so that
+  spelling is documented as the trap rather than rerouted on a guess; the
+  way out is the application's AUMID — bare
+  (`["Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"]`, what
+  `Get-StartApps` lists; PATH still wins over the shape, on purpose) or in
+  the Explorer spelling (`["shell:AppsFolder\\<AUMID>"]`) — which goes
+  through `ActivateApplication`, the API that reports the real process id.
+
+  Windows is more generous to the resulting `Application` than macOS was:
+  process handles for non-children are waitable and carry the real exit
+  code, so `returncode` is the application's actual one (`stop()` on the
+  live Calculator returned 1, `TerminateProcess`'s code — measured) with
+  no observed-exit sentinel, and `wait()` blocks on the handle rather than
+  polling. No Popen kwargs apply, `env=` included (activation offers no
+  environment control): any kwarg raises rather than being dropped.
+
+  Two platform behaviours ride along, documented on `pyguitest.winapp`.
+  A single-instance packaged app that is *already running* is reactivated
+  rather than launched, and this API cannot force a fresh instance — so
+  that case raises rather than handing back a process the session did not
+  start, which leaving a `with` block would then terminate, closing a
+  window the test never opened (`launch_app_id(..., adopt_existing=True)`
+  takes it anyway, for a caller who knows the instance is theirs). And a
+  *UWP-hosted* packaged app's window belongs to `ApplicationFrameHost.exe`
+  rather than to the app's own process — measured: Calculator's window
+  carried the frame host's pid — so `pid=` finds nothing for one of those
+  and `title` is the filter to use. A packaged full-trust (desktop bridge)
+  app owns its windows, where `pid=` works and is the better filter, a
+  title being able to collide with another window carrying it. The
+  lifecycle calls act on the real app either way.
+
+- **`find_windows`, `find_window`, `wait_for_window` and `expect_window`
+  take `pid=`.** The filter to reach for when a window's title is not
+  knowable up front -- the ordinary case for a document-based macOS
+  application, which titles its window after the *document*: measured,
+  a fresh TextEdit's window is "Untitled", so waiting on "TextEdit"
+  finds nothing, silently. `wait_for_window(pid=app.pid)` finds it
+  regardless of title, which is exactly what the bundle launch above
+  makes possible by reporting the real pid. Combines with `title` and
+  `app_id` the way those two already combine; like `app_id`, it matches
+  nothing on a backend that cannot fill `Window.pid`, rather than
+  everything.
+
+### Changed
+
+- **`Application.stop()` bounds the wait after its own `kill()`, and
+  answers `None` when the program is still running.** A SIGKILL to a child
+  cannot be declined, so the previously unbounded wait was safe for
+  everything `start_app` used to return — but the macOS application path
+  signals a process this one did not fork, and the kernel can refuse that
+  outright (`EPERM`), leaving `stop()` waiting for an exit that was never
+  coming. Blocking forever inside cleanup, while an exception is already
+  unwinding, is a suite that wedges with no message at all; `None` says so
+  instead. `restart()` now raises `PyGUITestError` in that same case rather
+  than launching a second instance on top of the one it could not stop,
+  which would leave the first orphaned with only the new one reachable.
+
+### Fixed
+
+- **A bundle's own executable named with different capitalisation fell
+  through to `Popen`.** The check compared the path's last component against
+  `CFBundleExecutable` as text, and APFS volumes are case-insensitive by
+  default — so `.../MacOS/textedit` is the very same file the plist calls
+  `TextEdit`, and routing it to `Popen` hit precisely the SIGKILL-at-launch
+  measured above. The comparison is now `os.path.samefile`, which answers to
+  the filesystem rather than to the spelling: every spelling a volume accepts
+  resolves, while a genuinely different file — a helper beside the
+  executable, a distinct case variant on a case-sensitive volume — stays on
+  the `Popen` path, where launching the whole application in its place would
+  run something the caller did not name.
+
+- **Bundle detection searched this process's `PATH`, not the one the launch
+  would use.** `start_app(["TextEdit"], env=...)` resolves a bare name
+  against the `PATH` in `env`, because that is what `Popen` would search —
+  so an executable on the caller's own `PATH` now wins over an installed
+  application of the same name, which is the PATH-wins rule the detection
+  documents, previously inverted whenever `env=` carried a different `PATH`.
+
+- **A macOS bundle launch that timed out could leave an untracked
+  application on screen.** LaunchServices offers no way to cancel a launch,
+  so a timeout now *disowns* it: the completion handler stays registered and
+  terminates an application that arrives after the waiter gave up, rather
+  than leaving a window no `Application` will ever close. The handoff is
+  taken under a lock, so a completion landing in the same instant as the
+  timeout is either returned to the caller or cleaned up — never both, and
+  never neither.
+
+- **`BundleProcess` identified its application by pid number alone.** A pid
+  the kernel has recycled reads as alive, and `stop()` signals through that
+  same check — so a long-held handle to an application that had exited could
+  aim SIGTERM at an unrelated process. Identity is now a `kqueue`
+  `EVFILT_PROC`/`NOTE_EXIT` registration taken at construction, which the
+  kernel binds to *that* process, so the exit it reports is the
+  application's own and a recycled pid can never be mistaken for it. Where
+  the registration cannot be taken the probe falls back to the pid, and the
+  class documents which guarantee is in force.
+
+- **`PackagedAppProcess.wait()` could block forever on a finite timeout.**
+  `dwMilliseconds` is a `DWORD` whose "wait forever" sentinel sits inside the
+  range a caller can ask for: `timeout=4294967.295` converted to exactly
+  `INFINITE`, and anything larger wrapped to a *short* wait that expired
+  early. Both silently. Long finite waits are now sliced against a deadline
+  tracked in `time.monotonic()`, so the timeout asked for is the one that
+  applies.
+
+- **`PackagedAppProcess.terminate()` raised for an application that had
+  already exited.** Windows rejects terminating a dead process, which is the
+  ordinary outcome when the application exits between the poll and the
+  `TerminateProcess` — and raising there meant `Application.stop()` throwing
+  while unwinding someone else's exception, replacing the real failure with a
+  complaint about an application that had, in fact, stopped. The process is
+  re-polled after a failed call, with the original error preserved for one
+  that really is still running.
+
+- **Repeated packaged-app activations left COM initialisation unbalanced.**
+  Every `CoInitialize` that returns owes a `CoUninitialize`, `S_FALSE`
+  included; an `app.restart()` loop added one per iteration and released
+  none, which keeps the apartment from ever being torn down. The count is
+  now balanced on every path, with the activation manager released before the
+  apartment it came from.
+
+- **`xkb.available()` returned `True` on a `libxkbcommon` too old to use.**
+  `available()` only checked that `libxkbcommon.so.0` could be `dlopen`ed,
+  not that it exports the specific symbols `_bind` wires up — so on
+  Fedora 19's `libxkbcommon` 0.3.0 (2013, three years before
+  `xkb_keymap_min_keycode` existed), the check passed and `Keymap.__init__`
+  crashed with a raw `AttributeError` from deep inside `_bind` instead of
+  the `RuntimeError` a caller checking `available()` first already expects.
+
+  `available()` now checks every symbol `_bind` configures via `hasattr`,
+  not just the library file itself; `Keymap.__init__` also catches an
+  `AttributeError` from `_bind` and re-raises it as the same `RuntimeError`,
+  so a caller that constructs one directly without checking `available()`
+  first still fails cleanly rather than crashing. Verified live on
+  Fedora 19: the 17 real-keymap tests that used to error now skip cleanly,
+  and the rest of the suite (2504 tests) is unaffected.
+
 ## [0.21.0] — 2026-11-04
 
 Everything here was found by driving a GTK4 (4.24.1) application through
@@ -5740,7 +5919,9 @@ First public release.
 - A `pyguitest` command-line entry point.
 - PEP 561 type information (`py.typed`); no hard runtime dependencies.
 
-[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.20.1...HEAD
+[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/ctrondlp/pyguitest/compare/v0.21.0...v0.22.0
+[0.21.0]: https://github.com/ctrondlp/pyguitest/compare/v0.20.1...v0.21.0
 [0.20.1]: https://github.com/ctrondlp/pyguitest/compare/v0.20.0...v0.20.1
 [0.20.0]: https://github.com/ctrondlp/pyguitest/compare/v0.19.1...v0.20.0
 [0.19.1]: https://github.com/ctrondlp/pyguitest/compare/v0.19.0...v0.19.1

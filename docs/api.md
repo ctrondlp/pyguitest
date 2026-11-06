@@ -1101,8 +1101,8 @@ A `Window` stays usable as a handle, but its `title`, `app_id` and `pid` are rea
 | Call | Needs | What it does |
 |------|-------|--------------|
 | [`windows()`](#windows) | [`WINDOW_LIST`](#cap-window_list) | Return every open window. |
-| [`find_window(title: str \| re.Pattern[str] \| None = None, app_id: str \| Sequence[str] \| None = None)`](#find_window) | [`WINDOW_LIST`](#cap-window_list) | The topmost window matching `title` and/or `app_id`. |
-| [`find_windows(title: str \| re.Pattern[str] \| None = None, app_id: str \| Sequence[str] \| None = None)`](#find_windows) | [`WINDOW_LIST`](#cap-window_list) | Every window matching `title` and/or `app_id` (exact). |
+| [`find_window(...)`](#find_window) | [`WINDOW_LIST`](#cap-window_list) | The topmost window matching `title`, `app_id`, and/or `pid`. |
+| [`find_windows(...)`](#find_windows) | [`WINDOW_LIST`](#cap-window_list) | Every window matching `title`, `app_id` (exact), and/or `pid`. |
 | [`active_window()`](#active_window) | [`WINDOW_STATE`](#cap-window_state) | The currently focused window, or None if nothing holds focus. |
 | [`window_at(x: int, y: int, screen: int = 0)`](#window_at) | [`WINDOW_AT_POINT`](#cap-window_at_point) | The topmost window covering a screen coordinate, or None. |
 | [`geometry(window: Window)`](#geometry) | [`WINDOW_GEOMETRY`](#cap-window_geometry) | `window`'s (x, y, width, height) in screen coordinates. |
@@ -1144,7 +1144,11 @@ fills it in.
 ### `find_window`
 
 ```python
-find_window(title: str | re.Pattern[str] | None = None, app_id: str | Sequence[str] | None = None)
+find_window(
+    title: str | re.Pattern[str] | None = None,
+    app_id: str | Sequence[str] | None = None,
+    pid: int | None = None,
+)
 ```
 
 **Parameters**
@@ -1153,12 +1157,13 @@ find_window(title: str | re.Pattern[str] | None = None, app_id: str | Sequence[s
 |-----------|------|---------|
 | `title` | `str \| re.Pattern[str] \| None` | `None` |
 | `app_id` | `str \| Sequence[str] \| None` | `None` |
+| `pid` | `int \| None` | `None` |
 
 **Returns** `Window`
 
 Raises WindowNotFound if nothing matches, so a script stops where the
-mistake is. See find_windows for how `title`/`app_id` combine and
-what `title` accepts.
+mistake is. See find_windows for how the filters combine, what
+`title` accepts, and when `pid` is the right one to reach for.
 
 Same "last of windows() wins" convention window_at() uses for hit-
 testing, not the first: windows() is ordered bottom-to-top by
@@ -1184,7 +1189,11 @@ window = gui.find_window(app_id="org.gnome.TextEditor")
 ### `find_windows`
 
 ```python
-find_windows(title: str | re.Pattern[str] | None = None, app_id: str | Sequence[str] | None = None)
+find_windows(
+    title: str | re.Pattern[str] | None = None,
+    app_id: str | Sequence[str] | None = None,
+    pid: int | None = None,
+)
 ```
 
 **Parameters**
@@ -1193,21 +1202,33 @@ find_windows(title: str | re.Pattern[str] | None = None, app_id: str | Sequence[
 |-----------|------|---------|
 | `title` | `str \| re.Pattern[str] \| None` | `None` |
 | `app_id` | `str \| Sequence[str] \| None` | `None` |
+| `pid` | `int \| None` | `None` |
 
 **Returns** `list[Window]`
 
-At least one of `title`/`app_id` is required. Given both, a window
-must satisfy each. `title` takes a plain string (matched literally,
-as a substring -- see _title_pattern) or a compiled regex (matched
-with `.search()`), the same convention `elements`/`element` use for
-`name`/`description` -- over an identifier that can drift after a
-window opens (see Window's docstring). `app_id` is an exact match
-against one that should not drift, and may be several ids where the
-same window is named differently by each protocol (`app_id=("a",
-"b")`) -- the one case a single id cannot cover: see _app_id_match. It
-is empty on backends that never fill it (see Window.app_id), and
-nothing matches `app_id=""` on purpose, since that is "unset", not a
-real identifier; an empty sequence matches nothing for that reason.
+At least one of `title`/`app_id`/`pid` is required. Given several, a
+window must satisfy each. `title` takes a plain string (matched
+literally, as a substring -- see _title_pattern) or a compiled regex
+(matched with `.search()`), the same convention `elements`/`element`
+use for `name`/`description` -- over an identifier that can drift
+after a window opens (see Window's docstring). `app_id` is an exact
+match against one that should not drift, and may be several ids
+where the same window is named differently by each protocol
+(`app_id=("a", "b")`) -- the one case a single id cannot cover: see
+_app_id_match. It is empty on backends that never fill it (see
+Window.app_id), and nothing matches `app_id=""` on purpose, since
+that is "unset", not a real identifier; an empty sequence matches
+nothing for that reason.
+
+`pid` is the identifier to reach for when the window's title is not
+knowable up front -- the common case for a native macOS application,
+where a document-based app titles its window after the *document*
+("Untitled"), not the application, so matching the app's name finds
+nothing (measured: TextEdit). `start_app` on a `.app` bundle returns
+an Application whose `.pid` is the real application's, exactly so it
+can be used here. Like `app_id`, it matches nothing on a backend
+that cannot fill `Window.pid` (kdotool is one -- see the KDE notes),
+rather than everything.
 
 ### `active_window`
 
@@ -1815,6 +1836,63 @@ copy to override one variable:
 gui.start_app(["app"], env={**os.environ, "LANG": "de_DE.UTF-8"})
 ```
 
+**A macOS application is launched as one.** A list command naming a
+`.app` bundle -- the bundle itself, its own main executable, or a
+bare installed-application name that is not on PATH -- goes through
+LaunchServices rather than `Popen`, because both Popen spellings
+fail in ways measured live (`pyguitest.macapp`'s docstring has the
+detail: the binary is SIGKILLed at launch; `open -a` leaves the
+Application tracking a launcher that exits immediately). The
+returned `Application` tracks the application's *real* process, so
+`pid`/`is_running()`/`stop()` mean what they say -- with two
+caveats `macapp.BundleProcess` documents: `returncode` is 0 for any
+observed exit, and there are no pipes, so of `Popen`'s kwargs only
+`env=` applies (anything else raises rather than being dropped
+silently). Each `restart()` is a new application instance, as is
+the launch itself -- a bundle already running elsewhere is left
+alone, not reactivated. Find its window by `pid` rather than title:
+a document-based app titles windows after the document
+("Untitled"), not the application:
+
+```python
+with gui.start_app(["TextEdit"]) as app:
+    window = gui.wait_for_window(pid=app.pid, timeout=15)
+```
+
+**A Windows packaged application is launched as one.** A list
+command naming an AUMID -- bare
+(`["Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"]`, the
+identifier PowerShell's `Get-StartApps` lists) or in the Explorer
+spelling (`["shell:AppsFolder\\<AUMID>"]`) -- goes through
+`ActivateApplication`, which reports the application's real
+process id; the returned `Application` tracks that process, with
+a *real* exit code (Windows hands out waitable handles for
+non-children, so there is no observed-exit sentinel here). No
+Popen kwargs apply, `env=` included -- activation offers no
+environment control -- so any kwarg raises rather than being
+dropped. What stays unfixed, deliberately: `start_app(["calc.exe"])`
+still tracks the System32 stub, which hands off to the packaged
+Calculator and exits (measured: `is_running()` False with the
+window up, `terminate()` touching nothing) -- a stub cannot be
+told from a real program until it has already exited, so launch
+packaged applications by AUMID instead. `pyguitest.winapp`
+carries the mechanism and two platform behaviours to know. A
+single-instance packaged app that is *already running* is
+reactivated rather than launched, and this API, unlike macOS's,
+cannot force a fresh instance -- so that case raises rather than
+handing back a process this session did not start and would
+terminate on the way out of the `with` block. And a packaged app's
+window may not belong to the app's own process: a UWP-hosted one
+is drawn in `ApplicationFrameHost.exe` -- measured on Windows 10,
+where the Calculator's window reported the frame host's pid -- so
+`pid=app.pid` finds nothing for those and `title` is the filter to
+use. It is only the hosted ones: a packaged full-trust (desktop
+bridge) app creates its own windows, where `pid=app.pid` works and
+is the better filter, since a title can collide with another
+window carrying the same one. Try `pid=` first and fall back to
+`title` -- or check with `pyguitest inspect`. The lifecycle calls
+here act on the real application either way.
+
 ### `run_app`
 
 ```python
@@ -1845,7 +1923,7 @@ Every `wait_*` call polls on an interval unless the backend can do better: a win
 | [`wait_until(predicate: Callable[[], bool], timeout: float \| None = None, interval: float = 0.5)`](#wait_until) |  | Block until predicate() is truthy, or timeout elapses. |
 | [`wait_for_element(...)`](#wait_for_element) | [`ELEMENT_TREE`](#cap-element_tree) | Block until an element matching role/name appears. |
 | [`wait_until_gone(...)`](#wait_until_gone) | [`ELEMENT_TREE`](#cap-element_tree) | Block until no element matches role/name/within, or timeout. |
-| [`wait_for_window(...)`](#wait_for_window) | [`WINDOW_LIST`](#cap-window_list) — uses [`WINDOW_EVENTS`](#cap-window_events) if present | Block until a window matching `title` and/or `app_id`. |
+| [`wait_for_window(...)`](#wait_for_window) | [`WINDOW_LIST`](#cap-window_list) — uses [`WINDOW_EVENTS`](#cap-window_events) if present | Block until a window matching `title`, `app_id`, and/or `pid`. |
 | [`wait_window_close(window: Window, timeout: float \| None = None, interval: float = 0.5)`](#wait_window_close) | [`WINDOW_LIST`](#cap-window_list) — uses [`WINDOW_EVENTS`](#cap-window_events) if present | Block until `window` (from find_window or wait_for_window) closes. |
 | [`wait_for_process(name: str \| re.Pattern[str], timeout: float \| None = None, interval: float = 0.5)`](#wait_for_process) |  | Block until a process matching `name` is running, or timeout. |
 | [`wait_for_idle(pid, ...)`](#wait_for_idle) |  | Block until `pid` looks CPU-idle, or timeout. |
@@ -2044,6 +2122,7 @@ wait_for_window(
     timeout: float | None = None,
     interval: float = 0.5,
     app_id: str | Sequence[str] | None = None,
+    pid: int | None = None,
 )
 ```
 
@@ -2055,11 +2134,14 @@ wait_for_window(
 | `timeout` | `float \| None` | `None` |
 | `interval` | `float` | `0.5` |
 | `app_id` | `str \| Sequence[str] \| None` | `None` |
+| `pid` | `int \| None` | `None` |
 
 **Returns** `Window | None`
 
-See find_windows for how `title`/`app_id` combine and what `title`
-accepts; at least one is required.
+See find_windows for how the filters combine, what `title` accepts,
+and when `pid` is the right one (a freshly `start_app`ed macOS
+application whose window title is the document's, not the app's);
+at least one filter is required.
 
 Delegates to the backend's own event-driven implementation where
 Capability.WINDOW_EVENTS is available and only `title` was asked for
@@ -2067,7 +2149,7 @@ Capability.WINDOW_EVENTS is available and only `title` was asked for
 Windows, and GNOME Shell, KWin, sway and niri on their desktops;
 macOS is not one of them, its AXObserver being a later phase, and
 neither is any X11 session. Everywhere else -- both of those, and any
-call that names `app_id`, one id or several, because the event-driven
+call that names `app_id` or `pid`, because the event-driven
 backends only ever learned to match a title -- this polls
 find_windows every `interval` seconds instead, so a script does not
 need to know which case it is in, or hand-roll the poll loop itself:
@@ -2729,6 +2811,7 @@ expect_window(
     title: str | re.Pattern[str] | None = None,
     timeout: float | None = None,
     app_id: str | Sequence[str] | None = None,
+    pid: int | None = None,
 )
 ```
 
@@ -2739,14 +2822,15 @@ expect_window(
 | `title` | `str \| re.Pattern[str] \| None` | `None` |
 | `timeout` | `float \| None` | `None` |
 | `app_id` | `str \| Sequence[str] \| None` | `None` |
+| `pid` | `int \| None` | `None` |
 
 **Returns** `Window`
 
 The raising sibling wait_for_window deliberately lacks (see its
 docstring): a script that already knows the window it wants exist is
 an error, not a branch to handle, is the common case a generated
-replay is written against. See wait_for_window for how `title`/
-`app_id` combine and what `title` accepts.
+replay is written against. See find_windows for how `title`/
+`app_id`/`pid` combine and what `title` accepts.
 
 A lookup and nothing else. It does not raise, focus, resize or
 otherwise disturb the window it hands back -- focus_window() is for
@@ -3725,7 +3809,11 @@ application's: a launcher that spawns the real program and exits --
 macOS `open -a`, a wrapper script -- reads as *not* running while the
 window it opened is still on screen. Where that matters, wait on the
 window or an element rather than on this. See `pid` for the same
-distinction.
+distinction. The macOS case has a real fix rather than a caveat:
+`start_app` given a `.app` bundle (or a bare installed-app name)
+launches it through LaunchServices and tracks the application's own
+process, so this answers truthfully there -- pass that instead of
+`open -a`.
 
 #### `kill`
 
@@ -3747,7 +3835,12 @@ exits -- macOS `open -a`, a wrapper shell script, a `.desktop`
 handler -- leaves this pointing at the launcher, so it will not match
 the `Element.pid` or `Window.pid` of the application on screen. Check
 with `pyguitest inspect` when a pid-scoped element query comes back
-empty for an application that is plainly running.
+empty for an application that is plainly running. On macOS, launch
+the `.app` bundle (or the bare installed-app name) through
+`start_app` instead of spelling out `open -a` yourself: that path
+tracks the application's real process, so this pid matches the
+window's and `wait_for_window(pid=app.pid)` finds it regardless of
+title.
 
 The string form of `command` is a common cause, and which way it
 goes depends on what `/bin/sh` is on the machine. Measured three
@@ -3796,6 +3889,14 @@ left open, each was only reclaimed by the garbage collector, with a
 `communicate()`: a program started through the shell can leave a
 grandchild holding the pipe, and a drain would then block on it. Read
 `app.stdout` before calling this if the old output matters.
+
+Raises `PyGUITestError` if the old process could not be stopped --
+see `stop()` for the one case that happens in, a signal the kernel
+refuses. Starting the replacement anyway would leave two instances
+running with only the new one reachable, which is the leak this
+class exists to prevent; the old `.process` is left in place, so a
+caller can look at it rather than having it replaced out from under
+them.
 
 #### `returncode`
 
@@ -3885,6 +3986,17 @@ live run).
 Idempotent, and never raises: this is what runs while an exception
 is already unwinding, and a cleanup path that throws replaces the
 real failure with its own. Returns the exit status.
+
+**`None` means it is still running**, which is the one answer worth
+checking for. A SIGKILL to a child cannot be declined, so on the
+ordinary `start_app` path this never happens -- but the macOS
+application path signals a process this one did not fork, and the
+kernel can refuse that outright (`EPERM`: an application that
+re-execed under another identity, a sandbox refusal). The wait after
+`kill()` is bounded for exactly that case: an exit that a refused
+SIGKILL guarantees will never come is reported, not waited on, since
+blocking forever inside cleanup is how a suite wedges with no
+message at all.
 
 #### `terminate`
 

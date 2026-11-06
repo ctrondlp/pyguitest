@@ -86,9 +86,40 @@ def _library():
         return None
 
 
+_REQUIRED_SYMBOLS = (
+    "xkb_context_new",
+    "xkb_context_unref",
+    "xkb_keymap_new_from_string",
+    "xkb_keymap_unref",
+    "xkb_keymap_min_keycode",
+    "xkb_keymap_max_keycode",
+    "xkb_keymap_num_layouts_for_key",
+    "xkb_keymap_num_levels_for_key",
+    "xkb_keymap_key_get_syms_by_level",
+    "xkb_keymap_key_get_mods_for_level",
+    "xkb_keymap_num_mods",
+    "xkb_keymap_mod_get_name",
+    "xkb_utf32_to_keysym",
+    "xkb_keysym_from_name",
+)
+"""Every symbol `_bind` configures. Kept in sync with it by hand -- there is
+no introspection that would derive one from the other automatically."""
+
+
 def available() -> bool:
-    """Whether libxkbcommon can be loaded here."""
-    return _library() is not None
+    """Whether libxkbcommon can be loaded here.
+
+    Checks every symbol this module needs, not just the library file
+    itself. A library old enough
+    to be missing one (measured: 0.3.0 from 2013, which predates
+    xkb_keymap_min_keycode) still `dlopen`s fine; only `_bind` touching the
+    missing name raises, which is too late for a caller deciding whether to
+    offer TEXT_ENTRY at all.
+    """
+    lib = _library()
+    if lib is None:
+        return False
+    return all(hasattr(lib, name) for name in _REQUIRED_SYMBOLS)
 
 
 def _bind(lib):
@@ -157,7 +188,12 @@ class Keymap:
         lib = _library()
         if lib is None:
             raise RuntimeError("libxkbcommon.so.0 is not available")
-        self._lib = _bind(lib)
+        try:
+            self._lib = _bind(lib)
+        except AttributeError as exc:
+            raise RuntimeError(
+                f"libxkbcommon.so.0 is missing a required symbol: {exc}"
+            ) from exc
         self._context = self._lib.xkb_context_new(_XKB_CONTEXT_NO_FLAGS)
         if not self._context:
             raise RuntimeError("xkb_context_new() failed")
