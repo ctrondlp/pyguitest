@@ -7,6 +7,102 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.22.0] — 2026-11-05
+
+A minor rather than a patch because `start_app` gains behaviour on two
+platforms (a macOS `.app` bundle and a Windows packaged application each
+launch as an application) and the window lookups gain a parameter
+(`pid=`). The xkb fix below rode along from what began as a 0.21.1
+staging.
+
+### Added
+
+- **`start_app` launches a macOS application bundle as one.** Both ways a
+  caller could previously reach for failed, measured live on macOS 26.7
+  against TextEdit rather than inferred: the bundle's own binary, exec'd
+  directly the way example 04 launches gedit, is SIGKILLed at launch
+  (exit status 137, deterministic, no crash report, no window) -- the
+  measured shape of launch-constraint enforcement; and `open -a` launches
+  the app but hands `Application` a launcher that exits in under a
+  second, so `pid` named a dead process, `is_running()` answered False
+  under a live window, and `terminate()` left the real application
+  untouched (measured: TextEdit outlived it).
+
+  A list command naming a `.app` bundle -- the bundle itself, its own
+  `CFBundleExecutable` (any other file inside a bundle is left to Popen:
+  launching the whole app in a helper's place would run something the
+  caller did not name), or a bare installed-application name that is not
+  on PATH (PATH wins, so a real executable named like an app launches
+  exactly as before) -- now goes through LaunchServices
+  (`NSWorkspace`, a new instance every time, so a copy already running
+  elsewhere is not reactivated and handed over), and the returned
+  `Application` tracks the application's *real* process. Two documented
+  differences remain on that path, both consequences of launchd being the
+  parent: `returncode` is 0 for any observed exit, and there are no
+  pipes, so of Popen's kwargs only `env=` applies -- anything else raises
+  rather than being dropped silently. The new `pyguitest.macapp` module
+  carries the mechanism and the full measurements.
+
+- **`start_app` launches a Windows packaged application as one.** The same
+  gap in a different costume, measured live on Windows 10 22H2: the
+  System32 `calc.exe` is a stub that hands off to the packaged Calculator
+  and exits, so the `Application` built on it reported `is_running()`
+  False under a live window, a pid matching nothing on screen, and a
+  `terminate()` that touched nothing (the Calculator outlived it). A stub
+  cannot be told from a real program until it has already exited, so that
+  spelling is documented as the trap rather than rerouted on a guess; the
+  way out is the application's AUMID — bare
+  (`["Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"]`, what
+  `Get-StartApps` lists; PATH still wins over the shape, on purpose) or in
+  the Explorer spelling (`["shell:AppsFolder\\<AUMID>"]`) — which goes
+  through `ActivateApplication`, the API that reports the real process id.
+
+  Windows is more generous to the resulting `Application` than macOS was:
+  process handles for non-children are waitable and carry the real exit
+  code, so `returncode` is the application's actual one (`stop()` on the
+  live Calculator returned 1, `TerminateProcess`'s code — measured) with
+  no observed-exit sentinel, and `wait()` blocks on the handle rather than
+  polling. No Popen kwargs apply, `env=` included (activation offers no
+  environment control): any kwarg raises rather than being dropped. Two
+  platform behaviours ride along, documented on `pyguitest.winapp`: a
+  single-instance packaged app already running is reactivated and its
+  existing pid returned (this API cannot force a fresh instance), and a
+  packaged app's *window* belongs to `ApplicationFrameHost.exe` rather
+  than the app's own process — measured: Calculator's window carried the
+  frame host's pid — so find it by `title`; `pid=` below stays right for
+  classic executables, and the lifecycle calls act on the real app either
+  way.
+
+- **`find_windows`, `find_window`, `wait_for_window` and `expect_window`
+  take `pid=`.** The filter to reach for when a window's title is not
+  knowable up front -- the ordinary case for a document-based macOS
+  application, which titles its window after the *document*: measured,
+  a fresh TextEdit's window is "Untitled", so waiting on "TextEdit"
+  finds nothing, silently. `wait_for_window(pid=app.pid)` finds it
+  regardless of title, which is exactly what the bundle launch above
+  makes possible by reporting the real pid. Combines with `title` and
+  `app_id` the way those two already combine; like `app_id`, it matches
+  nothing on a backend that cannot fill `Window.pid`, rather than
+  everything.
+
+### Fixed
+
+- **`xkb.available()` returned `True` on a `libxkbcommon` too old to use.**
+  `available()` only checked that `libxkbcommon.so.0` could be `dlopen`ed,
+  not that it exports the specific symbols `_bind` wires up — so on
+  Fedora 19's `libxkbcommon` 0.3.0 (2013, three years before
+  `xkb_keymap_min_keycode` existed), the check passed and `Keymap.__init__`
+  crashed with a raw `AttributeError` from deep inside `_bind` instead of
+  the `RuntimeError` a caller checking `available()` first already expects.
+
+  `available()` now checks every symbol `_bind` configures via `hasattr`,
+  not just the library file itself; `Keymap.__init__` also catches an
+  `AttributeError` from `_bind` and re-raises it as the same `RuntimeError`,
+  so a caller that constructs one directly without checking `available()`
+  first still fails cleanly rather than crashing. Verified live on
+  Fedora 19: the 17 real-keymap tests that used to error now skip cleanly,
+  and the rest of the suite (2504 tests) is unaffected.
+
 ## [0.21.0] — 2026-11-04
 
 Everything here was found by driving a GTK4 (4.24.1) application through
@@ -5740,7 +5836,9 @@ First public release.
 - A `pyguitest` command-line entry point.
 - PEP 561 type information (`py.typed`); no hard runtime dependencies.
 
-[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.20.1...HEAD
+[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/ctrondlp/pyguitest/compare/v0.21.0...v0.22.0
+[0.21.0]: https://github.com/ctrondlp/pyguitest/compare/v0.20.1...v0.21.0
 [0.20.1]: https://github.com/ctrondlp/pyguitest/compare/v0.20.0...v0.20.1
 [0.20.0]: https://github.com/ctrondlp/pyguitest/compare/v0.19.1...v0.20.0
 [0.19.1]: https://github.com/ctrondlp/pyguitest/compare/v0.19.0...v0.19.1

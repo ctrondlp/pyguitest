@@ -153,6 +153,36 @@ with gui.start_app(["gnome-text-editor", "/tmp/notes.txt"]) as app:
 members you already use (`wait`, `poll`, `returncode`, `terminate`, `kill`)
 are all present. `stop()` is the bounded one: it asks politely, then kills.
 
+### Native macOS and Windows applications
+
+A macOS application is a `.app` bundle, and a modern Windows one is a
+packaged program behind a stub — both break the plain
+launch-the-executable pattern above in measured ways (the bundle's binary
+is SIGKILLed at launch; `open -a` and `calc.exe` leave the `Application`
+tracking a launcher that exits immediately). `start_app` launches both
+properly from their platform spellings and tracks the real process:
+
+```python
+# macOS: the bundle, its binary, or the bare installed-app name.
+with gui.start_app(["TextEdit"]) as app:
+    # A document-based app titles its window after the document
+    # ("Untitled"), so find it by pid, not by the app's name.
+    window = gui.wait_for_window(pid=app.pid, timeout=15)
+
+# Windows: the AUMID (what PowerShell's Get-StartApps lists), bare or in
+# the shell:AppsFolder spelling.
+with gui.start_app(["Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"]) as app:
+    # A packaged app's window belongs to ApplicationFrameHost, not the
+    # app's own process -- find it by title; app.pid is still the right
+    # process for wait_for_idle and the lifecycle calls.
+    window = gui.wait_for_window("Calculator", timeout=15)
+```
+
+Neither path offers pipes (`stdout=`/`stderr=` raise rather than being
+dropped); macOS additionally honours `env=`, Windows activation cannot.
+The full measurements live in `pyguitest.macapp`/`pyguitest.winapp` and
+docs/validation.md's 2026-11-05 entries.
+
 ## Screenshots, and evidence when a test fails
 
 ```python
@@ -360,8 +390,9 @@ shadowing it rather than as a use. It is a heuristic lexer rather than Perl
 itself, and it does not look inside interpolated strings or `eval "..."`, so a
 call built at run time is one it cannot see: read a clean report as "nothing
 found here", not as proof that a file is free of them. It exits non-zero on the two kinds of call
-a human has to decide about: the ones Wayland refuses, and the two with no
-replacement anywhere (`GetScreenDepth`, `GetWindowsFromPid`). The full
+a human has to decide about: the ones Wayland refuses, and the one with no
+replacement anywhere (`GetScreenDepth` — `GetWindowsFromPid` now maps to
+`find_windows(pid=...)`). The full
 50-export table lives in `pyguitest.compat`, alongside the `:CONST` integers
 in `compat.CONSTANTS`, and is explained in
 [developers/wayland-audit.md](developers/wayland-audit.md).

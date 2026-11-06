@@ -337,12 +337,18 @@ holding the foreground: a person typing, a window that cannot be activated
 separately in the message, because activating never restores one; call
 `minimize_window(window, False)` first.
 
-A related trap, since it looks like this one: a modern Windows 11 application
-(Notepad, Calculator and most inbox apps) is a single-instance, packaged
-program. `start_app(["notepad.exe"])` a second time hands off to the instance
-already running and exits, so `app.stop()` terminates a launcher that never
-owned the window, and the real window stays open. Match the window
-(`find_window`) and use its `pid` rather than assuming one launch is one window.
+A related trap, since it looks like this one: a modern Windows application
+(Calculator everywhere, Notepad and most inbox apps on Windows 11) is a
+packaged program behind a stub. `start_app(["calc.exe"])` tracks the stub,
+which hands off and exits — measured: `is_running()` False under a live
+window, and `terminate()` touching nothing. Launch the application by its
+AUMID instead (`start_app(["Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"])`,
+the identifier PowerShell's `Get-StartApps` lists, or the
+`shell:AppsFolder\` spelling): that goes through `ActivateApplication` and
+tracks the application's real process, with its real exit code. One caveat
+that stays even then: the packaged app's *window* belongs to
+`ApplicationFrameHost.exe`, so find it by `title`, not `pid=app.pid` — the
+lifecycle calls act on the real app regardless.
 
 ## `wait_for_process` matches only the program name on Windows
 

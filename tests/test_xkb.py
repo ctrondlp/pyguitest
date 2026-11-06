@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ctypes
 import unittest
+import unittest.mock
 
 from pyguitest import xkb
 
@@ -173,6 +174,30 @@ class TestFrenchLayout(RealKeymapTestCase):
         self.assertEqual(self.keymap.for_char("\n"), (KEY_ENTER, ()))
 
 
+class _Symbol:
+    """Stands in for one ctypes function pointer.
+
+    Accepts the argtypes/restype assignment _bind makes, remembers
+    nothing else.
+    """
+
+    argtypes = None
+    restype = None
+
+
+class _FakeLib:
+    """A library that `dlopen`ed fine but is missing `missing_symbol`.
+
+    The shape measured live on Fedora 19's libxkbcommon 0.3.0 (2013),
+    which predates `xkb_keymap_min_keycode`.
+    """
+
+    def __init__(self, missing_symbol):
+        for name in xkb._REQUIRED_SYMBOLS:
+            if name != missing_symbol:
+                setattr(self, name, _Symbol())
+
+
 class TestAvailability(unittest.TestCase):
     def test_available_reports_a_bool(self):
         self.assertIsInstance(xkb.available(), bool)
@@ -182,6 +207,56 @@ class TestAvailability(unittest.TestCase):
             self.skipTest("libxkbcommon.so.0 is not available")
         with self.assertRaises(RuntimeError):
             xkb.Keymap("this is not a keymap")
+
+    def test_unavailable_when_the_library_will_not_load(self):
+        with unittest.mock.patch.object(xkb, "_library", return_value=None):
+            self.assertFalse(xkb.available())
+
+    def test_unavailable_when_a_required_symbol_is_missing(self):
+        fake = _FakeLib(missing_symbol="xkb_keymap_min_keycode")
+        with unittest.mock.patch.object(xkb, "_library", return_value=fake):
+            self.assertFalse(xkb.available())
+
+    def test_available_when_every_required_symbol_is_present(self):
+        fake = _FakeLib(missing_symbol="")
+        with unittest.mock.patch.object(xkb, "_library", return_value=fake):
+            self.assertTrue(xkb.available())
+
+    def test_a_missing_symbol_raises_runtimeerror_not_attributeerror(self):
+        """The bug measured on Fedora 19.
+
+        `_bind` touching a symbol this old a library does not have used
+        to raise a raw AttributeError from deep inside `Keymap.__init__`,
+        instead of the same clean RuntimeError a caller already expects
+        from "library not found".
+        """
+        fake = _FakeLib(missing_symbol="xkb_keymap_min_keycode")
+        with unittest.mock.patch.object(xkb, "_library", return_value=fake):
+            with self.assertRaises(RuntimeError):
+                xkb.Keymap("irrelevant: _bind fails before this is read")
+
+    def test_required_symbols_is_exactly_what_bind_touches(self):
+        """The one guard on the hand-synced list.
+
+        `_REQUIRED_SYMBOLS` is kept in step with `_bind` by hand, so a new
+        `lib.xkb_*` call added to `_bind` without a matching tuple entry
+        would quietly let `available()` pass a library missing it -- the
+        exact Fedora-19 crash back for that symbol. This records every name
+        `_bind` sets argtypes/restype on and asserts the set matches, which
+        fails loudly in either drift direction.
+        """
+
+        class _Recorder:
+            def __init__(self):
+                self.touched: set[str] = set()
+
+            def __getattr__(self, name):
+                self.touched.add(name)
+                return _Symbol()
+
+        recorder = _Recorder()
+        xkb._bind(recorder)
+        self.assertEqual(recorder.touched, set(xkb._REQUIRED_SYMBOLS))
 
 
 if __name__ == "__main__":

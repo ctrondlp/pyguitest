@@ -551,7 +551,11 @@ def _load(name):
     if loader is None:
         return None
     try:
-        return loader(name)
+        # use_last_error so a failing call's error can be read back from
+        # ctypes' saved thread-local (ctypes.get_last_error) rather than a
+        # second GetLastError() call, which CPython's own docs warn is
+        # unreliable -- the same reason session._win32_lib sets it.
+        return loader(name, use_last_error=True)
     except OSError:
         return None
 
@@ -732,6 +736,24 @@ def _declare_kernel32(lib):
     lib.GlobalSize.restype = ctypes.c_size_t
     lib.GetCurrentThreadId.argtypes = ()
     lib.GetCurrentThreadId.restype = wintypes.DWORD
+    # Process handles, for winapp's packaged-application launch. Declared
+    # here with HANDLE restypes rather than redeclared per call against the
+    # process-global `windll.kernel32`: a HANDLE returned through ctypes'
+    # default c_int would be truncated on a 64-bit build, the classic bug
+    # this whole module exists to centralize.
+    lib.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    lib.OpenProcess.restype = wintypes.HANDLE
+    lib.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    lib.WaitForSingleObject.restype = wintypes.DWORD
+    lib.GetExitCodeProcess.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    lib.GetExitCodeProcess.restype = wintypes.BOOL
+    lib.TerminateProcess.argtypes = (wintypes.HANDLE, wintypes.UINT)
+    lib.TerminateProcess.restype = wintypes.BOOL
+    lib.CloseHandle.argtypes = (wintypes.HANDLE,)
+    lib.CloseHandle.restype = wintypes.BOOL
 
 
 def _declare_gdi32(lib):
@@ -831,7 +853,7 @@ def user32():
 
 
 def kernel32():
-    """kernel32.dll: the global memory the clipboard is handed."""
+    """kernel32.dll: the clipboard's global memory, and winapp's process handles."""
     return _dll("kernel32")
 
 

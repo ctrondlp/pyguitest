@@ -83,7 +83,11 @@ class Application:
         macOS `open -a`, a wrapper script -- reads as *not* running while the
         window it opened is still on screen. Where that matters, wait on the
         window or an element rather than on this. See `pid` for the same
-        distinction.
+        distinction. The macOS case has a real fix rather than a caveat:
+        `start_app` given a `.app` bundle (or a bare installed-app name)
+        launches it through LaunchServices and tracks the application's own
+        process, so this answers truthfully there -- pass that instead of
+        `open -a`.
         """
         return self.process.poll() is None
 
@@ -166,7 +170,12 @@ class Application:
         handler -- leaves this pointing at the launcher, so it will not match
         the `Element.pid` or `Window.pid` of the application on screen. Check
         with `pyguitest inspect` when a pid-scoped element query comes back
-        empty for an application that is plainly running.
+        empty for an application that is plainly running. On macOS, launch
+        the `.app` bundle (or the bare installed-app name) through
+        `start_app` instead of spelling out `open -a` yourself: that path
+        tracks the application's real process, so this pid matches the
+        window's and `wait_for_window(pid=app.pid)` finds it regardless of
+        title.
 
         The string form of `command` is a common cause, and which way it
         goes depends on what `/bin/sh` is on the machine. Measured three

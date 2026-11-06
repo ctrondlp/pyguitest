@@ -13,7 +13,8 @@ a developer re-reading the audit:
 
 Nothing here is executable. `replacement` names the operation that serves the
 call now, or None where nothing in the package spells it -- which is only
-`GetScreenDepth` and `GetWindowsFromPid`. A tier is a statement about Wayland,
+`GetScreenDepth` (`GetWindowsFromPid` gained one, `find_windows(pid=...)`, in
+pyguitest 0.22.0). A tier is a statement about Wayland,
 not about availability: all six Tier.NO_PATH rows do have replacements, served
 on X11, Windows and (for `pointer_position`) macOS, and raise
 CapabilityUnsupported on Wayland. `unavailable()` is named for that tier, so
@@ -298,9 +299,11 @@ _ALL = [
         "scan tree for _NET_WM_PID",
         C.WINDOW_PID,
         Tier.COMPOSITOR,
-        None,
-        "No pid= filter exists yet; [w for w in windows() if w.pid == "
-        "target] until it does. Prefer app_id",
+        "find_windows(pid=...)",
+        "find_window/wait_for_window/expect_window take pid= too, with the "
+        "topmost-match and raising semantics a plain comprehension lacks. "
+        "Matches nothing where Window.pid is unfilled; prefer app_id where "
+        "the desktop reports one",
     ),
     _f(
         "GetWindowPos",
@@ -544,9 +547,9 @@ def unavailable() -> list[LegacyFunction]:
 def unported() -> list[LegacyFunction]:
     """The functions this package does not spell at all, on any backend.
 
-    Two, and both for reasons the table records: `GetScreenDepth` asks a
-    question with one answer everywhere, and `GetWindowsFromPid` has no
-    `pid=` filter yet, though a comprehension over `windows()` does it.
+    One now: `GetScreenDepth`, which asks a question with one answer
+    everywhere. `GetWindowsFromPid` left this set when `find_windows`
+    gained `pid=`.
     """
     return [f for f in _ALL if f.replacement is None]
 
