@@ -201,11 +201,9 @@ menu and toolbar actions across nine tabs, every control carrying a stable
 accessible name, and a status bar that reports each action so a test can
 prove an interaction *landed* rather than assume it. Its 105 uniquely-named
 controls are each driven and status-bar-verified, plus the whole menu bar,
-across the Linux, BSD and Windows fleet — including the first widget-level
-drives on wlroots (Hyprland) and niri, sway having been exercised earlier for
-window control alone. The one dedicated target short of a clean drive is
-macOS, by a single control, through a gap in the fixture's own driver rather
-than a pyguitest defect. The torture repo's
+across the Linux, BSD, Windows and macOS fleet — including the first
+widget-level drives on wlroots (Hyprland) and niri, sway having been
+exercised earlier for window control alone. The torture repo's
 [VALIDATION.md](https://github.com/ctrondlp/pyguitest-torture-test/blob/main/VALIDATION.md)
 holds the current per-platform matrix — the authoritative list of what is
 clean where, so this paragraph does not restate a count that would rot as the
@@ -269,9 +267,12 @@ if gui.supports(Capability.WINDOW_GEOMETRY):
 
 `connect()` never raises on a limited desktop — a session with few capabilities
 is the normal case, and `supports()` is how you find out. That includes macOS,
-where every capability is gated on a grant made by hand in System Settings: the
-backends are all composed by a plain `connect()`, and each reports a capability
-only where its grant is already there.
+where the grants are made by hand in System Settings: the backends are all
+composed by a plain `connect()`, and each reports a gated capability only where
+its grant is already there. Not everything there is gated — the window list,
+window geometry and activation, the screen list and the pointer position all
+come from CoreGraphics and need no grant at all — so `supports()` is worth
+asking rather than assuming a Mac with nothing granted can do nothing.
 
 A session is usually several backends at once: elements from AT-SPI, injection
 from a CLI adapter, capture from another. `CompositeBackend` merges their

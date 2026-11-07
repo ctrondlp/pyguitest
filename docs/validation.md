@@ -11,6 +11,16 @@ What follows is in the order it happened, which is the right order for
 reading how something was found and the wrong one for asking "has my desktop
 been tried at all". The same record sorted that way instead:
 
+- **The errno a closed pipe reports is not the same on both platforms** --
+  [a dead process's pipe](#a-dead-processs-pipe-does-not-report-the-same-errno-on-windows-as-on-posix-2026-11-07):
+  Windows raises a bare `OSError`/`EINVAL` where POSIX raises
+  `BrokenPipeError`/`EPIPE`, so the obvious guard cannot catch it there.
+- **COSMIC and niri as a user actually has them** — [the window family picks
+  the blind member](#cosmic-with-an-x-server-present-the-window-family-picks-the-blind-member-2026-11-07):
+  a real session on either sets `DISPLAY`, which composes `x11` and changes
+  which member lists windows. One fault fixed, one still open, and the
+  configuration every earlier COSMIC round here was driven in is not the one
+  a person at the desktop gets.
 - **Seven desktops at once, recorded on two of them** — [the
   cross-platform replay matrix](#macos-input-in-automatic-composition-and-a-cross-platform-replay-matrix-2026-11-06):
   whether a script recorded on one desktop drives the same controls on
@@ -40,8 +50,9 @@ been tried at all". The same record sorted that way instead:
 - **Omarchy / Hyprland, Wayland** — [the first wlroots compositor run
   against](#omarchy--hyprland-the-first-wlroots-compositor-run-against-2026-10-13):
   every window capability served by `hyprland` against a real compositor, a
-  full torture-test pass, and no library change needed. niri is now the only
-  supported desktop with no live run behind it.
+  full torture-test pass, and no library change needed. niri was the last
+  supported desktop with no live run behind it, and the entry below closed it
+  the next day.
 - **niri on KaOS, Wayland** — [the last compositor, met at
   last](#niri-on-kaos-the-last-compositor-met-at-last-2026-10-14): the window
   backend exercised live and one wrong answer fixed, with widgets still out of
@@ -3754,7 +3765,10 @@ terminal for the by-hand step the script still asks for; and the consent questio
 is unanswered for a locked screen or a second logged-in user, where the
 pasteboard this reaches as the console user may not be the one a GUI app would
 see. Nothing here needed a TCC grant, which is worth knowing given that every
-other macOS capability in this file did.
+other capability *this section* measured did -- not every macOS capability in
+this file: the window list, window geometry and activation, the screen list
+and `pointer_position()` are all ungated, and the entry above records the
+pointer read answering on a machine whose only grant was Accessibility.
 
 ## macOS: `screencapture -l`, measured with the grant in hand (2026-09-27)
 
@@ -4771,7 +4785,7 @@ backend forced.
 
 This closes the caveat on the XTest entry in [Not run live](#not-run-live)
 above. That entry records 2 of 21 checks against Mutter and explains why the
-20 failures were the probe's design meeting a compositor that routes injected
+19 failures were the probe's design meeting a compositor that routes injected
 events by its *own* focus, not the X server's — leaving the script's premise,
 that an X window given `XSetInputFocus` really receives what is injected,
 sound in principle and measured nowhere. The script's own docstring said as
@@ -4784,8 +4798,11 @@ every assertion lands:
 
 - **`input focus is the probe window: True`** — the one precondition the
   Mutter run could not establish, and everything below depends on it.
-- **Pointer: 3/3 moves delivered as exactly one `MotionNotify` each, and
-  `pointer_position()` reads back each target exactly.** This is also the
+- **Pointer: 3/3 moves delivered, each as exactly one `MotionNotify`, and
+  `pointer_position()` reads back each target exactly.** The "exactly one" is
+  what this run showed, not what the check requires: `_validate_pointer_move`
+  passes on *any* motion arriving, since a server free to coalesce or split
+  motion would otherwise fail a probe about delivery. This is also the
   regime where that readback is unconditionally trustworthy, rather than
   accurate-over-an-X-surface and silently stale elsewhere as it is under
   XWayland.
@@ -5107,3 +5124,94 @@ there rather than universal. All six controls are driven on every desktop
 either way; a test whose *meaning* depends on the order of two rapid actions
 needs a wait between them, which is also why a recorded script keeps the
 pauses the recording observed rather than compressing them away.
+
+## A dead process's pipe does not report the same errno on Windows as on POSIX (2026-11-07)
+
+`Application.restart()` closes the pipes of the process it is replacing, and
+a process that has already exited makes that close fail. The guard for it
+used to be `except BrokenPipeError`, which is correct on POSIX and silently
+wrong on Windows. Measured on both, closing the `stdin` of an exited child
+after writing enough to fill the pipe buffer:
+
+| Platform | Exception | errno |
+|---|---|---|
+| Debian (CPython 3.13) | `BrokenPipeError` | 32 (`EPIPE`) |
+| Windows 11 build 26200 (CPython 3.13) | `OSError` | 22 (`EINVAL`) |
+
+Windows raises the base `OSError`, **not** a `BrokenPipeError` -- so no
+`except BrokenPipeError` can catch it, however the code is arranged, and
+`restart()` on Windows propagated the close failure of a process it had
+already successfully replaced. `stdout` and `stderr` closed clean on both
+platforms; only the write side faults. The guard is now a frozenset of both
+errnos, so a close failure that means something else still raises.
+
+## COSMIC with an X server present: the window family picks the blind member (2026-11-07)
+
+Measured on Pop!_OS 24.04 / cosmic-comp over ssh, with the session's own
+environment supplied by hand -- `XDG_RUNTIME_DIR`, `WAYLAND_DISPLAY`,
+`DBUS_SESSION_BUS_ADDRESS`, `XDG_CURRENT_DESKTOP=COSMIC`, and **`DISPLAY=:0`**.
+That last one is the whole entry: a real COSMIC session sets it (read out of
+`cosmic-panel`'s own `/proc/<pid>/environ`) and runs Xwayland, so a script a
+user starts from a terminal on that desktop composes `x11` as a member. Every
+previous COSMIC round here was driven over ssh *without* it, which composes no
+`x11` at all -- so the configuration this file has been validating is not the
+one a person sitting at the desktop gets.
+
+With `DISPLAY` set, members are `['cosmic', 'input:wtype', 'uinput',
+'clipboard:wl-copy', 'x11']` and the window family splits:
+
+| capability | `provider()` | `_window_family_provider()` |
+|---|---|---|
+| `WINDOW_LIST` | `cosmic` | **`x11`** |
+| `WINDOW_GEOMETRY` | `cosmic` | **`x11`** |
+| `WINDOW_MINIMIZE` | `cosmic` | `cosmic` |
+| `WINDOW_RESIZE` | `x11` | `x11` |
+
+Two separate faults follow, and only one of them is fixed.
+
+**Fixed: an operation reached a member that cannot read the handle.** With one
+`zenity` window open, `cosmic.windows()` named it and the composite then
+handed that cosmic-issued `Window` to `x11`:
+
+```
+geometry             -> WindowNotFound: window is gone: 'int' object has no attribute 'get_geometry'
+is_window_viewable   -> WindowNotFound: window is gone: 'int' object has no attribute 'get_attributes'
+```
+
+"Window is gone" for a window that was on screen. Routing a window operation
+to the member that *issued* the window (`CompositeBackend._route_window`,
+0.24.0) answers both correctly against the same live window:
+
+```
+geometry             -> (490, 118, 300, 200)
+is_window_viewable   -> True
+```
+
+**Open: `windows()` itself comes from the member that cannot see the
+windows.** `_window_family_provider` prefers a lister that can also *place*
+windows, which on this desktop means `x11` -- and `x11` cannot see native
+Wayland clients at all:
+
+```
+composite windows()  -> []
+cosmic.windows()     -> ['ComposeProbe']
+x11.windows()        -> []
+```
+
+So on a COSMIC desktop as a user actually has it, every window lookup finds
+nothing. `niri` on KaOS shows the identical split (`WINDOW_LIST` and
+`WINDOW_GEOMETRY` provided by `niri`, family `x11`), measured the same day
+with no window open, so the blindness there is structural rather than
+demonstrated.
+
+The rule exists for a real crash in the other direction -- on Xfce, AT-SPI
+won `WINDOW_LIST` and `move_window` then handed an AT-SPI frame reference to
+X11Backend, which died inside python-xlib (see the Xfce entry above). What
+distinguishes the two cases is whether the losing member is an *authoritative*
+window source for its own desktop: a compositor backend serves
+`WINDOW_AT_POINT` or `WINDOW_EVENTS` (`_COMMON` carries the first, `cosmic`
+and `niri` both carry them), and AT-SPI serves neither. Deferring the override
+when the normal provider serves either would fix COSMIC and niri without
+reopening Xfce -- **not done here**, because it changes which member lists
+windows on every multi-member desktop and the Xfce box was down on the day.
+Validate it there before trusting it.

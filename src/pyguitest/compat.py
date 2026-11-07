@@ -422,7 +422,10 @@ _ALL = [
         "pointer_position",
         "X11, Windows and macOS; no Wayland compositor reports it, and an "
         "XWayland answer can be silently stale -- prefer window_at/element_at "
-        "to check where a click will land",
+        "to check where a click will land. In list context X11::GUITest 0.29 "
+        "answered (x, y, screen) and this answers (x, y), so code unpacking "
+        "three names needs a decision rather than a rename: nothing here "
+        "reports a screen number for the pointer",
     ),
     _f(
         "IsKeyPressed",

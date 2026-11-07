@@ -7,6 +7,169 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.24.0] — 2026-11-07
+
+A minor rather than a patch, because behaviour changes that a script can
+see. Two are worth reading before upgrading:
+
+- **`wait_for_window` now answers with the same window `find_window` does**
+  when several share a title -- the last of `windows()`, not the first -- on
+  every event-driven backend. A script relying on the old answer on GNOME,
+  COSMIC, sway, Hyprland, niri or KWin gets a different window.
+- **macOS `activate_window()` now raises** where it used to return having
+  only raised the window: the application activation is what decides
+  success, because that is what decides where keyboard input goes.
+
+And one that is breaking for a caller who passed them positionally:
+`ExternalTool`'s flags and `discover`'s filters are keyword-only, so a
+mistake that used to put one flag's value in another field is now a
+`TypeError`. The first three positional arguments of `ExternalTool` are
+unchanged.
+
+A review-backlog pass: every unresolved CodeRabbit finding across this
+repository's pull-request history, triaged against current code and fixed
+where it was still real. Grouped by what a caller would notice.
+
+### Fixed
+
+- **`wait_for_window` and `find_window` named different windows when two
+  shared a title.** `Session.find_window` is documented as the *topmost*
+  match ("last of `windows()` wins") and the polling path honours it, but
+  the event-driven fast path returned the *first* match on
+  `gnomeshell`, `cosmic`, the sway/Hyprland/niri window backends and
+  `kwinevents` — only `win32` had adopted the rule. So the two calls
+  disagreed about which window one title meant, which is the collision
+  `find_window` itself was fixed for.
+- **A window operation could be routed to a member that cannot read its
+  handle.** `CompositeBackend` forces a window-*listing* member to be one
+  that can also place windows, which left `minimize_window` and
+  `resize_window` routed by plain priority: on COSMIC with XWayland present
+  the list comes from `x11` and the minimize went to `cosmic`, which cannot
+  read an Xlib handle and raised `WindowNotFound` for a window that was open
+  and listed. niri has the same shape for `resize_window`. A window
+  operation now prefers the member that issued the window, and a window from
+  an events-only member is re-homed to the provider rather than refused.
+- **An event wait could spin.** `_in_event_slices` started its next attempt
+  immediately when a backend's event stream ended early — a compositor
+  restart, or `swaymsg` closing its socket — so `timeout=None` became a busy
+  loop that looked like a hang. The unused part of each slice is now slept
+  out.
+- **`Application.restart()` could die on a broken pipe.** Closing a buffered
+  `stdin` flushes it, after `stop()` has killed the only reader, so a caller
+  that wrote without flushing got a `BrokenPipeError` from the middle of the
+  cleanup: `stdout`/`stderr` left open and no replacement launched.
+- **macOS `activate_window()` reported success when only the raise worked.**
+  The method's own documentation calls that the dangerous outcome — the
+  window looks activated to every query this package can make and keyboard
+  input still goes elsewhere — and the success gate accepted it anyway. The
+  application activation now decides, and the refusal says whether the
+  window was raised.
+- **`PackagedAppProcess.wait(timeout=0)` never asked the kernel.** The
+  deadline check ran before the first wait, so `Application.stop(timeout=0)`
+  reported "still running" for a process that had exited and `restart()`
+  then refused to relaunch. The handle is now queried once, clamped to 0 ms,
+  before the deadline is consulted.
+- **macOS `select()` could clear what it selected.** A radio button with no
+  `AXSelected` and no `AXPress` was clicked, and the click wrote `not
+  checked` — so choosing an already-selected option cleared it. A tab
+  publishing only a writable `AXValue` had no value route at all after
+  0.23.0 read its role in context. Both now take a value write that *sets*
+  rather than toggles; a check box still toggles.
+- **macOS `element_at` could answer from a covered window.** When the
+  front-most window was identified and its own hit test declined the point,
+  the system-wide call ran anyway — and it carries no stacking order, so it
+  could name an element behind the window that had just said no.
+- **COSMIC window rectangles went stale when an output moved.** The output
+  origin was added when the toplevel geometry arrived, so a monitor moved in
+  the display settings left every window on it offset by the difference —
+  and that rectangle is what hit-testing and `click_element` use.
+- **COSMIC discarded `wl_display.error`.** A protocol error names the
+  object, a code and a message, and all three were dropped unread; the
+  failure then surfaced as the generic closed-connection `OSError`.
+- **macquartz released a button with another button's click count.** Only
+  the most recent press was remembered, so with two buttons held the release
+  of the first carried the wrong count — and a double-click is usually
+  handled on release.
+- **`portal.get_clipboard()` swallowed `BackendUnavailable`.** It is a
+  `PyGUITestError`, so a dead Clipboard interface was recorded as "this MIME
+  type was refused", every remaining type was tried against it, and the
+  caller got a generic "could not be read as text".
+- **The AT-SPI combo-box setter reported a found option as missing.**
+  dogtail's `combovalue` looks the option up and *then* clicks it, so a
+  failed click was reported as "no option named X" — a diagnosis pointing at
+  the caller's string instead of the widget that refused.
+- **`HyprlandCLI.dispatch` reported a missing `hyprctl` as a refusal.**
+  `FileNotFoundError` is an `OSError`, so it came back as the daemon's reply
+  text and `_checked` said "hyprland refused" for a request that never ran.
+- **`pyguitest migrate` could pass without scanning everything.** A Perl
+  file it could not read was named on stderr and skipped, and the exit
+  status — which is what a CI gate reads — ignored it.
+- **`Session.click_via` is validated where it is set.** A misspelling used
+  to be found by the first element click that took the session default,
+  which is a long way from the line that made it.
+- **`CapabilitySet`'s reflected operators refuse a non-set operand.**
+  `frozenset(other)` accepts any iterable, so `["x"] | caps` came back a
+  `CapabilitySet` where the builtin raises `TypeError`.
+- **`ExternalTool`'s flags and `discover`'s filters are keyword-only.**
+  Three fields had been inserted ahead of existing ones, each shifting a
+  positional slot, so a downstream positional caller could have one flag's
+  value land in another's field silently. The first three positional
+  arguments are unchanged.
+- **UIA's control-view condition is normalised.** A NULL COM interface
+  pointer is not `None`, so it survived the `is not None` guard and reached
+  `CreateAndCondition`, where a search that should have fallen back to the
+  raw view raised instead.
+- **The GNOME Shell extension no longer leaks a reserved temp file.** A
+  failure from `close()` after `create()` succeeded left a 0600
+  `.<stem>.<uuid>.tmp` beside the destination, which no caller knew to
+  discard.
+
+### Documentation
+
+- Generated signatures in `docs/api.md` now carry the `*` separator.
+  Every keyword-only parameter was rendered as positional, so the documented
+  `find_window(title, app_id, pid)` was three positional arguments where the
+  real call takes one and a copied line raised `TypeError`.
+- `Session.expect_checked` no longer advises testing `Element.checked` for
+  `None` as a portable guard: AT-SPI answers a real bool for every element,
+  so on Linux "publishes no checked state" and "unchecked" are the same
+  answer, and `expect_checked(checked=False)` can pass against a toolkit that
+  never reported it. The transition is what to assert there.
+- The macOS permission claims in the README, `getting-started.md`,
+  `install.md` and `ai-assistants.md` said *every* capability is gated on a
+  grant. Window listing, geometry and activation, the screen list and the
+  pointer position are not: CoreGraphics answers them with nothing granted.
+- `run_app` says it blocks, and points at `start_app` for a GUI launch.
+- Corrected or scoped: the portal clipboard's missing PRIMARY selection, the
+  Linux input routes that need no prerequisite at all (X11/XTest, `wtype`),
+  the Windows guidance for comparing `app.pid` against the window list
+  (`pyguitest inspect` reports no pids) and the one case where an activated
+  packaged app is adopted without being owned, `Application.restart()`'s
+  behaviour with a mutable `command`, `move_mouse_naturally`'s event bound
+  (the overshoot adds three points the old formula left out), the
+  final-leg-only overshoot in `examples/10_natural_mouse.py`,
+  `GetMousePos`'s three-value list context in the migration table, the
+  README's stale macOS torture-test status, niri's status in
+  `validation.md`, the Mutter XTest failure count, the pointer probe's
+  at-least-one assertion, the TCC comparison, the 0.22.1 summary against the
+  `request` option it adds, and `unittest discover`'s actual reason for
+  skipping `06_a_real_test.py`.
+
+### Internal
+
+- CI: the advisory newest-ruff/mypy job runs its format and type steps even
+  when `ruff check` fails, which is the drift it exists to report; the
+  publish job requires a tag *push* rather than any ref that looks like one.
+- `scripts/pre-commit-test.sh` checks for `dbus-daemon` before requiring the
+  portal tests not to skip — dbusmock starts a private bus whether or not
+  the shell has one, so its absence was reported as a failing check.
+- Cross-page link fragments are checked by `tests/test_docs.py`: a renamed
+  heading broke every link into it from another page while the suite stayed
+  green.
+- `examples/06_a_real_test.py` guards `TEXT_ENTRY` before typing, and
+  `examples/_natural_motion_validate.py` no longer raises before it can
+  report a failure when no motion events arrive.
+
 ## [0.23.0] — 2026-11-06
 
 A minor rather than a patch because `Element.role` answers differently on
@@ -63,9 +226,12 @@ macOS to all six, and from five of six to all six on COSMIC.
 
 ## [0.22.1] — 2026-11-06
 
-A patch: no API is added or removed. What changes is which backends a plain
-`connect()` composes on macOS, and it changes because the old answer was a
-defect.
+A patch: no call is added or removed, and no signature changes. What changes
+is which backends a plain `connect()` composes on macOS, and it changes
+because the old answer was a defect. One new knob comes with it -- the
+`request` backend option below, which is how the behaviour the `opt_in` flag
+used to guard stays reachable -- so "no API" means no new *call*, not no new
+option.
 
 ### Fixed
 
@@ -6014,7 +6180,10 @@ First public release.
 - A `pyguitest` command-line entry point.
 - PEP 561 type information (`py.typed`); no hard runtime dependencies.
 
-[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.22.0...HEAD
+[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.24.0...HEAD
+[0.24.0]: https://github.com/ctrondlp/pyguitest/compare/v0.23.0...v0.24.0
+[0.23.0]: https://github.com/ctrondlp/pyguitest/compare/v0.22.1...v0.23.0
+[0.22.1]: https://github.com/ctrondlp/pyguitest/compare/v0.22.0...v0.22.1
 [0.22.0]: https://github.com/ctrondlp/pyguitest/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/ctrondlp/pyguitest/compare/v0.20.1...v0.21.0
 [0.20.1]: https://github.com/ctrondlp/pyguitest/compare/v0.20.0...v0.20.1

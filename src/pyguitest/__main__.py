@@ -584,16 +584,25 @@ def _scan_data(per_file, hits, const_hits):
 
 
 def _scan(paths, json_output=False):
-    """Report the migration cost of each X11::GUITest call in `paths`."""
+    """Report the migration cost of each X11::GUITest call in `paths`.
+
+    A file that cannot be read is named on stderr *and* makes the status
+    non-zero. Skipping it quietly was worse than it looks: the status is
+    what a CI migration gate reads, so a directory whose readable files
+    happen to be clean passed the gate while part of the tree had never
+    been scanned at all -- a green answer to a question nobody asked.
+    """
     hits: Counter[str] = Counter()
     const_hits: Counter[str] = Counter()
     per_file: dict[str, PerlScan] = {}
+    unreadable: list[str] = []
 
     for path in _perl_sources(paths):
         try:
             source = path.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
             print(f"{path}: {exc}", file=sys.stderr)
+            unreadable.append(str(path))
             continue
         found = scan(source)
         if found.calls or found.constants:
@@ -605,20 +614,34 @@ def _scan(paths, json_output=False):
 
     blocked = [n for n in hits if LEGACY[n].tier is Tier.NO_PATH]
     unspelled = [n for n in hits if LEGACY[n].replacement is None]
-    status = 1 if blocked or unspelled else 0
+    status = 1 if blocked or unspelled or unreadable else 0
 
     if json_output:
-        print(json.dumps(_scan_data(per_file, hits, const_hits), indent=2))
+        data = _scan_data(per_file, hits, const_hits)
+        data["summary"]["unreadable"] = sorted(unreadable)
+        print(json.dumps(data, indent=2))
         return status
 
     if not hits and not const_hits:
         print("No X11::GUITest calls found.")
-        return 0
+        if unreadable:
+            print(
+                f"{len(unreadable)} file(s) could not be read and were not "
+                "scanned; see the errors above.",
+                file=sys.stderr,
+            )
+        return status
 
     for path, found in per_file.items():
         print(f"\n{path}")
         _print_file(found)
     _print_summary(hits, const_hits, blocked, unspelled)
+    if unreadable:
+        print(
+            f"\n{len(unreadable)} file(s) could not be read and were not "
+            "scanned; see the errors above.",
+            file=sys.stderr,
+        )
     return status
 
 

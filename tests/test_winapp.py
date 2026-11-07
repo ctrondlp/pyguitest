@@ -226,18 +226,38 @@ class TestWaitTimeouts(unittest.TestCase):
         self.assertLessEqual(max(kernel32.asked_ms), winapp._MAX_WAIT_MS)
 
     def test_a_timeout_past_a_dword_does_not_wrap_to_a_short_wait(self):
-        kernel32 = _FakeKernel32(waits=[winapp._WAIT_TIMEOUT])
+        kernel32 = _FakeKernel32(waits=[winapp._WAIT_TIMEOUT, winapp._WAIT_TIMEOUT])
         process = packaged(kernel32)
         with mock.patch.object(winapp.time, "monotonic", side_effect=[0.0, 0.0, 1e12]):
             with self.assertRaises(subprocess.TimeoutExpired):
                 process.wait(timeout=1e9)
-        self.assertEqual(kernel32.asked_ms, [winapp._MAX_WAIT_MS])
+        # The 0 ms probe first -- see wait() -- then the clamped slice.
+        self.assertEqual(kernel32.asked_ms, [0, winapp._MAX_WAIT_MS])
 
     def test_an_ordinary_timeout_is_one_wait_of_that_length(self):
-        kernel32 = _FakeKernel32(waits=[winapp._WAIT_OBJECT_0])
+        kernel32 = _FakeKernel32(waits=[winapp._WAIT_TIMEOUT, winapp._WAIT_OBJECT_0])
         process = packaged(kernel32)
         self.assertEqual(process.wait(timeout=5), 1)
-        self.assertEqual(kernel32.asked_ms, [5000])
+        self.assertEqual(kernel32.asked_ms, [0, 5000])
+
+    def test_a_zero_timeout_asks_the_kernel_before_refusing(self):
+        # A process can be gone without this object having latched a
+        # returncode for it, and the deadline check used to run first -- so
+        # wait(timeout=0) raised TimeoutExpired for a process that had
+        # exited. Application.stop(timeout=0) then reported "still running"
+        # for it and restart() refused to relaunch.
+        kernel32 = _FakeKernel32(waits=[winapp._WAIT_OBJECT_0], exit_code=0)
+        process = packaged(kernel32)
+        self.assertEqual(process.wait(timeout=0), 0)
+        self.assertEqual(kernel32.asked_ms, [0])
+
+    def test_a_zero_timeout_on_a_live_process_still_times_out(self):
+        # The other half: the probe is a question, not a grace period.
+        kernel32 = _FakeKernel32(waits=[winapp._WAIT_TIMEOUT])
+        process = packaged(kernel32)
+        with self.assertRaises(subprocess.TimeoutExpired):
+            process.wait(timeout=0)
+        self.assertEqual(kernel32.asked_ms, [0])
 
     def test_no_timeout_still_waits_infinitely_in_one_call(self):
         kernel32 = _FakeKernel32(waits=[winapp._WAIT_OBJECT_0])

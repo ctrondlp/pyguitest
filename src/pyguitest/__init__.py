@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypeVar, cast
 from . import backends, compat, inspect, macapp, winapp
 from .app import Application
 from .backends import Element, GUIBackend, ImageMatch, NullBackend, Screen, Window
+from .backends.base import CLICK_ROUTES
 from .backends.composite import CaptureFallbackWarning
 from .backends.input import KeymapWarning
 from .capabilities import TIERS, Capability, CapabilitySet, Tier
@@ -86,7 +87,7 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T")
 
-__version__ = "0.23.0"
+__version__ = "0.24.0"
 
 __all__ = [
     "connect",
@@ -827,7 +828,11 @@ class Session:
         `via` of its own: `"action"` (the accessible action only), `"pointer"`
         (the user pathway only) or `"auto"` (today's ladder, action first with
         the pointer as the fallback). Settable mid-run, so one assignment can
-        switch a whole suite's policy.
+        switch a whole suite's policy -- and checked on every assignment, not
+        only here, for that reason: a misspelling used to be found by
+        `resolve_click_route`, which runs on the first *element* click that
+        takes the session default, so `connect(click_via="pointr")` reported
+        a typo in the setup from somewhere in the middle of a test.
         """
         self.backend = backend
         self.environment = environment
@@ -841,6 +846,28 @@ class Session:
         # the only one available. It tracks what was *sent*, so a hand on the
         # physical mouse invalidates it; pass start= when that is a risk.
         self._pointer: tuple[int, int] | None = None
+
+    @property
+    def click_via(self) -> str:
+        """The default route `element.click()` takes; see `__init__`."""
+        return self._click_via
+
+    @click_via.setter
+    def click_via(self, route: str) -> None:
+        """Set the default click route, refusing a value no element can use.
+
+        A property rather than a plain attribute because this is documented
+        as settable mid-run, so the constructor is not the only place a bad
+        value can get in -- and `resolve_click_route` only sees it on the
+        first element click that takes the session default, which is a long
+        way from the line that misspelled it.
+        """
+        if route not in CLICK_ROUTES:
+            raise ValueError(
+                f"unknown click route {route!r}; expected one of "
+                f"{', '.join(CLICK_ROUTES)}"
+            )
+        self._click_via = route
 
     # -- negotiation -------------------------------------------------------
 
@@ -1068,6 +1095,13 @@ class Session:
         self, command: str | Sequence[str], **kwargs: Any
     ) -> subprocess.CompletedProcess[Any]:
         """Run a program to completion. Replaces RunApp.
+
+        **Blocking, and so almost never what a GUI test wants**: this waits
+        for the program to exit, so pointing it at the application under test
+        hangs until something closes that application. `start_app` is the
+        non-blocking launch, and it hands back an `Application` with the
+        lifecycle calls on it. This one is for the command that finishes --
+        a fixture script, a `git` call, a file conversion.
 
         Same shell and `env=` behaviour as :meth:`start_app`: a string runs
         through the shell, and `env=` replaces rather than extends the
@@ -1578,9 +1612,12 @@ class Session:
         unevenly spaced `via` points over a short move -- one leg takes
         almost the whole budget while every other leg still gets its floor of
         one, so n legs emit up to 2n+1 events against a budget of n+1, which
-        approaches twice the rate without reaching it. The `duration * rate`
-        term dominates and the overshoot disappears once it is comfortably
-        above the leg count.
+        approaches twice the rate without reaching it. **A non-zero
+        `overshoot` adds three more on top of that**, the points that carry
+        the pointer past the target and bring it back, so the bound with the
+        default overshoot is 2n+4; measured, not derived, and the three are
+        there whatever the budget. The `duration * rate` term dominates and
+        the excess disappears once it is comfortably above the leg count.
         `latency` is the pause before the pointer starts moving, defaulting to
         the session's own `event_delay` so one knob paces the whole script,
         and `pause` inserts a single hesitation part-way through, which is
@@ -2187,6 +2224,17 @@ class Session:
         moment it does. `attempt` gets the slice's length and returns the
         answer, or None to keep waiting; one attempt is always made, so
         `timeout=0` still asks once.
+
+        An `attempt` that returns *early* is slept out for the rest of its
+        slice rather than retried at once. Nothing promises an event stream
+        lasts as long as it was given: `SwayCLI._stream` ends on its
+        subprocess closing the socket, and a backend whose compositor
+        restarts, or whose helper is killed, answers in microseconds. With
+        `timeout=None` and no sleep here, that turned this loop into a spin
+        -- a wait that looked like a hang while burning a core and
+        re-subscribing thousands of times a second. The sleep is the slice's
+        unused remainder, so a stream that really does run its slice is
+        unaffected and the missed-event gap stays bounded at one slice.
         """
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
@@ -2196,11 +2244,15 @@ class Session:
                 if remaining is None
                 else max(0.0, min(_EVENT_SLICE, remaining))
             )
+            started = time.monotonic()
             found = attempt(seconds)
             if found:
                 return found
             if deadline is not None and time.monotonic() >= deadline:
                 return None
+            unused = seconds - (time.monotonic() - started)
+            if unused > 0:
+                time.sleep(unused)
 
     def wait_for_window(
         self,
@@ -2654,14 +2706,25 @@ class Session:
         state" are different exceptions, and the worst case is twice
         `timeout` rather than once.
 
-        A control whose toolkit publishes no checked state at all reports
-        `Element.checked` as None, which equals neither True nor False -- so
-        this times out and then says "but it is unchecked", because None is
-        falsey. `Element.checkable` is the guard for a widget you do not know,
-        and what it rules out is a control that is not a check, radio or
-        toggle at all; a role-checkable widget whose toolkit still publishes
-        no state passes the guard and reaches the timeout above. Reading
-        `Element.checked` for None is the narrower test for that.
+        `Element.checkable` is the guard for a widget you do not know, and
+        what it rules out is a control that is not a check, radio or toggle at
+        all; a role-checkable widget whose toolkit still publishes no state
+        passes that guard and reaches the timeout above.
+
+        **Whether "it did not say" can be told apart from "it said no"
+        depends on the platform, and on Linux it cannot.** On Windows an
+        element with no Toggle pattern, and on macOS one publishing neither
+        `kAXValueAttribute` nor a menu-item mark, report `Element.checked` as
+        None -- which equals neither True nor False, so `checked=False` fails
+        there rather than passing by accident, and reading `checked` for None
+        is the narrower test. On AT-SPI there is no such signal: dogtail's
+        `Node.checked` reads the state set, so it answers a real bool for
+        every element and a toolkit that never publishes CHECKED is
+        indistinguishable from one reporting "unchecked". `expect_checked(...,
+        checked=False)` on Linux can therefore pass without the toolkit having
+        reported checked state at all. Where that distinction matters, assert
+        the *transition* -- read `checked`, click, and expect the opposite --
+        which no amount of silence can satisfy.
 
             gui.checkbox("Read only").click()
             gui.expect_checked(name="Read only", checked=True)

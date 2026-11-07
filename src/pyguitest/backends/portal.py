@@ -668,6 +668,17 @@ class PortalBackend(GUIBackend):
         produce that failure transiently -- see `_call_for_fd` -- so a
         caller reading straight after another process wrote should retry
         rather than conclude the clipboard is empty.
+
+        `BackendUnavailable` is re-raised rather than counted as a refusal.
+        It is a `PyGUITestError`, so the per-type handler below used to
+        absorb it: a Clipboard interface that is not there, or a D-Bus call
+        that failed outright, was recorded as "this MIME type was refused",
+        every remaining type was tried against the same dead interface, and
+        the caller got a generic "could not be read as text" naming four
+        types. That is the one failure here that is not about the clipboard's
+        *content*, and the typed error exists so a caller can tell the two
+        apart -- `can_capture`'s portal fallback makes the same distinction
+        for the same reason.
         """
         self.require(Capability.CLIPBOARD)
         self._no_primary(primary)
@@ -677,6 +688,8 @@ class PortalBackend(GUIBackend):
                 fd = self._call_for_fd(
                     "SelectionRead", "(os)", (self._session_handle, mime)
                 )
+            except BackendUnavailable:
+                raise
             except PyGUITestError as exc:
                 refusals.append(f"{mime} ({exc})")
                 continue

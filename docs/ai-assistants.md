@@ -107,13 +107,17 @@ rules below are one shape of that mistake.
     is real and useful, but it breaks on theme, font and scaling changes.
     Reach for it only when there is nothing accessible to match.
 
-17. **On macOS, every capability is gated on a grant the user makes by
-    hand.** A plain `connect()` composes elements, windows, capture and input
-    alike, but each backend reports its capabilities only where the grant is
-    already there — Accessibility for elements, PostEvent for input, Screen
-    Recording for capture. Code cannot grant them, so check `supports()` and
-    let `require()` fail by name. (Input was opt-in before 0.22.1, and older
-    scripts naming `["macquartz", "macos"]` still work unchanged.)
+17. **On macOS, the grants are made by hand and some capabilities need
+    none.** A plain `connect()` composes elements, windows, capture and input
+    alike, and each backend reports a *gated* capability only where the grant
+    is already there — Accessibility for elements, PostEvent for input, Screen
+    Recording for capture. Window listing, geometry, activation, the screen
+    list and the pointer position are not gated: CoreGraphics answers them on
+    a Mac with nothing granted, so do not tell a user to change privacy
+    settings before calling `pointer_position()` or `windows()`. Code cannot
+    grant anything either way, so check `supports()` and let `require()` fail
+    by name. (Input was opt-in before 0.22.1, and older scripts naming
+    `["macquartz", "macos"]` still work unchanged.)
 
 ## A correct script, end to end
 

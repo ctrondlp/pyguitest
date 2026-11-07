@@ -55,14 +55,23 @@ function reserveTempBeside(path) {
     for (let attempt = 0; attempt < 8; attempt++) {
         const name = GLib.build_filenamev(
             [dir, `.${stem}.${GLib.uuid_string_random()}.tmp`]);
+        let stream = null;
         try {
             // PRIVATE is mode 0600, so the window before the rename is not
             // readable by other local accounts either.
-            Gio.File.new_for_path(name)
-                .create(Gio.FileCreateFlags.PRIVATE, null)
-                .close(null);
+            stream = Gio.File.new_for_path(name)
+                .create(Gio.FileCreateFlags.PRIVATE, null);
+            stream.close(null);
             return name;
         } catch (e) {
+            // The file exists from here on if `create` is what succeeded, so
+            // a failure out of `close` has to take it with it: the callers
+            // reserve this name *before* their own try blocks, so nothing
+            // downstream knows there is anything to discard, and a 0600
+            // `.<stem>.<uuid>.tmp` would be left beside the destination for
+            // good.
+            if (stream !== null)
+                discardTemp(name);
             const taken = typeof e.matches === 'function' &&
                 e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.EXISTS);
             if (!taken)

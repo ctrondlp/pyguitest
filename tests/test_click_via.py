@@ -68,6 +68,40 @@ class TestResolveClickRoute(unittest.TestCase):
             self.assertEqual(resolve_click_route(_Element(), route), route)
 
 
+class TestTheSessionDefaultIsCheckedWhereItIsSet(unittest.TestCase):
+    """`click_via` is validated on assignment, not on the first click.
+
+    `resolve_click_route` only sees the session default when an element click
+    passes no `via` of its own, so a misspelling in `connect(...)` used to be
+    reported from somewhere in the middle of a test rather than from the line
+    that made it -- and a suite that only ever passes `via=` explicitly never
+    heard about it at all.
+    """
+
+    def _session(self, **kwargs):
+        return pyguitest.Session(pyguitest.NullBackend(), pyguitest.detect(), **kwargs)
+
+    def test_the_default_is_auto(self):
+        self.assertEqual(self._session().click_via, "auto")
+
+    def test_every_documented_route_is_accepted(self):
+        for route in CLICK_ROUTES:
+            self.assertEqual(self._session(click_via=route).click_via, route)
+
+    def test_a_misspelled_route_is_refused_at_construction(self):
+        with self.assertRaises(ValueError) as caught:
+            self._session(click_via="pointr")
+        self.assertIn("pointr", str(caught.exception))
+
+    def test_a_misspelled_route_is_refused_mid_run_too(self):
+        # The documented use: one assignment switches a whole suite's policy.
+        session = self._session()
+        with self.assertRaises(ValueError):
+            session.click_via = "keyboard"
+        # And the good value it had is still the one in force.
+        self.assertEqual(session.click_via, "auto")
+
+
 class TestRequireClickRoute(unittest.TestCase):
     def test_pointer_requires_the_pointer_half(self):
         session = _Session(

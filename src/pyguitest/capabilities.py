@@ -321,18 +321,33 @@ class CapabilitySet(frozenset):
     # leaves the four reflected methods out even though the type has them at
     # runtime. Going through a plain frozenset computes the same set by the
     # same set algebra, and needs no `# type: ignore` to say so.
+    #
+    # Each one checks the operand first, because `frozenset(other)` accepts
+    # any iterable: `["x"] | caps` and `{"k": 1} - caps` used to come back a
+    # CapabilitySet where the builtin they are standing in for raises
+    # TypeError. Set algebra against a list is a mistake, not a shorthand,
+    # and NotImplemented is how an operator says so -- Python then reports
+    # the unsupported operand types itself.
     def __ror__(self, other) -> CapabilitySet:
         """Union with `other` on the left, re-wrapped as __or__ is."""
+        if not isinstance(other, (set, frozenset)):
+            return NotImplemented
         return CapabilitySet(frozenset(other).union(self))
 
     def __rand__(self, other) -> CapabilitySet:
         """Intersection with `other` on the left, re-wrapped as __or__ is."""
+        if not isinstance(other, (set, frozenset)):
+            return NotImplemented
         return CapabilitySet(frozenset(other).intersection(self))
 
     def __rxor__(self, other) -> CapabilitySet:
         """Symmetric difference with `other` on the left, re-wrapped."""
+        if not isinstance(other, (set, frozenset)):
+            return NotImplemented
         return CapabilitySet(frozenset(other).symmetric_difference(self))
 
     def __rsub__(self, other) -> CapabilitySet:
         """`other` minus this set, re-wrapped as __or__ is."""
+        if not isinstance(other, (set, frozenset)):
+            return NotImplemented
         return CapabilitySet(frozenset(other).difference(self))

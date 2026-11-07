@@ -14,6 +14,19 @@ from pathlib import Path
 from pyguitest.__main__ import main
 
 
+def _can_read(path):
+    """Whether this user can read `path` despite its mode.
+
+    Root ignores file permissions, and so does a container running as it,
+    so the unreadable-file tests have to check rather than assume.
+    """
+    try:
+        path.read_bytes()
+    except OSError:
+        return False
+    return True
+
+
 class TestMigrationScanner(unittest.TestCase):
     def _scan(self, source):
         with tempfile.TemporaryDirectory() as tmp:
@@ -44,6 +57,50 @@ class TestMigrationScanner(unittest.TestCase):
 
     def test_empty_script_is_clean(self):
         self.assertEqual(self._scan("print qq{hello}\n"), 0)
+
+    def _scan_with_an_unreadable_file(self, *flags):
+        """Run the scan over a directory holding one unreadable Perl file.
+
+        Returns (status, stdout, stderr), or skips where the file turns out
+        to be readable anyway -- root ignores the mode.
+        """
+        output, errors = io.StringIO(), io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            clean = Path(tmp) / "clean.pl"
+            clean.write_text("StartApp('xterm');\n", encoding="utf-8")
+            unreadable = Path(tmp) / "secret.pl"
+            unreadable.write_text("StartApp('xterm');\n", encoding="utf-8")
+            unreadable.chmod(0o000)
+            try:
+                if _can_read(unreadable):
+                    self.skipTest("this user can read a 0o000 file (root?)")
+                with (
+                    contextlib.redirect_stdout(output),
+                    contextlib.redirect_stderr(errors),
+                ):
+                    status = main(["migrate", *flags, tmp])
+            finally:
+                # Before the directory goes, or its own cleanup is the one
+                # that fails and the real failure never gets reported.
+                unreadable.chmod(0o600)
+        return status, output.getvalue(), errors.getvalue()
+
+    def test_a_file_that_cannot_be_read_fails_the_scan(self):
+        # The status is what a CI migration gate reads, so a directory whose
+        # readable files happen to be clean used to pass the gate while part
+        # of the tree had never been scanned at all.
+        status, _out, errors = self._scan_with_an_unreadable_file()
+        self.assertEqual(status, 1)
+        self.assertIn("secret.pl", errors)
+        self.assertIn("could not be read", errors)
+
+    def test_an_unreadable_file_is_named_in_the_json_report(self):
+        status, out, _errors = self._scan_with_an_unreadable_file("--json")
+        self.assertEqual(status, 1)
+        report = json.loads(out)
+        self.assertEqual(
+            [Path(p).name for p in report["summary"]["unreadable"]], ["secret.pl"]
+        )
 
     def test_report_names_the_blocked_call_and_its_replacement(self):
         # Regression: this reported "no replacement -- rethink this call" for

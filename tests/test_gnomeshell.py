@@ -919,6 +919,19 @@ class TestWindowEvents(GnomeShellTestCase):
         self.assertEqual(found.title, "Editor")
         self.assertEqual(self.connection.subscriptions, {})
 
+    def test_wait_for_window_takes_the_last_of_several_same_titled_windows(self):
+        # Session.find_window is find_windows(...)[-1] over this same
+        # windows() list, so the first match is the wrong one: the two calls
+        # would name different windows for one title.
+        self.proxy.windows = [
+            (1, 100, "Untitled Document", 0, 0, 800, 600, False, True),
+            (2, 200, "Calculator", 800, 0, 400, 600, False, False),
+            (3, 300, "Untitled Document", 0, 0, 800, 600, False, False),
+        ]
+        found = self.gui.wait_for_window("Untitled Document")
+        self.assertEqual(found.handle, 3)
+        self.assertEqual(self.connection.subscriptions, {})
+
     def test_wait_for_window_picks_up_a_new_matching_window(self):
         self.driver.scripted.append(("new", 3, "Terminal"))
         found = self.gui.wait_for_window("Term", timeout=1)

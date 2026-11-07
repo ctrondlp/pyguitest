@@ -39,9 +39,12 @@ because that is how the library is normally used. Run it directly:
 python3 examples/06_a_real_test.py -v
 ```
 
-`unittest discover` cannot import it: its filename starts with a digit, so
-it is not a valid module name, and discovery reports "NO TESTS RAN" rather
-than an error. Your own test files will not have this problem.
+`unittest discover` does not pick it up, and the reason is the pattern
+rather than the name: discovery matches `test*.py` by default, so this file
+is never considered and the run reports "NO TESTS RAN" rather than an error.
+The leading digit matters only if you widen the pattern to include the file
+-- a discovered module has to be importable, and `06_a_real_test` is not a
+valid module name. Your own test files will have neither problem.
 
 What each desktop supports is summarised in the project
 [README](../README.md#what-works-where); setup for elements, input and

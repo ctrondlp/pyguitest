@@ -288,11 +288,19 @@ gui = pyguitest.connect()
 
 `macquartz` supplies the pointer and keyboard; `macos` supplies elements and
 windows; `screencapture` and `pbcopy` supply capture and the clipboard. None
-of them asks for a grant by being composed — each one *preflights*, and
-reports the capability only where the grant is already there. So a Mac with
-PostEvent granted can type, and one without it has no `KEY_EVENT` in
+of them asks for a grant by being composed — `macquartz` *preflights*, and
+reports its input capabilities only where PostEvent is already granted. So a
+Mac with that grant can type, and one without it has no `KEY_EVENT` in
 `supports()` and `require()` says so by name rather than letting an injected
 event go quietly nowhere.
+
+The preflight is `macquartz`'s, not a rule for the whole Mac. `macos` reports
+the window list, window geometry, activation, the screen list and the pointer
+position whatever is granted — CoreGraphics answers those and Accessibility
+gates none of them. Capture is the third shape: both capture capabilities are
+reported whether or not Screen Recording is granted, and the permission is
+checked when the capture is actually taken, so a denied Mac raises
+`PermissionRequired` naming the grant instead of writing a black PNG.
 
 `macquartz` was opt-in until 0.22.1, which meant a plain `connect()` on a Mac
 had no pointer or keyboard at all and every script had to name backends.

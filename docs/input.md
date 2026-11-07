@@ -565,7 +565,10 @@ and never auto-selected, the same rule `eiinput` and `portal` follow.
 
 **Live-validated on 2026-09-12** — on GNOME Shell 51.rc/Wayland; see
 `docs/validation.md` for the run. `Activated` arrives and carries a
-`cursor_position`, so a timeout is no longer the outcome to expect. What has
+`cursor_position`, so a timeout is no longer the outcome to expect *for a
+deliberate edge crossing on that compositor with Mouse Integration off*.
+The method still returns `None` whenever no activation arrives, and that
+remains the ordinary answer for a barrier nobody crossed. What has
 not changed is who can check it: verifying it needs a user who has
 deliberately accepted that their own input will be diverted, not merely
 someone who clicked Allow on a dialog, so

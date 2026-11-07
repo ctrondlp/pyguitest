@@ -30,7 +30,11 @@ from pyguitest.backends.cosmic import (
 )
 from pyguitest.backends.windows import for_compositor
 from pyguitest.capabilities import Capability
-from pyguitest.errors import CapabilityUnsupported, WindowNotFound
+from pyguitest.errors import (
+    CapabilityUnsupported,
+    PyGUITestError,
+    WindowNotFound,
+)
 from pyguitest.png import png_size
 from pyguitest.session import Compositor
 
@@ -140,6 +144,22 @@ def _recv_all(sock, timeout=0.2):
     return data
 
 
+def _deliver(backend, object_id, opcode, *fields):
+    """Dispatch one compositor message straight into the client's handler.
+
+    Encoded by `_msg`, the test's own independent encoder, then handed to
+    `_handle` with the header stripped -- which is where `_recv_message`
+    hands every real message anyway. Written to the handler rather than to
+    the socket because `_make_backend` queues spare `done` callbacks behind
+    the handshake: a test cannot say how many of them an earlier call
+    consumed, so it cannot say how many reads its own appended message sits
+    behind, and reading far enough to find it starves the *next* call of the
+    callback it waits for.
+    """
+    raw = _msg(object_id, opcode, *fields)
+    backend._conn._handle(object_id, opcode, raw[8:])
+
+
 def _make_backend(test, done_count=8):
     """A CosmicBackend over a socketpair, pre-fed the handshake plus spare `done`s.
 
@@ -212,6 +232,89 @@ class TestCosmicBackend(unittest.TestCase):
         window = backend.windows()[0]
         backend.minimize_window(window, minimized=False)
         self.assertIn(_msg(MANAGER, 6, ("o", COSMIC_HANDLE)), _recv_all(server))
+
+
+class TestOutputOriginChangesAfterTheGeometry(unittest.TestCase):
+    """A window's rectangle follows its output when the output moves.
+
+    `wl_output.geometry` is re-sent whenever an output's properties change, so
+    moving a monitor in the display settings, or a hotplug that re-lays-out
+    the desktop, moves every window on it without any toplevel saying so.
+    Adding the origin once, when the toplevel geometry arrived, left the
+    cached answer offset by the difference for the rest of the session -- and
+    that rectangle is what `window_at` hit-tests and what `click_element`
+    aims at, so it reads as clicks landing in the wrong place.
+    """
+
+    def test_a_later_output_move_moves_the_window_with_it(self):
+        backend, _ = _make_backend(self)
+        window = backend.windows()[0]
+        self.assertEqual(backend.geometry(window), (110, 70, 800, 600))
+        # The same output, re-announced 300px to the right and 25px down.
+        _deliver(
+            backend,
+            WOUT,
+            0,
+            ("i", 400),
+            ("i", 75),
+            ("i", 0),
+            ("i", 0),
+            ("i", 0),
+            ("s", "make"),
+            ("s", "model"),
+            ("i", 0),
+        )
+        # The toplevel never said anything; its rectangle moved anyway.
+        self.assertEqual(backend.geometry(window), (410, 95, 800, 600))
+
+    def test_window_at_hit_tests_the_moved_rectangle(self):
+        backend, _ = _make_backend(self)
+        self.assertIsNotNone(backend.window_at(200, 150))
+        _deliver(
+            backend,
+            WOUT,
+            0,
+            ("i", 1100),
+            ("i", 50),
+            ("i", 0),
+            ("i", 0),
+            ("i", 0),
+            ("s", "make"),
+            ("s", "model"),
+            ("i", 0),
+        )
+        self.assertIsNone(backend.window_at(200, 150))
+        self.assertIsNotNone(backend.window_at(1200, 150))
+
+
+class TestProtocolErrorsReachTheCaller(unittest.TestCase):
+    """`wl_display.error` is the compositor's last word, not noise.
+
+    Messages addressed to `wl_display` used to fall off the end of `_handle`
+    unread, so the object, the code and the compositor's own sentence were all
+    dropped -- and because nothing on the connection is answered after an
+    error, the failure surfaced at the next read as the generic
+    "the compositor closed the connection".
+    """
+
+    def test_the_error_message_is_raised_rather_than_discarded(self):
+        backend, _ = _make_backend(self)
+        with self.assertRaises(PyGUITestError) as caught:
+            _deliver(
+                backend,
+                1,  # wl_display's fixed object id
+                0,  # wl_display.error
+                ("o", INFO),
+                ("u", 7),
+                ("s", "invalid method 9, object zcosmic_toplevel_info_v1"),
+            )
+        self.assertIn("invalid method 9", str(caught.exception))
+        self.assertIn("code 7", str(caught.exception))
+
+    def test_an_unrelated_display_event_is_ignored(self):
+        # delete_id is ordinary bookkeeping; ids are never reused here.
+        backend, _ = _make_backend(self)
+        _deliver(backend, 1, 1, ("u", 11))  # wl_display.delete_id, must not raise
 
 
 class TestConnectCosmic(unittest.TestCase):
@@ -476,6 +579,31 @@ class TestWindowEvents(unittest.TestCase):
         events = list(backend.window_events(timeout=0))
         self.assertEqual([e.change for e in events], ["new", "title", "close"])
         self.assertEqual([e.window.title for e in events], ["Editor"] * 3)
+
+
+class TestWaitForWindow(unittest.TestCase):
+    """The existing-window scan `wait_for_window` runs before subscribing."""
+
+    def _backend(self, titles):
+        toplevels = {
+            handle: mock.Mock(title=title, app_id="org.editor", closed=False)
+            for handle, title in titles.items()
+        }
+        return CosmicBackend(mock.Mock(_events=[], _toplevels=toplevels))
+
+    def test_an_existing_window_is_returned_without_waiting(self):
+        backend = self._backend({5: "Editor"})
+        self.assertEqual(backend.wait_for_window("Edit", timeout=0).handle, 5)
+
+    def test_the_last_of_several_same_titled_windows_wins(self):
+        # Session.find_window is find_windows(...)[-1] over this same
+        # windows() list, so the first match is the wrong one: the two calls
+        # would name different windows for one title.
+        backend = self._backend(
+            {5: "Untitled Document", 6: "Calculator", 7: "Untitled Document"}
+        )
+        found = backend.wait_for_window("Untitled Document", timeout=0)
+        self.assertEqual(found.handle, 7)
 
 
 class TestWindowEventsWire(unittest.TestCase):

@@ -5,7 +5,9 @@
 `move_mouse_naturally` shapes the path instead: a minimum-jerk speed ramp out
 of the start and into each target, an arch bowing every leg off the straight
 line, a little seeded drift across the run, and an overshoot that aims past the
-end of each leg before correcting back onto it.
+target before correcting back onto it -- the last of those on the final leg
+only, which is where a hand overshoots: a waypoint it is on its way through
+is not aimed at.
 
 This walks a rosette -- fifty points around the screen, alternating between an
 outer ring and an inner one -- so all four of those are visible at once. The

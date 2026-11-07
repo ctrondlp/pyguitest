@@ -29,11 +29,19 @@ working unchanged.
 
 from __future__ import annotations
 
+import errno
 import subprocess
 from collections.abc import Callable, Sequence
 from typing import IO, Any, Literal
 
 from .errors import PyGUITestError
+
+_BROKEN_PIPE_ERRNOS = frozenset({errno.EPIPE, errno.EINVAL})
+"""The errnos a write to a pipe with no reader left can fail with.
+
+`BrokenPipeError` (EPIPE) is the POSIX answer and `OSError` with EINVAL is
+Windows's -- measured, not assumed. CPython's own `Popen._stdin_write`
+tolerates exactly these two in exactly this situation."""
 
 __all__ = ["Application"]
 
@@ -138,6 +146,14 @@ class Application:
         Returns self, so `app.restart().pid` reads. The new process replaces
         `.process`; the old one is stopped first by the rules above.
 
+        "Same command" is the `command` object this was built with, not a
+        snapshot of what it held at the time: `start_app` accepts any
+        sequence, and a caller who hands over a list and then edits it gets
+        the edited one relaunched here. Nothing copies it on the way in --
+        `.command` is deliberately the caller's own object so they can read
+        what was run -- so pass a tuple, or stop editing the list, if the
+        relaunch has to be byte-identical.
+
         **The old process's captured output is discarded.** Its pipes -- the
         `stdin`/`stdout`/`stderr` a `start_app(..., stdout=PIPE)` gave it -- are
         closed here, because nothing can reach them once `.process` is replaced;
@@ -146,6 +162,22 @@ class Application:
         `communicate()`: a program started through the shell can leave a
         grandchild holding the pipe, and a drain would then block on it. Read
         `app.stdout` before calling this if the old output matters.
+
+        A broken pipe while closing them is swallowed, and only that.
+        `close()` on a buffered `stdin` *flushes* first, so a caller that
+        wrote to `app.stdin` without flushing has that write happen here --
+        after `stop()` has already killed the only reader. The resulting
+        error used to escape from the middle of this cleanup, which left
+        `stdout`/`stderr` unclosed and the replacement never launched: a
+        failed restart caused by output the caller had already handed over.
+
+        **Two spellings, because the platforms disagree.** POSIX raises
+        `BrokenPipeError` (EPIPE); Windows raises a plain `OSError` with
+        `errno == EINVAL` instead -- measured on Windows 11 build 26200,
+        where suppressing only `BrokenPipeError` left this test failing with
+        "[Errno 22] Invalid argument". CPython's own `Popen._stdin_write`
+        carries both cases for the same reason, and `_BROKEN_PIPE_ERRNOS`
+        below is that list.
 
         Raises `PyGUITestError` if the old process could not be stopped --
         see `stop()` for the one case that happens in, a signal the kernel
@@ -164,7 +196,11 @@ class Application:
         old = self.process
         for stream in (old.stdin, old.stdout, old.stderr):
             if stream is not None:
-                stream.close()
+                try:
+                    stream.close()
+                except OSError as exc:
+                    if exc.errno not in _BROKEN_PIPE_ERRNOS:
+                        raise
         self.process = self._launch()
         return self
 

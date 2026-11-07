@@ -111,6 +111,8 @@ class EditorTest(unittest.TestCase):
         with self.gui.capture_on_failure(ARTIFACTS, name="typing"):
             if self.gui.supports(Capability.WINDOW_ACTIVATE):
                 self.gui.activate_window(self.window)
+            if not self.gui.supports(Capability.TEXT_ENTRY):
+                self.skipTest("no TEXT_ENTRY on this session; see input.md")
             self.gui.type_text("hello from pyguitest")
 
             # Not `gui.wait(1)`. The editor may be slow to render on a

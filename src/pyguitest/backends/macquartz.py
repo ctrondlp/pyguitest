@@ -609,6 +609,12 @@ class MacquartzBackend(GUIBackend):
         # (button, when, x, y, count) of the last press, for the click count a
         # Cocoa application reads a double-click from. See `_click_count`.
         self._last_press: tuple[int, float, int, int, int] | None = None
+        # The click count each held button was pressed with, so its release
+        # carries that one. Separate from `_last_press`, which is the
+        # multi-click *history* and so can only remember one button: with two
+        # buttons held, the history's is not the right answer for both. See
+        # `release_button`.
+        self._press_counts: dict[int, int] = {}
         if request:
             request_post_event()
 
@@ -715,6 +721,7 @@ class MacquartzBackend(GUIBackend):
         down, _up, cg_button = _button_events(button)
         x, y = pointer_position(self._q)
         count = self._click_count(button, x, y)
+        self._press_counts[button] = count
         self._post(self._button_event(down, (x, y), cg_button, count))
         if button not in self._buttons:
             self._buttons.append(button)
@@ -723,13 +730,19 @@ class MacquartzBackend(GUIBackend):
         """Release a mouse button, wherever the pointer already is.
 
         The release carries the click count of the press it ends, as a
-        hardware release does.
+        hardware release does -- read from `_press_counts`, which holds one
+        per held button, and not from `_last_press`, which holds only the
+        most recent. Those differ the moment two buttons overlap: press 1,
+        release 1, press 1, press 3, release 1 gave the second left press a
+        count of 2 and its release a count of 1, because button 3's press
+        had overwritten the history in between. An application that acts on
+        release -- which is where a double-click is usually handled -- then
+        read the wrong gesture entirely.
         """
         self.require(Capability.POINTER_BUTTON)
         _down, up, cg_button = _button_events(button)
         x, y = pointer_position(self._q)
-        last = self._last_press
-        count = last[4] if last is not None and last[0] == button else 1
+        count = self._press_counts.pop(button, 1)
         if button in self._buttons:
             self._buttons.remove(button)
         self._post(self._button_event(up, (x, y), cg_button, count))

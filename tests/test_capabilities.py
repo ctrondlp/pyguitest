@@ -116,6 +116,30 @@ class TestCapabilitySet(unittest.TestCase):
         # The values are still the right ones, not merely the right type.
         self.assertEqual(other - self.caps, CapabilitySet({Capability.WINDOW_LIST}))
 
+    def test_a_set_on_the_left_is_accepted_too(self):
+        # A mutable set is a sibling of frozenset rather than a subclass, so
+        # `{...} | caps` is answered by set.__or__ and never reaches these --
+        # but `{...} - caps` and the rest do, and set algebra between two
+        # real sets is exactly what they are for.
+        other = {Capability.WINDOW_LIST, Capability.TIMING}
+        self.assertEqual(other - self.caps, CapabilitySet({Capability.WINDOW_LIST}))
+
+    def test_an_operand_that_is_not_a_set_is_refused_as_the_builtin_refuses_it(self):
+        # `frozenset(other)` accepts any iterable, so a list or a mapping
+        # came back a CapabilitySet where the builtin being stood in for
+        # raises TypeError -- set algebra against a list is a mistake, not a
+        # shorthand. NotImplemented is how an operator says so.
+        for operand in ([Capability.TIMING], {"timing": 1}, "timing", 3):
+            with self.subTest(operand=operand):
+                for operation in (
+                    lambda a, b: a | b,
+                    lambda a, b: a & b,
+                    lambda a, b: a ^ b,
+                    lambda a, b: a - b,
+                ):
+                    with self.assertRaises(TypeError):
+                        operation(operand, self.caps)
+
 
 if __name__ == "__main__":
     unittest.main()

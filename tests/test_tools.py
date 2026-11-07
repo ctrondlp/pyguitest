@@ -112,6 +112,28 @@ class TestCompositorGatedTools(unittest.TestCase):
         self.assertIn(Capability.KEY_EVENT, wtype.capabilities)
         self.assertIn(Capability.TEXT_ENTRY, wtype.capabilities)
 
+    def test_a_tool_flag_cannot_be_passed_positionally(self):
+        # Three fields arrived after flags they now sit beside -- each one
+        # shifting a positional slot -- so a downstream caller passing flags
+        # positionally would have had one flag's value land in another's
+        # field, silently. A TypeError is the answer instead.
+        with self.assertRaises(TypeError):
+            tools.ExternalTool("probe", frozenset(), "note", False)
+
+    def test_the_documented_positional_three_still_work(self):
+        # The other half: name, capabilities and note are what every
+        # construction site writes positionally, here and under src/.
+        tool = tools.ExternalTool("probe", frozenset(), "a note")
+        self.assertEqual((tool.name, tool.note), ("probe", "a note"))
+
+    def test_a_discover_filter_cannot_be_passed_positionally(self):
+        # `discover(group, True, True, True, "mutter")` used to bind the
+        # compositor name to `allow_wayland_only`, leave `compositor` unset,
+        # and skip the compositor filtering it had just been asked for --
+        # handing back a tool that runs, exits successfully and does nothing.
+        with self.assertRaises(TypeError):
+            tools.discover(tools.INPUT_TOOLS, True, True, True, "mutter")
+
     def test_the_withheld_on_default_is_not_a_dataclass_default(self):
         # A regression test for a break CI found and this machine could not.
         # `withheld_on = MappingProxyType({})` written as the default is
