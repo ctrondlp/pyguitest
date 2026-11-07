@@ -578,6 +578,7 @@ nothing in between. See glide() for the animated form.
 glide(
     x: int,
     y: int,
+    *,
     duration: float = 0.2,
     rate: float = 120.0,
     via: Sequence[tuple[int, int]] = (),
@@ -645,6 +646,7 @@ gui.glide(600, 400, via=[(300, 100), (450, 250)], duration=1.0)
 move_mouse_naturally(
     x: int,
     y: int,
+    *,
     duration: float | None = None,
     pace: float = 700.0,
     rate: float = 120.0,
@@ -722,9 +724,12 @@ can push the total past `duration * rate`. The worst case is many
 unevenly spaced `via` points over a short move -- one leg takes
 almost the whole budget while every other leg still gets its floor of
 one, so n legs emit up to 2n+1 events against a budget of n+1, which
-approaches twice the rate without reaching it. The `duration * rate`
-term dominates and the overshoot disappears once it is comfortably
-above the leg count.
+approaches twice the rate without reaching it. **A non-zero
+`overshoot` adds three more on top of that**, the points that carry
+the pointer past the target and bring it back, so the bound with the
+default overshoot is 2n+4; measured, not derived, and the three are
+there whatever the budget. The `duration * rate` term dominates and
+the excess disappears once it is comfortably above the leg count.
 `latency` is the pause before the pointer starts moving, defaulting to
 the session's own `event_delay` so one knob paces the whole script,
 and `pause` inserts a single hesitation part-way through, which is
@@ -832,6 +837,7 @@ click()/drag(), which pair them for you.
 drag(
     start: tuple[int, int],
     end: tuple[int, int],
+    *,
     button: int = 1,
     duration: float = 0.3,
     rate: float = 120.0,
@@ -1146,6 +1152,7 @@ fills it in.
 ```python
 find_window(
     title: str | re.Pattern[str] | None = None,
+    *,
     app_id: str | Sequence[str] | None = None,
     pid: int | None = None,
 )
@@ -1191,6 +1198,7 @@ window = gui.find_window(app_id="org.gnome.TextEditor")
 ```python
 find_windows(
     title: str | re.Pattern[str] | None = None,
+    *,
     app_id: str | Sequence[str] | None = None,
     pid: int | None = None,
 )
@@ -1908,6 +1916,13 @@ run_app(command: str | Sequence[str], **kwargs: Any)
 
 **Returns** `subprocess.CompletedProcess[Any]`
 
+**Blocking, and so almost never what a GUI test wants**: this waits
+for the program to exit, so pointing it at the application under test
+hangs until something closes that application. `start_app` is the
+non-blocking launch, and it hands back an `Application` with the
+lifecycle calls on it. This one is for the command that finishes --
+a fixture script, a `git` call, a file conversion.
+
 Same shell and `env=` behaviour as :meth:`start_app`: a string runs
 through the shell, and `env=` replaces rather than extends the
 environment. `**kwargs` go to `subprocess.run`.
@@ -2121,6 +2136,7 @@ wait_for_window(
     title: str | re.Pattern[str] | None = None,
     timeout: float | None = None,
     interval: float = 0.5,
+    *,
     app_id: str | Sequence[str] | None = None,
     pid: int | None = None,
 )
@@ -2507,6 +2523,7 @@ Compared per role rather than globally: a "Save" button beside a
 | Call | Needs | What it does |
 |------|-------|--------------|
 | [`click_element(element: Element, button: int = 1)`](#click_element) | [`ELEMENT_GEOMETRY`](#cap-element_geometry), [`POINTER_BUTTON`](#cap-pointer_button), [`POINTER_MOVE`](#cap-pointer_move) | Click a named element through the pointer. `element.click()` ends here. |
+| [`click_via`](#click_via) |  | The default route `element.click()` takes; see `__init__`. |
 | [`double_click(button: int = 1)`](#double_click) | [`POINTER_BUTTON`](#cap-pointer_button) | Press and release a mouse button twice, as one double-click. |
 | [`double_click_element(element: Element)`](#double_click_element) | [`ELEMENT_GEOMETRY`](#cap-element_geometry), [`POINTER_BUTTON`](#cap-pointer_button), [`POINTER_MOVE`](#cap-pointer_move) | Double-click a named element. `element.double_click()` does the same. |
 | [`element_at(x: int, y: int)`](#element_at) | [`ELEMENT_GEOMETRY`](#cap-element_geometry) | The deepest accessible element at a screen coordinate, or None. |
@@ -2525,7 +2542,7 @@ Compared per role rather than globally: a "Save" button beside a
 | [`require_version(minimum: str)`](#require_version) |  | Raise VersionTooOld unless this pyguitest is at least `minimum`. |
 | [`row_values(row: Element)`](#row_values) |  | `row`'s own column values, as plain text, one per child cell. |
 | [`set_window_title(window: Window, title: str)`](#set_window_title) | [`WINDOW_TITLE_SET`](#cap-window_title_set) | Replaces SetWindowName. Impersonation is possible under X11. |
-| [`tree_items(root: Element, role: str \| None = None, max_depth: int = 24)`](#tree_items) | [`ELEMENT_ACTION`](#cap-element_action), [`ELEMENT_TREE`](#cap-element_tree) | Every descendant of `root`, opening collapsed branches to reach them. |
+| [`tree_items(root: Element, *, role: str \| None = None, max_depth: int = 24)`](#tree_items) | [`ELEMENT_ACTION`](#cap-element_action), [`ELEMENT_TREE`](#cap-element_tree) | Every descendant of `root`, opening collapsed branches to reach them. |
 | [`wait_for_pointer_activation(timeout: float \| None = None)`](#wait_for_pointer_activation) | [`INPUT_CAPTURE`](#cap-input_capture) | Block for one real crossing of a screen edge, and return where. |
 | [`wait_window_focus(window: Window, timeout: float \| None = None, interval: float = 0.1)`](#wait_window_focus) | [`WINDOW_STATE`](#cap-window_state) | Block until `window` holds keyboard focus, or timeout. |
 
@@ -2564,6 +2581,10 @@ rectangle for this element -- it is not showing, or the backend reports
 none -- the same split `double_click_element` makes. `element.click()`
 raises ElementNotActionable for that case instead, so that the typed
 refusal a caller already catches keeps its meaning.
+
+### `click_via`
+
+**Returns** `str`
 
 ### `double_click`
 
@@ -2655,6 +2676,7 @@ really covers the point (extents() says).
 expect_checked(
     role: str | None = None,
     name: str | None = None,
+    *,
     checked: bool,
     timeout: float = 5.0,
     within: Element | None = None,
@@ -2677,14 +2699,25 @@ re-read until the deadline. So "no such control" and "the wrong
 state" are different exceptions, and the worst case is twice
 `timeout` rather than once.
 
-A control whose toolkit publishes no checked state at all reports
-`Element.checked` as None, which equals neither True nor False -- so
-this times out and then says "but it is unchecked", because None is
-falsey. `Element.checkable` is the guard for a widget you do not know,
-and what it rules out is a control that is not a check, radio or
-toggle at all; a role-checkable widget whose toolkit still publishes
-no state passes the guard and reaches the timeout above. Reading
-`Element.checked` for None is the narrower test for that.
+`Element.checkable` is the guard for a widget you do not know, and
+what it rules out is a control that is not a check, radio or toggle at
+all; a role-checkable widget whose toolkit still publishes no state
+passes that guard and reaches the timeout above.
+
+**Whether "it did not say" can be told apart from "it said no"
+depends on the platform, and on Linux it cannot.** On Windows an
+element with no Toggle pattern, and on macOS one publishing neither
+`kAXValueAttribute` nor a menu-item mark, report `Element.checked` as
+None -- which equals neither True nor False, so `checked=False` fails
+there rather than passing by accident, and reading `checked` for None
+is the narrower test. On AT-SPI there is no such signal: dogtail's
+`Node.checked` reads the state set, so it answers a real bool for
+every element and a toolkit that never publishes CHECKED is
+indistinguishable from one reporting "unchecked". `expect_checked(...,
+checked=False)` on Linux can therefore pass without the toolkit having
+reported checked state at all. Where that distinction matters, assert
+the *transition* -- read `checked`, click, and expect the opposite --
+which no amount of silence can satisfy.
 
 ```python
 gui.checkbox("Read only").click()
@@ -2766,6 +2799,7 @@ the action the element exists for actually worked.
 expect_text(
     role: str | None = None,
     name: str | None = None,
+    *,
     equals: str,
     timeout: float = 5.0,
     within: Element | None = None,
@@ -2810,6 +2844,7 @@ gui.expect_text(
 expect_window(
     title: str | re.Pattern[str] | None = None,
     timeout: float | None = None,
+    *,
     app_id: str | Sequence[str] | None = None,
     pid: int | None = None,
 )
@@ -3084,7 +3119,7 @@ the stable handle where a backend fills it in.
 ### `tree_items`
 
 ```python
-tree_items(root: Element, role: str | None = None, max_depth: int = 24)
+tree_items(root: Element, *, role: str | None = None, max_depth: int = 24)
 ```
 
 **Parameters**
@@ -3356,6 +3391,12 @@ state has nothing to be checked, and an *indeterminate* control --
 a mixed-state check box -- has not said "set" or "not set" either.
 Read `checkable` first to know whether the value means anything,
 and treat `None` as "it did not say" rather than as False.
+
+It is not a signal every backend can give. AT-SPI's state set
+answers a plain bool for every element, so `AtspiBackend`'s
+implementation never reports None for a live node and "publishes no
+checked state" reads there as False -- see `Session.expect_checked`,
+which is where that matters to a caller.
 
 #### `child`
 
@@ -3881,6 +3922,14 @@ for in a loop that is waiting without committing to a deadline.
 Returns self, so `app.restart().pid` reads. The new process replaces
 `.process`; the old one is stopped first by the rules above.
 
+"Same command" is the `command` object this was built with, not a
+snapshot of what it held at the time: `start_app` accepts any
+sequence, and a caller who hands over a list and then edits it gets
+the edited one relaunched here. Nothing copies it on the way in --
+`.command` is deliberately the caller's own object so they can read
+what was run -- so pass a tuple, or stop editing the list, if the
+relaunch has to be byte-identical.
+
 **The old process's captured output is discarded.** Its pipes -- the
 `stdin`/`stdout`/`stderr` a `start_app(..., stdout=PIPE)` gave it -- are
 closed here, because nothing can reach them once `.process` is replaced;
@@ -3889,6 +3938,22 @@ left open, each was only reclaimed by the garbage collector, with a
 `communicate()`: a program started through the shell can leave a
 grandchild holding the pipe, and a drain would then block on it. Read
 `app.stdout` before calling this if the old output matters.
+
+A broken pipe while closing them is swallowed, and only that.
+`close()` on a buffered `stdin` *flushes* first, so a caller that
+wrote to `app.stdin` without flushing has that write happen here --
+after `stop()` has already killed the only reader. The resulting
+error used to escape from the middle of this cleanup, which left
+`stdout`/`stderr` unclosed and the replacement never launched: a
+failed restart caused by output the caller had already handed over.
+
+**Two spellings, because the platforms disagree.** POSIX raises
+`BrokenPipeError` (EPIPE); Windows raises a plain `OSError` with
+`errno == EINVAL` instead -- measured on Windows 11 build 26200,
+where suppressing only `BrokenPipeError` left this test failing with
+"[Errno 22] Invalid argument". CPython's own `Popen._stdin_write`
+carries both cases for the same reason, and `_BROKEN_PIPE_ERRNOS`
+below is that list.
 
 Raises `PyGUITestError` if the old process could not be stopped --
 see `stop()` for the one case that happens in, a signal the kernel

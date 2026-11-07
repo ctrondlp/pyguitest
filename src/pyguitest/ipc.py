@@ -366,9 +366,17 @@ class HyprlandCLI:
         `HyprlandBackend._dispatch` reads to tell the two syntaxes apart and
         to refuse with a reason. Raising instead hid the text behind
         "failed: " and made the CLI transport unusable on a modern daemon.
+
+        A *missing* `hyprctl` is the exception, and keeps its own error. It
+        is an `OSError` too, so it used to come back as a reply string and
+        `HyprlandBackend._checked` reported "hyprland refused" -- a refusal
+        attributed to a daemon that was never asked, which sends whoever
+        reads it looking at window rules instead of at the PATH.
         """
         try:
             return self._runner(["hyprctl", "dispatch", command])
+        except FileNotFoundError:
+            raise
         except OSError as exc:
             return str(exc)
 

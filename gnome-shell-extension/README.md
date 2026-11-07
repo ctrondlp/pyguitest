@@ -221,7 +221,12 @@ a close signal reaches a subscriber the window is already gone from
 then, unlike geometry or viewability, which can always ask fresh.
 
 Without the extension, `wait_for_window` and `wait_window_close` on GNOME
-fall back to polling every `interval` seconds.
+fall back to polling every `interval` seconds -- and what those polls can
+see narrows with it. The window list then comes from `X11Backend` on X11, or
+from AT-SPI, which knows a window only where its application publishes an
+accessible tree: GNOME Wayland has no foreign-toplevel protocol, so a
+toolkit or application with accessibility off is invisible to the poll as
+well as to the subscription.
 
 If `window-created`/`unmanaging`/`notify::title` ever fail to connect on
 some future Mutter (`startWatching()` in `extension.js`), the extension

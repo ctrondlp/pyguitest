@@ -1099,6 +1099,52 @@ class TestWindowWrites(BackendTestCase):
         self.assertEqual(self.node.performed, ["AXRaise"])
         running.activateWithOptions_.assert_called_once_with(1 << 9)
 
+    def test_a_raise_without_an_activation_is_a_refusal_not_a_success(self):
+        # The trap this method's own docstring describes: after an AXRaise
+        # alone the window is visibly in front and `active_window` names it,
+        # while typed text still goes to whatever was frontmost before. That
+        # used to return normally, so the caller was told the window was
+        # activated and then typed into a different application.
+        running = mock.Mock()
+        running.activateWithOptions_.return_value = False
+        appkit = types.SimpleNamespace(
+            NSApplicationActivateAllWindows=1 << 9,
+            NSRunningApplication=mock.Mock(
+                runningApplicationWithProcessIdentifier_=mock.Mock(return_value=running)
+            ),
+        )
+        with (
+            mock.patch.dict(sys.modules, {"AppKit": appkit}),
+            mock.patch.object(self.backend, "_set", return_value=1),
+            self.assertRaises(CapabilityUnsupported) as refusal,
+        ):
+            self.backend.activate_window(self.terminal)
+        # The raise did happen and the message says so, since the window has
+        # really moved.
+        self.assertEqual(self.node.performed, ["AXRaise"])
+        self.assertIn("was raised", str(refusal.exception))
+        self.assertIn("keyboard input", str(refusal.exception))
+
+    def test_an_activation_without_a_raise_still_succeeds(self):
+        # The other half: AX refusing the raise is not fatal, because the
+        # application activation is the part that decides where keys go.
+        backend = self.make(
+            trusted=False,
+            onscreen=self.onscreen_windows(),
+            applications=self.applications(),
+        )
+        window = macos.Window(48, backend, pid=690)
+        running = mock.Mock()
+        running.activateWithOptions_.return_value = True
+        appkit = types.SimpleNamespace(
+            NSApplicationActivateAllWindows=1 << 9,
+            NSRunningApplication=mock.Mock(
+                runningApplicationWithProcessIdentifier_=mock.Mock(return_value=running)
+            ),
+        )
+        with mock.patch.dict(sys.modules, {"AppKit": appkit}):
+            backend.activate_window(window)  # must not raise
+
     def test_activating_a_window_the_server_no_longer_lists_is_a_refusal(self):
         gone = macos.Window(9999, self.backend, pid=2829)
         with self.assertRaises(WindowNotFound):
@@ -2243,7 +2289,9 @@ class TestGeometryAndHitTesting(BackendTestCase):
         front = FakeElement(role="AXButton", pid=690)
         backend._ax.position_by_element = {
             backend._ax.system_wide: (0, underneath),
-            backend._ax.applications[690].windows[0]: (0, front),
+            # The *application* element, which is the only scope the AX call
+            # accepts -- see the application-scoped test below.
+            backend._ax.applications[690]: (0, front),
         }
         element = backend.element_at(640, 400)
         self.assertEqual((element.role, element.pid), (Role.PUSH_BUTTON, 690))
@@ -2251,6 +2299,58 @@ class TestGeometryAndHitTesting(BackendTestCase):
     def test_a_hit_test_where_ax_declines_answers_none(self):
         backend = self.make()
         self.assertIsNone(backend.element_at(0, 0))
+
+    def test_the_owning_application_is_what_gets_hit_tested(self):
+        # Measured on macOS 26.7: AXUIElementCopyElementAtPosition does not
+        # accept a *window*. A window-scoped call answers -25201 and no
+        # element for a point in the middle of that very window, while the
+        # same point asked of the application element answers correctly. The
+        # window decides whose tree to ask; the application element is asked.
+        backend = self.make(
+            onscreen=self.onscreen_windows(),
+            applications=BackendTestCase.applications(),
+        )
+        underneath = FakeElement(role="AXTextArea", pid=2829)
+        front = FakeElement(role="AXButton", pid=690)
+        backend._ax.position_by_element = {
+            backend._ax.system_wide: (0, underneath),
+            backend._ax.applications[690]: (0, front),
+        }
+        element = backend.element_at(640, 400)
+        self.assertEqual((element.role, element.pid), (Role.PUSH_BUTTON, 690))
+
+    def test_an_application_that_declines_the_point_is_the_final_answer(self):
+        # The stacking-order mistake this method exists to avoid, reached the
+        # other way: the application owning the front-most window at the
+        # point says nothing of its own is there, so the only thing the
+        # system-wide call can add is an element from *behind* that window.
+        backend = self.make(
+            onscreen=self.onscreen_windows(),
+            applications=BackendTestCase.applications(),
+        )
+        underneath = FakeElement(role="AXTextArea", pid=2829)
+        backend._ax.position_by_element = {
+            backend._ax.system_wide: (0, underneath),
+            backend._ax.applications[690]: (0, None),
+        }
+        self.assertIsNone(backend.element_at(640, 400))
+
+    def test_a_window_with_no_pid_still_falls_through(self):
+        # The case the fall-through is actually for: a menu, the Dock, or any
+        # surface the window server reports with no owning process, so there
+        # is no application element to ask. Nothing has been asked yet there,
+        # so the system-wide answer is the only one.
+        backend = self.make(
+            onscreen=self.onscreen_windows(),
+            applications=BackendTestCase.applications(),
+        )
+        somewhere = FakeElement(role="AXMenuItem", pid=2829)
+        backend._ax.position_by_element = {backend._ax.system_wide: (0, somewhere)}
+        with mock.patch.object(
+            backend, "window_at", return_value=macos.Window(48, backend, pid=None)
+        ):
+            element = backend.element_at(640, 400)
+        self.assertEqual(element.role, Role.MENU_ITEM)
 
     def test_geometry_and_hit_testing_need_the_grant(self):
         backend = self.make(trusted=False)
@@ -2504,6 +2604,43 @@ class TestSelectFallsBackToClicking(BackendTestCase):
         backend = self._backend(actions=["AXPress"])
         backend.find_element(role=Role.PAGE_TAB, name="Choices").select()
         self.assertIn("AXPress", self.target.performed)
+
+    def test_a_tab_with_only_a_writable_value_is_set_not_toggled(self):
+        # The tab's raw role is AXRadioButton, so before it was read in
+        # context as PAGE_TAB it reached the check-box toggle and worked by
+        # accident. Reading it as a tab left it with no value route at all:
+        # an action-only click raised instead of activating it.
+        backend = self._backend()
+        self.target.attrs["kAXValueAttribute"] = 0
+        tab = backend.find_element(role=Role.PAGE_TAB, name="Choices")
+        tab.click(via="action")
+        self.assertIn(("kAXValueAttribute", True), self.target.written)
+
+    def test_selecting_an_already_selected_tab_does_not_clear_it(self):
+        # `not checked` wrote False to a tab already reading 1, so choosing
+        # the open tab closed it. Selection has to be idempotent.
+        backend = self._backend()
+        self.target.attrs["kAXValueAttribute"] = 1
+        backend.find_element(role=Role.PAGE_TAB, name="Choices").select()
+        self.assertEqual(self.target.written, [("kAXValueAttribute", True)])
+
+    def test_selecting_an_already_checked_radio_does_not_clear_it(self):
+        # The same write, reached the other way: a radio button with no
+        # AXSelected and no AXPress, where select() delegates to click().
+        backend = self._backend(role="AXRadioButton", parent="AXGroup")
+        self.target.attrs["kAXValueAttribute"] = 1
+        radio = backend.find_element(role=Role.RADIO_BUTTON, name="Choices")
+        radio.select()
+        self.assertEqual(self.target.written, [("kAXValueAttribute", True)])
+
+    def test_a_check_box_is_still_toggled_rather_than_set(self):
+        # The other half of the split: a check box is not a selection, and
+        # clicking a ticked one has to clear it.
+        backend = self._backend(role="AXCheckBox", parent="AXGroup")
+        self.target.attrs["kAXValueAttribute"] = 1
+        box = backend.find_element(role=Role.CHECK_BOX, name="Choices")
+        box.click(via="action")
+        self.assertEqual(self.target.written, [("kAXValueAttribute", False)])
 
     def test_a_push_button_still_refuses_to_be_selected(self):
         # The guard that keeps this a rule about selection rather than a

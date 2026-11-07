@@ -129,9 +129,16 @@ jobs:
           ruff --version
           mypy --version
 
+      # `if: !cancelled()` on the two below, not on the first: job-level
+      # `continue-on-error` does not change step *scheduling*, so a failing
+      # `ruff check` would skip both of these -- and then a new Ruff
+      # release's first complaint hides whatever the newest formatter and
+      # mypy had to say, which is the whole output this job exists for.
       - run: ruff check src tests examples scripts
-      - run: ruff format --check src tests examples scripts docs
-      - run: mypy
+      - if: ${{ !cancelled() }}
+        run: ruff format --check src tests examples scripts docs
+      - if: ${{ !cancelled() }}
+        run: mypy
 
   imagemagick:
     name: image search against real ImageMagick
@@ -713,7 +720,10 @@ jobs:
   # silently publishing nothing.
   publish:
     name: publish to PyPI
-    if: startsWith(github.ref, 'refs/tags/v')
+    # A push of a `v*` tag, and only that. The ref test alone also admitted a
+    # manual `workflow_dispatch` run targeting a tag, which is a publish
+    # nobody asked for from a button meant for the diagnostic jobs.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     # `windows` is in here because a release that cannot be imported on
     # Windows is exactly what shipped once already: 0.10.1 carries a
     # module-scope `import grp`, so `import pyguitest` raises there, and no

@@ -649,6 +649,213 @@ class TestWindowFamilyPrefersAFullServiceMember(unittest.TestCase):
         self.assertIs(window.backend, self.atspi)
 
 
+class TestWindowOperationsFollowTheIssuingMember(unittest.TestCase):
+    """An operation on a Window goes to the member that minted its handle.
+
+    `_WINDOW_FAMILY` coordinates only WINDOW_LIST/STATE/GEOMETRY/ACTIVATE, so
+    it forces a *listing* member to be one that can also place windows -- and
+    then left WINDOW_MINIMIZE and WINDOW_RESIZE routed by plain priority. Two
+    shipped backends fall in that gap:
+
+    - `CosmicBackend` has WINDOW_MINIMIZE and no WINDOW_PLACEMENT, so with
+      XWayland present the list comes from `x11` and `minimize_window` went
+      to `cosmic`, which cannot read an Xlib handle.
+    - `NiriBackend` has WINDOW_RESIZE and no WINDOW_PLACEMENT, same shape for
+      `resize_window`.
+
+    Both reported `WindowNotFound` for a window that was open and listed.
+    """
+
+    class Native(GUIBackend):
+        """A compositor backend: integer protocol ids, no placement."""
+
+        name = "cosmic"
+        capabilities = CapabilitySet(
+            {
+                Capability.WINDOW_LIST,
+                Capability.WINDOW_STATE,
+                Capability.WINDOW_GEOMETRY,
+                Capability.WINDOW_ACTIVATE,
+                Capability.WINDOW_MINIMIZE,
+                Capability.WINDOW_RESIZE,
+            }
+        )
+
+        def __init__(self):
+            self.minimized = []
+            self.resized = []
+
+        def windows(self):
+            return [Window(handle=0xFF000001, backend=self, title="Editor")]
+
+        def _own(self, window):
+            handle = getattr(window, "handle", window)
+            if not isinstance(handle, int):
+                raise AssertionError("got a handle from another backend")
+            return handle
+
+        def minimize_window(self, window, minimized=True):
+            self.minimized.append(self._own(window))
+
+        def resize_window(self, window, width, height):
+            self.resized.append(self._own(window))
+
+    class Xorg(GUIBackend):
+        """X11Backend's shape: opaque Xlib handles, and the full family."""
+
+        name = "x11"
+        capabilities = CapabilitySet(
+            {
+                Capability.WINDOW_LIST,
+                Capability.WINDOW_STATE,
+                Capability.WINDOW_GEOMETRY,
+                Capability.WINDOW_ACTIVATE,
+                Capability.WINDOW_PLACEMENT,
+                Capability.WINDOW_MINIMIZE,
+                Capability.WINDOW_RESIZE,
+            }
+        )
+
+        def __init__(self):
+            self.handle = object()
+            self.minimized = []
+            self.resized = []
+
+        def windows(self):
+            return [Window(handle=self.handle, backend=self, title="Editor")]
+
+        def _own(self, window):
+            if getattr(window, "handle", window) is not self.handle:
+                raise AssertionError("got a handle from another backend")
+            return window
+
+        def minimize_window(self, window, minimized=True):
+            self.minimized.append(self._own(window))
+
+        def resize_window(self, window, width, height):
+            self.resized.append(self._own(window))
+
+    def setUp(self):
+        self.native = self.Native()
+        self.x11 = self.Xorg()
+        # The compositor backend first, as registration order has it.
+        self.composite = CompositeBackend([self.native, self.x11])
+
+    def test_the_list_still_comes_from_the_full_service_member(self):
+        # The premise: the family check already re-homes the listing, which
+        # is what leaves the window a foreign handle for the two operations
+        # below.
+        (window,) = self.composite.windows()
+        self.assertIs(window.backend, self.x11)
+
+    def test_minimize_goes_to_the_issuer_not_the_priority_provider(self):
+        (window,) = self.composite.windows()
+        self.composite.minimize_window(window)
+        self.assertEqual(self.x11.minimized, [window])
+        self.assertEqual(self.native.minimized, [])
+
+    def test_resize_goes_to_the_issuer_not_the_priority_provider(self):
+        (window,) = self.composite.windows()
+        self.composite.resize_window(window, 800, 600)
+        self.assertEqual(self.x11.resized, [window])
+        self.assertEqual(self.native.resized, [])
+
+    def test_a_window_the_provider_issued_still_goes_to_the_provider(self):
+        # Nothing to re-route: the issuer and the provider are one member.
+        composite = CompositeBackend([self.native])
+        (window,) = composite.windows()
+        composite.minimize_window(window)
+        self.assertEqual(self.native.minimized, [0xFF000001])
+
+    def test_a_raw_handle_keeps_the_historic_provider_routing(self):
+        # Only the caller knows whose namespace a bare handle is from, so it
+        # is handed to the capability's provider exactly as before.
+        self.composite.minimize_window(0xFF000001)
+        self.assertEqual(self.native.minimized, [0xFF000001])
+        self.assertEqual(self.x11.minimized, [])
+
+
+class TestAnEventsOnlyWindowIsRehomedForAnOperation(unittest.TestCase):
+    """A Window from a member that serves nothing but events still works.
+
+    `KWinEventsBackend`'s capabilities are WINDOW_EVENTS alone, so it can
+    never serve the operation itself -- and on KDE it speaks the same KWin
+    UUIDs `kdotool` does, so handing its Window straight to the provider has
+    always worked. Preferring the issuer must not break that: where the
+    issuer cannot serve the call, the window is re-homed to the provider
+    rather than refused.
+    """
+
+    class Events(GUIBackend):
+        """Serves window events and nothing else, as KWinEventsBackend does."""
+
+        name = "kwinevents"
+        capabilities = CapabilitySet({Capability.WINDOW_EVENTS})
+
+        def wait_for_window(self, title, timeout=None):
+            return Window(
+                handle="{uuid-1}", backend=self, title="Editor", app_id="org.editor"
+            )
+
+    class Lister(GUIBackend):
+        """Lists and places windows, speaking the same UUIDs the events do."""
+
+        name = "kdotool"
+        capabilities = CapabilitySet(
+            {
+                Capability.WINDOW_LIST,
+                Capability.WINDOW_GEOMETRY,
+                Capability.WINDOW_PLACEMENT,
+                Capability.WINDOW_ACTIVATE,
+                Capability.WINDOW_STATE,
+            }
+        )
+
+        def __init__(self):
+            self.asked = []
+
+        def windows(self):
+            return [
+                Window(
+                    handle="{uuid-1}",
+                    backend=self,
+                    title="Editor",
+                    app_id="org.editor",
+                )
+            ]
+
+        def geometry(self, window):
+            self.asked.append(window)
+            return (0, 0, 800, 600)
+
+    def setUp(self):
+        self.events = self.Events()
+        self.lister = self.Lister()
+        self.composite = CompositeBackend([self.events, self.lister])
+
+    def test_geometry_reaches_the_lister_with_a_window_of_its_own(self):
+        window = self.composite.wait_for_window("Editor")
+        self.assertIs(window.backend, self.events)
+        self.assertEqual(self.composite.geometry(window), (0, 0, 800, 600))
+        (asked,) = self.lister.asked
+        self.assertIs(asked.backend, self.lister)
+
+    def test_an_ambiguous_title_hands_over_the_original_window(self):
+        # Two candidates are indistinguishable from here, so re-homing
+        # declines and the original handle is passed through -- the same
+        # answer `_normalize_window` gives, and on KDE it still works.
+        self.lister.windows = lambda: [
+            Window(handle="{a}", backend=self.lister, title="Editor", app_id="x"),
+            Window(handle="{b}", backend=self.lister, title="Editor", app_id="x"),
+        ]
+        window = Window(
+            handle="{uuid-1}", backend=self.events, title="Editor", app_id="x"
+        )
+        self.composite.geometry(window)
+        (asked,) = self.lister.asked
+        self.assertIs(asked, window)
+
+
 class TestNormalizeWindowAcrossEventsAndPlacement(unittest.TestCase):
     """A Window an event feed issued, re-homed before a placement call.
 

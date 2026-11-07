@@ -221,7 +221,11 @@ gui.get_clipboard(primary=True)  # the X11 PRIMARY selection
 Clipboard access is `Capability.CLIPBOARD`: the Win32 clipboard on Windows,
 `pbcopy`/`pbpaste` on macOS, and on Linux a CLI tool or, on GNOME, the
 `portal` backend. `primary=True` exists only where there is a PRIMARY
-selection (X11 and most Wayland desktops) and raises on Windows and macOS.
+selection (X11 and most Wayland desktops) and raises on Windows and macOS --
+and on the `portal` backend too, whose Clipboard interface addresses the
+clipboard proper and has no PRIMARY in it at all. That is the one case where
+a Linux session refuses it, so a GNOME script reading PRIMARY needs a CLI
+tool (`xclip`, `wl-paste`) rather than the portal.
 On Wayland, reading a selection your own process owns is the case most likely
 to surprise you — see
 [troubleshooting.md](troubleshooting.md#the-clipboard-reads-back-empty).
@@ -413,7 +417,7 @@ note for each — they are collected under the table.
 | `MoveMouseAbs` | `move_mouse` | |
 | `ClickMouseButton` | `click` | Buttons 4/5 are now `scroll()` |
 | `SetEventSendDelay` / `SetKeySendDelay` | `Session(event_delay=, key_delay=)` | **Seconds, not milliseconds** |
-| `FindWindowLike` | `find_windows` | Toplevels only, no recursive descent. A string is a case-sensitive literal substring; the original was a case-insensitive regex, so use `re.compile(..., re.I)` |
+| `FindWindowLike` | `find_windows` | Toplevels only, no recursive descent. A string is a case-sensitive literal substring; the original was a case-insensitive regex, so use `re.compile(..., re.I)` — and translate the pattern to *Python* regex syntax first: `re.compile` is not a Perl parser, and the two differ on named groups, `\z`, and inline modifiers |
 | `WaitWindowLike` / `WaitWindowClose` | `wait_for_window` / `wait_window_close` | Event-driven where the compositor allows. `timeout=None` waits forever; the originals gave up after 10 s |
 | `WaitWindowViewable` | `wait_for_window`, then `is_window_viewable` | The original waited; `is_window_viewable` reads once |
 | `GetWindowName` | `Window.title` | |

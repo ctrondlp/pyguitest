@@ -633,6 +633,12 @@ class Element(Protocol):
         a mixed-state check box -- has not said "set" or "not set" either.
         Read `checkable` first to know whether the value means anything,
         and treat `None` as "it did not say" rather than as False.
+
+        It is not a signal every backend can give. AT-SPI's state set
+        answers a plain bool for every element, so `AtspiBackend`'s
+        implementation never reports None for a live node and "publishes no
+        checked state" reads there as False -- see `Session.expect_checked`,
+        which is where that matters to a caller.
         """
         ...
 

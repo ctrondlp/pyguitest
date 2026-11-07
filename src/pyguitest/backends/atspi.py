@@ -1260,9 +1260,21 @@ class Element:
                 # only dogtail's lookup failure is being translated here.
                 raise
             except Exception as error:
+                # `combovalue` does the lookup and the action as two steps
+                # -- `childNamed`, then `doActionNamed("click")` -- so a
+                # failure from it is not necessarily a missing option. Where
+                # the option is demonstrably *there*, reporting "no option
+                # named X" would be a wrong diagnosis pointing at the test's
+                # own string instead of at the widget that refused, so the
+                # original error is kept. Asked of `options()` rather than of
+                # dogtail's exception class, which is not a contract and
+                # cannot be consulted on a machine where dogtail is absent.
+                offered = [o.name for o in self.options()]
+                if option in offered:
+                    raise
                 raise ElementNotFound(
                     f"no option named {option!r} is in {self!r}; it offers "
-                    f"{', '.join(repr(o.name) for o in self.options()) or 'none'}"
+                    f"{', '.join(repr(name) for name in offered) or 'none'}"
                 ) from error
 
     def options(self):

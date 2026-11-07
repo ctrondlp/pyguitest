@@ -317,6 +317,27 @@ class TestRestart(unittest.TestCase):
             app.stop()
             app.stdout.close()
 
+    def test_restart_survives_buffered_input_the_dead_process_cannot_take(self):
+        # `close()` on a buffered stdin flushes first, so a caller that wrote
+        # without flushing has that write happen inside restart() -- after
+        # stop() killed the only reader. The BrokenPipeError used to escape
+        # from the middle of the cleanup: stdout/stderr left unclosed, and no
+        # replacement launched.
+        gui = session()
+        app = gui.start_app(SLEEP, stdin=subprocess.PIPE, text=True)
+        try:
+            old = app.process
+            # Small enough to sit in the buffer rather than reach the pipe.
+            app.stdin.write("x")
+            app.restart()
+            self.assertIsNot(app.process, old)
+            self.assertTrue(app.is_running())
+            # The rest of the cleanup still ran, which is the half the raise
+            # used to skip.
+            self.assertTrue(old.stdin.closed)
+        finally:
+            app.stop()
+
     def test_restarting_an_already_exited_program_starts_it_again(self):
         gui = session()
         app = gui.start_app(EXITS)

@@ -433,6 +433,21 @@ class TestMacquartz(unittest.TestCase):
             backend.release_button(1)
         self.assertEqual(self.click_counts(), [1, 1, 2, 2])
 
+    def test_each_held_button_releases_with_its_own_click_count(self):
+        # `_last_press` can only remember one button, so a press of another
+        # button in between overwrote the count the first button's release
+        # had to carry: the second left press said 2 and its release said 1.
+        # An application acting on release -- which is where a double-click
+        # is usually handled -- then read the wrong gesture.
+        backend = self.build()
+        backend.press_button(1)
+        backend.release_button(1)
+        backend.press_button(1)  # the second of a double-click
+        backend.press_button(3)  # a different button, held at the same time
+        backend.release_button(1)
+        backend.release_button(3)
+        self.assertEqual(self.click_counts(), [1, 1, 2, 1, 2, 1])
+
     def test_a_late_or_different_press_starts_counting_again(self):
         backend = self.build()
         backend.press_button(1)

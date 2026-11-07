@@ -660,6 +660,89 @@ class TestWaitForWindow(unittest.TestCase):
         self.assertIsNotNone(window)
         self.assertEqual(gui.backend.slices, 2)
 
+    def test_an_attempt_that_ends_early_sleeps_out_the_rest_of_its_slice(self):
+        # Nothing promises an event stream lasts as long as it was given:
+        # SwayCLI._stream ends when its subprocess closes the socket, so a
+        # fruitless attempt can answer in microseconds. Without the sleep,
+        # `timeout=None` turned this loop into a spin -- a wait that looked
+        # like a hang while burning a core and re-subscribing thousands of
+        # times a second.
+        class EventBackend(FakeBackend):
+            def __init__(self):
+                super().__init__()
+                self.slices = 0
+
+            @property
+            def capabilities(self):
+                return CapabilitySet(
+                    set(FakeBackend.capabilities.fget(self))
+                    | {Capability.WINDOW_EVENTS}
+                )
+
+            def wait_for_window(self, title, timeout):
+                self.slices += 1
+                return None if self.slices < 3 else self.windows()[0]
+
+        gui = pyguitest.Session(EventBackend(), pyguitest.detect())
+        slept: list[float] = []
+        with (
+            mock.patch.object(pyguitest, "_EVENT_SLICE", 0.05),
+            mock.patch.object(pyguitest.time, "sleep", slept.append),
+        ):
+            window = gui.wait_for_window("Editor", timeout=None)
+        self.assertIsNotNone(window)
+        self.assertEqual(gui.backend.slices, 3)
+        # One nap per fruitless slice, each very nearly the whole slice --
+        # the attempt itself returned immediately.
+        self.assertEqual(len(slept), 2)
+        self.assertTrue(all(nap > 0.04 for nap in slept), slept)
+
+    def test_a_slice_that_runs_its_full_length_is_not_slept_on_top(self):
+        # The sleep is the slice's *unused* remainder, so a stream that
+        # really does wait out its slice must not have another one added.
+        class EventBackend(FakeBackend):
+            def __init__(self):
+                super().__init__()
+                self.slices = 0
+
+            @property
+            def capabilities(self):
+                return CapabilitySet(
+                    set(FakeBackend.capabilities.fget(self))
+                    | {Capability.WINDOW_EVENTS}
+                )
+
+            def wait_for_window(self, title, timeout):
+                self.slices += 1
+                time.sleep(timeout)
+                return None if self.slices < 2 else self.windows()[0]
+
+        gui = pyguitest.Session(EventBackend(), pyguitest.detect())
+        slept: list[float] = []
+        real_sleep = time.sleep
+
+        def record(seconds):
+            slept.append(seconds)
+            real_sleep(seconds)
+
+        with (
+            mock.patch.object(pyguitest, "_EVENT_SLICE", 0.02),
+            mock.patch.object(pyguitest.time, "sleep", record),
+        ):
+            self.assertIsNotNone(gui.wait_for_window("Editor", timeout=None))
+        # Both real naps are the backend's own, one per slice; the loop added
+        # no slice of its own, because the attempt consumed the whole thing.
+        #
+        # Bounded rather than compared exactly: Windows' clock granularity is
+        # about 15 ms, so a 20 ms sleep can measure as marginally short and
+        # leave the loop a remainder of a few microseconds to sleep out. That
+        # dust is not the regression this test is about -- a *whole extra
+        # slice* is -- and an `assertEqual` on the list failed on Win10 under
+        # suite load while passing on its own.
+        naps = [nap for nap in slept if nap >= 0.01]
+        self.assertEqual(naps, [0.02, 0.02], slept)
+        self.assertLess(sum(nap for nap in slept if nap < 0.01), 0.01, slept)
+
     def test_a_compiled_title_reaches_the_backend_with_its_flags(self):
         # Its `.pattern` string would drop re.IGNORECASE: found live on
         # Windows, where find_windows matched and this path timed out.
@@ -2168,6 +2251,37 @@ class TestMoveMouseNaturally(unittest.TestCase):
         gui.move_mouse_naturally(400, 0, via=[(200, 120)], start=(0, 0))
         self.assertIn((200, 120), backend.path)
         self.assertEqual(backend.path[-1], (400, 0))
+
+    def test_the_documented_event_bound_holds_including_the_overshoot(self):
+        # The docstring's bound used to be 2n+1 over a budget of n+1 and
+        # left out the overshoot-and-correct entirely, so it was wrong by
+        # three for every move that has one: two legs on a budget of three
+        # emit seven events, not five. Pinned here so the number in the
+        # docstring and the number the code emits cannot drift apart.
+        for waypoints in range(0, 4):
+            legs = waypoints + 1
+            via = [(i + 1, 0) for i in range(waypoints)]
+            with self.subTest(legs=legs):
+                shaped, backend = self.gui()
+                shaped.move_mouse_naturally(
+                    1101, 0, start=(0, 0), via=via, duration=0.025, rate=120
+                )
+                with_overshoot = len(backend.path)
+                plain, flat = self.gui()
+                plain.move_mouse_naturally(
+                    1101,
+                    0,
+                    start=(0, 0),
+                    via=via,
+                    duration=0.025,
+                    rate=120,
+                    overshoot=0.0,
+                )
+                self.assertLessEqual(len(flat.path), 2 * legs + 1)
+                self.assertLessEqual(with_overshoot, 2 * legs + 4)
+                # And the overshoot's own contribution is those three
+                # points, which is the part the old bound dropped.
+                self.assertEqual(with_overshoot - len(flat.path), 3)
 
     def test_the_path_bows_off_the_straight_line(self):
         gui, backend = self.gui()

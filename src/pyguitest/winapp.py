@@ -258,6 +258,21 @@ class PackagedAppProcess:
         wraps to a *short* wait that expires early. Both are silent. The
         deadline is tracked in `time.monotonic()` across the slices, so the
         timeout a caller asked for is the timeout they get.
+
+        The handle is queried **once before the deadline is consulted**, with
+        the wait clamped to 0 ms, so `timeout=0` asks the kernel rather than
+        refusing on arithmetic alone. A process can already have exited
+        without this object having latched a `returncode` for it -- nothing
+        latches one until a wait or a poll observes the exit -- and the
+        deadline check ran first, so `wait(timeout=0)` raised
+        `TimeoutExpired` for a process that was gone. `Application.stop(
+        timeout=0)` is the reachable path: `TerminateProcess` succeeds, the
+        first `wait(0)` raises, `kill()` finds the process already gone, the
+        second `wait(0)` raises too, and `stop()` reports None -- "still
+        running" -- for a process that had exited, after which `restart()`
+        refuses to relaunch. `subprocess.Popen.wait(timeout=0)` on Windows
+        makes the same 0 ms call first, and `BundleProcess.wait()` polls
+        first, for the same reason.
         """
         if self.returncode is not None:
             return self.returncode
@@ -266,6 +281,7 @@ class PackagedAppProcess:
             assert self.returncode is not None
             return self.returncode
         deadline = time.monotonic() + timeout
+        self._wait_slice(0, timeout)
         while self.returncode is None:
             remaining = deadline - time.monotonic()
             if remaining <= 0:

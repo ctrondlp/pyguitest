@@ -597,6 +597,18 @@ class TestNiri(unittest.TestCase):
         gui = NiriBackend(FakeNiri(windows=[], events=NIRI_EVENTS))
         self.assertEqual(gui.wait_for_window("README").title, "README.md - Editor")
 
+    def test_wait_for_window_takes_the_last_of_several_same_titled_windows(self):
+        # Session.find_window is find_windows(...)[-1] over this same
+        # windows() list, so the first match is the wrong one: the two calls
+        # would name different windows for one title.
+        duplicates = [
+            {**NIRI_WINDOWS[0], "id": 7, "title": "Untitled Document"},
+            {**NIRI_WINDOWS[1], "id": 8, "title": "Calculator"},
+            {**NIRI_WINDOWS[0], "id": 9, "title": "Untitled Document"},
+        ]
+        gui = NiriBackend(FakeNiri(windows=duplicates))
+        self.assertEqual(gui.wait_for_window("Untitled Document").handle, 9)
+
 
 class TestHyprland(unittest.TestCase):
     def setUp(self):
@@ -830,6 +842,41 @@ class TestWindowEvents(unittest.TestCase):
     def test_wait_matches_a_window_that_appears_later(self):
         found = self.gui.wait_for_window("Untitled")
         self.assertEqual(found.title, "Untitled - Editor")
+
+    def test_wait_takes_the_last_of_several_same_titled_windows(self):
+        # Session.find_window is find_windows(...)[-1] over this same
+        # windows() list, so the first match is the wrong one: the two calls
+        # would name different windows for one title.
+        tree = {
+            "id": 1,
+            "name": "root",
+            "nodes": [
+                {
+                    "id": 2,
+                    "name": "HDMI-1",
+                    "nodes": [
+                        {
+                            "id": 7,
+                            "name": "Untitled Document",
+                            "app_id": "editor",
+                            "pid": 123,
+                            "focused": False,
+                            "rect": {"x": 0, "y": 0, "width": 960, "height": 1080},
+                        },
+                        {
+                            "id": 9,
+                            "name": "Untitled Document",
+                            "app_id": "editor",
+                            "pid": 456,
+                            "focused": True,
+                            "rect": {"x": 960, "y": 0, "width": 960, "height": 1080},
+                        },
+                    ],
+                },
+            ],
+        }
+        gui = SwayBackend(FakeSway(tree=tree))
+        self.assertEqual(gui.wait_for_window("Untitled Document").handle, 9)
 
     def test_wait_matches_a_title_change(self):
         found = self.gui.wait_for_window(r"README\.md")

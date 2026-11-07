@@ -82,7 +82,16 @@ def off_the_line(points, start, end):
     Zero means a perfectly straight run. This is the whole arch measurement:
     `glide()` and `arc=0` should both be at roughly rounding error, and a shaped
     move should be nowhere near it.
+
+    Zero for an empty `points` as well, which is not a measurement but is the
+    right answer here: `max()` over nothing raises, and it raised *before*
+    any check had run, so a server that delivered no motion events at all
+    took this script down with a traceback instead of reporting FAIL and
+    exiting 1 -- and the emptiness check further down, which exists to say
+    exactly that, was unreachable for the same reason.
     """
+    if not points:
+        return 0.0
     ax, ay = start
     bx, by = end
     span = math.hypot(bx - ax, by - ay)

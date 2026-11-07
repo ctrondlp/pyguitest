@@ -27,7 +27,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import KW_ONLY, dataclass, field, replace
 from types import MappingProxyType
 
 from .capabilities import Capability
@@ -76,6 +76,22 @@ class ExternalTool:
     name: str
     capabilities: frozenset[Capability]
     note: str = ""
+
+    _: KW_ONLY
+    """Everything below is keyword-only, and the three above are not.
+
+    This class is exported, so its field order is part of its interface --
+    and every field below is a *property of a tool* that a caller sets by
+    name, which is how all of them are written here and in the tests. Adding
+    one in the middle therefore reads as harmless and is not: `compositors`,
+    `withheld_on` and `wayland_only` all arrived after `x_root_only` and
+    `mutter_incompatible` existed, so each one silently shifted a positional
+    slot, and a downstream caller passing flags positionally would have had
+    one flag's value land in another flag's field. Keyword-only makes that a
+    TypeError instead of a wrong answer, and lets the next field be added
+    wherever it reads best. The first three stay positional because they are
+    what every construction site actually writes that way."""
+
     keymap_safe: bool = True
     """False if the tool injects scancodes below the compositor, so typed text
     depends on the session's active keyboard layout."""
@@ -473,6 +489,7 @@ CLIPBOARD_TOOLS = (
 
 def discover(
     group: Sequence[ExternalTool],
+    *,
     allow_x11_only: bool = True,
     allow_x_root_only: bool = True,
     allow_mutter_incompatible: bool = True,
@@ -482,7 +499,12 @@ def discover(
     """Every usable tool in `group`, in preference order.
 
     Being on PATH is not enough; a tool is excluded when the session cannot
-    carry it:
+    carry it. Every filter is keyword-only, for `ExternalTool`'s own reason:
+    `allow_wayland_only` was added ahead of `compositor`, so a five-argument
+    positional call -- `discover(group, True, True, True, "mutter")` -- bound
+    the compositor name to a flag, left `compositor` unset, and quietly
+    skipped the filtering it had asked for, which hands back a tool that
+    exits successfully and does nothing.
 
     allow_x11_only=False
         drops tools that only see the X server. They run, but address an almost

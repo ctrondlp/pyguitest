@@ -1954,6 +1954,31 @@ class TestWaylandElementGeometry(AtspiTestCase):
         # Chained, so dogtail's own traceback is still reachable.
         self.assertIsInstance(caught.exception.__cause__, _DogtailSearchError)
 
+    def test_an_option_that_is_there_keeps_the_failure_that_was_raised(self):
+        # dogtail's combovalue setter finds the item and *then* clicks it, so
+        # a failure from it is not necessarily a missing option. Reporting
+        # "no option named Beta" for an option plainly listed beside it sent
+        # the reader to check their own string instead of the widget that
+        # refused the click.
+        class _Refusing(FakeNode):
+            @property
+            def combovalue(self):
+                return None
+
+            @combovalue.setter
+            def combovalue(self, value):
+                raise _DogtailSearchError("the item refused its click action")
+
+        combo = _Refusing(
+            role="combo box",
+            children=[
+                FakeNode(name="Alpha", role="menu item"),
+                FakeNode(name="Beta", role="menu item"),
+            ],
+        )
+        with self.assertRaises(_DogtailSearchError):
+            self.atspi.Element(combo).choose("Beta")
+
     def test_the_refusal_names_what_the_control_does_offer(self):
         # The method's documented advice is "when the text does not match,
         # options() is what to print" -- so the error prints it rather than
@@ -2647,13 +2672,27 @@ class TestElementCheckable(AtspiTestCase):
                 self.assertFalse(self.atspi.Element(FakeNode(role=role)).checkable)
 
     def test_the_fallback_grants_no_checked_value_of_its_own(self):
-        # Widening `checkable` must not touch `checked` -- a control whose
-        # toolkit publishes no state still reports None, which is what
-        # expect_checked's own caveat is about.
+        # Widening `checkable` must not touch `checked`: the role fallback
+        # says "this is the kind of control that has a tick", and the state
+        # read stays the only thing that says whether it is ticked.
         node = FakeNode(role="check box")
-        element = self.atspi.Element(node)
-        self.assertTrue(element.checkable)
-        self.assertIsNone(element.checked)
+        self.assertTrue(self.atspi.Element(node).checkable)
+        self.assertIsNone(self.atspi.Element(node).checked)
+
+    def test_a_dogtail_node_answers_a_bool_so_none_is_not_a_signal_here(self):
+        # The pin that matters for expect_checked's caveat: dogtail's own
+        # `Node.checked` reads the state set and so answers a real bool for
+        # *every* node, False when CHECKED is simply absent. None is only
+        # what the absent-attribute default above produces, which no live
+        # dogtail node reaches -- so on AT-SPI, unlike UIA and AX, `checked
+        # is None` cannot tell "publishes no checked state" from "unchecked".
+        # A test asserting checked=False can therefore pass against a
+        # toolkit that never reported the state at all.
+        node = FakeNode(role="check box")
+        node.checked = False
+        self.assertIs(self.atspi.Element(node).checked, False)
+        node.checked = True
+        self.assertIs(self.atspi.Element(node).checked, True)
 
 
 class TestElementExpandCollapse(AtspiTestCase):

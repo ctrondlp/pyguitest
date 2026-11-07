@@ -236,9 +236,14 @@ SSH session instead; see [input.md](input.md#on-macos-key-legends-and-one-collis
 Work down this list; it is ordered by how often each one is the answer.
 
 1. **Is there an input path at all?** `pyguitest doctor` says what is missing
-   and how to install it. On Linux, injection needs `/dev/uinput`
-   permission, a `ydotool` daemon, libei, or portal consent, and no desktop
-   has all of these by default.
+   and how to install it. On a *Wayland* session, injection needs
+   `/dev/uinput` permission, a `ydotool` daemon, libei, or portal consent,
+   and no desktop has all of these by default. Two Linux routes need none of
+   them and are worth checking for first: an X11 or XWayland session injects
+   through XTest with nothing to set up, and `wtype` types on a compositor
+   implementing `zwp_virtual_keyboard_manager_v1` (sway, Hyprland, COSMIC)
+   with no permission either. So a session that already has a working route
+   should not be sent looking for a daemon to install.
 2. **Is it only the pointer, on Wayland?** If keystrokes land and clicks do
    not, one likely cause needs no misconfiguration at all: `uinput` pointer
    events are accepted by the kernel and dropped before the compositor sees
@@ -353,12 +358,30 @@ process — Calculator, measured — so `pid=app.pid` matches nothing for those
 and `title` is the filter that works. That is not every packaged app: a
 full-trust (desktop bridge) one creates its own windows, where `pid=app.pid`
 works and is the filter to prefer, since a title can match some other window
-carrying the same text. Try `pid=` first, fall back to `title`, or settle it
-with `pyguitest inspect`. The lifecycle calls act on the real application
-either way. The second caveat is that a single-instance packaged app which is
-*already running* gets reactivated rather than launched, and `start_app`
-raises instead of handing back a process it did not start — stop that
-instance yourself first, or drive it by window title.
+carrying the same text. Try `pid=` first and fall back to `title`. To settle
+which case an app is in, compare the pid against the window list rather than
+reaching for `pyguitest inspect`, which reports roles, names and states and
+no pids at all:
+
+```python
+app = gui.start_app(["calc.exe"])
+print(app.pid, [w.pid for w in gui.windows()])
+```
+
+A pid of the app's own among them means `pid=app.pid` will match; an app whose
+windows all belong to `ApplicationFrameHost.exe` is the hosted case. The
+lifecycle calls act on the real application either way.
+
+The second caveat is that a single-instance packaged app which is *already
+running* gets reactivated rather than launched, and `start_app` raises instead
+of handing back a process it did not start — stop that instance yourself
+first, or drive it by window title. One exception: the check compares the
+process's creation time against the moment of the activation, so if Windows
+will not report a creation time for it the ownership question cannot be
+answered and the activated process is returned as though it had been
+launched. Context-manager cleanup then stops an application this session did
+not start, so on a Windows build where that read fails, drive single-instance
+apps by title rather than by `start_app`.
 
 ## `wait_for_process` matches only the program name on Windows
 

@@ -58,7 +58,11 @@ def read_clipboard(app, timeout):
     state = {"done": False, "attempts": 0, "last": ""}
 
     def finish(line):
-        """Print the answer and quit, once; later attempts are ignored."""
+        """Print the result line and quit, once; later attempts are ignored.
+
+        The result, not the answer: the timeout path calls this with an
+        `ERROR ...` line, so this prints whichever of the two came first.
+        """
         if state["done"]:
             return
         state["done"] = True

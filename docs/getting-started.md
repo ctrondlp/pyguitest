@@ -135,7 +135,7 @@ what an outside program may do.
 | **Wayland** (GNOME, KDE, sway, Hyprland, niri) | Elements and input, plus whatever window control that specific compositor exposes. Input injection needs consent or device permission | Window operations vary *by compositor*, not by "Wayland". GNOME and sway are as different from each other as either is from X11 |
 | **XWayland** | An X11 client inside a Wayland session. X11 operations work for X11 clients only, and native Wayland clients are invisible to them | The one that catches people out: `xdotool` sees half your desktop and reports success |
 | **Windows** | Window control, input, capture and elements, through Win32 and UI Automation, with no daemon or permission to set up | Injected input into an elevated window is dropped silently unless the test runs elevated too |
-| **macOS** | Elements, windows, capture and input, each behind a privacy grant in System Settings | Every capability is gated on a grant made by hand, and a missing one is withdrawn rather than raised: `supports()` is the only honest answer |
+| **macOS** | Elements, input and capture behind a privacy grant in System Settings; window control, the screen list and the pointer position need no grant | A gated capability is withdrawn rather than raised when its grant is missing, so `supports()` is the only honest answer — and an ungated one answers on a Mac with nothing granted at all |
 
 `pyguitest` reports which one you are on:
 
@@ -168,8 +168,8 @@ which is the sleep this section is telling you not to reach for, and
 `sync(timeout)`, which is a confirmation that the compositor consumed the
 input just sent — `libei` is the only backend that can answer it.
 
-`timeout` is in seconds everywhere, and `None` — which every `wait_*` call
-defaults to — means wait indefinitely; there is no session-wide default. Whether
+`timeout` is in seconds everywhere, and `None` — which every `gui.wait_*`
+call defaults to — means wait indefinitely; there is no session-wide default. Whether
 a window wait is answered by an event or by a poll depends on the platform:
 notified through `SetWinEventHook` on Windows and by the compositor on GNOME
 Shell, KWin, sway and niri, polling every `interval` on macOS and on every X11

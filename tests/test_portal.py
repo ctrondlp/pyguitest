@@ -570,6 +570,22 @@ class TestClipboard(unittest.TestCase):
         self.assertEqual(asked[0], "text/plain;charset=utf-8")
         self.assertIn("UTF8_STRING", asked)
 
+    def test_an_unavailable_clipboard_interface_keeps_its_typed_error(self):
+        # BackendUnavailable is a PyGUITestError, so the per-MIME handler
+        # used to absorb it: a dead Clipboard interface was recorded as
+        # "this type was refused", the remaining types were tried against
+        # the same dead interface, and the caller got a generic "could not
+        # be read as text" naming four of them. The one failure here that
+        # is not about the clipboard's content has to stay tellable apart.
+        gui = self._gui()
+        with mock.patch.object(
+            gui, "_call_for_fd", side_effect=BackendUnavailable("no Clipboard here")
+        ) as call:
+            with self.assertRaises(BackendUnavailable):
+                gui.get_clipboard()
+        # Asked once, not once per MIME type: there was nothing to retry.
+        self.assertEqual(call.call_count, 1)
+
     def test_a_non_blocking_descriptor_is_still_read_in_full(self):
         # The bug a live run caught: the portal's pipe can arrive
         # non-blocking, and BufferedReader.read() answers None rather than

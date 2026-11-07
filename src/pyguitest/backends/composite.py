@@ -117,6 +117,27 @@ _DISPATCH = {
     "is_window_cursor": Capability.WINDOW_CURSOR_QUERY,
 }
 
+# The `_DISPATCH` operations whose first argument is a Window rather than a
+# coordinate, a key or a path -- so the one member that can read its handle
+# gets a say in where the call goes. See
+# CompositeBackend._route_window, which is the whole explanation; the names
+# are listed rather than derived from the capability because WINDOW_STATE
+# serves both `is_window_viewable(window)` and the argument-less
+# `active_window()`.
+_WINDOW_ARGUMENT = frozenset(
+    {
+        "is_window_viewable",
+        "geometry",
+        "move_window",
+        "resize_window",
+        "activate_window",
+        "minimize_window",
+        "set_window_title",
+        "lower_window",
+        "is_window_cursor",
+    }
+)
+
 
 class CompositeBackend(GUIBackend):
     """Several backends presented as one."""
@@ -288,14 +309,85 @@ class CompositeBackend(GUIBackend):
         if window is None:
             return None
         family = self._window_family_provider(Capability.WINDOW_LIST)
-        if family is None or window.backend is family:
+        if family is None:
+            return window
+        return self._rehomed(window, family)
+
+    def _rehomed(self, window, member):
+        """`window` re-resolved through `member`'s own `windows()`, or itself.
+
+        The re-resolution `_normalize_window` describes, factored out because
+        `_route_window` needs the same thing against a member that is not the
+        window family's provider. Neither title nor app_id is a real
+        cross-backend identity, so only a *unique* match is trusted; anything
+        else hands back what it was given, for the reasons
+        `_normalize_window` gives at length.
+
+        A member that cannot list windows cannot re-home one either, and
+        saying so by raising would be wrong -- this is a best-effort repair
+        of a handle that may well work as it is.
+        """
+        if window.backend is member:
+            return window
+        if Capability.WINDOW_LIST not in member.capabilities or not self._implements(
+            member, "windows"
+        ):
+            return window
+        try:
+            candidates = member.windows()
+        except PyGUITestError:
             return window
         matches = [
             candidate
-            for candidate in family.windows()
+            for candidate in candidates
             if candidate.title == window.title and candidate.app_id == window.app_id
         ]
         return matches[0] if len(matches) == 1 else window
+
+    def _route_window(self, attr, capability, provider, args):
+        """`(member, args)` for an operation whose first argument is a Window.
+
+        A `Window` carries the member that issued it, and a handle only means
+        anything to that member: `windows()` on COSMIC hands back
+        `zcosmic_toplevel_handle_v1` ids, X11Backend hands back Xlib window
+        objects, kdotool hands back KWin UUID strings. Routing purely by
+        capability therefore had a live hole that `_window_family_provider`
+        does not close, because it only coordinates the four capabilities in
+        `_WINDOW_FAMILY`:
+
+        - **COSMIC.** `CosmicBackend` serves WINDOW_LIST and WINDOW_MINIMIZE
+          but not WINDOW_PLACEMENT, so with XWayland present the family check
+          correctly hands the window *list* to `x11` -- and then
+          `minimize_window` went to `cosmic`, whose `_toplevel()` cannot read
+          an Xlib handle and raised `WindowNotFound` for a window that was
+          right there.
+        - **niri.** `NiriBackend` serves WINDOW_RESIZE without
+          WINDOW_PLACEMENT, so `resize_window` had the same shape.
+
+        So the member that issued the window is preferred wherever it can
+        serve the operation at all -- which is the answer in both cases
+        above, since the issuer is the only member that can read its own
+        handle. Where it cannot, the capability's provider is still used, but
+        the window is re-homed to it first (`_rehomed`), which is what keeps
+        a window issued by an events-only member -- `kwinevents`, whose
+        capabilities are WINDOW_EVENTS alone -- reaching `kdotool` the way it
+        does today.
+
+        A *raw handle* keeps the historic behaviour untouched: only the
+        caller knows whose namespace it is from, so it is handed to the
+        provider as given. See `_issuer`.
+        """
+        window = args[0]
+        issuer = self._issuer(window)
+        if issuer is None or issuer is provider or provider is None:
+            return provider, args
+        if (
+            issuer in self.members
+            and capability in issuer.capabilities
+            and self._implements(issuer, attr)
+        ):
+            return issuer, args
+        return provider, (self._rehomed(window, provider), *args[1:])
 
     def member(self, name):
         """The member backend called `name`.
@@ -597,6 +689,8 @@ def _delegate(attr, capability):
     def method(self, *args, **kwargs):
         """Call the member that provides this capability."""
         provider = self._window_family_provider(capability)
+        if attr in _WINDOW_ARGUMENT and args:
+            provider, args = self._route_window(attr, capability, provider, args)
         if provider is None:
             raise CapabilityUnsupported(
                 capability, self.name, "no member backend provides it"

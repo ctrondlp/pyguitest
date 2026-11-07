@@ -418,12 +418,19 @@ class GnomeShellBackend(GUIBackend):
         indefinitely. Mirrors SwayBackend/NiriBackend's own override of
         this method for the same reason: Session delegates here rather
         than polling once WINDOW_EVENTS is supported.
+
+        The *last* match among the existing windows, not the first, because
+        `Session.find_window` is `find_windows(...)[-1]` over this same
+        `windows()` list -- so taking the last is what makes a title several
+        windows share mean the same window through both calls. Taking the
+        first made this method and `find_window` disagree, which is the
+        collision bug `find_window` was itself fixed for.
         """
         self.require(Capability.WINDOW_EVENTS)
         pattern = re.compile(title)
-        for existing in self.windows():
-            if pattern.search(existing.title):
-                return existing
+        existing = [w for w in self.windows() if pattern.search(w.title)]
+        if existing:
+            return existing[-1]
         for event in self.window_events(timeout=timeout):
             if event.change in ("new", "title") and pattern.search(event.window.title):
                 return event.window

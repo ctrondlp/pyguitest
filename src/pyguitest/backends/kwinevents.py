@@ -335,12 +335,26 @@ class KWinEventsBackend(GUIBackend):
         GnomeShellBackend/SwayBackend/NiriBackend's own overrides of this
         method, which is why it shells out here rather than calling
         `self.windows()`.
+
+        The *last* match among those, not the first, because
+        `Session.find_window` is `find_windows(...)[-1]` over the window
+        list, and on a KDE session that list comes from `KdotoolBackend`,
+        which reads it with the same `kdotool search .` in the same order.
+        Taking the last is therefore what makes a title several windows
+        share mean the same window through both calls. See
+        `win32.Win32Backend.wait_for_window`, where the convention is
+        written out in full.
         """
         self.require(Capability.WINDOW_EVENTS)
         pattern = re.compile(title)
-        for handle, existing_title in self._existing_windows():
-            if pattern.search(existing_title):
-                return Window(handle=handle, backend=self, title=existing_title)
+        existing = [
+            (handle, found)
+            for handle, found in self._existing_windows()
+            if pattern.search(found)
+        ]
+        if existing:
+            handle, found = existing[-1]
+            return Window(handle=handle, backend=self, title=found)
         for event in self.window_events(timeout=timeout):
             if event.change in ("new", "title") and pattern.search(event.window.title):
                 return event.window

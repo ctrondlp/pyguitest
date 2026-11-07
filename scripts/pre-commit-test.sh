@@ -238,6 +238,12 @@ needs_imagemagick() { _says_imagemagick compare || _says_imagemagick magick; }
 
 needs_portal() {
     "$PYTHON" -c 'import dbus, dbusmock, gi' 2>/dev/null || return 1
+    # dbusmock starts a *private* bus per test case whether or not this shell
+    # already has one, so dbus-daemon has to be there regardless of
+    # DBUS_SESSION_BUS_ADDRESS. Without it every test in the file skips
+    # itself, and `must_not_skip` turns that skip into a failed check --
+    # reporting a missing tool as a broken test suite.
+    command -v dbus-daemon >/dev/null || return 1
     # The tests put a mock service on a session bus. CI's runner has one; a
     # shell on a developer's machine may not, and dbus-run-session is how the
     # sibling repo's live check gets its own. With neither, this is a missing

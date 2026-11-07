@@ -1105,11 +1105,15 @@ class Element:
     def click(self, via=None):
         """Act on the element directly -- no coordinates, no injection.
 
-        Three routes, in the order AX offers them: `AXPress`, which is a
-        button's own "I have been pressed"; a write to `kAXValueAttribute` on a
-        check box, radio button or switch, which is the toggle at-spi performs
-        for the same roles; and `kAXSelectedAttribute` on a row, tab or menu
-        item, which is `select()` spelled as a click.
+        Four routes, in the order AX offers them: `AXPress`, which is a
+        button's own "I have been pressed"; a *toggling* write to
+        `kAXValueAttribute` on a check box, switch or ticked menu item, which
+        is what at-spi performs for the same roles; `kAXSelectedAttribute` on
+        a row, tab or menu item, which is `select()` spelled as a click; and a
+        *setting* write to `kAXValueAttribute` for the roles in
+        `_AX_SELECT_BY_PRESS`, whose activation is their selection -- see the
+        comment on that branch for the two widgets that need it and why
+        toggling was wrong for both.
 
         A refusal from the route that applies is *not* fallen through -- the
         choice `uia.Element.click` makes, for the reason it gives there: an
@@ -1140,13 +1144,28 @@ class Element:
             require_click_route(self, "action")
         if self._press():
             return
-        if self.checkable:
+        if self.checkable and self.role not in _AX_SELECT_BY_PRESS:
             self._write(
                 self._ax.kAXValueAttribute, not bool(self.checked), f"toggle {self!r}"
             )
             return
         if self.selectable:
             self.select()
+            return
+        if self.role in _AX_SELECT_BY_PRESS and self.checked is not None:
+            # A value write that *selects*, not one that toggles. Two things
+            # land here, and `not checked` was wrong for both:
+            #
+            # - a radio button with no `AXSelected` and no `AXPress`, where
+            #   `select()` delegates to this method: clicking an already
+            #   selected one wrote False and so *cleared* it, and nothing in
+            #   a radio group is cleared by being chosen again.
+            # - a tab publishing a writable `AXValue` and nothing else. Its
+            #   raw role is `AXRadioButton`, so it used to be reported as
+            #   RADIO_BUTTON and reach the toggle above; reading it in
+            #   context as PAGE_TAB left it with no value route at all, so
+            #   an action-only click raised instead of activating it.
+            self._write(self._ax.kAXValueAttribute, True, f"select {self!r}")
             return
         if route == "action":
             raise ElementNotActionable(
@@ -2377,9 +2396,19 @@ class MacosBackend(GUIBackend):
         window and not to whichever window was most recently raised. Raising
         without activating is therefore a window that looks activated to every
         query this package can make and is not activated for the one purpose a
-        test usually wants it for. A handle the window server no longer lists
-        is a `WindowNotFound`; a machine where *neither* route answered is a
-        typed `CapabilityUnsupported`.
+        test usually wants it for.
+
+        So **the application activation is what decides success**, not either
+        route answering. An `AXRaise` that worked while the activation did not
+        used to return normally, which handed the caller exactly the state the
+        paragraph above calls a trap: visibly in front, named by
+        `active_window`, and not where the keys go. `_activate` has two routes
+        of its own -- AppKit, then a `kAXFrontmostAttribute` write -- so
+        False from it means both refused, and that is worth a typed refusal
+        rather than a silent half-activation. The raise is reported in it,
+        since it has already happened and the window really has moved.
+
+        A handle the window server no longer lists is a `WindowNotFound`.
         """
         self.require(Capability.WINDOW_ACTIVATE)
         entry = self._entry_for(window.handle)
@@ -2404,12 +2433,23 @@ class MacosBackend(GUIBackend):
         # rather than between them, so that nothing can refill a cache from the
         # ordering that held partway through an activation.
         self._forget_windows()
-        if not raised and not activated:
+        if not activated:
+            why = (
+                "the window server lists no owning process for it"
+                if pid is None
+                else "AppKit and the AX frontmost write both refused"
+            )
+            also = (
+                " The window itself was raised, so it has moved to the front "
+                "without its application becoming frontmost."
+                if raised
+                else ""
+            )
             raise CapabilityUnsupported(
                 Capability.WINDOW_ACTIVATE,
                 self.name,
-                f"could not bring {window!r} forward: AppKit refused the activation "
-                "and no AX window matched its handle",
+                f"could not make {window!r}'s application frontmost: {why}, so "
+                "keyboard input would still go to whichever application is." + also,
             )
 
     def root_element(self):
@@ -2590,6 +2630,23 @@ class MacosBackend(GUIBackend):
         the window behind it. Menus, the Dock and surfaces that are not layer-0
         windows fall through to the system-wide hit test.
 
+        **The scope is the owning application's element, not the window's.**
+        `AXUIElementCopyElementAtPosition` does not accept a window: measured
+        on macOS 26.7 against a real Calendar window, a window-scoped call
+        answers `kAXErrorIllegalArgument` (-25201) and no element for a point
+        in the middle of that very window, while the same point asked of
+        `AXUIElementCreateApplication(pid)` answers correctly. So the window
+        is used to decide *whose* tree to ask, and the application element is
+        what gets asked.
+
+        An application that *declines* the point does not fall through. Only
+        a window this backend could not reach an application element for does
+        -- no pid on the window -- which is where the menus and the Dock above
+        arrive. Once the owning application has been asked and has said
+        "nothing of mine is there", the system-wide call can only answer with
+        something *underneath* that window, which is the very mistake this
+        method exists to avoid; the honest answer at that point is None.
+
         None where AX declines, which it does for a point inside no window's
         own tree.
         """
@@ -2598,43 +2655,23 @@ class MacosBackend(GUIBackend):
             window = self.window_at(x, y)
         except Exception:  # noqa: BLE001 - WINDOW_AT_POINT can be missing
             window = None
-        if window is not None:
-            ax_window = self._ax_window_for(window)
-            if ax_window is not None:
-                err, element = self._ax.AXUIElementCopyElementAtPosition(
-                    ax_window, int(x), int(y), None
-                )
-                if not err and element is not None:
-                    return Element(element, self)
+        if window is not None and window.pid is not None:
+            application = self._ax.AXUIElementCreateApplication(window.pid)
+            err, element = self._ax.AXUIElementCopyElementAtPosition(
+                application, int(x), int(y), None
+            )
+            if not err and element is not None:
+                return Element(element, self)
+            # Asked the application that owns the front-most window at this
+            # point, and it declined. See the docstring: anything the
+            # system-wide call could add here is behind that window.
+            return None
         err, element = self._ax.AXUIElementCopyElementAtPosition(
             self._ax.AXUIElementCreateSystemWide(), int(x), int(y), None
         )
         if err or element is None:
             return None
         return Element(element, self)
-
-    def _ax_window_for(self, window):
-        """The AX window element backing `window`, or None.
-
-        The join is by frame: AX and CoreGraphics report identical window
-        rectangles (see `_titles`), so the AX window whose frame equals the
-        window server's entry is the one to hit-test within.
-        """
-        if window.pid is None:
-            return None
-        err, windows = self._copy(
-            self._ax.AXUIElementCreateApplication(window.pid),
-            self._ax.kAXWindowsAttribute,
-        )
-        if err or not windows:
-            return None
-        target = self._bounds(self._entry_for(window.handle))
-        if target is None:
-            return None
-        for ax_window in windows:
-            if self._frame(ax_window) == target:
-                return ax_window
-        return None
 
     def _applications(self):
         """The applications the tree is searched through, as `Element`s.

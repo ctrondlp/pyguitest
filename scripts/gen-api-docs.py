@@ -458,7 +458,16 @@ def note_for(name: str, obj) -> str:
 
 
 def signature(cls, name: str) -> str:
-    """`name(params)` for a method, or bare `name` for a property."""
+    """`name(params)` for a method, or bare `name` for a property.
+
+    The bare `*` separator is rendered too. `str(Parameter)` cannot carry it
+    -- it is a property of the signature rather than of any one parameter --
+    and dropping it printed every keyword-only argument as though it were
+    positional: the documented `find_window(title, app_id, pid)` is three
+    positional arguments where the real call takes one, and a reader copying
+    it got a TypeError. Rebuilt here rather than taken from `str(sig)`,
+    which would bring `self` back with it.
+    """
     static = inspect.getattr_static(cls, name, None)
     if isinstance(static, property):
         return name
@@ -466,7 +475,19 @@ def signature(cls, name: str) -> str:
         sig = inspect.signature(getattr(cls, name))
     except (TypeError, ValueError):
         return f"{name}(...)"
-    params = [str(p) for n, p in sig.parameters.items() if n != "self"]
+    params: list[str] = []
+    starred = False
+    for n, p in sig.parameters.items():
+        if n == "self":
+            continue
+        if p.kind is p.VAR_POSITIONAL:
+            # `*args` is itself the separator; a bare `*` beside it is a
+            # syntax error.
+            starred = True
+        elif p.kind is p.KEYWORD_ONLY and not starred:
+            params.append("*")
+            starred = True
+        params.append(str(p))
     rendered = re.sub(r"'([^']*)'", r"\1", ", ".join(params))
     return f"{name}({rendered})"
 

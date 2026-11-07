@@ -107,6 +107,25 @@ class TestKWinEventsBackend(unittest.TestCase):
         # returns immediately without needing any queued/incoming event.
         self.assertEqual(gui._events, [])
 
+    def test_wait_for_window_takes_the_last_of_several_same_titled_windows(self):
+        # Session.find_window is find_windows(...)[-1] over the window list,
+        # and on KDE that list comes from KdotoolBackend reading the same
+        # `kdotool search .` in the same order. Taking the first match here
+        # made the two calls name different windows for one title -- the
+        # collision find_window itself was fixed for.
+        runner = Recorder(
+            outputs={
+                ("kdotool", "search", "."): "{uuid-1}\n{uuid-2}\n{uuid-3}\n",
+                ("kdotool", "getwindowname", "{uuid-1}"): "Untitled Document",
+                ("kdotool", "getwindowname", "{uuid-2}"): "Calculator",
+                ("kdotool", "getwindowname", "{uuid-3}"): "Untitled Document",
+            }
+        )
+        gui = self._backend(runner=runner)
+        window = gui.wait_for_window("Untitled Document", timeout=1)
+        self.assertIsNotNone(window)
+        self.assertEqual(window.handle, "{uuid-3}")
+
     def test_wait_for_window_falls_through_to_a_new_event(self):
         runner = Recorder(outputs={("kdotool", "search", "."): ""})
         gui = self._backend(runner=runner)

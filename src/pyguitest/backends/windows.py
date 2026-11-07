@@ -282,12 +282,19 @@ class SwayBackend(_WindowBackend):
         the total wait; None (the default) blocks indefinitely. Previously
         accepted and silently ignored -- an editor that never launched hung
         the caller forever with no way out.
+
+        The *last* match among the existing windows, not the first, because
+        `Session.find_window` is `find_windows(...)[-1]` over this same
+        `windows()` list -- so taking the last is what makes a title several
+        windows share mean the same window through both calls. See
+        `win32.Win32Backend.wait_for_window`, where the convention is
+        written out in full.
         """
         self.require(Capability.WINDOW_EVENTS)
         pattern = re.compile(title)
-        for existing in self.windows():
-            if pattern.search(existing.title):
-                return existing
+        existing = [w for w in self.windows() if pattern.search(w.title)]
+        if existing:
+            return existing[-1]
         for event in self.window_events(timeout=timeout):
             if event.change in ("new", "title") and pattern.search(event.window.title):
                 return event.window
@@ -898,12 +905,18 @@ class NiriBackend(_WindowBackend):
                 )
 
     def wait_for_window(self, title, timeout=None):
-        """Block until a window whose title matches `title` appears."""
+        """Block until a window whose title matches `title` appears.
+
+        Last existing match rather than the first, for the reason
+        `SwayBackend.wait_for_window` above gives: it is what keeps this
+        method and `Session.find_window` naming the same window when
+        several share a title.
+        """
         self.require(Capability.WINDOW_EVENTS)
         pattern = re.compile(title)
-        for existing in self.windows():
-            if pattern.search(existing.title):
-                return existing
+        existing = [w for w in self.windows() if pattern.search(w.title)]
+        if existing:
+            return existing[-1]
         for event in self.window_events(timeout=timeout):
             if event.change in ("new", "title") and pattern.search(event.window.title):
                 return event.window

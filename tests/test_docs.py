@@ -249,6 +249,40 @@ class TestLinksAndAnchorsResolve(unittest.TestCase):
                         f"{page.name} links to {path}, which does not exist",
                     )
 
+    def test_a_fragment_on_a_cross_page_link_resolves_too(self):
+        """The half the test above drops on the floor: `other.md#section`.
+
+        It splits the fragment off to find the file and then discards it, and
+        `test_every_in_page_anchor_resolves` only looks at links whose whole
+        target is an anchor -- so a heading renamed on page B broke every
+        link into it from page A while both tests stayed green. Same failure
+        as a broken in-page anchor, and just as invisible: the page renders,
+        the click scrolls nowhere.
+        """
+        seen = 0
+        for page in self.pages():
+            for target in _INLINE_LINK.findall(page.read_text(encoding="utf-8")):
+                if target.startswith(("http://", "https://", "mailto:")):
+                    continue
+                path, _, fragment = target.partition("#")
+                if not path or not fragment:
+                    continue
+                destination = page.parent / path
+                if destination.suffix != ".md" or not destination.is_file():
+                    continue
+                text = destination.read_text(encoding="utf-8")
+                headings = {heading_slug(h) for h in _HEADING.findall(text)}
+                headings |= set(_EXPLICIT_ANCHOR.findall(text))
+                seen += 1
+                with self.subTest(page=page.name, target=target):
+                    self.assertIn(
+                        heading_slug(fragment),
+                        headings,
+                        f"{page.name} links to {target} with no such heading on {path}",
+                    )
+        # Guard against the filtering above silently matching nothing.
+        self.assertGreater(seen, 5)
+
     def test_each_pages_own_contents_resolves(self):
         for page in self.pages():
             text = page.read_text(encoding="utf-8")

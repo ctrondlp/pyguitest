@@ -1680,8 +1680,14 @@ class UiaBackend(GUIBackend):
         walks whichever view the condition selects, so every search here is
         combined with this one -- and a None falls back to the raw view, which is
         coarser but never wrong, since the predicate filters the result.
+
+        Through `_null_to_none`, for the reason that helper exists: a NULL COM
+        interface pointer is an ordinary Python object wrapping address zero,
+        so `_and`'s `is not None` would keep it, `_fold` would hand it to
+        `CreateAndCondition`, and a search that should have quietly fallen
+        back to the raw view would raise instead.
         """
-        return _current(self._uia(), "ControlViewCondition")
+        return _null_to_none(_current(self._uia(), "ControlViewCondition"))
 
     def _true_condition(self):
         """UIA's match-everything condition, or None where it cannot be built."""

@@ -21,7 +21,9 @@ Geometry comes from the `zcosmic_toplevel_handle_v1.geometry` event, whose
 x/y are *output-relative*. The backend also binds one `wl_output` per
 advertised output -- the event is only emitted relative to outputs this
 client has bound -- and adds each output's own origin, so the coordinates it
-reports are absolute screen coordinates even on a multi-output desktop. The
+reports are absolute screen coordinates even on a multi-output desktop. That
+sum is taken when the rectangle is *read* rather than when the event arrived,
+because an output can be re-announced at a new origin afterwards. The
 management protocol's `close` request has no corresponding capability here
 (`Capability` has no WINDOW_CLOSE), so it is bound but not surfaced.
 """
@@ -42,7 +44,12 @@ from collections.abc import Iterator
 from typing import cast
 
 from ..capabilities import Capability, CapabilitySet
-from ..errors import CapabilityUnsupported, CaptureRegionUnsupported, WindowNotFound
+from ..errors import (
+    CapabilityUnsupported,
+    CaptureRegionUnsupported,
+    PyGUITestError,
+    WindowNotFound,
+)
 from ..ipc import DEFAULT_TIMEOUT
 from ..png import write_rgb
 from .base import Screen, Window, check_region, fit_region
@@ -65,6 +72,9 @@ Where it is missing this is -1, and the connection attempt fails with an
 
 _DISPLAY = 1
 """`wl_display`'s object id, fixed by the protocol."""
+
+_DISPLAY_ERROR = 0
+"""`wl_display.error` -- the compositor's last word on a protocol mistake."""
 
 _SYNC = 0
 _GET_REGISTRY = 1
@@ -290,22 +300,56 @@ class _Toplevel:
         "app_id",
         "identifier",
         "states",
-        "geometry",
+        "local_geometry",
+        "geometry_output",
+        "_outputs",
         "outputs",
         "cosmic",
         "closed",
     )
 
-    def __init__(self) -> None:
+    def __init__(self, outputs: dict[int, _Output] | None = None) -> None:
         self.title = ""
         self.app_id = ""
         self.identifier: str | None = None
         self.states: set[int] = set()
-        self.geometry: tuple[int, int, int, int] | None = None
+        self.local_geometry: tuple[int, int, int, int] | None = None
+        """The rectangle as the geometry event gave it: relative to its output."""
+        self.geometry_output: int | None = None
+        """The wl_output that rectangle is relative to."""
+        self._outputs = outputs if outputs is not None else {}
         self.outputs: set[int] = set()
         self.cosmic: int | None = None
         """The zcosmic_toplevel_handle_v1 id, once `get_cosmic_toplevel` is sent."""
         self.closed = False
+
+    @property
+    def geometry(self) -> tuple[int, int, int, int] | None:
+        """The rectangle in absolute screen coordinates, or None if unreported.
+
+        Computed on every read rather than when the geometry event arrived,
+        because the origin it is computed *from* can change afterwards:
+        `wl_output.geometry` is re-sent whenever an output's properties
+        change, so moving a monitor in the display settings, or a hotplug
+        that re-lays-out the desktop, moves every window on it without any
+        toplevel saying so. Adding the origin once, at event time, left the
+        cached answer silently offset by the difference -- and a stale
+        rectangle is the input to `window_at` hit-testing and to every
+        `click_element`, so it does not read as a geometry bug, it reads as
+        clicks landing in the wrong place.
+        """
+        if self.local_geometry is None:
+            return None
+        x, y, width, height = self.local_geometry
+        # geometry_output is set beside local_geometry and so is never None
+        # here, but the two are separate fields and mypy reads them as such.
+        output = (
+            None
+            if self.geometry_output is None
+            else self._outputs.get(self.geometry_output)
+        )
+        origin_x, origin_y = (output.x, output.y) if output else (0, 0)
+        return (x + origin_x, y + origin_y, width, height)
 
 
 class _Output:
@@ -587,6 +631,9 @@ class _CosmicConnection:
     # -- event dispatch ----------------------------------------------------
 
     def _handle(self, object_id: int, opcode: int, payload: bytes) -> None:
+        if object_id == _DISPLAY:
+            self._handle_display(opcode, payload)
+            return
         if object_id == self._registry:
             if opcode == _REGISTRY_GLOBAL:
                 reader = _Reader(payload)
@@ -607,10 +654,38 @@ class _CosmicConnection:
         if object_id in self._cosmic_handle:
             self._handle_cosmic(object_id, opcode, payload)
 
+    def _handle_display(self, opcode: int, payload: bytes) -> None:
+        """Raise what `wl_display.error` says, and ignore `delete_id`.
+
+        A protocol error is the compositor's last word before it stops
+        talking: it names the object, a per-interface error code and a
+        human-readable message, and then nothing else on the connection will
+        ever be answered. Messages for `wl_display` used to fall off the end
+        of `_handle` unread, so all of that was dropped and the failure
+        surfaced at the *next* read as the generic closed-connection
+        `OSError` -- "the compositor closed the connection", which says
+        nothing about what this client got wrong. Raising here puts the
+        compositor's own sentence in front of whoever has to fix it.
+
+        `delete_id` is ordinary bookkeeping (an id the server has released
+        for reuse) and this client allocates ids monotonically without
+        reusing them, so there is nothing to do with it.
+        """
+        if opcode != _DISPLAY_ERROR:
+            return
+        reader = _Reader(payload)
+        object_id = reader.obj()
+        code = reader.uint()
+        message = reader.string()
+        raise PyGUITestError(
+            f"cosmic-comp refused this client: {message} "
+            f"(object {object_id}, code {code})"
+        )
+
     def _handle_list(self, opcode: int, payload: bytes) -> None:
         if opcode == _EFL_TOPLEVEL:
             handle = _Reader(payload).uint()
-            self._toplevels[handle] = _Toplevel()
+            self._toplevels[handle] = _Toplevel(self._outputs)
             self._events.append(("new", handle))
         elif opcode == _EFL_FINISHED:
             self._finished = True
@@ -638,16 +713,16 @@ class _CosmicConnection:
         if opcode == _ZTH_STATE:
             toplevel.states = set(reader.u32_array())
         elif opcode == _ZTH_GEOMETRY:
-            output_id = reader.obj()
-            x, y, width, height = (
+            # Kept output-relative, exactly as the event gave it, with the
+            # output it belongs to beside it; `_Toplevel.geometry` adds the
+            # origin at read time so a later output move is picked up.
+            toplevel.geometry_output = reader.obj()
+            toplevel.local_geometry = (
                 reader.int_(),
                 reader.int_(),
                 reader.int_(),
                 reader.int_(),
             )
-            output = self._outputs.get(output_id)
-            origin_x, origin_y = (output.x, output.y) if output else (0, 0)
-            toplevel.geometry = (x + origin_x, y + origin_y, width, height)
         elif opcode == _ZTH_OUTPUT_ENTER:
             toplevel.outputs.add(reader.obj())
         elif opcode == _ZTH_OUTPUT_LEAVE:
@@ -895,12 +970,19 @@ class CosmicBackend(_WindowBackend):
         """Block until a window whose title matches `title` appears.
 
         Checks existing windows first, so one already open is not missed.
+
+        The *last* match among those, not the first, because
+        `Session.find_window` is `find_windows(...)[-1]` over this same
+        `windows()` list -- so taking the last is what makes a title several
+        windows share mean the same window through both calls. See
+        `win32.Win32Backend.wait_for_window`, where the convention is
+        written out in full.
         """
         self.require(Capability.WINDOW_EVENTS)
         pattern = re.compile(title)
-        for existing in self.windows():
-            if pattern.search(existing.title):
-                return existing
+        existing = [w for w in self.windows() if pattern.search(w.title)]
+        if existing:
+            return existing[-1]
         for event in self.window_events(timeout=timeout):
             if event.change in ("new", "title") and pattern.search(event.window.title):
                 return event.window

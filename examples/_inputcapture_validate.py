@@ -91,9 +91,13 @@ try:
     if position is None:
         print(f"\nTIMED OUT after {elapsed:.1f}s -- no activation arrived.")
         print(
-            "Only a *refused* barrier set raises above, and a partial "
-            "refusal is silent, so read this as 'no reachable trigger' rather "
-            "than 'the compositor is quiet'. Check Mouse Integration is off "
+            "What this does and does not say: no activation arrived. Only a "
+            "*totally* refused barrier set raises above, and a partial "
+            "refusal is silent, so this covers three different things -- a "
+            "barrier nobody crossed, a barrier the compositor silently "
+            "declined, and a compositor or portal that never delivered "
+            "Activated at all. It is not evidence for any one of them. Check "
+            "Mouse Integration is off "
             "(Host+I) on a VirtualBox guest -- with it on, the guest's pointer "
             "is the host's mouse and a screen edge can never fire. Otherwise "
             "press the pointer firmly against one edge and hold it there for a "

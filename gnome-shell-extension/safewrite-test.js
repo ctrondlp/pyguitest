@@ -36,6 +36,22 @@ function read(path) {
     return ok ? new TextDecoder().decode(bytes) : null;
 }
 
+// The reserved temp names sitting beside a destination. `reserveTempBeside`
+// hides them -- a leading dot and a random stem -- so a leak is invisible
+// unless the directory is listed.
+function listTempsBeside(path) {
+    const found = [];
+    const enumerator = Gio.File.new_for_path(GLib.path_get_dirname(path))
+        .enumerate_children('standard::name', Gio.FileQueryInfoFlags.NONE, null);
+    let info;
+    while ((info = enumerator.next_file(null)) !== null) {
+        if (info.get_name().endsWith('.tmp'))
+            found.push(info.get_name());
+    }
+    enumerator.close(null);
+    return found;
+}
+
 const dir = GLib.dir_make_tmp('pyguitest-safewrite-XXXXXX');
 
 // 1. The ordinary case, which is also the one pyguitest takes: the backend
@@ -145,6 +161,35 @@ const dir = GLib.dir_make_tmp('pyguitest-safewrite-XXXXXX');
     check('discardTemp on a missing file does not raise', true);
     check('a failed write leaves no destination behind',
         !GLib.file_test(dest, GLib.FileTest.EXISTS));
+}
+
+// 5b. A reservation that fails *after* creating the file takes the file
+//     with it. The callers reserve the name before their own try blocks, so
+//     nothing downstream knows there is anything to discard -- a 0600
+//     `.<stem>.<uuid>.tmp` would be left beside the destination for good.
+//     `close` is the step that can fail that late, so it is the one stubbed.
+{
+    const dest = GLib.build_filenamev([dir, 'closefail.png']);
+    const before = listTempsBeside(dest);
+    const realCreate = Gio.File.prototype.create;
+    let raised = false;
+    Gio.File.prototype.create = function (...args) {
+        const stream = realCreate.apply(this, args);
+        stream.close = () => {
+            throw new Error('close refused');
+        };
+        return stream;
+    };
+    try {
+        reserveTempBeside(dest);
+    } catch {
+        raised = true;
+    } finally {
+        Gio.File.prototype.create = realCreate;
+    }
+    check('a reservation whose close fails raises', raised);
+    check('and leaves no temp file behind',
+        listTempsBeside(dest).length === before.length);
 }
 
 // 6. A commit whose source is gone reports rather than silently succeeding.
