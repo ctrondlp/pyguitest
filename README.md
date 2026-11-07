@@ -215,8 +215,6 @@ and every one of them is fixed.
 ## Usage
 
 ```python
-import re
-
 import pyguitest
 
 gui = pyguitest.connect()
@@ -230,7 +228,7 @@ gui.dropdown("Country").choose("Norway")
 # compiled regex as a pattern -- and by app id, which survives a title that
 # changes with the document.
 window = gui.find_window("Editor")
-editor = gui.find_window(app_id="org.gnome.TextEditor")
+gui.find_window(app_id="org.gnome.TextEditor")
 
 # Coordinates and keys, when you need them.
 gui.move_mouse(500, 300)
@@ -249,6 +247,8 @@ take a compiled regex instead of an exact string, and `predicate` is an
 escape hatch for anything else (an ancestor/descendant check, say):
 
 ```python
+import re
+
 from pyguitest import Role
 
 gui.elements(role=Role.PUSH_BUTTON, enabled=True)
