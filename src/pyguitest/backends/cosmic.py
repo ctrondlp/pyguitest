@@ -40,6 +40,7 @@ import socket
 import struct
 import tempfile
 import time
+import warnings
 from collections.abc import Iterator
 from typing import cast
 
@@ -55,7 +56,7 @@ from ..png import write_rgb
 from .base import Screen, Window, check_region, fit_region
 from .windows import WindowEvent, _WindowBackend
 
-__all__ = ["CosmicBackend", "connect_cosmic"]
+__all__ = ["CosmicBackend", "HandshakeRefusalWarning", "connect_cosmic"]
 
 _AF_UNIX: int = getattr(socket, "AF_UNIX", -1)
 """The Unix socket address family, looked up rather than named.
@@ -1009,10 +1010,20 @@ class CosmicBackend(_WindowBackend):
     def _cosmic_of(self, window: Window) -> int:
         """The zcosmic_toplevel_handle_v1 id a management request targets.
 
-        Reads the cache rather than refreshing: the mapping is established when
-        the window was first listed, and never changes for a given handle.
+        The mapping is bound during a sync and never changes once set, so the
+        cache is read first. But a window handed out by the *event* path --
+        `wait_for_window`/`window_events`, which record a toplevel without
+        requesting its management handle -- has no mapping yet, and used to
+        make a `minimize`/`activate` that happened to be the first call on
+        such a window raise `WindowNotFound` for a window that was right
+        there. So an unbound handle triggers one sync (which binds it) before
+        the question is given up on; a genuinely gone window stays `None`
+        through the sync and is still a `WindowNotFound`.
         """
         cosmic = self._toplevel(window).cosmic
+        if cosmic is None:
+            self._refresh()
+            cosmic = self._toplevel(window).cosmic
         if cosmic is None:
             raise WindowNotFound(
                 f"window at handle {self._handle(window)!r} has no COSMIC handle"
@@ -1213,13 +1224,30 @@ class CosmicBackend(_WindowBackend):
         return path
 
 
+class HandshakeRefusalWarning(UserWarning):
+    """A compositor refused the probe-time handshake with its own error.
+
+    Warned rather than swallowed because the compositor's `wl_display.error`
+    sentence is the one diagnostic that says *why* -- and rather than raised
+    because a best-effort probe answering "no backend here" must not crash
+    `connect()` on a desktop that may simply not be COSMIC's.
+    """
+
+
 def connect_cosmic() -> CosmicBackend | None:
     """Connect to the Wayland socket and build a CosmicBackend, or None.
 
     None for anything a plain `connect()` should treat as "no window backend
     here": no Wayland runtime, no socket, a compositor without COSMIC's
-    globals, or a connection that fails. The handshake itself raises only
-    `OSError`, so the caller can also let a real failure propagate.
+    globals, or a connection that fails -- including a compositor that
+    answers the handshake itself with `wl_display.error`, which
+    `_handle_display` surfaces as a `PyGUITestError`. That typed error is
+    the right loud answer on an established connection and the wrong one
+    from a best-effort probe, so it is downgraded to a
+    `HandshakeRefusalWarning` carrying the compositor's own sentence. The
+    handshake never raises -- not even under warnings-as-errors; only a
+    failure to create or configure the socket at all still surfaces, as
+    the `OSError` it is.
     """
     runtime = os.environ.get("XDG_RUNTIME_DIR")
     if not runtime:
@@ -1240,5 +1268,18 @@ def connect_cosmic() -> CosmicBackend | None:
         connection = _CosmicConnection(sock)
     except (OSError, struct.error, ValueError):
         sock.close()
+        return None
+    except PyGUITestError as refusal:
+        sock.close()
+        # The compositor's one explanatory sentence -- the whole point of
+        # surfacing wl_display.error -- must not vanish into a silent None.
+        # Under warnings-as-errors (pytest's filterwarnings = error, the
+        # usual regime in the suites this library serves) the warn itself
+        # raises; swallowing exactly that keeps the probe's never-crash
+        # contract, which outranks the diagnostic -- the pre-fix behaviour
+        # was connect() dying on a refusal, and an error filter must not
+        # quietly bring it back.
+        with contextlib.suppress(HandshakeRefusalWarning):
+            warnings.warn(str(refusal), HandshakeRefusalWarning, stacklevel=2)
         return None
     return CosmicBackend(connection)

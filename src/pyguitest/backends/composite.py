@@ -689,8 +689,14 @@ def _delegate(attr, capability):
     def method(self, *args, **kwargs):
         """Call the member that provides this capability."""
         provider = self._window_family_provider(capability)
-        if attr in _WINDOW_ARGUMENT and args:
-            provider, args = self._route_window(attr, capability, provider, args)
+        if attr in _WINDOW_ARGUMENT:
+            # Every _WINDOW_ARGUMENT method spells its first parameter
+            # `window` (test_composite pins the names), so the keyword
+            # spelling folds into the positional slot and routes the same.
+            if not args and "window" in kwargs:
+                args = (kwargs.pop("window"),)
+            if args:
+                provider, args = self._route_window(attr, capability, provider, args)
         if provider is None:
             raise CapabilityUnsupported(
                 capability, self.name, "no member backend provides it"

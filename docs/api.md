@@ -4364,6 +4364,7 @@ TOOL_BAR  TREE  TREE_ITEM  TREE_TABLE  VIEWPORT  WINDOW  WINDOW_ROLES
 | `ElementNotActionable` | Element.click() has no way left to act on this element. |
 | `ElementNotFound` | No accessible element matched the search. |
 | `FocusMismatch` | The wrong element (or nothing) has keyboard focus. |
+| `HandshakeRefusalWarning` | A compositor refused the probe-time handshake with its own error. |
 | `ImageNotFound` | No match for the template image cleared the similarity threshold. |
 | `KeymapWarning` | Typed text may not match the requested characters. |
 | `PermissionRequired` | The operation exists but was not granted. |
@@ -4407,6 +4408,7 @@ TOOL_BAR  TREE  TREE_ITEM  TREE_TABLE  VIEWPORT  WINDOW  WINDOW_ROLES
 | `ElementNotActionable` | Element.click() has no way left to act on this element. |
 | `ElementNotFound` | No accessible element matched the search. |
 | `FocusMismatch` | The wrong element (or nothing) has keyboard focus. |
+| `HandshakeRefusalWarning` | A compositor refused the probe-time handshake with its own error. |
 | `ImageNotFound` | No match for the template image cleared the similarity threshold. |
 | `KeymapWarning` | Typed text may not match the requested characters. |
 | `PermissionRequired` | The operation exists but was not granted. |

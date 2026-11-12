@@ -19,13 +19,16 @@ if sys.platform == "win32":  # pragma: no cover - platform guard
 
 import socket
 import struct
+import warnings
 from unittest import mock
 
 from pyguitest.backends.cosmic import (
     CosmicBackend,
+    HandshakeRefusalWarning,
     _bgr_rows,
     _CosmicConnection,
     _crop_bgra,
+    _Toplevel,
     connect_cosmic,
 )
 from pyguitest.backends.windows import for_compositor
@@ -233,6 +236,38 @@ class TestCosmicBackend(unittest.TestCase):
         backend.minimize_window(window, minimized=False)
         self.assertIn(_msg(MANAGER, 6, ("o", COSMIC_HANDLE)), _recv_all(server))
 
+    def test_cosmic_of_binds_an_unbound_handle_via_one_sync(self):
+        # A window from the event path has a toplevel whose management handle
+        # is not bound yet (cosmic is None). _cosmic_of must trigger one sync
+        # -- which binds it -- rather than raise WindowNotFound for a window
+        # that is open and listed.
+        backend, _ = _make_backend(self)
+        handle = 0xFF000050
+        toplevel = _Toplevel(backend._conn._outputs)
+        backend._conn._toplevels[handle] = toplevel
+        window = backend._window(handle, toplevel)
+        self.assertIsNone(toplevel.cosmic)
+
+        def bind():
+            toplevel.cosmic = 4242
+
+        with mock.patch.object(backend, "_refresh", side_effect=bind) as refresh:
+            self.assertEqual(backend._cosmic_of(window), 4242)
+        refresh.assert_called_once_with()
+
+    def test_cosmic_of_still_raises_when_a_sync_cannot_bind(self):
+        # A genuinely gone window has no handle even after the sync, and must
+        # stay a WindowNotFound rather than loop or succeed.
+        backend, _ = _make_backend(self)
+        handle = 0xFF000051
+        toplevel = _Toplevel(backend._conn._outputs)
+        backend._conn._toplevels[handle] = toplevel
+        window = backend._window(handle, toplevel)
+        with mock.patch.object(backend, "_refresh") as refresh:
+            with self.assertRaises(WindowNotFound):
+                backend._cosmic_of(window)
+        refresh.assert_called_once_with()
+
 
 class TestOutputOriginChangesAfterTheGeometry(unittest.TestCase):
     """A window's rectangle follows its output when the output moves.
@@ -341,6 +376,54 @@ class TestConnectCosmic(unittest.TestCase):
             "pyguitest.backends.cosmic.connect_cosmic", side_effect=OSError
         ):
             self.assertIsNone(for_compositor(Compositor.COSMIC))
+
+    def test_a_handshake_protocol_error_is_no_backend_not_a_crash(self):
+        # `_handle_display` turns `wl_display.error` into a PyGUITestError --
+        # the right loud answer on an established connection, and one the
+        # except tuple here used to let escape: `connect()`'s best-effort
+        # probe crashed on it, and the socket was left open on the way out.
+        # The compositor's own sentence survives as a warning.
+        fake_sock = mock.Mock()
+        env = {"XDG_RUNTIME_DIR": "/run/user/1000", "WAYLAND_DISPLAY": "wayland-0"}
+        with (
+            mock.patch.dict("os.environ", env, clear=True),
+            mock.patch("pyguitest.backends.cosmic.os.path.exists", return_value=True),
+            mock.patch(
+                "pyguitest.backends.cosmic.socket.socket",
+                return_value=fake_sock,
+            ),
+            mock.patch(
+                "pyguitest.backends.cosmic._CosmicConnection",
+                side_effect=PyGUITestError("cosmic-comp refused this client"),
+            ),
+            self.assertWarns(HandshakeRefusalWarning) as caught,
+        ):
+            self.assertIsNone(connect_cosmic())
+        fake_sock.close.assert_called_once()
+        self.assertIn("refused this client", str(caught.warning))
+
+    def test_the_refusal_warning_never_crashes_the_probe(self):
+        # pytest suites routinely run with warnings-as-errors; the probe's
+        # never-crash contract must survive that filter too, or the error
+        # filter quietly brings back the pre-fix crash.
+        fake_sock = mock.Mock()
+        env = {"XDG_RUNTIME_DIR": "/run/user/1000", "WAYLAND_DISPLAY": "wayland-0"}
+        with (
+            mock.patch.dict("os.environ", env, clear=True),
+            mock.patch("pyguitest.backends.cosmic.os.path.exists", return_value=True),
+            mock.patch(
+                "pyguitest.backends.cosmic.socket.socket",
+                return_value=fake_sock,
+            ),
+            mock.patch(
+                "pyguitest.backends.cosmic._CosmicConnection",
+                side_effect=PyGUITestError("cosmic-comp refused this client"),
+            ),
+            warnings.catch_warnings(),
+        ):
+            warnings.simplefilter("error")
+            self.assertIsNone(connect_cosmic())
+        fake_sock.close.assert_called_once()
 
 
 class TestCaptureHelpers(unittest.TestCase):

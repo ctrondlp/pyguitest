@@ -7,6 +7,51 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.25.0] — 2026-11-10
+
+A minor rather than a patch, by the same rule 0.24.0 applied: behaviour a
+script can see. macOS `activate_window()`'s refusal changed exception type —
+a script catching `CapabilityUnsupported` around it must catch
+`PyGUITestError` now — and `HandshakeRefusalWarning` is a new exported name.
+
+### Fixed
+
+- **A compositor that refuses the handshake no longer crashes `connect()` on
+  COSMIC.** 0.24.0 taught the COSMIC connection to surface `wl_display.error`
+  as a typed `PyGUITestError` — the right loud answer on an established
+  connection, but `connect_cosmic()`'s best-effort probe only expected
+  `OSError`-family failures, so a compositor answering the *handshake* with a
+  protocol error escaped every caller built to fall back quietly, and the
+  socket was left open on the way out. The probe now treats that refusal as
+  "no backend here", closes the socket, keeps the compositor's own sentence
+  as a `HandshakeRefusalWarning` (new, exported, filterable like
+  `CaptureFallbackWarning`), and lets detection continue.
+- **`minimize_window(window=w)` routes to the issuing backend too.** The
+  0.24.0 window-routing fix only engaged when the window was passed
+  positionally; the keyword spelling fell back to plain capability routing
+  and could hand a backend a handle it cannot read — the exact bug the fix
+  closed. The keyword spelling is now folded into the positional slot before
+  routing, for every window-argument operation.
+- **macOS `activate_window()`'s refusal is retryable again.** The 0.24.0
+  change that made a failed application activation raise chose
+  `CapabilityUnsupported` — the one type `Session.focus_window` treats as
+  "asking is impossible" and gives up on after a single attempt. A window
+  server declining to make an application frontmost right now is the
+  transient, focus-stealing-prevention-shaped failure the retry loop exists
+  to out-wait, so that refusal is now a plain `PyGUITestError`, matching what
+  Windows raises for a foreground contest — while a window the server lists
+  no owning process for keeps the fast-fail, since no retry can conjure an
+  application to activate. `focus_window` also pauses briefly between failed
+  attempts now; back-to-back retries inside the same millisecond out-waited
+  nothing.
+- **A `minimize_window`/`activate_window` that is the first call on a COSMIC
+  window from the event path no longer raises spuriously.** A window handed
+  back by `wait_for_window`/`window_events` carries no COSMIC management
+  handle until a sync binds one, so a management call before any
+  `windows()`/`geometry()` raised `WindowNotFound` for a window that was
+  open and listed. The bind is now triggered on demand. (Found during this
+  release's live validation on Pop!_OS.)
+
 ## [0.24.0] — 2026-11-07
 
 A minor rather than a patch, because behaviour changes that a script can
@@ -6180,7 +6225,8 @@ First public release.
 - A `pyguitest` command-line entry point.
 - PEP 561 type information (`py.typed`); no hard runtime dependencies.
 
-[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.24.0...HEAD
+[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.25.0...HEAD
+[0.25.0]: https://github.com/ctrondlp/pyguitest/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/ctrondlp/pyguitest/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/ctrondlp/pyguitest/compare/v0.22.1...v0.23.0
 [0.22.1]: https://github.com/ctrondlp/pyguitest/compare/v0.22.0...v0.22.1

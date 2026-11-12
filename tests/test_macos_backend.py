@@ -1116,7 +1116,7 @@ class TestWindowWrites(BackendTestCase):
         with (
             mock.patch.dict(sys.modules, {"AppKit": appkit}),
             mock.patch.object(self.backend, "_set", return_value=1),
-            self.assertRaises(CapabilityUnsupported) as refusal,
+            self.assertRaises(PyGUITestError) as refusal,
         ):
             self.backend.activate_window(self.terminal)
         # The raise did happen and the message says so, since the window has
@@ -1124,6 +1124,22 @@ class TestWindowWrites(BackendTestCase):
         self.assertEqual(self.node.performed, ["AXRaise"])
         self.assertIn("was raised", str(refusal.exception))
         self.assertIn("keyboard input", str(refusal.exception))
+        # Never CapabilityUnsupported -- that is what keeps focus_window's
+        # retry loop retrying; see activate_window's docstring.
+        self.assertNotIsInstance(refusal.exception, CapabilityUnsupported)
+
+    def test_a_window_with_no_owning_process_fails_fast(self):
+        # The opposite case: pid is None is permanent for the handle --
+        # there is nothing to activate -- so it keeps the
+        # CapabilityUnsupported fast-fail that lets focus_window give up at
+        # once instead of retrying an answer that cannot change.
+        window = macos.Window(48, self.backend, pid=None)
+        with (
+            mock.patch.object(self.backend, "_entry_for", return_value={}),
+            self.assertRaises(CapabilityUnsupported) as refusal,
+        ):
+            self.backend.activate_window(window)
+        self.assertIn("no owning process", str(refusal.exception))
 
     def test_an_activation_without_a_raise_still_succeeds(self):
         # The other half: AX refusing the raise is not fatal, because the

@@ -43,6 +43,7 @@ from .app import Application
 from .backends import Element, GUIBackend, ImageMatch, NullBackend, Screen, Window
 from .backends.base import CLICK_ROUTES
 from .backends.composite import CaptureFallbackWarning
+from .backends.cosmic import HandshakeRefusalWarning
 from .backends.input import KeymapWarning
 from .capabilities import TIERS, Capability, CapabilitySet, Tier
 from .errors import (
@@ -87,7 +88,7 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T")
 
-__version__ = "0.24.0"
+__version__ = "0.25.0"
 
 __all__ = [
     "connect",
@@ -122,6 +123,7 @@ __all__ = [
     "ElementNotActionable",
     "ElementNotFound",
     "FocusMismatch",
+    "HandshakeRefusalWarning",
     "ImageNotFound",
     "KeymapWarning",
     "PermissionRequired",
@@ -2409,7 +2411,7 @@ class Session:
                 last = current
         except Exception:
             pass
-        for _ in range(attempts):
+        for attempt in range(attempts):
             try:
                 self.activate_window(window)
                 if self.wait_window_focus(window, timeout=0.1):
@@ -2428,8 +2430,14 @@ class Session:
                 # is for, and returning False here defeated it: one
                 # transient failure on the first pass abandoned the
                 # remaining four, on the one call whose whole purpose is to
-                # out-wait a window manager that grants focus late.
-                continue
+                # out-wait a window manager that grants focus late. The
+                # pause is what makes the out-wait real: a refusal raises
+                # immediately, and `attempts` back-to-back retries inside
+                # the same millisecond would out-wait nothing. Only between
+                # attempts -- after the last one there is nothing left to
+                # out-wait.
+                if attempt + 1 < attempts:
+                    self.wait(0.1)
         return False
 
     def is_window_open(self, window: Window) -> bool:
