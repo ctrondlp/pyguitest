@@ -5,11 +5,16 @@ handle it minted, and what capture does when the pieces providing it are two
 different members.
 """
 
+import inspect
 import unittest
 import warnings
 
 from pyguitest.backends.base import GUIBackend, Window
-from pyguitest.backends.composite import CaptureFallbackWarning, CompositeBackend
+from pyguitest.backends.composite import (
+    _WINDOW_ARGUMENT,
+    CaptureFallbackWarning,
+    CompositeBackend,
+)
 from pyguitest.capabilities import Capability, CapabilitySet
 from pyguitest.errors import CapabilityUnsupported, PyGUITestError
 
@@ -773,6 +778,25 @@ class TestWindowOperationsFollowTheIssuingMember(unittest.TestCase):
         self.composite.minimize_window(0xFF000001)
         self.assertEqual(self.native.minimized, [0xFF000001])
         self.assertEqual(self.x11.minimized, [])
+
+    def test_a_keyword_spelled_window_is_routed_the_same_way(self):
+        # `minimize_window(window=w)` is the same call as the positional
+        # spelling, but it used to leave `args` empty, skip _route_window
+        # entirely, and hand cosmic the Xlib handle -- the exact bug the
+        # positional path was fixed for, reachable through the calling
+        # convention alone.
+        (window,) = self.composite.windows()
+        self.composite.minimize_window(window=window)
+        self.assertEqual(self.x11.minimized, [window])
+        self.assertEqual(self.native.minimized, [])
+
+    def test_every_window_argument_method_spells_its_parameter_window(self):
+        # The keyword fold in _delegate turns `window=` into the positional
+        # slot, which is only sound while every routed method's first
+        # parameter is literally named `window` on the interface.
+        for name in _WINDOW_ARGUMENT:
+            parameters = list(inspect.signature(getattr(GUIBackend, name)).parameters)
+            self.assertEqual(parameters[1], "window", name)
 
 
 class TestAnEventsOnlyWindowIsRehomedForAnOperation(unittest.TestCase):

@@ -8,6 +8,7 @@ what they raise when nothing in the session can serve them.
 import dataclasses
 import json
 import math
+import os
 import sys
 import types
 import unittest
@@ -933,6 +934,16 @@ class TestScreenSize(unittest.TestCase):
         patcher = mock.patch.object(backends, "_xlib_size", return_value=None)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # Same hazard for the Wayland sources: `_wlroots_size` consults
+        # NIRI_SOCKET before any mocked CLI, so a test run on a real niri/sway/
+        # Hyprland session reaches that live compositor's own IPC and answers
+        # over the mock. Clear the signatures; the tests that want one set it
+        # back with their own patch.dict. Found live on KaOS/niri.
+        env = mock.patch.dict("os.environ")
+        env.start()
+        self.addCleanup(env.stop)
+        for var in ("NIRI_SOCKET", "SWAYSOCK", "I3SOCK", "HYPRLAND_INSTANCE_SIGNATURE"):
+            os.environ.pop(var, None)
 
     def test_it_falls_back_rather_than_raising_when_nothing_answers(self):
         with mock.patch("shutil.which", return_value=None):

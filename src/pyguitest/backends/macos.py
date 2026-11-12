@@ -2408,6 +2408,17 @@ class MacosBackend(GUIBackend):
         rather than a silent half-activation. The raise is reported in it,
         since it has already happened and the window really has moved.
 
+        The refusal's type is load-bearing: `Session.focus_window` gives up
+        at once on `CapabilityUnsupported` and retries anything else. An
+        AppKit/AX activation refusal is *this attempt* failing -- the
+        transient, focus-stealing-prevention-shaped contest the retry loop
+        exists to out-wait, and the same choice `Win32Backend.activate_window`
+        makes for a foreground contest -- so it raises plain `PyGUITestError`.
+        A window the server lists no owning process for is the opposite case:
+        nothing to activate, ever, so it keeps the `CapabilityUnsupported`
+        fast-fail rather than paying for retries that cannot change the
+        answer.
+
         A handle the window server no longer lists is a `WindowNotFound`.
         """
         self.require(Capability.WINDOW_ACTIVATE)
@@ -2445,12 +2456,18 @@ class MacosBackend(GUIBackend):
                 if raised
                 else ""
             )
-            raise CapabilityUnsupported(
-                Capability.WINDOW_ACTIVATE,
-                self.name,
+            message = (
                 f"could not make {window!r}'s application frontmost: {why}, so "
-                "keyboard input would still go to whichever application is." + also,
+                "keyboard input would still go to whichever application is." + also
             )
+            if pid is None:
+                # Permanent for this handle: with no owning process there is
+                # nothing to activate, so no number of retries changes the
+                # answer -- the type focus_window gives up on at once.
+                raise CapabilityUnsupported(
+                    Capability.WINDOW_ACTIVATE, self.name, message
+                )
+            raise PyGUITestError(message)
 
     def root_element(self):
         """The desktop: a synthetic root over every searchable application.

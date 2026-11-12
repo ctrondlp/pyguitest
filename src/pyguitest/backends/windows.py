@@ -1138,6 +1138,9 @@ def for_compositor(compositor):
     if compositor is Compositor.COSMIC:
         from .cosmic import connect_cosmic
 
+        # connect_cosmic owns every handshake failure and answers None;
+        # this covers only what precedes the handshake -- socket creation
+        # itself failing (EMFILE).
         try:
             return connect_cosmic()
         except OSError:
