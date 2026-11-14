@@ -459,10 +459,11 @@ class TestChangelogVersionLinksResolve(unittest.TestCase):
         notice that the tag behind all three was never created. Only
         ground truth outside the document can, so this one asks git.
 
-        Skipped where the clone has no tags to ask about: CI checks out at
-        depth 1 and fetches none. It runs where releases are prepared,
-        which is where a heading can be written for a tag that never
-        follows.
+        Skipped where the clone cannot supply the full tag history: CI
+        checks out at depth 1 and fetches no tags, and a tag push leaves
+        only the one pushed tag -- so "some tags" is not the same as "all
+        of them". It runs where releases are prepared, which is where a
+        heading can be written for a tag that never follows.
         """
         tags = subprocess.run(
             ["git", "-C", str(ROOT), "tag", "--list", "v*"],
@@ -470,8 +471,20 @@ class TestChangelogVersionLinksResolve(unittest.TestCase):
             text=True,
             check=False,
         )
-        if tags.returncode != 0 or not tags.stdout.strip():
-            self.skipTest("no tags in this clone (a shallow or archived checkout)")
+        shallow = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "--is-shallow-repository"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if (
+            tags.returncode != 0
+            or not tags.stdout.strip()
+            or shallow.stdout.strip() == "true"
+        ):
+            self.skipTest(
+                "no full tag history in this clone (a shallow or archived checkout)"
+            )
         present = {line.strip().lstrip("v") for line in tags.stdout.splitlines()}
         headings = self.headings()
         # The newest heading is the release being prepared: its version is
