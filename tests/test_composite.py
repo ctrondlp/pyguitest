@@ -496,6 +496,36 @@ class TestWindowHandlesStayWithTheirOwnBackend(unittest.TestCase):
         self.assertEqual(self.shell.geometry_calls, [window])
         self.assertEqual(other.geometry_calls, [], "asked the wrong member")
 
+    class KwinEvents(GUIBackend):
+        """Watches windows and nothing else; handles are KWin UUID strings.
+
+        The real shape of `kwinevents`: WINDOW_EVENTS alone, so a window it
+        issues through the fast event path carries a handle no other member
+        can read, and it cannot re-home one itself either.
+        """
+
+        name = "kwinevents"
+        capabilities = CapabilitySet({Capability.WINDOW_EVENTS})
+
+        def window_events(self, timeout=None):
+            return iter(())
+
+    def test_geometry_rehomes_a_window_its_owner_cannot_measure(self):
+        # The owner is a member, so `_owner` finds it -- but it serves no
+        # WINDOW_GEOMETRY, so the rectangle has to come from another member,
+        # and the UUID string it issued means nothing there. Without the
+        # re-home this reached Shell.geometry() with the string and, live,
+        # reached X11Backend.geometry() with it: a bare AttributeError out
+        # of python-xlib rather than anything this package can catch.
+        kwin = self.KwinEvents()
+        window = Window(handle="{aee98775-01a0-4f9c}", backend=kwin, title="Editor")
+        composite = CompositeBackend([kwin, self.shell, self.x11])
+        composite.capture(window=window)
+        self.assertIs(composite._owner(window), kwin)
+        measured = self.shell.geometry_calls[-1]
+        self.assertEqual(measured.handle, 42, "the handle was not re-homed")
+        self.assertEqual(self.x11.calls[0]["region"], (10, 20, 300, 200))
+
     def test_a_window_from_a_backend_outside_the_composite_is_not_trusted(self):
         # A Window built by a backend that is not a member at all: its
         # handle is from nobody's namespace here, so the native path must
@@ -511,6 +541,108 @@ class TestWindowHandlesStayWithTheirOwnBackend(unittest.TestCase):
         self.assertEqual(self.x11.calls[0]["region"], (10, 20, 300, 200))
 
 
+class TestCapturePrefersTheIssuingMember(unittest.TestCase):
+    """A window a capture-capable member issued is grabbed through that member.
+
+    The COSMIC + XWayland shape: x11 serves the window family, so the window
+    is x11-issued, while cosmic is the higher-priority WINDOW_CAPTURE
+    provider. The native per-window path used to consult only the top
+    provider (`issuer in (None, native)`), so an x11-issued window fell to a
+    whole-output crop through cosmic that bakes in whatever occludes it --
+    where x11.capture(window=...) reads the window's own drawable
+    un-occluded. The same "prefer the issuer" rule the window operations use.
+    """
+
+    class Cosmic(GUIBackend):
+        """The higher-priority capture provider; whole-output screen grabs."""
+
+        name = "cosmic"
+        capabilities = CapabilitySet(
+            {Capability.SCREEN_CAPTURE, Capability.WINDOW_CAPTURE}
+        )
+
+        def __init__(self):
+            self.calls = []
+
+        def capture(self, window=None, path=None, region=None):
+            self.calls.append({"window": window, "region": region})
+            return "/tmp/cosmic.png"
+
+    class Xorg(GUIBackend):
+        """Serves the window family and can grab its own windows natively."""
+
+        name = "x11"
+        capabilities = CapabilitySet(
+            {
+                Capability.WINDOW_LIST,
+                Capability.WINDOW_GEOMETRY,
+                Capability.WINDOW_CAPTURE,
+            }
+        )
+
+        def __init__(self):
+            self.handle = object()
+            self.calls = []
+
+        def windows(self):
+            return [Window(handle=self.handle, backend=self, title="Editor")]
+
+        def geometry(self, window):
+            return (10, 20, 300, 200)
+
+        def capture(self, window=None, path=None, region=None):
+            self.calls.append({"window": window, "region": region})
+            return "/tmp/x11-window.png"
+
+    def setUp(self):
+        self.cosmic = self.Cosmic()
+        self.x11 = self.Xorg()
+        # cosmic first: registration order makes it the higher-priority
+        # WINDOW_CAPTURE provider, while x11 is the sole WINDOW_LIST member
+        # so the listed window is x11-issued.
+        self.composite = CompositeBackend([self.cosmic, self.x11])
+
+    def test_an_x11_issued_window_is_grabbed_through_x11_not_cosmic(self):
+        (window,) = self.composite.windows()
+        self.assertIs(window.backend, self.x11)
+        self.assertEqual(self.composite.capture(window=window), "/tmp/x11-window.png")
+        self.assertEqual(self.x11.calls, [{"window": window, "region": None}])
+        # No whole-output crop through cosmic.
+        self.assertEqual(self.cosmic.calls, [])
+
+    def test_a_cosmic_issued_window_still_goes_to_cosmic(self):
+        # Issuer is the provider: unchanged, native grab through cosmic.
+        window = Window(handle=0xFF01, backend=self.cosmic, title="Editor")
+        self.composite.capture(window=window)
+        self.assertEqual(self.cosmic.calls, [{"window": window, "region": None}])
+        self.assertEqual(self.x11.calls, [])
+
+    def test_a_foreign_capturer_is_never_called_even_though_it_could(self):
+        # The sharp edge of preferring the issuer: a Window naming a
+        # backend that is NOT a member -- even one declaring WINDOW_CAPTURE
+        # and implementing capture() -- is positively foreign, and the
+        # composite must not become the one place that calls a backend it
+        # does not contain. The foreign window takes the geometry-plus-crop
+        # route, exactly as it did before the issuer preference existed.
+        stranger = self.Xorg()  # capable, but never added to the composite
+        window = Window(handle=stranger.handle, backend=stranger, title="Far")
+
+        class Geometry(GUIBackend):
+            name = "shell"
+            capabilities = CapabilitySet({Capability.WINDOW_GEOMETRY})
+
+            def geometry(self, _window):
+                return (1, 2, 30, 40)
+
+        composite = CompositeBackend([self.cosmic, Geometry()])
+        composite.capture(window=window)
+        self.assertEqual(stranger.calls, [], "called a backend outside the composite")
+        # Resolved to a rectangle and cropped out of the screen instead.
+        self.assertEqual(
+            self.cosmic.calls, [{"window": None, "region": (1, 2, 30, 40)}]
+        )
+
+
 class TestWindowFamilyPrefersAFullServiceMember(unittest.TestCase):
     """A window-listing member must also be able to move what it lists.
 
@@ -522,8 +654,12 @@ class TestWindowFamilyPrefersAFullServiceMember(unittest.TestCase):
     AT-SPI (registered ahead of X11Backend). move_window then received an
     AT-SPI frame reference where X11Backend needed an Xlib window, and
     crashed inside python-xlib's own struct packing -- not a typed error
-    this package could catch, unlike the analogous capture()/_geometry_of
-    bug TestWindowHandlesStayWithTheirOwnBackend guards above.
+    this package could catch, the same shape as the capture()/_geometry_of
+    bug `test_geometry_rehomes_a_window_its_owner_cannot_measure` pins
+    above. (That one needs a non-int handle to detect at all: every double
+    in `TestWindowHandlesStayWithTheirOwnBackend` is a `Shell`, so its
+    handles are all plain integers and `Shell.geometry`'s own type check
+    cannot tell an in-composite handle from a foreign one.)
     """
 
     class Atspi(GUIBackend):
@@ -682,6 +818,8 @@ class TestWindowOperationsFollowTheIssuingMember(unittest.TestCase):
                 Capability.WINDOW_GEOMETRY,
                 Capability.WINDOW_ACTIVATE,
                 Capability.WINDOW_MINIMIZE,
+                Capability.WINDOW_MAXIMIZE,
+                Capability.WINDOW_CLOSE,
                 Capability.WINDOW_RESIZE,
             }
         )
@@ -689,6 +827,8 @@ class TestWindowOperationsFollowTheIssuingMember(unittest.TestCase):
         def __init__(self):
             self.minimized = []
             self.resized = []
+            self.closed = []
+            self.maximized = []
 
         def windows(self):
             return [Window(handle=0xFF000001, backend=self, title="Editor")]
@@ -705,6 +845,16 @@ class TestWindowOperationsFollowTheIssuingMember(unittest.TestCase):
         def resize_window(self, window, width, height):
             self.resized.append(self._own(window))
 
+        def close_window(self, window):
+            self.closed.append(self._own(window))
+
+        def maximize_window(self, window, maximized=True):
+            self.maximized.append(self._own(window))
+
+        def is_window_maximized(self, window):
+            self.maximized.append(self._own(window))
+            return False
+
     class Xorg(GUIBackend):
         """X11Backend's shape: opaque Xlib handles, and the full family."""
 
@@ -717,6 +867,8 @@ class TestWindowOperationsFollowTheIssuingMember(unittest.TestCase):
                 Capability.WINDOW_ACTIVATE,
                 Capability.WINDOW_PLACEMENT,
                 Capability.WINDOW_MINIMIZE,
+                Capability.WINDOW_MAXIMIZE,
+                Capability.WINDOW_CLOSE,
                 Capability.WINDOW_RESIZE,
             }
         )
@@ -725,6 +877,8 @@ class TestWindowOperationsFollowTheIssuingMember(unittest.TestCase):
             self.handle = object()
             self.minimized = []
             self.resized = []
+            self.closed = []
+            self.maximized = []
 
         def windows(self):
             return [Window(handle=self.handle, backend=self, title="Editor")]
@@ -739,6 +893,16 @@ class TestWindowOperationsFollowTheIssuingMember(unittest.TestCase):
 
         def resize_window(self, window, width, height):
             self.resized.append(self._own(window))
+
+        def close_window(self, window):
+            self.closed.append(self._own(window))
+
+        def maximize_window(self, window, maximized=True):
+            self.maximized.append(self._own(window))
+
+        def is_window_maximized(self, window):
+            self.maximized.append(self._own(window))
+            return False
 
     def setUp(self):
         self.native = self.Native()
@@ -764,6 +928,21 @@ class TestWindowOperationsFollowTheIssuingMember(unittest.TestCase):
         self.composite.resize_window(window, 800, 600)
         self.assertEqual(self.x11.resized, [window])
         self.assertEqual(self.native.resized, [])
+
+    def test_maximize_and_its_read_go_to_the_issuer(self):
+        (window,) = self.composite.windows()
+        self.composite.maximize_window(window)
+        self.composite.is_window_maximized(window)
+        self.assertEqual(self.x11.maximized, [window, window])
+        self.assertEqual(self.native.maximized, [])
+
+    def test_close_goes_to_the_issuer_not_the_priority_provider(self):
+        # Same hazard as minimize: a close sent to the wrong member is a
+        # handle it cannot read -- or, worse, a different window closed.
+        (window,) = self.composite.windows()
+        self.composite.close_window(window)
+        self.assertEqual(self.x11.closed, [window])
+        self.assertEqual(self.native.closed, [])
 
     def test_a_window_the_provider_issued_still_goes_to_the_provider(self):
         # Nothing to re-route: the issuer and the provider are one member.

@@ -302,7 +302,7 @@ reported whether or not Screen Recording is granted, and the permission is
 checked when the capture is actually taken, so a denied Mac raises
 `PermissionRequired` naming the grant instead of writing a black PNG.
 
-`macquartz` was opt-in until 0.22.1, which meant a plain `connect()` on a Mac
+`macquartz` was opt-in until 0.23.0, which meant a plain `connect()` on a Mac
 had no pointer or keyboard at all and every script had to name backends.
 Scripts that still do are unaffected — naming backends composes exactly the
 ones named, so add `"capture"`, `"clipboard"` or `"imagesearch"` to the list

@@ -565,23 +565,43 @@ class LibeiBackend(GUIBackend):
         object that created it, living in xdg-desktop-portal until
         `Session.Close()` or the D-Bus connection drops, and that
         connection is GLib's shared session-bus singleton, which does not.
+
+        Every step is attempted even when an earlier one fails, and the
+        first failure is raised once they all have been. Sequencing them
+        bare meant a device whose EIS connection had already gone away
+        server-side -- a compositor restart mid-run, the commonest way
+        `stop_emulating()` raises -- skipped the keymap's fd and, worse, the
+        `Session.Close()` below it, stranding exactly the approved grant the
+        constructor's own teardown goes out of its way to release. The
+        attribute clearing is unconditional for the same reason: a second
+        `close()` must not re-enter a device that is already gone.
         """
+        errors = []
+
+        def _attempt(step):
+            try:
+                step()
+            except Exception as exc:  # noqa: BLE001 - every step must be tried
+                errors.append(exc)
+
         if self._emulation_started and self._device is not None:
-            self._device.stop_emulating()
-            self._emulation_started = False
+            _attempt(self._device.stop_emulating)
+        self._emulation_started = False
         if self._keyboard_emulation_started and self._keyboard is not None:
-            self._keyboard.stop_emulating()
-            self._keyboard_emulation_started = False
+            _attempt(self._keyboard.stop_emulating)
+        self._keyboard_emulation_started = False
         if self._keymap is not None:
-            self._keymap.close()
+            _attempt(self._keymap.close)
             self._keymap = None
         self._device = None
         self._keyboard = None
         self._sender = None
         if self._session is not None:
-            self._session.close()
+            _attempt(self._session.close)
             self._session = None
         self._connection = None
+        if errors:
+            raise errors[0]
 
     def _button_code(self, button):
         """The libei button code for `button`, or ValueError if unsupported."""

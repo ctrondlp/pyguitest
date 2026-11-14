@@ -141,8 +141,27 @@ class KWinEventsBackend(GUIBackend):
         from the same GLib main context's callbacks, never concurrently."""
 
         if connect:
-            self._host_service()
-            self._scripting = self._load_and_run_script()
+            try:
+                self._host_service()
+                self._scripting = self._load_and_run_script()
+            except BaseException:
+                # `_host_service()` has already claimed the bus name and
+                # exported the object by the time the script load can fail,
+                # and that failure is a documented, reachable one: the
+                # factory's own docstring names "the script failing to load"
+                # among the reasons construction raises where `available()`
+                # saw nothing wrong. Nothing else can release the name --
+                # `close()` is never reached on an object no caller was
+                # handed, and there is no `__del__` anywhere in these
+                # backends -- so it stayed owned for the life of the
+                # process. Worse, it was claimed without DO_NOT_QUEUE, so a
+                # later connect() in the same process queued behind this
+                # abandoned ownership and timed out blaming "another
+                # instance", which was this process all along. close() is
+                # idempotent and suppresses its own errors, so it is safe
+                # here however far construction got.
+                self.close()
+                raise
         else:
             self._scripting = _Closer(lambda: None)
 

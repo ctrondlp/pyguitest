@@ -138,6 +138,18 @@ class Capability(Enum):
         "Raise and focus; there is no raise-without-focus operation",
     )
     WINDOW_MINIMIZE = (Tier.COMPOSITOR, "Minimize and restore")
+    WINDOW_MAXIMIZE = (
+        Tier.COMPOSITOR,
+        "Maximize and restore, and read whether a window is maximized -- "
+        "only where the desktop has the concept: a tiling compositor does "
+        "not, and macOS zoom is not it",
+    )
+    WINDOW_CLOSE = (
+        Tier.COMPOSITOR,
+        "Ask the window manager to close one window gracefully -- the route "
+        "that lets the application prompt to save, where stopping the "
+        "process cannot",
+    )
     WINDOW_GEOMETRY = (
         Tier.COMPOSITOR,
         "Read position and size; no foreign-toplevel protocol carries this",
@@ -262,21 +274,39 @@ class CapabilitySet(frozenset):
     # subclass instance, which drops .report() and .missing -- the two
     # methods this class exists for. Re-wrapped here so
     # `gui.capabilities | {...}` stays a CapabilitySet.
+    # Each guards the operand the same way the reflected operators below do:
+    # `frozenset.__or__` returns NotImplemented for a non-set operand, and
+    # wrapping *that* in `CapabilitySet(...)` iterates NotImplemented and
+    # raises a confusing `TypeError: 'NotImplementedType' object is not
+    # iterable`. Returning NotImplemented instead lets Python raise the clean
+    # `unsupported operand type(s)` TypeError the builtin frozenset gives.
     def __or__(self, other) -> CapabilitySet:
         """Union, re-wrapped so the result keeps .report() and .missing."""
-        return CapabilitySet(super().__or__(other))
+        result = super().__or__(other)
+        if result is NotImplemented:
+            return NotImplemented
+        return CapabilitySet(result)
 
     def __and__(self, other) -> CapabilitySet:
         """Intersection, re-wrapped for the same reason as __or__."""
-        return CapabilitySet(super().__and__(other))
+        result = super().__and__(other)
+        if result is NotImplemented:
+            return NotImplemented
+        return CapabilitySet(result)
 
     def __sub__(self, other) -> CapabilitySet:
         """Difference, re-wrapped for the same reason as __or__."""
-        return CapabilitySet(super().__sub__(other))
+        result = super().__sub__(other)
+        if result is NotImplemented:
+            return NotImplemented
+        return CapabilitySet(result)
 
     def __xor__(self, other) -> CapabilitySet:
         """Symmetric difference, re-wrapped for the same reason as __or__."""
-        return CapabilitySet(super().__xor__(other))
+        result = super().__xor__(other)
+        if result is NotImplemented:
+            return NotImplemented
+        return CapabilitySet(result)
 
     # The named methods are the same defect one call along, and the four
     # operators above did not cover them: `union()` and its three siblings

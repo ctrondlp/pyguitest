@@ -236,6 +236,67 @@ class TestCosmicBackend(unittest.TestCase):
         backend.minimize_window(window, minimized=False)
         self.assertIn(_msg(MANAGER, 6, ("o", COSMIC_HANDLE)), _recv_all(server))
 
+    def test_maximize_sends_set_and_unset(self):
+        # Opcodes 3 and 4 per the protocol XML, between activate=2 and
+        # set_minimized=5.
+        backend, server = _make_backend(self)
+        window = backend.windows()[0]
+        backend.maximize_window(window)
+        backend.maximize_window(window, maximized=False)
+        sent = _recv_all(server)
+        self.assertIn(_msg(MANAGER, 3, ("o", COSMIC_HANDLE)), sent)
+        self.assertIn(_msg(MANAGER, 4, ("o", COSMIC_HANDLE)), sent)
+
+    def test_is_window_maximized_reads_the_state_array(self):
+        backend, _ = _make_backend(self)
+        window = backend.windows()[0]
+        self.assertFalse(backend.is_window_maximized(window))
+        _deliver(backend, COSMIC_HANDLE, 8, ("a", _u32s(0)))  # maximized
+        self.assertTrue(backend.is_window_maximized(window))
+
+    def test_is_window_maximized_drains_the_socket_first(self):
+        # Pins the _refresh() call _deliver cannot see (it hands events
+        # straight to the handler, bypassing the socket): measured live on
+        # COSMIC, the maximize visibly took while a poll of this read
+        # answered False for as long as nothing drained the pushed state
+        # event. Without this pin, removing the _refresh() stays green.
+        backend, _ = _make_backend(self)
+        window = backend.windows()[0]
+        calls = []
+        original = backend._refresh
+
+        def counting():
+            calls.append(1)
+            return original()
+
+        backend._refresh = counting
+        backend.is_window_maximized(window)
+        self.assertEqual(len(calls), 1)
+
+    def test_is_window_viewable_drains_the_socket_first(self):
+        # The sibling read has the same push-then-drain dependency.
+        backend, _ = _make_backend(self)
+        window = backend.windows()[0]
+        calls = []
+        original = backend._refresh
+
+        def counting():
+            calls.append(1)
+            return original()
+
+        backend._refresh = counting
+        backend.is_window_viewable(window)
+        self.assertEqual(len(calls), 1)
+
+    def test_close_sends_the_manager_close_request(self):
+        # Opcode 1 on zcosmic_toplevel_manager_v1 -- destroy=0, close=1,
+        # activate=2 per the protocol XML -- which the compositor forwards
+        # to the client as an ordinary xdg close.
+        backend, server = _make_backend(self)
+        window = backend.windows()[0]
+        backend.close_window(window)
+        self.assertIn(_msg(MANAGER, 1, ("o", COSMIC_HANDLE)), _recv_all(server))
+
     def test_cosmic_of_binds_an_unbound_handle_via_one_sync(self):
         # A window from the event path has a toplevel whose management handle
         # is not bound yet (cosmic is None). _cosmic_of must trigger one sync
@@ -424,6 +485,76 @@ class TestConnectCosmic(unittest.TestCase):
             warnings.simplefilter("error")
             self.assertIsNone(connect_cosmic())
         fake_sock.close.assert_called_once()
+
+
+class TestACaptureSessionThatStopsIsReported(unittest.TestCase):
+    """`stopped` (session event 5) must end the wait, not fall through it.
+
+    The session can stop before it ever offers a buffer format -- the
+    protocol names the capture source being destroyed as one reason, which
+    is just `capture(window=...)` on a window that closes as the grab
+    starts. No frame object exists yet at that point, so the frame's own
+    `failed` event cannot carry the news: unhandled, the negotiation loop
+    waited for a message that was never coming and surfaced ten seconds
+    later as a bare socket timeout naming nothing.
+    """
+
+    def _stopping_connection(self, before=()):
+        """A real connection whose next events are `before` then `stopped`.
+
+        The session's object id is whatever the real allocator hands out, so
+        the script is built lazily: by the time `_recv_message` is first
+        called, `_capture_frame` has already allocated it.
+        """
+        backend, _server = _make_backend(self)
+        conn = backend._conn
+        allocated = []
+        real_allocate = conn._allocate
+
+        def allocate(interface):
+            object_id = real_allocate(interface)
+            allocated.append(object_id)
+            return object_id
+
+        queued = list(before)
+        reads = []
+
+        def recv():
+            # The session is the most recent allocation: `_capture_frame`
+            # allocates it before reading anything.
+            session = allocated[-1]
+            reads.append(session)
+            if len(reads) > len(queued) + 4:
+                raise AssertionError(
+                    "the loop kept reading past `stopped` -- it was ignored"
+                )
+            if queued:
+                opcode, payload = queued.pop(0)
+                return (session, opcode, payload)
+            return (session, 5, b"")  # stopped
+
+        conn._allocate = allocate
+        conn._recv_message = recv
+        return conn
+
+    def test_stopped_before_done_raises_instead_of_waiting(self):
+        conn = self._stopping_connection()
+        with self.assertRaises(OSError) as ctx:
+            conn._capture_frame(conn._allocate("ext_image_capture_source_v1"))
+        self.assertIn("ended the capture session", str(ctx.exception))
+        self.assertNotIn("timed out", str(ctx.exception))
+
+    def test_stopped_after_a_partial_offer_still_raises(self):
+        # buffer_size and shm_format having arrived is not enough: without
+        # `done` there is no agreed format, and the old code would wait.
+        offer = [
+            (0, struct.pack("<II", 100, 50)),  # buffer_size
+            (1, struct.pack("<I", 0x34324241)),  # shm_format ABGR8888
+        ]
+        conn = self._stopping_connection(before=offer)
+        with self.assertRaises(OSError) as ctx:
+            conn._capture_frame(conn._allocate("ext_image_capture_source_v1"))
+        self.assertIn("most likely went away", str(ctx.exception))
 
 
 class TestCaptureHelpers(unittest.TestCase):

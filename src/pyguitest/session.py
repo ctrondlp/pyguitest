@@ -1076,24 +1076,65 @@ class Environment:
     """What the current login actually offers."""
 
     session_type: SessionType
+    """Which display server this login is using, as a `SessionType`:
+    WAYLAND, X11, XWAYLAND, WIN32, DARWIN, HEADLESS or UNKNOWN. The
+    single most important field here -- it decides which backends can
+    exist at all."""
     compositor: Compositor
+    """Which compositor or window manager is running, as a `Compositor`:
+    MUTTER, KWIN, WLROOTS, COSMIC, DWM, QUARTZ, OTHER or NONE. What a
+    Wayland session can be asked to do varies by this, not by the
+    protocol."""
     desktop: str = ""
+    """The desktop environment that announced itself, from
+    `XDG_CURRENT_DESKTOP`, or "" where nothing did."""
     display: str = ""
+    """The X display this session reaches, from `DISPLAY`, or "" where
+    there is none."""
     wayland_display: str = ""
+    """The Wayland socket name, from `WAYLAND_DISPLAY`, or "" where there
+    is none. Set alongside `display` on an XWayland session, which is
+    what distinguishes one from plain X11."""
 
     has_libei: bool = False
+    """Whether `python-libei` is importable, and with it the `eiinput`
+    backend -- the only input path a native Wayland session grants
+    without root."""
     has_uinput: bool = False
+    """Whether the kernel's `/dev/uinput` device node exists at all.
+    Present is not usable: see `uinput_writable`."""
     uinput_writable: bool = False
+    """Whether this process may actually open `/dev/uinput` for writing.
+    False on a machine where the node exists but the user is not in the
+    group owning it, which is the common case and the one worth
+    reporting separately."""
     has_atspi: bool = False
+    """Whether the AT-SPI accessibility bus is reachable, and with it every
+    element lookup on Linux and BSD."""
     has_pygobject: bool = False
+    """Whether `gi` is importable, which is how the AT-SPI bus is spoken to."""
     has_dogtail: bool = False
+    """Whether `dogtail` is importable. Not used for anything here; probed
+    because its presence means the accessibility stack is installed and
+    configured, which is a useful thing to know when `has_atspi` is
+    False."""
     has_evdev: bool = False
+    """Whether `evdev` is importable, which the uinput input path needs."""
     # Defaults True so a hand-built Environment keeps the advice it always
     # got; detect() always sets it from the machine. See _has_input_group.
     has_input_group: bool = True
+    """Whether this user belongs to the group that owns the input device
+    nodes. The fix for a False `uinput_writable` is usually adding the
+    user to it, so the two are reported side by side."""
     has_portal: bool = False
+    """Whether an `xdg-desktop-portal` implementation is on the session bus,
+    which is how a sandboxed or Wayland session reaches screenshots,
+    clipboard and input capture."""
     has_xtest: bool = False
+    """Whether the X server carries the XTEST extension, which is how the
+    `x11` backend injects input."""
     has_xlib: bool = False
+    """Whether `python-xlib` is importable, which the `x11` backend needs."""
 
     # Windows-only probes, every one of them defaulted so that a hand-built
     # Environment, and every Linux session, keeps the answers it always had.
@@ -1126,8 +1167,8 @@ class Environment:
     prompt."""
     foreground_is_elevated: bool | None = None
     """Whether the window in the foreground belongs to a high-integrity
-    process, or None where that could not be asked -- see
-    `_foreground_is_elevated`.
+    process, or None where the foreground window has no reachable owning
+    process to ask about.
 
     Reported beside `is_elevated` rather than folded into it because the
     failure that matters needs both: it is a *more* privileged window
@@ -1199,16 +1240,29 @@ class Environment:
     TCC question ADR 004 leaves open, and the first machine that prints it
     settles it."""
     macos_version: str = ""
-    """The macOS release (`26.7`), or "" where it could not be read. See
-    `_darwin_version` for why this is not derived from the Darwin kernel
-    version every `uname` reports."""
+    """The macOS release (`26.7`), or "" where it could not be read.
+
+    Read from `platform.mac_ver()`, never from the Darwin kernel version
+    `uname` reports: no arithmetic recovers one from the other, since Apple
+    renumbered to 26 for 2026 after Darwin 24 had stood for macOS 15."""
 
     input_tools: tuple[str, ...] = field(default_factory=tuple)
+    """The external input tools found on PATH, in the order they would be
+    tried -- `xdotool`, `ydotool`, `wtype` and the rest."""
     capture_tools: tuple[str, ...] = field(default_factory=tuple)
+    """The external screenshot tools found on PATH, in preference order."""
     window_tools: tuple[str, ...] = field(default_factory=tuple)
+    """The external window-management tools found on PATH, in preference
+    order."""
     image_tools: tuple[str, ...] = field(default_factory=tuple)
+    """The external image tools found on PATH, used for template matching
+    and cropping."""
     clipboard_tools: tuple[str, ...] = field(default_factory=tuple)
+    """The external clipboard tools found on PATH, in preference order."""
     notes: tuple[str, ...] = field(default_factory=tuple)
+    """Everything the probes noticed that is worth telling a human but does
+    not fit a flag: a permission that will prompt, a tool present but
+    broken, a session that lies about itself. `summary()` prints these."""
 
     @property
     def can_inject_input(self) -> bool:
@@ -1948,15 +2002,27 @@ def detect(env: Mapping[str, str] | None = None) -> Environment:
     # compositor is running; an X connection does not substitute, which is why
     # this is not `or x11_session`. See _input_factory in backends/__init__.py,
     # which makes the same call for the backend this list only describes.
-    input_tools = tuple(
-        t.name
-        for t in _tools.discover(
+    usable_input_tools = tuple(
+        _tools.discover(
             _tools.INPUT_TOOLS,
             allow_x11_only=x11_session,
             compositor=compositor.value,
         )
     )
-    if input_tools and not _tools.best(_tools.INPUT_TOOLS, keymap_safe_only=True):
+    input_tools = tuple(t.name for t in usable_input_tools)
+    # Asked of the same filtered set the note names, not of `tools.best`.
+    # `best()` calls `discover()` with its defaults -- no compositor
+    # filtering, which `discover`'s own docstring says it relies on -- so it
+    # searched a strictly larger set than this list was built from. On a
+    # GNOME/Mutter Wayland session with `wtype` and `ydotool` both
+    # installed, the usable list is `('ydotool',)` and it is keymap-unsafe,
+    # but `best(keymap_safe_only=True)` answered `wtype` -- installed,
+    # keymap-safe, and excluded from this session by its own
+    # `compositors={"wlroots","cosmic"}`. The guard therefore read "a
+    # keymap-safe tool exists" and said nothing, in exactly the session
+    # where the warning is true and where trusting `wtype` means typing
+    # nothing at all.
+    if input_tools and not any(t.keymap_safe for t in usable_input_tools):
         notes.append(
             f"only keymap-unsafe input tools found ({', '.join(input_tools)}); "
             "typed text may differ on a non-US layout"

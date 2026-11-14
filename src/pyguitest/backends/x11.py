@@ -168,6 +168,8 @@ class X11Backend(GUIBackend):
             Capability.WINDOW_RESIZE,
             Capability.WINDOW_ACTIVATE,
             Capability.WINDOW_MINIMIZE,
+            Capability.WINDOW_MAXIMIZE,
+            Capability.WINDOW_CLOSE,
             Capability.WINDOW_PID,
             Capability.WINDOW_AT_POINT,
             # Impossible on Wayland, ordinary here.
@@ -614,6 +616,34 @@ class X11Backend(GUIBackend):
         """The X window object for a Window or raw handle."""
         return window.handle if isinstance(window, Window) else window
 
+    @staticmethod
+    def _unreadable(handle, exc):
+        """The `WindowNotFound` for a handle this backend could not read.
+
+        Two different failures used to share one sentence. A window that has
+        been destroyed makes Xlib raise, and "window is gone" is exactly
+        right for it. A handle from *another backend's* namespace -- a KWin
+        UUID string, a GNOME Shell stable_sequence integer -- is not a
+        window object at all, so the failure is an `AttributeError` for the
+        Xlib method that does not exist on it, and calling that "window is
+        gone" described a window that was on screen the whole time while
+        leaking python-xlib's own type error into the message.
+
+        Measured live on KDE Wayland with a composite of kwinevents + x11:
+        `screenshot(window=...)` on a native Wayland window reported
+        "window is gone: 'str' object has no attribute 'get_geometry'".
+        The window was open; x11 simply cannot see a Wayland client, which
+        is what this now says.
+        """
+        if isinstance(exc, AttributeError):
+            return WindowNotFound(
+                f"not an X11 window handle ({type(handle).__name__}): a "
+                f"Window another backend issued cannot be read here, and on "
+                f"a Wayland session X11 does not see native Wayland windows "
+                f"at all"
+            )
+        return WindowNotFound(f"window is gone: {exc}")
+
     def _frame_extents(self, handle):
         """The shadow a client draws around its own visible window, or None.
 
@@ -717,7 +747,7 @@ class X11Backend(GUIBackend):
             geom = handle.get_geometry()
             origin = geom.root.translate_coords(handle, 0, 0)
         except Exception as exc:
-            raise WindowNotFound(f"window is gone: {exc}") from exc
+            raise self._unreadable(handle, exc) from exc
         return self._inside_extents(
             origin.x,
             origin.y,
@@ -730,7 +760,18 @@ class X11Backend(GUIBackend):
     """Position the window's own top-left corner exactly at (x, y),
     decorations included, regardless of their size -- see _moveresize."""
 
-    _MOVERESIZE_SOURCE_APPLICATION = 1 << 12
+    _MOVERESIZE_SOURCE_PAGER = 2 << 12
+    """Source indication 2 -- "pager or taskbar", i.e. a direct user action.
+
+    Bits 12-15 of `data.l[0]` carry it. Source 1 means "the application
+    itself", and EWMH §9.11 explicitly permits a window manager to treat
+    that differently from a request made on a user's behalf: an unsolicited
+    application reposition is the kind of thing a manager may demote,
+    reorder or ignore outright. This package is the user's hand here, which
+    is the same reasoning `close_window` and `maximize_window` already
+    spell out for sending 2 -- `_moveresize` was the one request in this
+    file still claiming to be the application.
+    """
 
     def _moveresize(self, window, x=None, y=None, width=None, height=None):
         """Send _NET_MOVERESIZE_WINDOW: move and/or resize in screen coordinates.
@@ -775,7 +816,7 @@ class X11Backend(GUIBackend):
                 width += left + right
             if height is not None:
                 height += top + bottom
-        flags = self._MOVERESIZE_GRAVITY_STATIC | self._MOVERESIZE_SOURCE_APPLICATION
+        flags = self._MOVERESIZE_GRAVITY_STATIC | self._MOVERESIZE_SOURCE_PAGER
         values = [0, 0, 0, 0]
         for i, value in enumerate((x, y, width, height)):
             if value is not None:
@@ -840,6 +881,96 @@ class X11Backend(GUIBackend):
             handle.unmap()
         else:
             handle.map()
+        self._sync()
+
+    def maximize_window(self, window, maximized=True):
+        """Maximize or restore a window, via `_NET_WM_STATE`.
+
+        One ClientMessage carrying both `_NET_WM_STATE_MAXIMIZED_VERT` and
+        `_NET_WM_STATE_MAXIMIZED_HORZ` -- EWMH lets a message name two
+        properties exactly so that a maximize is one request rather than
+        two half-maximized intermediate states. Routed through the manager
+        like `_moveresize` and `close_window`, since the maximized frame is
+        the manager's to grant.
+
+        `data.l[0]` is the action (1 add, 0 remove), `l[3]` the same
+        source-indication 2 ("direct user action") `close_window` sends.
+
+        The manager does the maximizing, so this inherits `_moveresize`'s
+        no-manager trap: on a bare Xvfb with no window manager the request
+        goes nowhere, nothing errors, and `is_window_maximized` keeps
+        answering False.
+        """
+        self.require(Capability.WINDOW_MAXIMIZE)
+        handle = self._handle(window)
+        action = 1 if maximized else 0
+        vert = self._display.intern_atom("_NET_WM_STATE_MAXIMIZED_VERT")
+        horz = self._display.intern_atom("_NET_WM_STATE_MAXIMIZED_HORZ")
+        message = self._xevent.ClientMessage(
+            window=handle,
+            client_type=self._display.intern_atom("_NET_WM_STATE"),
+            data=(32, [action, vert, horz, 2, 0]),
+        )
+        root = handle.get_geometry().root
+        root.send_event(
+            message,
+            event_mask=self._X.SubstructureRedirectMask
+            | self._X.SubstructureNotifyMask,
+        )
+        self._sync()
+
+    def is_window_maximized(self, window):
+        """Whether both maximized atoms are in the window's `_NET_WM_STATE`.
+
+        Both, not either: a half-maximized (tiled-to-one-edge) window
+        carries exactly one of the pair, and calling that "maximized" would
+        report a state `maximize_window` never set. A window with no
+        `_NET_WM_STATE` property at all is simply not maximized.
+        """
+        self.require(Capability.WINDOW_MAXIMIZE)
+        handle = self._handle(window)
+        atom = self._display.intern_atom("_NET_WM_STATE")
+        try:
+            prop = handle.get_full_property(atom, self._X.AnyPropertyType)
+        except Exception as exc:  # the same idiom is_window_viewable uses
+            raise self._unreadable(handle, exc) from exc
+        if prop is None:
+            return False
+        states = set(prop.value)
+        vert = self._display.intern_atom("_NET_WM_STATE_MAXIMIZED_VERT")
+        horz = self._display.intern_atom("_NET_WM_STATE_MAXIMIZED_HORZ")
+        return vert in states and horz in states
+
+    def close_window(self, window):
+        """Ask the window manager to close a window, via `_NET_CLOSE_WINDOW`.
+
+        The EWMH route rather than `XDestroyWindow`: the manager forwards it
+        to the client as an ordinary `WM_DELETE_WINDOW`, so the application
+        keeps its say -- an editor with unsaved work answers with its "Save
+        changes?" dialog instead of dying, which is the whole reason this
+        operation exists apart from killing the process. Sent to the root
+        with the same event mask `_moveresize` uses, since both are requests
+        *to the manager* about a window rather than to the window itself.
+
+        `data.l[1]` is 2, "direct user action" -- EWMH's spec for pagers and
+        for tools acting on the user's behalf, and the value that entitles
+        the request to be honoured now rather than demoted the way managers
+        may demote an application's own unsolicited request (source 1).
+        """
+        self.require(Capability.WINDOW_CLOSE)
+        handle = self._handle(window)
+        atom = self._display.intern_atom("_NET_CLOSE_WINDOW")
+        message = self._xevent.ClientMessage(
+            window=handle,
+            client_type=atom,
+            data=(32, [self._X.CurrentTime, 2, 0, 0, 0]),
+        )
+        root = handle.get_geometry().root
+        root.send_event(
+            message,
+            event_mask=self._X.SubstructureRedirectMask
+            | self._X.SubstructureNotifyMask,
+        )
         self._sync()
 
     def _font_cursor(self, shape):
@@ -975,7 +1106,7 @@ class X11Backend(GUIBackend):
         try:
             attrs = handle.get_attributes()
         except Exception as exc:
-            raise WindowNotFound(f"window is gone: {exc}") from exc
+            raise self._unreadable(handle, exc) from exc
         return attrs.map_state == self._X.IsViewable
 
     # -- capture -----------------------------------------------------------
@@ -1155,7 +1286,7 @@ class X11Backend(GUIBackend):
             geometry = drawable.get_geometry()
         except Exception as exc:
             if window is not None:
-                raise WindowNotFound(f"window is gone: {exc}") from exc
+                raise self._unreadable(drawable, exc) from exc
             raise CapabilityUnsupported(
                 Capability.SCREEN_CAPTURE,
                 self.name,

@@ -3,7 +3,7 @@
 Status: accepted · 2026-09-22 · follows [ADR 001](adr-001-dependencies.md),
 [ADR 002](adr-002-transports.md) and [ADR 003](adr-003-windows.md)
 
-> **Amended since (0.22.1):** *neither* backend is `opt_in` any more, and
+> **Amended since (0.23.0):** *neither* backend is `opt_in` any more, and
 > §3's title is no longer the design. Both now join automatic composition and
 > both gate their *request* behind `backend_options={"request": True}`, which
 > is §4's preflight/prompt split expressed as an option rather than as a

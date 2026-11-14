@@ -105,6 +105,8 @@ class FakeInputCaptureSession:
             raise FakePortalTimeoutError("Activated", timeout or 0)
         if getattr(self, "_protocol_error_on_wait", False):
             raise FakePortalError("Activated arrived with a malformed payload")
+        if getattr(self, "_interrupt_on_wait", False):
+            raise KeyboardInterrupt
         return self._activation
 
     def close(self):
@@ -378,6 +380,21 @@ class TestWaitForPointerActivation(InputCaptureTestCase):
             self.gui.wait_for_pointer_activation(timeout=5.0)
         self.assertIn("malformed", str(ctx.exception))
         names = [call[0] for call in self.session.calls]
+        self.assertIn("disable", names)
+        self.assertNotIn("release", names)
+
+    def test_a_ctrl_c_during_the_wait_disables_capture_before_propagating(self):
+        # wait_for_activation sits in a main loop until someone physically
+        # crosses a barrier, so interrupting the wait is the expected way
+        # out, not an exotic one. The PortalError clauses cannot catch it,
+        # and without a BaseException reach the barriers stayed armed and
+        # capture stayed enabled -- leaving the user's own pointer diverted
+        # from their desktop after the test they just aborted.
+        self.session._interrupt_on_wait = True
+        with self.assertRaises(KeyboardInterrupt):
+            self.gui.wait_for_pointer_activation(timeout=5.0)
+        names = [call[0] for call in self.session.calls]
+        self.assertIn("enable", names)
         self.assertIn("disable", names)
         self.assertNotIn("release", names)
 

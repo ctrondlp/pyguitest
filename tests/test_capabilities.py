@@ -140,6 +140,26 @@ class TestCapabilitySet(unittest.TestCase):
                     with self.assertRaises(TypeError):
                         operation(operand, self.caps)
 
+    def test_a_non_set_operand_on_the_right_raises_the_clean_type_error(self):
+        # The forward operators had the mirror of the reflected ones' bug and
+        # no guard: `caps | ["x"]` wrapped frozenset.__or__'s NotImplemented
+        # in `CapabilitySet(...)`, which iterated NotImplemented and raised a
+        # confusing `TypeError: 'NotImplementedType' object is not iterable`
+        # instead of the builtin's clean `unsupported operand type(s)`.
+        for operand in ([Capability.TIMING], {"timing": 1}, "timing", 3):
+            with self.subTest(operand=operand):
+                for operation in (
+                    lambda a, b: a | b,
+                    lambda a, b: a & b,
+                    lambda a, b: a ^ b,
+                    lambda a, b: a - b,
+                ):
+                    with self.assertRaises(TypeError) as ctx:
+                        operation(self.caps, operand)
+                    message = str(ctx.exception)
+                    self.assertIn("unsupported operand type", message)
+                    self.assertNotIn("NotImplementedType", message)
+
 
 if __name__ == "__main__":
     unittest.main()

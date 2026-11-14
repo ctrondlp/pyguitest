@@ -14,6 +14,7 @@ Run from the repository root:  python3 scripts/gen-api-docs.py
 from __future__ import annotations
 
 import ast
+import dataclasses
 import importlib
 import inspect
 import pkgutil
@@ -53,7 +54,16 @@ HELPER_DISPATCH = {"KeySender": Capability.KEY_EVENT}
 # Backends that say yes to everything or nothing carry no information.
 UNINFORMATIVE = {"CompositeBackend", "NullBackend", "GUIBackend"}
 
-TYPES = ("Element", "Window", "Screen", "ImageMatch", "Application", "Environment")
+TYPES = (
+    "Element",
+    "Window",
+    "Screen",
+    "ImageMatch",
+    "Application",
+    "Environment",
+    # Handed back by `gui.capabilities`, and its three own members --
+    "CapabilitySet",
+)
 
 # Sections of the Session API, in the order a reader meets them. Anything
 # unlisted lands in "Other", so a newly added method shows up rather than
@@ -64,7 +74,15 @@ GROUPS: list[tuple[str, str, list[str]]] = [
         "A session is the handle on one desktop. `supports` and `require` are how a "
         "script asks what this desktop allows before depending on it, rather than "
         "discovering it from a traceback halfway through a run.",
-        ["supports", "require", "capabilities", "report", "close"],
+        [
+            "supports",
+            "require",
+            "require_version",
+            "capabilities",
+            "click_via",
+            "report",
+            "close",
+        ],
     ),
     (
         "Elements",
@@ -83,6 +101,10 @@ GROUPS: list[tuple[str, str, list[str]]] = [
             "window_element",
             "focused",
             "focus_tracking_works",
+            "element_at",
+            "extents",
+            "tree_items",
+            "row_values",
         ],
     ),
     (
@@ -101,6 +123,13 @@ GROUPS: list[tuple[str, str, list[str]]] = [
             "release_button",
             "drag",
             "scroll",
+            "click_element",
+            "double_click",
+            "double_click_element",
+            "drag_element",
+            "pointer_position",
+            "is_button_pressed",
+            "is_window_cursor",
         ],
     ),
     (
@@ -116,6 +145,7 @@ GROUPS: list[tuple[str, str, list[str]]] = [
             "release_key",
             "tap_key",
             "press_tab",
+            "is_key_pressed",
         ],
     ),
     (
@@ -137,10 +167,16 @@ GROUPS: list[tuple[str, str, list[str]]] = [
             "resize_window",
             "activate_window",
             "minimize_window",
+            "maximize_window",
+            "is_window_maximized",
+            "close_window",
             "is_window_open",
             "is_window_viewable",
             "refresh_window",
             "window_events",
+            "focus_window",
+            "lower_window",
+            "set_window_title",
         ],
     ),
     (
@@ -172,7 +208,8 @@ GROUPS: list[tuple[str, str, list[str]]] = [
         "Every `wait_*` call polls on an interval unless the backend can do "
         "better: a window wait is answered by real notification — "
         "`SetWinEventHook` on Windows, a compositor event stream on GNOME "
-        "Shell, KWin, sway or niri — but only when it matches a `title`. On "
+        "Shell, KWin, COSMIC, sway or niri — but only when it matches a "
+        "`title`. On "
         "macOS, which has no event feed here yet, on every X11 session, and "
         "on any wait that names `app_id`, that same call polls every "
         "`interval` seconds instead. `timeout` bounds the wait in seconds, "
@@ -190,6 +227,30 @@ GROUPS: list[tuple[str, str, list[str]]] = [
             "wait_for_process",
             "wait_for_idle",
             "wait_for_file",
+            "wait_window_focus",
+            "wait_for_pointer_activation",
+        ],
+    ),
+    (
+        "Expectations",
+        "Wait for a condition and raise when it does not arrive, which is what "
+        "a test wants: the `wait_*` calls return a value or `None` and leave the "
+        "judgement to the caller, while these raise a failure naming what was "
+        "actually found. **Their default deadlines differ.** `expect_element` "
+        "and `expect_window` default to `timeout=None` and wait indefinitely, "
+        "matching the `wait_*` calls they wrap; the state-checking six default "
+        "to five seconds. So an element that never appears hangs a run where a "
+        "value that never settles fails -- pass a `timeout` in any suite that "
+        "must not hang.",
+        [
+            "expect_element",
+            "expect_window",
+            "expect_text",
+            "expect_value",
+            "expect_checked",
+            "expect_enabled",
+            "expect_disabled",
+            "expect_showing",
         ],
     ),
     (
@@ -397,6 +458,52 @@ def attribute_note(source: str, name: str) -> str:
         ):
             continue
         following = tree.body[index + 1] if index + 1 < len(tree.body) else None
+        if not (
+            isinstance(following, ast.Expr)
+            and isinstance(following.value, ast.Constant)
+            and isinstance(following.value.value, str)
+        ):
+            return ""
+        return re.sub(r"\s+", " ", following.value.value.split("\n\n")[0].strip())
+    return ""
+
+
+def field_note(cls, name: str) -> str:
+    """First paragraph of the attribute docstring on a class field, or ''.
+
+    `attribute_note` reads module-level assignments; a dataclass field is
+    an annotated assignment inside the class body, which that function
+    never reaches. Nineteen `Environment` fields carry PEP 257 attribute
+    docstrings -- `has_wgc`, `has_listen_event`, `dpi_awareness` and the
+    rest, names that say nothing on their own -- and every one of them was
+    discarded, leaving the reference a column of bare names with empty
+    description cells.
+    """
+    try:
+        source = inspect.getsource(cls)
+    except (OSError, TypeError):
+        return ""
+    try:
+        tree = ast.parse(textwrap.dedent(source))
+    except SyntaxError:
+        return ""
+    definition = tree.body[0] if tree.body else None
+    if not isinstance(definition, ast.ClassDef):
+        return ""
+    body = definition.body
+    for index, node in enumerate(body):
+        if isinstance(node, ast.AnnAssign):
+            target = node.target
+            found = isinstance(target, ast.Name) and target.id == name
+        elif isinstance(node, ast.Assign):
+            found = any(
+                isinstance(one, ast.Name) and one.id == name for one in node.targets
+            )
+        else:
+            continue
+        if not found:
+            continue
+        following = body[index + 1] if index + 1 < len(body) else None
         if not (
             isinstance(following, ast.Expr)
             and isinstance(following.value, ast.Constant)
@@ -770,26 +877,47 @@ def method_capabilities(
         return set(), set()
     src = strip_docs(raw)
 
+    callees = set(re.findall(r"self\.([a-z_][a-z0-9_]*)\s*\(", src))
     routed = {**_DISPATCH, **EXTRA_DISPATCH}
+    # Skip the routed-dispatch shortcut for a name we also recurse into as a
+    # Session method: recursion returns that callee's accurate (needs,
+    # optional), where the _DISPATCH table is a coarse "mentions this
+    # capability" that cannot tell a hard requirement from an
+    # internally-optional one. Without this, expect_window -> `.wait_for_window(`
+    # matched _DISPATCH[WINDOW_EVENTS] and reported WINDOW_EVENTS as required,
+    # though wait_for_window uses it only when supports() says so. The backend
+    # hop (`self.backend.find_element(`) is not a `self.X(` callee, so its
+    # dispatch entry still counts.
     required = {
-        cap.name for attr, cap in routed.items() if re.search(rf"\.{attr}\s*\(", src)
+        cap.name
+        for attr, cap in routed.items()
+        if attr not in callees and re.search(rf"\.{attr}\s*\(", src)
     }
     required |= {
         cap.name
         for helper, cap in HELPER_DISPATCH.items()
         if re.search(rf"\b{helper}\s*\(", src)
     }
-    optional = set(re.findall(r"supports\(\s*Capability\.([A-Z_]+)", src))
-    required |= set(re.findall(r"Capability\.([A-Z_]+)", src)) - optional
+    own_optional = set(re.findall(r"supports\(\s*Capability\.([A-Z_]+)", src))
+    required |= set(re.findall(r"Capability\.([A-Z_]+)", src)) - own_optional
 
-    for callee in set(re.findall(r"self\.([a-z_][a-z0-9_]*)\s*\(", src)):
+    inherited_optional: set[str] = set()
+    for callee in callees:
         sub_required, sub_optional = method_capabilities(cls, callee, seen | {name})
         required |= sub_required
-        optional |= sub_optional
+        inherited_optional |= sub_optional
 
     known = set(Capability.__members__)
-    optional &= known
-    return (required & known) - optional, optional
+    # Only this method's OWN supports() guards discount its requirements, and a
+    # capability required through any unguarded path stays required even if
+    # another path reaches it under a guard. Measured: assert_focused calls
+    # focused() -- which degrades without ELEMENT_TREE, reporting it optional --
+    # AND element()/elements(), which hard-require it; a flat subtraction of
+    # the inherited optional set misreported the two focus asserts as not
+    # needing ELEMENT_TREE at all, when they raise without it.
+    needs = (required & known) - own_optional
+    optional = (own_optional | inherited_optional) & known
+    return needs, optional - needs
 
 
 def field_types(cls) -> dict[str, str]:
@@ -848,15 +976,14 @@ def member_row(cls, name: str, types: dict[str, str]) -> str:
         return f"| `{cell(signature(cls, name))}` | {cell(first_line(static))} |"
     declared = types.get(name)
     label = f"{name}: {declared}" if declared else name
-    # No description for a data member. What reaches here is only ever a
-    # field -- `count`/`index` and the rest of the builtin surface are
-    # filtered out above -- and a field carries no documentation of its
-    # own: a dataclass default borrows its *type's* docstring, and a
-    # NamedTuple's `_tuplegetter` says "Alias for field number 0", which
-    # tells a reader nothing the label `x: int` has not already told them.
-    # Both are also stdlib text that may be reworded between interpreters,
-    # and this file is byte-compared on every version CI runs.
-    return f"| `{cell(label)}` |  |"
+    # A field's own `__doc__` is never used: a dataclass default borrows its
+    # *type's* docstring, and a NamedTuple's `_tuplegetter` says "Alias for
+    # field number 0" -- stdlib text that says nothing the label `x: int`
+    # does not, and that may be reworded between interpreters, while this
+    # file is byte-compared on every version CI runs. A PEP 257 attribute
+    # docstring written in the class body is this project's own text, and is
+    # used.
+    return f"| `{cell(label)}` | {cell(field_note(cls, name))} |"
 
 
 def cap_link(name: str) -> str:
@@ -1131,12 +1258,27 @@ def render_types(out: list[str]) -> None:
         cls = getattr(pyguitest, name, None)
         if cls is None:
             continue
-        out += [f"### {name}", "", first_line(cls), ""]
+        # The class body, not just its summary line: `Window`'s says
+        # `handle` is backend-private and that a stale X11 id can silently
+        # address a different window, which reached no page while only
+        # `first_line` was emitted.
+        out += [f"### {name}", "", first_line(cls), "", *body(cls)]
         members = [
             n
             for n, _ in inspect.getmembers(cls)
             if not n.startswith("_") and not inherited_from_builtin(cls, n)
         ]
+        # A dataclass field with no class-level default is invisible to
+        # getmembers, so eight `Environment` fields were missing from the
+        # reference altogether -- `session_type` and `compositor` among
+        # them, which getting-started.md tells a reader to look at.
+        if dataclasses.is_dataclass(cls):
+            known = set(members)
+            members += [
+                field.name
+                for field in dataclasses.fields(cls)
+                if field.name not in known and not field.name.startswith("_")
+            ]
         if not members:
             continue
         types = field_types(cls)
@@ -1170,6 +1312,176 @@ def render_types(out: list[str]) -> None:
             out += params
             out += returns
             out += detail
+
+
+def render_key_names(out: list[str]) -> None:
+    """The `send_keys` vocabulary: modifier prefixes and `{}` key aliases.
+
+    Generated rather than written out, because the authority is
+    `GUIBackend.KEY_ALIASES`/`MODIFIER_KEYS` and a hand-copied table drifts
+    from them silently. It had no table at all before: `send_keys`'s
+    docstring named `KEY_ALIASES` -- a name that appeared in no document --
+    so the only way to learn the abbreviations was to read the backend
+    source. `examples/07_keys_and_pointer.py` shipped `{SPACE}`, which is
+    not one of them, and raised `ValueError` on X11 and Windows alike.
+    """
+    from pyguitest.backends.base import GUIBackend
+
+    out += [
+        "## Key names",
+        "",
+        "`send_keys` reads a `{NAME}` sequence as a key name: first against "
+        "the aliases below, case-insensitively, and otherwise by handing the "
+        "name to the backend as-is. The default vocabulary is X11 keysym "
+        "names, so `{Escape}`, `{Return}` and even `{Hiragana_Katakana}` "
+        "resolve on X11 without being aliases; a name that is neither an "
+        "alias nor a name the backend knows raises `ValueError`. Prefer an "
+        "alias: they are the portable spelling, and the same string then "
+        "works on every backend.",
+        "",
+        "### Modifier prefixes",
+        "",
+        "A prefix holds its key for the next key, or for a parenthesised "
+        "group. Groups nest, and a `)` releases exactly what its own `(` "
+        "added.",
+        "",
+        "| Prefix | Holds | Notes |",
+        "|--------|-------|-------|",
+    ]
+    notes = {
+        "^": "Control.",
+        "%": "Alt / Option.",
+        "+": "Shift.",
+        "#": (
+            "The `Meta_L` keysym on the Unix backends, which is **not** the "
+            "Super/Windows key -- use `{LSK}`/`{RSK}` for that. On Windows "
+            "it is the Windows key."
+        ),
+        "&": (
+            "AltGr, for a third-level character. **Not available on macOS**: "
+            "`MacquartzBackend` has no `&` modifier, so `&` there is typed "
+            "as a literal ampersand rather than held."
+        ),
+    }
+    for prefix, key in GUIBackend.MODIFIER_KEYS.items():
+        out.append(f"| `{prefix}` | `{key}` | {notes.get(prefix, '')} |")
+    out += [
+        "",
+        "### `{}` key aliases",
+        "",
+        "Several aliases can name one key; all spellings are equivalent and "
+        "matched case-insensitively.",
+        "",
+        "| Key | Aliases |",
+        "|-----|---------|",
+    ]
+    by_key: dict[str, list[str]] = {}
+    for alias, key in GUIBackend.KEY_ALIASES.items():
+        by_key.setdefault(key, []).append(alias)
+    for key in sorted(by_key):
+        spellings = ", ".join(f"`{{{a}}}`" for a in sorted(by_key[key]))
+        out.append(f"| `{key}` | {spellings} |")
+    out.append("")
+
+    # The one backend that accepts names beyond the shared aliases. Read
+    # from the module so the list cannot drift from the code; importable on
+    # any platform, since it is ctypes declarations rather than a live DLL.
+    # The one backend that accepts names beyond the shared aliases. Read
+    # from the module so the list cannot drift from the code; importable on
+    # any platform, since it is ctypes declarations rather than a live DLL.
+    try:
+        from pyguitest.backends import win32 as win32_module
+    except ImportError:  # pragma: no cover - defensive
+        long_names = None
+    else:
+        long_names = getattr(win32_module, "_SENDKEYS_LONG_NAMES", None)
+    if long_names:
+        out += [
+            "On Windows, `win32` also accepts these longer spellings, which "
+            "the other backends do not: "
+            + ", ".join(f"`{{{name}}}`" for name in sorted(long_names))
+            + ".",
+            "",
+        ]
+
+
+def render_session_object(out: list[str]) -> None:
+    """`Session`'s constructor and its public attributes.
+
+    The table of calls above is not the whole object. `Session.__init__`'s
+    docstring is the only place `event_delay`, `key_delay` and `click_via`
+    are explained together, and it reached no page: `Session` is not one of
+    the `TYPES` (rendering its hundred methods twice would be worse than
+    useless) and the detail pass only covers module-level functions. Its
+    four public attributes were invisible for the same reason -- an
+    instance attribute assigned in `__init__` is not a class member, so
+    `getmembers` never sees it -- while getting-started.md tells a reader
+    to call `gui.environment.summary()` and `connect`'s own entry says to
+    read `session.backend`.
+    """
+    session = pyguitest.Session
+    out += ["## The Session object", "", first_line(session), ""]
+    out += signature_fence(f"Session{function_signature(session.__init__)}")
+    out += parameter_table(session.__init__)
+    out += body(session.__init__)
+    out += [
+        "`connect()` is the ordinary way to get one; construct it directly "
+        "only to pair a backend you built yourself with an environment.",
+        "",
+        "These attributes are public and readable on any session:",
+        "",
+        "| Attribute | What it is |",
+        "|-----------|------------|",
+        "| `backend` | The backend, or composite of backends, this session "
+        "drives through. |",
+        "| `environment` | The `Environment` this session was opened against. |",
+        "| `event_delay` | Seconds slept after each synthesised event. |",
+        "| `key_delay` | Seconds slept between keystrokes. |",
+        "",
+    ]
+
+
+def render_helper_modules(out: list[str]) -> None:
+    """The public modules beside the package root.
+
+    Each declares an `__all__` and documents itself as callable without
+    going through the CLI, and none of them reached this page: a reader
+    sent to `pyguitest.compat` by recipes.md, or wanting the tree walk
+    `pyguitest inspect` prints, had only the source to go on.
+    """
+    import pyguitest.compat as compat_module
+    import pyguitest.inspect as inspect_module
+    import pyguitest.session as session_module
+
+    modules = [
+        ("pyguitest.inspect", inspect_module, list(inspect_module.__all__)),
+        ("pyguitest.compat", compat_module, list(compat_module.__all__)),
+        (
+            "pyguitest.session",
+            session_module,
+            [
+                "toolkit_accessibility",
+                "assistive_technology_enabled",
+                "gnome_extension_state",
+            ],
+        ),
+    ]
+    out += ["## Helper modules", ""]
+    for name, module, names in modules:
+        out += [f"### `{name}`", "", first_line(module), ""]
+        out += ["| Name | What it is |", "|------|------------|"]
+        for member in names:
+            obj = getattr(module, member, None)
+            if obj is None:
+                continue
+            shown = (
+                f"{member}{function_signature(obj)}"
+                if inspect.isfunction(obj)
+                else member
+            )
+            described = first_line(obj) or note_for(member, obj)
+            out.append(f"| `{cell(shown)}` | {cell(described)} |")
+        out.append("")
 
 
 def render_capabilities(out: list[str], prov, x11_only: set[str]) -> None:
@@ -1225,8 +1537,10 @@ def render_names(out: list[str]) -> None:
         "",
         "```",
     ]
+    names = [n for n in dir(pyguitest.Role) if not n.startswith("_")]
+    groups = [n for n in names if n.endswith("_ROLES")]
     line = ""
-    for role in (n for n in dir(pyguitest.Role) if not n.startswith("_")):
+    for role in (n for n in names if n not in groups):
         if len(line) + len(role) > 70:
             out.append(line.rstrip())
             line = ""
@@ -1234,6 +1548,22 @@ def render_names(out: list[str]) -> None:
     if line:
         out.append(line.rstrip())
     out += ["```", ""]
+    if groups:
+        # Kept out of the block above: these are *sets* of role names, and
+        # a reader scanning one flat list would take `WINDOW_ROLES` for a
+        # role in its own right and pass it to `element(role=...)`.
+        out += [
+            "`Role` also carries three ready-made groups, for the calls that "
+            "take several roles at once (`elements(role=...)` accepts a "
+            "sequence). Each is a set of the names above, not a role itself:",
+            "",
+            "| Group | Holds |",
+            "|-------|-------|",
+        ]
+        for group in groups:
+            members = sorted(getattr(pyguitest.Role, group))
+            out.append(f"| `Role.{group}` | {cell(', '.join(members))} |")
+        out.append("")
 
     out += [
         "## Exceptions",
@@ -1245,8 +1575,9 @@ def render_names(out: list[str]) -> None:
         obj = getattr(pyguitest, name, None)
         if isinstance(obj, type) and issubclass(obj, BaseException):
             out.append(f"| `{name}` | {cell(first_line(obj))} |")
+    out.append("")
+    render_exception_details(out)
     out += [
-        "",
         "## Module-level names",
         "",
         "| Name | What it is |",
@@ -1275,6 +1606,75 @@ def render_names(out: list[str]) -> None:
         out += body(obj)
 
 
+def recorded_attributes(exc: type) -> list[str]:
+    """The `self.x = ...` names an exception's own __init__ records."""
+    own = exc.__dict__.get("__init__")
+    raw = source_of(own) if own is not None else ""
+    if not raw:
+        return []
+    seen: list[str] = []
+    for name in re.findall(r"self\.([a-z_][a-z0-9_]*)\s*=", strip_docs(raw)):
+        if name not in seen:
+            seen.append(name)
+    return seen
+
+
+def render_exception_details(out: list[str]) -> None:
+    """Each exception in full: what it inherits, and what it carries.
+
+    The table above gives one line each, which is not enough to act on two
+    things a caller needs. The first is inheritance: `PermissionRequired`
+    is a `CapabilityUnsupported`, so one `except CapabilityUnsupported`
+    catches both -- and a suite that turns that into a skip silently turns
+    a missing grant into a skip too, which the one-line table could not
+    show. The second is the attributes. `CapabilityUnsupported`'s own
+    docstring says it "carries the capability and the reason so callers can
+    skip rather than fail", and `.capability`, `.backend`, `.reason` and
+    `.hint` appeared on no page, so the documented pattern could not be
+    written from the documentation.
+    """
+
+    def parts(exc: type) -> tuple[list[str], list[str], object, list[str]]:
+        bases = [
+            base.__name__
+            for base in exc.__bases__
+            if base is not object and base.__name__ != "Exception"
+        ]
+        return bases, body(exc), exc.__dict__.get("__init__"), recorded_attributes(exc)
+
+    exceptions = {
+        name: getattr(pyguitest, name)
+        for name in pyguitest.__all__
+        if isinstance(getattr(pyguitest, name, None), type)
+        and issubclass(getattr(pyguitest, name), BaseException)
+    }
+    # Which of them earn a section, decided before any of it is written: a
+    # base is linked only when its own section exists, or the link lands on
+    # an anchor this page does not have.
+    rendered = {
+        name for name, exc in exceptions.items() if any(parts(exc)[:2]) or parts(exc)[3]
+    }
+    for name, exc in exceptions.items():
+        if name not in rendered:
+            continue
+        bases, detail, own_init, attributes = parts(exc)
+        out += [f"### `{name}`", ""]
+        if bases:
+            inherits = ", ".join(
+                f"[`{base}`](#{base.lower()})" if base in rendered else f"`{base}`"
+                for base in bases
+            )
+            out += [f"Subclass of {inherits}.", ""]
+        out += detail
+        if own_init is not None:
+            out += parameter_table(own_init)
+        if attributes:
+            out += [
+                "Carries " + ", ".join(f"`.{one}`" for one in attributes) + ".",
+                "",
+            ]
+
+
 def _has_detail(obj) -> bool:
     """Whether a module-level export earns a section of its own.
 
@@ -1297,10 +1697,16 @@ def render() -> str:
 
     out = HEADER.split("\n")
     out += [first_line(pyguitest.connect), ""]
-    out += [f"`connect{cell(function_signature(pyguitest.connect))}`", ""]
+    out += [
+        f"[`connect{cell(function_signature(pyguitest.connect))}`](#connect)",
+        "",
+    ]
     render_session(out, x11_only)
     render_forwarded(out, x11_only)
     render_types(out)
+    render_session_object(out)
+    render_helper_modules(out)
+    render_key_names(out)
     render_capabilities(out, prov, x11_only)
     render_names(out)
     return "\n".join(out).rstrip() + "\n"

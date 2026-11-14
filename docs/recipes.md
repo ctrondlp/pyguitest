@@ -246,8 +246,13 @@ gui.assert_focused(name="Email")
 gui.assert_tab_order(["Name", "Email", "Country", "Submit"])
 ```
 
-`send_keys()` carries X11::GUITest's grammar (`^` Ctrl, `%` Alt, `+` Shift,
-`#` Meta, `{TAB}` and friends). `quote_for_type()` escapes a string that
+`send_keys()` carries X11::GUITest's grammar: `^` Ctrl, `%` Alt, `+` Shift,
+`#` Meta, `&` AltGr, `~` Enter, parenthesised groups that nest (`^(+(l)x)`
+holds Ctrl across both), a repeat count (`{TAB 3}`), `{PAUSE 500}` for a
+wait in milliseconds, and `{}` key names like `{TAB}` or `{BAC}` — the
+aliases are short, so `{SPC}` rather than `{SPACE}`. [api.md's **Key
+names** section](api.md#key-names) lists every alias and the two modifier
+prefixes that differ per platform. `quote_for_type()` escapes a string that
 contains those characters literally.
 
 **Check before you rely on focus.** Some desktops — GNOME Shell among them —

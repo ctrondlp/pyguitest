@@ -34,7 +34,7 @@ if not gui.supports(Capability.KEY_EVENT):
     )
 
 print("send_keys understands the X11::GUITest notation:")
-gui.send_keys("hello{SPACE}world")
+gui.send_keys("hello{SPC}world")
 gui.send_keys("^(a)")  # select all
 gui.send_keys("{BAC}")  # delete the selection
 

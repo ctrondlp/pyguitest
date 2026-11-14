@@ -284,6 +284,20 @@ class TestSway(unittest.TestCase):
         self.assertEqual(vim.app_id, "foot")
         self.assertEqual(vim.pid, 123)
 
+    def test_close_sends_kill_to_the_container(self):
+        # sway's `kill` is the graceful xdg close -- the surface gets a
+        # close event and the application keeps its "Save changes?" say --
+        # not a process kill, despite the name.
+        self.gui.close_window(self.gui.windows()[0])
+        self.assertEqual(self.transport.commands[-1], "[con_id=7] kill")
+
+    def test_maximize_is_not_claimed_by_a_tiler(self):
+        # sway's layout owns every window's size; there is no maximize to
+        # have.
+        from pyguitest.capabilities import Capability
+
+        self.assertNotIn(Capability.WINDOW_MAXIMIZE, self.gui.capabilities)
+
     def test_a_window_with_no_title_yet_is_still_listed(self):
         # Regression: filtering on name too made a window invisible to
         # windows() until it set a title -- exactly the window a
@@ -525,6 +539,20 @@ class TestNiri(unittest.TestCase):
         self.gui.activate_window(self.gui.windows()[1])
         self.assertEqual(self.transport.actions, [("FocusWindow", {"id": 8})])
 
+    def test_maximize_is_not_claimed_by_a_tiler(self):
+        # A scrolling tiler's layout owns every window's size; there is no
+        # maximize to have.
+        from pyguitest.capabilities import Capability
+
+        self.assertNotIn(Capability.WINDOW_MAXIMIZE, self.gui.capabilities)
+
+    def test_close_sends_close_window_by_id(self):
+        # niri's one graceful close -- the same request `niri msg action
+        # close-window` sends -- and the first window write it serves
+        # beyond resize and activate: no minimize, but close exists.
+        self.gui.close_window(self.gui.windows()[1])
+        self.assertEqual(self.transport.actions, [("CloseWindow", {"id": 8})])
+
     def test_resize_sets_each_axis_with_an_absolute_size_change(self):
         self.gui.resize_window(7, 800, 600)
         self.assertEqual(
@@ -636,6 +664,13 @@ class TestHyprland(unittest.TestCase):
     def test_dispatch_addresses_the_window(self):
         self.gui.activate_window(self.gui.windows()[0])
         self.assertIn("address:0x55a1", self.transport.dispatched[-1])
+
+    def test_maximize_is_not_claimed_by_a_tiler(self):
+        # Hyprland's layout owns every window's size; there is no maximize
+        # to have.
+        from pyguitest.capabilities import Capability
+
+        self.assertNotIn(Capability.WINDOW_MAXIMIZE, self.gui.capabilities)
 
     def test_viewable_defaults_true_when_fields_are_absent(self):
         self.assertTrue(self.gui.is_window_viewable(self.gui.windows()[0]))
@@ -1024,6 +1059,20 @@ class TestKdotool(unittest.TestCase):
         gui = KdotoolBackend(runner=failing_runner)
         self.assertEqual([w.app_id for w in gui.windows()], ["", ""])
 
+    def test_maximize_is_not_claimed(self):
+        # kdotool's own README: windowstate is MISSING maximized_vert and
+        # maximized_horz, and nothing reads state back -- so the capability
+        # is withheld rather than approximated.
+        from pyguitest.capabilities import Capability
+
+        self.assertNotIn(Capability.WINDOW_MAXIMIZE, self.gui.capabilities)
+
+    def test_close_runs_windowclose(self):
+        # kdotool's documented close verb; KWin forwards it to the client
+        # as an ordinary xdg close.
+        self.gui.close_window("{aaa-1}")
+        self.assertIn(["kdotool", "windowclose", "{aaa-1}"], self.calls)
+
     def test_xdotool_style_geometry_text_is_parsed(self):
         self.assertEqual(self.gui.geometry("{aaa-1}"), (100, 200, 800, 600))
 
@@ -1108,6 +1157,17 @@ class TestHyprlandLuaDispatch(unittest.TestCase):
             self.transport.dispatched[-1],
             "hl.dsp.window.move({ x = 400, y = 300, window = "
             f'"address:{HYPR_CLIENTS[0]["address"]}" }})',
+        )
+
+    def test_close_dispatches_closewindow_in_the_daemons_syntax(self):
+        # The Lua spelling comes from the daemon's own enumeration of
+        # hl.dsp.window (close, float, move, resize, ...), recorded in
+        # docs/validation.md -- not guessed.
+        address = HYPR_CLIENTS[0]["address"]
+        self.gui.close_window(address)
+        self.assertEqual(
+            self.transport.dispatched[-1],
+            f'hl.dsp.window.close({{ window = "address:{address}" }})',
         )
 
     def test_resize_sends_the_size_as_x_and_y(self):

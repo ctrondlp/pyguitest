@@ -18,6 +18,7 @@ Creating the device needs write access to /dev/uinput, normally via the
 `input` group.
 """
 
+import contextlib
 import os
 import time
 import warnings
@@ -92,7 +93,10 @@ _KEYSYM_NAMES = {
     "escape": "ESC",
     "prior": "PAGEUP",
     "next": "PAGEDOWN",
+    "page_up": "PAGEUP",
+    "page_down": "PAGEDOWN",
     "print": "SYSRQ",
+    "sys_req": "SYSRQ",
     "caps_lock": "CAPSLOCK",
     "num_lock": "NUMLOCK",
     "scroll_lock": "SCROLLLOCK",
@@ -107,6 +111,26 @@ _KEYSYM_NAMES = {
     "super_l": "LEFTMETA",
     "super_r": "RIGHTMETA",
     "iso_level3_shift": "RIGHTALT",
+    "bracketleft": "LEFTBRACE",
+    "bracketright": "RIGHTBRACE",
+    "period": "DOT",
+    "kp_add": "KPPLUS",
+    "kp_subtract": "KPMINUS",
+    "kp_multiply": "KPASTERISK",
+    "kp_divide": "KPSLASH",
+    "kp_enter": "KPENTER",
+    "kp_decimal": "KPDOT",
+    "kp_separator": "KPCOMMA",
+    "kp_0": "KP0",
+    "kp_1": "KP1",
+    "kp_2": "KP2",
+    "kp_3": "KP3",
+    "kp_4": "KP4",
+    "kp_5": "KP5",
+    "kp_6": "KP6",
+    "kp_7": "KP7",
+    "kp_8": "KP8",
+    "kp_9": "KP9",
 }
 """X11 keysym names that evdev spells differently, lowercased for lookup.
 
@@ -129,6 +153,20 @@ pressed something else.
 Evdev spellings still work: this is consulted before the `KEY_<NAME>`
 fallback, not in place of it, so `press_key("ENTER")` is unchanged -- which
 matters because this backend's own `KEY_ALIASES` emit exactly those.
+
+Three more families were the same loud half, found by asking which keysym
+names the other backends accept that this one refuses. `Page_Up`/`Page_Down`
+are X11's own aliases for `Prior`/`Next` and the spelling `docs/input.md`
+actually teaches, so a script written from the documentation died here while
+the same call worked on X11, Windows and macOS. The punctuation keysyms
+`bracketleft`/`bracketright`/`period` are spelled `LEFTBRACE`/`RIGHTBRACE`/
+`DOT` by evdev. And the keypad is spelled `KP_Add`/`KP_0` by X11 against
+`KPPLUS`/`KP0` here, for every arithmetic key and every digit.
+
+The shifted-character keysyms -- `asciitilde`, `exclam`, `at`, `numbersign`
+-- stay out for the reason the abbreviations above do: there is no single
+evdev key for a character that needs Shift held, so there is nothing to map
+them to that would not be a guess. `type_text` is the call for those.
 """
 
 
@@ -430,8 +468,24 @@ class UinputBackend(GUIBackend):
             code = self._keycode(name)
             if shift:
                 self._device.write(e.EV_KEY, e.KEY_LEFTSHIFT, 1)
-            self._device.write(e.EV_KEY, code, 1)
-            self._device.write(e.EV_KEY, code, 0)
+            try:
+                self._device.write(e.EV_KEY, code, 1)
+                self._device.write(e.EV_KEY, code, 0)
+            except BaseException:
+                # The Shift is already down in the kernel, and this device
+                # outlives the call -- it is held open for the session -- so
+                # a write that dies between the press and the release leaves
+                # Shift logically held for every later keystroke, turning the
+                # rest of the run into capitals and symbols with nothing
+                # raised to say so. Not a plain `finally`, for Session.drag's
+                # reason: the release is likely to fail the same way the
+                # character did, and in a `finally` that second error would
+                # replace the one that actually explains the failure.
+                if shift:
+                    with contextlib.suppress(Exception):
+                        self._device.write(e.EV_KEY, e.KEY_LEFTSHIFT, 0)
+                        self._device.syn()
+                raise
             if shift:
                 self._device.write(e.EV_KEY, e.KEY_LEFTSHIFT, 0)
             self._device.syn()

@@ -79,7 +79,7 @@ returns a value for you to branch on.
 
 Open an automation session.
 
-`connect(backend: str \| Sequence[str] \| None = None, environment: Environment \| None = None, backend_options: dict \| None = None, **kwargs: Any) -> Session`
+[`connect(backend: str \| Sequence[str] \| None = None, environment: Environment \| None = None, backend_options: dict \| None = None, **kwargs: Any) -> Session`](#connect)
 
 ## Session control
 
@@ -89,7 +89,9 @@ A session is the handle on one desktop. `supports` and `require` are how a scrip
 |------|-------|--------------|
 | [`supports(capability: Capability)`](#supports) |  | Whether this session provides `capability`. |
 | [`require(*capabilities: Capability)`](#require) |  | Raise unless every capability is available. |
+| [`require_version(minimum: str)`](#require_version) |  | Raise VersionTooOld unless this pyguitest is at least `minimum`. |
 | [`capabilities`](#capabilities) |  | Everything this session can do. |
+| [`click_via`](#click_via) |  | The default route `element.click()` takes. |
 | [`report()`](#report) |  | A support table for this session, for logs and bug reports. |
 | [`close()`](#close) |  | Release the backend's resources. |
 
@@ -131,7 +133,32 @@ require(*capabilities: Capability)
 | `*capabilities` |  | *any number* |
 
 For declaring a test suite's needs up front rather than failing part
-way through a run.
+way through a run. Raises CapabilityUnsupported, naming the first
+missing capability and what this session composed, so a suite can
+skip rather than fail -- see the class for the attributes a skip
+decision reads.
+
+### `require_version`
+
+```python
+require_version(minimum: str)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `minimum` | `str` | **required** |
+
+The counterpart of require() for the package itself rather than the
+desktop: a script written against this release declares that fact up
+front and fails here, naming both versions, rather than mid-run with
+an AttributeError on an API an older release does not have.
+
+Delegates to the module-level pyguitest.require_version(), which
+also works before connect(); this method exists so a script holding
+only `gui` declares its floor the same way it declares the
+capabilities it needs.
 
 ### `capabilities`
 
@@ -140,6 +167,20 @@ way through a run.
 The backend's capabilities plus the tier-1 ones Session implements
 directly -- process launch and timing work regardless of which backend
 was selected, or whether one was found at all.
+
+### `click_via`
+
+**Returns** `str`
+
+Used when a call passes no `via` of its own: `"action"` (the
+accessible action only), `"pointer"` (the user pathway only) or
+`"auto"` (action first, with the pointer as the fallback).
+
+Settable mid-run, so one assignment switches a whole suite's
+policy, and checked on every assignment rather than only in the
+constructor: assigning anything else raises ValueError at the line
+that did it, instead of surfacing from the first element click that
+happened to take the session default.
 
 ### `report`
 
@@ -192,8 +233,12 @@ The recommended way to drive an application: match on what a widget is and what 
 | [`elements(...)`](#elements) | [`ELEMENT_TREE`](#cap-element_tree) | Return every accessible element matching every given filter. |
 | [`root_element()`](#root_element) | [`ELEMENT_TREE`](#cap-element_tree) | The accessible-tree root. The replacement for the X11 window tree. |
 | [`window_element(title: str \| re.Pattern[str])`](#window_element) | [`ELEMENT_TREE`](#cap-element_tree) — uses [`WINDOW_LIST`](#cap-window_list) if present | The accessible Element for the window matching `title`. |
-| [`focused()`](#focused) | [`ELEMENT_TREE`](#cap-element_tree) — uses [`WINDOW_STATE`](#cap-window_state) if present | The accessible element that currently has keyboard focus, or None. |
-| [`focus_tracking_works()`](#focus_tracking_works) | [`ELEMENT_TREE`](#cap-element_tree) — uses [`WINDOW_STATE`](#cap-window_state) if present | Whether this desktop actually publishes per-widget keyboard focus. |
+| [`focused()`](#focused) | uses [`ELEMENT_TREE`](#cap-element_tree), [`WINDOW_STATE`](#cap-window_state) if present | The accessible element that currently has keyboard focus, or None. |
+| [`focus_tracking_works()`](#focus_tracking_works) | uses [`ELEMENT_TREE`](#cap-element_tree), [`WINDOW_STATE`](#cap-window_state) if present | Whether this desktop actually publishes per-widget keyboard focus. |
+| [`element_at(x: int, y: int)`](#element_at) | [`ELEMENT_GEOMETRY`](#cap-element_geometry) | The deepest accessible element at a screen coordinate, or None. |
+| [`extents(element: Element)`](#extents) | [`ELEMENT_GEOMETRY`](#cap-element_geometry) | `element`'s (x, y, width, height) in screen coordinates. |
+| [`tree_items(root: Element, *, role: str \| None = None, max_depth: int = 24)`](#tree_items) | [`ELEMENT_ACTION`](#cap-element_action), [`ELEMENT_TREE`](#cap-element_tree) | Every descendant of `root`, opening collapsed branches to reach them. |
+| [`row_values(row: Element)`](#row_values) |  | `row`'s own column values, as plain text, one per child cell. |
 
 ### `button`
 
@@ -214,6 +259,9 @@ Push buttons only. A toolbar item, a tab, or a menu entry that looks
 like a button to a user usually publishes a different role -- reach
 for menu_item(), or element(role=...), rather than assuming this
 covers them.
+
+Raises ElementNotFound if nothing matches, the same as element():
+it never returns None, so there is nothing to test for.
 
 ### `text_field`
 
@@ -238,6 +286,9 @@ and a password field is its own role everywhere.
 A read-only field is still returned; it simply never reports typed
 input (its READ_ONLY state is the honest signal to check first).
 
+Raises ElementNotFound if nothing matches, the same as element():
+it never returns None, so there is nothing to test for.
+
 ### `dropdown`
 
 ```python
@@ -257,6 +308,9 @@ A Qt combo box publishes its *current text* as the accessible name
 and discards the name set on it, so the stable name often travels in
 the accessible *description* instead. Try the description before
 giving up.
+
+Raises ElementNotFound if nothing matches, the same as element():
+it never returns None, so there is nothing to test for.
 
 ### `checkbox`
 
@@ -278,6 +332,9 @@ own role. Read the returned element's `checked` to see its state,
 and `checkable` first: `checked` answers a real boolean on
 everything, whether or not it has a box to check.
 
+Raises ElementNotFound if nothing matches, the same as element():
+it never returns None, so there is nothing to test for.
+
 ### `link`
 
 ```python
@@ -298,6 +355,9 @@ publishes no accessible tree at all until an assistive technology is
 announced, so this raising ElementNotFound on every link in such an
 app is a sign of that rather than of a wrong name -- see
 docs/troubleshooting.md.
+
+Raises ElementNotFound if nothing matches, the same as element():
+it never returns None, so there is nothing to test for.
 
 ### `menu_item`
 
@@ -323,6 +383,9 @@ A submenu's own entry carries this role too, and a checkable item
 reports its state through `checked`. Top-level menu bar entries
 ("File") may publish `menu` rather than `menu item` depending on the
 toolkit; use element(role=...) where that distinction matters.
+
+Raises ElementNotFound if nothing matches, the same as element():
+it never returns None, so there is nothing to test for.
 
 ### `element`
 
@@ -424,6 +487,9 @@ that same subtree N times over, where one search naming all N roles
 walks it once. Confirmed live: on AT-SPI, walking a ~130-element
 window role by role (16 calls) took over a minute; the same 16 roles
 in one call took a few seconds, the walk's own cost either way.
+
+Raises TypeError if `within` is a Window rather than an Element --
+`window_element(window)` is the Element for a window.
 
 ### `root_element`
 
@@ -540,6 +606,197 @@ False when nothing at all currently has focus, which on a healthy
 desktop usually means an active window with nothing focused in it
 rather than a desktop that cannot report focus.
 
+### `element_at`
+
+```python
+element_at(x: int, y: int)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `x` | `int` | **required** |
+| `y` | `int` | **required** |
+
+**Returns** `Element | None`
+
+What window_at is for windows, with no `screen` argument: the
+accessible tree is addressed in one desktop-wide coordinate space.
+
+The answer is only as good as the extents behind it. A toolkit that
+misreports them -- GTK4 has been seen placing every widget at the
+origin -- makes one element claim every point, and nothing here can
+tell that apart from a correct answer, so a caller turning a
+coordinate into a locator should check that the element it got back
+really covers the point (extents() says).
+
+### `extents`
+
+```python
+extents(element: Element)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `element` | `Element` | **required** |
+
+**Returns** `tuple[int, int, int, int] | None`
+
+None where the element occupies no screen space -- it publishes no
+rectangle, or reports an empty one because it is not showing.
+
+The counterpart of geometry() for elements, and separate from it
+because the two are answered by different backends: a window
+rectangle can come from the compositor, an element's only ever from
+the accessible tree. Needs Capability.ELEMENT_GEOMETRY.
+
+### `tree_items`
+
+```python
+tree_items(root: Element, *, role: str | None = None, max_depth: int = 24)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `root` | `Element` | **required** |
+| `role` | `str \| None` | `None` |
+| `max_depth` | `int` | `24` |
+
+**Returns** `list[Element]`
+
+`elements(within=root)` only ever sees what the accessibility tree
+already has *visible* -- a collapsed tree row's children are not
+there to find until something opens it, the same way they are not
+there on screen. This walks `root`, expanding every branch it finds
+still collapsed (`expandable` and not `expanded`) before descending
+into it, so a caller gets every row the user could reach by clicking
+every disclosure triangle in order, not only the ones already open
+when this was called.
+
+`root` is the *container* the rows live in -- the tree, list or table
+element itself, not a row inside it. Where the next section says a
+toolkit publishes revealed rows beside their branch, that is the
+whole reason: a row passed here is not a container of anything, so a
+collapsed one answers nothing.
+
+Where a revealed row goes
+-------------------------
+Opening a branch does not put its rows in the same place on every
+toolkit, and `child.children` alone cannot tell the two apart:
+
+- **UI Automation nests them.** The branch's own `children` grows, so
+  reading it after `expand()` finds them. Measured on WinDirStat's
+  real tree, where a `tree item` holds the rows it revealed.
+- **AT-SPI on GTK flattens them.** The opened row keeps *no*
+  children at all, and the rows it revealed are published as new
+  siblings of it, in the container's own child list. Measured live on
+  a GTK3 `GtkTreeView` (the probe window's `Folders` tree): with
+  `Documents` collapsed, `Documents.children` was `[]`, and after
+  `Documents.expand()` it was still `[]` -- while the tree's own
+  children went from `[column header 'Folder', 'Documents', 'Trash']`
+  to `['Folder', 'Documents', 'Reports', 'Notes', 'Trash']`. The
+  revealed rows appear in pre-order beside the row that revealed
+  them, exactly as the flattened list on screen reads. A walk that
+  only recursed into `child.children` therefore found every row that
+  was already open and never one it had just opened itself.
+
+So a container's children are re-read after each expansion, and the
+walk resumes from where it stopped rather than from the snapshot it
+started with. That picks up rows revealed beside their branch (GTK)
+and leaves the nested case (UIA) exactly as it was, since there the
+list does not change and the recursion into the branch finds them
+instead. The one thing this assumes about order is that a toolkit
+publishes revealed rows at or after the position of the row that
+revealed them, which is what pre-order flattening means and what both
+measured toolkits do; one that inserted them *before* their branch
+would leave them unseen. The result is not deduped either, because
+there is nothing to dedupe on: a live backend hands out a fresh
+wrapper per read, so two reads of one row are two objects that merely
+look alike, and a container publishing the same row twice yields it
+twice rather than once.
+
+Only the reads matter here, and one is added where it counts: a
+container is re-read once per expansion, never once per child, so a
+tree with nothing left collapsed costs exactly the walk it did before.
+
+`role` filters what is *returned* -- `Role.TABLE_CELL` for a GTK tree
+view's rows, `Role.TREE_ITEM` for UI Automation's, say -- without
+changing what gets walked or expanded; `None` (the default) returns
+every descendant, matching `elements()`'s own convention. Rows this
+expands stay expanded afterward: collapsing them back would cost a
+second full walk for a state nothing asked to have preserved, the
+same tradeoff `os.walk` makes about a directory's mtimes.
+
+`max_depth` bounds how deep the *containers* nest, the same bound
+`element_at` polices descent with on both backends and for the same
+reason: a cyclic or malformed tree must not spin forever. A real tree
+exhausts its actual depth long before 24 matters; a caller automating
+something deeper can raise it. On a flattening toolkit it bounds less
+than it looks like it does, since every row sits one level below the
+tree itself however deep the branch it came from -- it is not a limit
+on rows. A cycle is still caught: an element listing itself among its
+own children is only walked again where an expansion actually added
+something to walk, and `expand()` no-ops on a row already open.
+
+Needs Capability.ELEMENT_TREE to walk children at all, and
+Capability.ELEMENT_ACTION only where a branch actually has to be
+opened -- a tree with nothing left collapsed runs on the first alone,
+and the second is asked for before the first expansion rather than on
+the way in.
+
+```python
+# `root` is required: pass the container's own Element.
+tree = gui.element(role=Role.TREE, within=gui.window_element("Files"))
+for row in gui.tree_items(tree):
+    print(gui.row_values(row))
+
+# Narrow the walk by role, and bound it on a tree deep enough
+# to be worth not walking all of.
+gui.tree_items(tree, role=Role.TABLE_ROW, max_depth=4)
+```
+
+### `row_values`
+
+```python
+row_values(row: Element)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `row` | `Element` | **required** |
+
+**Returns** `tuple[str, ...]`
+
+For a control that nests each row's cells beneath it as children --
+confirmed live against a UIA `ListView` (WinDirStat's real
+extension-summary list, each `list item` holding one `text` child
+per column). Reads each child's `name`, which is where both backends
+put a cell's displayed value.
+
+A GTK `GtkTreeView` never nests this way, whatever its column count:
+it publishes no row element at all. Measured live on
+pyguitest-recorder's probe window -- a one-column `Gtk.TreeView`
+(`First row`/`Second row`/`Third row`, and the `Folders` tree, whose
+rows are `Documents`/`Reports`/`Q1`/`Q2`/`Notes`/`Trash`) -- every
+one of those names is a `table cell` directly inside the table,
+`table row` matches nothing at all, and this method on one of those
+cells answers `()`. Measured again on a three-column
+`Gtk.ListStore`: three `table column header` children (`Name`,
+`Count`, `Color`) followed by the six `table cell`s flat, in
+row-major order. Nothing groups those into rows but the caller
+already knowing the column count, so this method does not cover that
+shape -- reading it means chunking
+`elements(role=Role.TABLE_CELL, within=table)` by the count
+`elements(role=Role.TABLE_COLUMN_HEADER, within=table)` gives, by
+hand, since nothing here has that structure to read automatically.
+
 ## Pointer
 
 Coordinates are absolute screen pixels, and `screen=` selects the monitor. Prefer driving a named element over clicking a point where you can: a coordinate goes stale the moment a window moves. `glide` and `move_mouse_naturally` exist for applications that only react to real movement, such as hover menus.
@@ -554,6 +811,13 @@ Coordinates are absolute screen pixels, and `screen=` selects the monitor. Prefe
 | [`release_button(button: int)`](#release_button) | [`POINTER_BUTTON`](#cap-pointer_button) | Release a mouse button. |
 | [`drag(start, end, ...)`](#drag) | [`POINTER_BUTTON`](#cap-pointer_button), [`POINTER_MOVE`](#cap-pointer_move) — uses [`POINTER_QUERY`](#cap-pointer_query) if present | Press at `start`, glide to `end`, release. Drag-and-drop. |
 | [`scroll(dx: int = 0, dy: int = 0)`](#scroll) | [`POINTER_SCROLL`](#cap-pointer_scroll) | Scroll by whole wheel detents: `dy` positive is up, `dx` right. |
+| [`click_element(element: Element, button: int = 1)`](#click_element) | [`ELEMENT_GEOMETRY`](#cap-element_geometry), [`POINTER_BUTTON`](#cap-pointer_button), [`POINTER_MOVE`](#cap-pointer_move) | Click a named element through the pointer. `element.click()` ends here. |
+| [`double_click(button: int = 1)`](#double_click) | [`POINTER_BUTTON`](#cap-pointer_button) | Press and release a mouse button twice, as one double-click. |
+| [`double_click_element(element: Element)`](#double_click_element) | [`ELEMENT_GEOMETRY`](#cap-element_geometry), [`POINTER_BUTTON`](#cap-pointer_button), [`POINTER_MOVE`](#cap-pointer_move) | Double-click a named element. `element.double_click()` does the same. |
+| [`drag_element(source, target, ...)`](#drag_element) | [`ELEMENT_GEOMETRY`](#cap-element_geometry), [`POINTER_BUTTON`](#cap-pointer_button), [`POINTER_MOVE`](#cap-pointer_move) — uses [`POINTER_QUERY`](#cap-pointer_query) if present | Drag `source` onto `target`: press at one element, glide to the other. |
+| [`pointer_position()`](#pointer_position) | [`POINTER_QUERY`](#cap-pointer_query) | The global pointer position. Replaces GetMousePos. |
+| [`is_button_pressed(button: int)`](#is_button_pressed) | [`INPUT_STATE_QUERY`](#cap-input_state_query) | Whether a mouse button is currently held down. |
+| [`is_window_cursor(window: Window, shape: int)`](#is_window_cursor) | [`WINDOW_CURSOR_QUERY`](#cap-window_cursor_query) | Whether `window` is currently showing cursor `shape`. |
 
 ### `move_mouse`
 
@@ -639,6 +903,9 @@ gui.glide(600, 400)
 # the pointer to actually pass along the path.
 gui.glide(600, 400, via=[(300, 100), (450, 250)], duration=1.0)
 ```
+
+Raises ValueError if `duration` is negative or `rate` is not
+positive.
 
 ### `move_mouse_naturally`
 
@@ -898,6 +1165,8 @@ gui.drag((120, 400), (600, 400), via=[(300, 250)], duration=0.8)
 gui.drag((120, 400), (600, 400), settle=0.2)
 ```
 
+Raises ValueError if `settle` is negative.
+
 ### `scroll`
 
 ```python
@@ -916,6 +1185,207 @@ direction is X11's rather than Wayland's -- the same on every
 backend, which took a fix on two of them. `GUIBackend.scroll`
 has the reasoning.
 
+### `click_element`
+
+```python
+click_element(element: Element, button: int = 1)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `element` | `Element` | **required** |
+| `button` | `int` | `1` |
+
+Where the element publishes no accessible action to name -- a widget
+whose provider offers neither Invoke nor Toggle nor an MSAA default
+action, measured live on a `SysListView32` cell in
+pyguitest-recorder -- `element.click()` calls this instead of raising,
+because a coordinate click is what a person does with such a widget and
+what the refusal used to advise. The element is still the locator: its
+rectangle is read fresh each call rather than baked in ahead of time,
+and only the gesture falls back to the pointer.
+
+The spelling for an element with no session behind it -- one taken
+straight from a backend, where `element.click()` has nothing to
+delegate to. Either reads the same to a caller; this one is also what
+`element.click()` ends up calling.
+
+Needs Capability.ELEMENT_GEOMETRY, plus the pointer capabilities --
+which come from whichever input backend the session was built with
+(`win32`, `macquartz`, X11/XTEST, the portal), not from the
+accessibility one. Raises PyGUITestError where extents() has no
+rectangle for this element -- it is not showing, or the backend reports
+none -- the same split `double_click_element` makes. `element.click()`
+raises ElementNotActionable for that case instead, so that the typed
+refusal a caller already catches keeps its meaning.
+
+### `double_click`
+
+```python
+double_click(button: int = 1)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `button` | `int` | `1` |
+
+Whether a pair of clicks *is* a double-click is the toolkit's
+judgement, not this package's: GTK and Qt each measure the gap
+between the two presses against a threshold that defaults to 400ms
+and is settable per desktop.
+
+So the four events go out back-to-back, deliberately skipping the
+`event_delay` pause that calling click() twice would take between
+them. At an `event_delay` of 0.2s that pause alone puts 400ms
+between the presses and delivers two single clicks -- a test that
+then passes against a widget that never saw a double-click, which
+is the failure this package works hardest to avoid. A double-click
+is one user action, so it takes one `event_delay` at the end, the
+same as every other action here.
+
+### `double_click_element`
+
+```python
+double_click_element(element: Element)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `element` | `Element` | **required** |
+
+The spelling for an element with no session behind it -- one taken
+straight from a backend, where `element.double_click()` has nothing
+to delegate to. Either reads the same to a caller; this one is also
+what `element.double_click()` ends up calling.
+
+Two `element.click()` calls are not a double click: each is a
+separate round trip over the accessibility bus, which is slower
+than any toolkit's double-click interval, so the pair arrives as
+two single clicks and a double-clicked folder icon simply does not
+open.
+
+The element is still the locator -- its rectangle is read fresh
+each call, rather than baked in ahead of time -- and only the
+gesture falls back to the pointer, because that is where this
+package's real double_click lives. Needs Capability.ELEMENT_GEOMETRY.
+
+Raises PyGUITestError if extents() has no rectangle for this element
+-- it is not showing, or the backend reports none -- rather than
+ElementNotActionable, which means something more specific: no click
+or press action for element.click() to fall back to.
+
+### `drag_element`
+
+```python
+drag_element(
+    source: Element,
+    target: Element,
+    *,
+    button: int = 1,
+    duration: float = 0.3,
+    rate: float = 120.0,
+    via: Sequence[tuple[int, int]] = (),
+    ease: Callable[[float], float] | None = None,
+    settle: float = 0.05,
+)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `source` | `Element` | **required** |
+| `target` | `Element` | **required** |
+| `button` | `int` | `1` |
+| `duration` | `float` | `0.3` |
+| `rate` | `float` | `120.0` |
+| `via` | `Sequence[tuple[int, int]]` | `()` |
+| `ease` | `Callable[[float], float] \| None` | `None` |
+| `settle` | `float` | `0.05` |
+
+The element form of `drag`, standing to it exactly as `click_element`
+stands to the pointer `click`: both endpoints are locators, their
+rectangles read fresh each call rather than baked in by a caller
+doing the `extents()` arithmetic by hand, and only the gesture itself
+falls back to the pointer. Reorder a list by dragging one row onto
+another, drop a file onto a trash button, move a node between panes.
+
+Every keyword argument but drag's `screen` is here and means the
+same there -- `via` waypoints, `duration`/`rate`/`ease` for the
+glide, and `settle` for the pauses around the button events a fussy
+drop target needs. `screen` is deliberately absent: both ends come
+from extents(), which are already absolute screen coordinates, the
+same reason click_element takes no screen either. The
+press-glide-release shape, and why a bare press-release is not a
+drag, are drag()'s to explain.
+
+Needs Capability.ELEMENT_GEOMETRY for both elements, plus the pointer
+capabilities drag() needs. Raises PyGUITestError where either element
+has no rectangle -- it is not showing, or the backend reports none --
+the same split click_element makes.
+
+```python
+rows = gui.elements(role=Role.TABLE_ROW, within=gui.window_element("Files"))
+gui.drag_element(rows[3], rows[0])  # move the fourth row to the top
+gui.drag_element(gui.element(name="report.pdf"), gui.button("Trash"))
+```
+
+### `pointer_position`
+
+```python
+pointer_position()
+```
+
+**Returns** `tuple[int, int]`
+
+In the coordinate space `screens()` reports. Works on X11, Windows
+and macOS; see the note above for why an XWayland answer can be
+silently stale. To check where a click will land, prefer
+window_at()/element_at() over comparing this against an expectation.
+
+### `is_button_pressed`
+
+```python
+is_button_pressed(button: int)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `button` | `int` | **required** |
+
+**Returns** `bool`
+
+Same numbering as click() -- 1 left, 2 middle, 3 right -- and
+reports the *desktop's* state, so a button a user is physically
+holding reads as pressed too, not only one this session injected.
+See the note above for the Wayland and XWayland caveats.
+
+### `is_window_cursor`
+
+```python
+is_window_cursor(window: Window, shape: int)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `window` | `Window` | **required** |
+| `shape` | `int` | **required** |
+
+**Returns** `bool`
+
+Replaces IsWindowCursor. Impossible on Wayland, where cursor shape is
+negotiated privately between client and compositor.
+
 ## Keyboard
 
 `type_text` is for literal text and `send_keys` for chords and named keys. Both go to whatever holds focus, so focus a window or element first -- see `focus_window` -- or the keystrokes land somewhere else. Typed text depends on the session keymap; [input.md](input.md) covers when that matters.
@@ -928,6 +1398,7 @@ has the reasoning.
 | [`release_key(key: str)`](#release_key) | [`KEY_EVENT`](#cap-key_event) | Release a key by name. |
 | [`tap_key(key: str)`](#tap_key) | [`KEY_EVENT`](#cap-key_event) | Press and release a key. Replaces PressReleaseKey. |
 | [`press_tab(reverse: bool = False)`](#press_tab) | [`KEY_EVENT`](#cap-key_event) | Press Tab (or Shift+Tab if `reverse`), advancing keyboard focus. |
+| [`is_key_pressed(key: str)`](#is_key_pressed) | [`INPUT_STATE_QUERY`](#cap-input_state_query) | Whether a key is currently held down. Replaces IsKeyPressed. |
 
 ### `type_text`
 
@@ -982,8 +1453,9 @@ characters:
 
 ```
 ^ % + # &   modifiers: Ctrl, Alt, Shift, Meta, AltGr
-~ or \n     Enter
-( )         group the following keys under a modifier
+~ \n \r     Enter
+\t          Tab
+( )         group keys under a modifier; groups nest
 { }         escape a special character, name a key by
             abbreviation, repeat one, or pause
 ```
@@ -995,7 +1467,7 @@ nothing:
 ```python
 gui.send_keys("Hello, how are you?\n")
 gui.send_keys("%(f)q")  # Alt-f, then plain q
-gui.send_keys("^(+(l))")  # Ctrl-Shift-l
+gui.send_keys("^(+(l)x)")  # Ctrl-Shift-l, then Ctrl-x
 gui.send_keys("+(abc)")  # Shift held: ABC
 gui.send_keys("{BAC}")  # Backspace
 gui.send_keys("{F1 F2 F3}")  # F1, F2, F3
@@ -1003,15 +1475,53 @@ gui.send_keys("{TAB 3}")  # Tab, three times
 gui.send_keys("{PAUSE 500}")  # sleep 500ms
 ```
 
-Key names inside `{}` are looked up case-insensitively in the active
-backend's KEY_ALIASES, or else passed to press_key as written, so an
-unabbreviated name works too: `{BackSpace}` in place of `{bac}`.
+**Groups nest, and a `)` releases exactly what its own `(` added**
+-- which is what the `^(+(l)x)` line above shows: Ctrl and Shift
+are held for `l`, the inner `)` lets go of Shift alone, and `x`
+arrives with Ctrl still down. The older `^(+(l))` spelling never
+demonstrated it, since nothing sits between the two `)`.
+
+`{PAUSE n}` waits n milliseconds, and **the number is required**:
+`{PAUSE}` and `{PAUSE TAB}` both raise ValueError rather than
+silently waiting for nothing. `{PAUSE 0}` is a legal no-op. PAUSE
+may share a brace with keys, as in `{TAB PAUSE 100}`.
+
+A repeat count works on any key or literal character -- `{a 3}`
+types `aaa` -- and must be positive: `{a 0}` and `{a -1}` both
+raise ValueError, as does a count with no key in front of it. A
+`{PAUSE n}` likewise refuses a negative n rather than sleeping for
+it. `{{}` and `{}}` are the
+literal braces. A bare `(...)` with no modifier in front is legal
+and groups nothing, an unmatched `)` releases whatever is held, and
+a group left unclosed at the end of the string is released on the
+way out, as is anything still held when a key in the middle fails.
+
+Key names inside `{}` are looked up case-insensitively against the
+aliases -- see **Key names** in docs/api.md for the full table, and
+for which modifier prefixes differ per platform (`#` is Meta rather
+than Super on the Unix backends, and `&` does not exist on macOS).
+A name that is not an alias is passed to press_key as written, so
+an unabbreviated name works where the backend knows it:
+`{BackSpace}` in place of `{bac}`. The aliases are the portable
+spelling, and they are short -- `{SPC}`, not `{SPACE}`, which no
+backend but uinput resolves.
 
 This is the classic ASCII grammar, faithfully ported -- not a
 keymap-aware text-entry path. Use type_text for arbitrary or
-non-ASCII text; this raises ValueError for a character with no
-static key mapping (see GUIBackend.resolve_char_key), for malformed
-`{}` syntax, and for a `{}` key name this backend does not resolve.
+non-ASCII text.
+
+Two different failures, and which one you catch matters. A
+`ValueError` means the string itself is wrong: a character with no
+static key mapping (see GUIBackend.resolve_char_key), malformed
+`{}` syntax, or a `{}` name that is not a key at all. A
+`CapabilityUnsupported` means the string is fine and this *desktop*
+cannot serve it -- a real key with no keycode in the server's
+current keymap. `gui.send_keys("{Hiragana_Katakana}")` on an
+ordinary US layout is the second kind: X11 resolves the name to a
+genuine keysym and then finds no physical key bound to it. The
+contract named only `ValueError` before, so a caller following it
+with `except ValueError` saw an uncaught error for a condition that
+is about the keyboard rather than their own call.
 
 ### `press_key`
 
@@ -1100,6 +1610,25 @@ Sugar over send_keys -- needs real key injection
 only read or set AT-SPI state directly and need no injection
 permission.
 
+### `is_key_pressed`
+
+```python
+is_key_pressed(key: str)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `key` | `str` | **required** |
+
+**Returns** `bool`
+
+Takes the same backend-native key name as press_key. Useful for
+asserting a modifier was actually released after a combination; see
+the note above, and be aware key state under XWayland is accurate
+only while an X client holds focus.
+
 ## Windows
 
 A `Window` stays usable as a handle, but its `title`, `app_id` and `pid` are read when it is created and do not update themselves -- call `refresh_window` for current values rather than comparing against a title the application has since changed. Finding one by title is the usual way in, and a window the list already carries may still not be placed on screen: check `is_window_viewable` before acting on a position.
@@ -1116,10 +1645,16 @@ A `Window` stays usable as a handle, but its `title`, `app_id` and `pid` are rea
 | [`resize_window(window: Window, width: int, height: int)`](#resize_window) | [`WINDOW_RESIZE`](#cap-window_resize) | Resize a window to `width` by `height`. |
 | [`activate_window(window: Window)`](#activate_window) | [`WINDOW_ACTIVATE`](#cap-window_activate) | Raise and focus. There is no raise-without-focus operation. |
 | [`minimize_window(window: Window, minimized: bool = True)`](#minimize_window) | [`WINDOW_MINIMIZE`](#cap-window_minimize) | Minimize a window, or restore it when `minimized` is False. |
+| [`maximize_window(window: Window, maximized: bool = True)`](#maximize_window) | [`WINDOW_MAXIMIZE`](#cap-window_maximize) | Maximize a window, or restore it when `maximized` is False. |
+| [`is_window_maximized(window: Window)`](#is_window_maximized) | [`WINDOW_MAXIMIZE`](#cap-window_maximize) | Whether `window` is currently maximized. |
+| [`close_window(window: Window)`](#close_window) | [`WINDOW_CLOSE`](#cap-window_close) | Ask the window manager to close `window` gracefully. |
 | [`is_window_open(window: Window)`](#is_window_open) | [`WINDOW_LIST`](#cap-window_list) | Whether `window` is still in the window list. |
 | [`is_window_viewable(window: Window)`](#is_window_viewable) | [`WINDOW_STATE`](#cap-window_state) | Whether `window` is currently mapped and showing. |
 | [`refresh_window(window: Window)`](#refresh_window) | [`WINDOW_LIST`](#cap-window_list) | `window` as it is *now*, or None if it has closed. |
 | [`window_events(timeout: float \| None = None)`](#window_events) | [`WINDOW_EVENTS`](#cap-window_events) | Yield WindowEvents as the compositor reports them. |
+| [`focus_window(window: Window, attempts: int = 5)`](#focus_window) | [`WINDOW_ACTIVATE`](#cap-window_activate), [`WINDOW_GEOMETRY`](#cap-window_geometry), [`WINDOW_STATE`](#cap-window_state) | Give `window` focus and confirm it actually took, best-effort. |
+| [`lower_window(window: Window)`](#lower_window) | [`WINDOW_LOWER`](#cap-window_lower) | Replaces LowerWindow -- no foreign-toplevel protocol offers this. |
+| [`set_window_title(window: Window, title: str)`](#set_window_title) | [`WINDOW_TITLE_SET`](#cap-window_title_set) | Replaces SetWindowName. Impersonation is possible under X11. |
 
 ### `windows`
 
@@ -1237,6 +1772,10 @@ an Application whose `.pid` is the real application's, exactly so it
 can be used here. Like `app_id`, it matches nothing on a backend
 that cannot fill `Window.pid` (kdotool is one -- see the KDE notes),
 rather than everything.
+
+Raises ValueError unless at least one of `title`, `app_id` or `pid`
+is given: an unfiltered call would return every window, which is
+what `windows()` is for.
 
 ### `active_window`
 
@@ -1428,6 +1967,102 @@ stop publishing extents (or publish empty ones) until it is
 restored; restoring does not re-raise or re-focus it, so follow
 with activate_window() where the next step is input.
 
+### `maximize_window`
+
+```python
+maximize_window(window: Window, maximized: bool = True)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `window` | `Window` | **required** |
+| `maximized` | `bool` | `True` |
+
+The counterpart of `minimize_window` for the other direction of
+growth, with the state read `is_window_maximized` to verify it --
+drive a layout at its largest for a responsive-UI check, then
+restore and confirm the window really left the state.
+
+On Windows -- and only there -- maximizing also *activates* the
+window: `SW_MAXIMIZE` is documented to, and no non-activating
+spelling exists, where every other backend's maximize leaves focus
+alone. Re-focus the window your next input is for.
+
+Needs Capability.WINDOW_MAXIMIZE, which is declared only where the
+desktop genuinely has the concept: X11, Windows, COSMIC, and GNOME
+(with a current pyguitest-window-control extension). A tiling
+compositor's layout owns every window's size -- sway, Hyprland and
+niri have no real maximize -- macOS zoom is a fit-to-content rather
+than a maximize, and KWin via kdotool documents the maximize
+properties as unimplemented, so none of those claim it.
+
+```python
+gui.maximize_window(window)
+assert gui.is_window_maximized(window)
+gui.maximize_window(window, maximized=False)
+```
+
+### `is_window_maximized`
+
+```python
+is_window_maximized(window: Window)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `window` | `Window` | **required** |
+
+**Returns** `bool`
+
+The read half of WINDOW_MAXIMIZE: `WINDOW_STATE` covers minimized
+and activated only, so this is what verifies a `maximize_window`
+took -- and `False` for a half-maximized (tiled-to-one-edge) window,
+which carries a state `maximize_window` never sets.
+
+### `close_window`
+
+```python
+close_window(window: Window)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `window` | `Window` | **required** |
+
+The route that leaves the application its say -- which
+`Application.stop()` cannot, because it ends the process. An editor
+with unsaved work answers this with its "Save changes?" dialog
+instead of going away, so the operation exists for two different
+tests: that a clean window really closes, and that a dirty one
+really prompts. Needs Capability.WINDOW_CLOSE.
+
+A request, not a guarantee. Returning without raising means the
+request was delivered; whether the window then closes is the
+application's decision, made in its own time. Verify the outcome
+rather than trusting the call:
+
+```python
+gui.close_window(window)
+assert gui.wait_window_close(window, timeout=5)
+
+# The dirty-document test: closing must prompt, not close.
+gui.type_text("draft")
+gui.close_window(window)
+dialog = gui.expect_window("Save", timeout=5)
+```
+
+Closing one window of a multi-window application leaves the rest
+running; whether closing the *last* window ends the process is the
+application's policy (most Linux/Windows applications exit, most
+macOS applications stay running), so a teardown that must end the
+process still belongs to `Application.stop()`.
+
 ### `is_window_open`
 
 ```python
@@ -1512,6 +2147,96 @@ window_events(timeout: float | None = None)
 Needs Capability.WINDOW_EVENTS. wait_for_window and
 wait_window_close are what most callers want instead: they consume
 this where it exists and poll where it does not.
+
+### `focus_window`
+
+```python
+focus_window(window: Window, attempts: int = 5)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `window` | `Window` | **required** |
+| `attempts` | `int` | `5` |
+
+**Returns** `bool`
+
+Three things activate_window() on its own does not do: it waits for
+the window's geometry to stop changing first (a still-animating
+window can be clicked at a position it is about to leave), it asks
+more than once (a window manager can drop a single request outright,
+focus-stealing prevention being the usual reason), and it checks
+whether the request was honored rather than assuming. Seen live as
+typed text landing in the terminal a replay script was itself
+running in, because the window it had just found did not hold focus
+yet at that instant.
+
+Returns whether `window` ended up focused. Never raises on its own:
+a backend without WINDOW_GEOMETRY, WINDOW_ACTIVATE or WINDOW_STATE
+simply reports False, since not being able to ask is not a different
+answer from "it did not take".
+
+A True here is as good as `active_window()`, which is the thing it
+checks -- and on macOS that is necessary but not sufficient for
+keystrokes to arrive: a panel belonging to another process can take
+them while changing no window-manager focus, so this still reports
+True. See `active_window()` for the measured case and for what to
+check instead when input is vanishing.
+
+`attempts` bounds the retry, and the two ways an attempt can fail are
+treated differently. A `CapabilityUnsupported` means asking is
+impossible, so it reports False at once rather than paying for
+`attempts` identical refusals. Anything else is this attempt failing
+-- a dropped request, a window-manager call that hung into a
+`BackendCallTimeout` -- and the next attempt is made, which is what
+the parameter is for.
+
+### `lower_window`
+
+```python
+lower_window(window: Window)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `window` | `Window` | **required** |
+
+Sends a window to the bottom of the stack. There is no Wayland
+route: the foreign-toplevel protocols expose activate and close but
+nothing to lower, so this raises CapabilityUnsupported there rather
+than approximating it by raising everything else.
+
+Not a mirror of activate_window(), which deliberately couples
+raising with focusing: this only restacks, and what happens to
+keyboard focus afterwards is the window manager's policy. Read
+active_window() if the next step depends on it.
+
+### `set_window_title`
+
+```python
+set_window_title(window: Window, title: str)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `window` | `Window` | **required** |
+| `title` | `str` | **required** |
+
+Renames *another* application's window, which X11 permits any client
+to do -- that is the impersonation note, and the reason no Wayland
+protocol offers it. Mostly useful for tagging a window a test
+created so later lookups are unambiguous.
+
+The application may well rename it back: a title is the client's to
+set, and anything that redraws it (a document change, a tab switch)
+overwrites this. Do not use it as durable identity -- `app_id` is
+the stable handle where a backend fills it in.
 
 ## Screen and capture
 
@@ -1929,7 +2654,7 @@ environment. `**kwargs` go to `subprocess.run`.
 
 ## Waiting
 
-Every `wait_*` call polls on an interval unless the backend can do better: a window wait is answered by real notification — `SetWinEventHook` on Windows, a compositor event stream on GNOME Shell, KWin, sway or niri — but only when it matches a `title`. On macOS, which has no event feed here yet, on every X11 session, and on any wait that names `app_id`, that same call polls every `interval` seconds instead. `timeout` bounds the wait in seconds, and `timeout` left `None` — which every `wait_*` here defaults to, `sync` excepted — waits indefinitely; there is no session-level default to fall back on.
+Every `wait_*` call polls on an interval unless the backend can do better: a window wait is answered by real notification — `SetWinEventHook` on Windows, a compositor event stream on GNOME Shell, KWin, COSMIC, sway or niri — but only when it matches a `title`. On macOS, which has no event feed here yet, on every X11 session, and on any wait that names `app_id`, that same call polls every `interval` seconds instead. `timeout` bounds the wait in seconds, and `timeout` left `None` — which every `wait_*` here defaults to, `sync` excepted — waits indefinitely; there is no session-level default to fall back on.
 
 | Call | Needs | What it does |
 |------|-------|--------------|
@@ -1943,6 +2668,8 @@ Every `wait_*` call polls on an interval unless the backend can do better: a win
 | [`wait_for_process(name: str \| re.Pattern[str], timeout: float \| None = None, interval: float = 0.5)`](#wait_for_process) |  | Block until a process matching `name` is running, or timeout. |
 | [`wait_for_idle(pid, ...)`](#wait_for_idle) |  | Block until `pid` looks CPU-idle, or timeout. |
 | [`wait_for_file(path: str, timeout: float \| None = None, interval: float = 0.5)`](#wait_for_file) |  | Block until `path` exists, or timeout. Returns whether it appeared. |
+| [`wait_window_focus(window: Window, timeout: float \| None = None, interval: float = 0.1)`](#wait_window_focus) | [`WINDOW_STATE`](#cap-window_state) | Block until `window` holds keyboard focus, or timeout. |
+| [`wait_for_pointer_activation(timeout: float \| None = None)`](#wait_for_pointer_activation) | [`INPUT_CAPTURE`](#cap-input_capture) | Block for one real crossing of a screen edge, and return where. |
 
 ### `wait`
 
@@ -2162,7 +2889,8 @@ at least one filter is required.
 Delegates to the backend's own event-driven implementation where
 Capability.WINDOW_EVENTS is available and only `title` was asked for
 -- real notification, not polling. Those backends are `win32`, on
-Windows, and GNOME Shell, KWin, sway and niri on their desktops;
+Windows, and GNOME Shell, KWin, COSMIC, sway and niri on their
+desktops;
 macOS is not one of them, its AXObserver being a later phase, and
 neither is any X11 session. Everywhere else -- both of those, and any
 call that names `app_id` or `pid`, because the event-driven
@@ -2333,6 +3061,9 @@ gui.wait_for_idle(app.pid, timeout=60)
 gui.expect_text(name="Status", equals="Ready", timeout=10)
 ```
 
+Raises PyGUITestError where this platform's clock resolution is
+coarser than `interval`, since idleness could not be measured.
+
 ### `wait_for_file`
 
 ```python
@@ -2351,6 +3082,414 @@ wait_for_file(path: str, timeout: float | None = None, interval: float = 0.5)
 
 For a process under test writing output somewhere -- an export, a
 log file -- rather than polling os.path.exists in a hand-rolled loop.
+
+### `wait_window_focus`
+
+```python
+wait_window_focus(window: Window, timeout: float | None = None, interval: float = 0.1)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `window` | `Window` | **required** |
+| `timeout` | `float \| None` | `None` |
+| `interval` | `float` | `0.1` |
+
+**Returns** `bool`
+
+A window can exist -- wait_for_window has already returned it -- for
+a moment before the window manager actually gives it focus, e.g. a
+freshly-opened window still animating into place. Nothing else here
+polls for that: activate_window() asks for focus once and returns
+immediately, so a script that clicks or types right after it cannot
+tell whether the request was honored yet, only that it was made.
+Seen live: typed text landing in the terminal a replay script was
+itself running in, because the window it had just clicked into did
+not hold focus yet at that instant.
+
+Returns whether `window` held focus by the deadline -- False is a
+real answer to check, not something to guess from a None.
+
+### `wait_for_pointer_activation`
+
+```python
+wait_for_pointer_activation(timeout: float | None = None)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `timeout` | `float \| None` | `None` |
+
+**Returns** `tuple[float, float] | None`
+
+Not a query, and deliberately not spelled `pointer_position()`:
+Capability.INPUT_CAPTURE (the `inputcapture` backend, opt-in --
+`connect(backend="inputcapture")`) can only ever answer this at the
+moment the compositor itself decides to divert input here, which
+happens when the user's actual pointer physically moves across one
+of the screen's edges. There is no way to trigger that on demand,
+so this can legitimately block for as long as `timeout` allows
+waiting for someone to do that -- and once it happens, **every
+physical or logical pointer/keyboard/touch device the compositor
+chose to divert stops reaching the desktop at all** until this
+method has read the answer and released it, which it does as its
+very next step. Call this only when that trade is genuinely wanted,
+never as a drop-in replacement for a synchronous position read.
+
+Returns the pointer's position in the coordinate space `Screen`
+reports, or None if `timeout` elapsed with nobody crossing an edge
+-- the ordinary outcome, matching every other `wait_for_*` method
+here, not an error. `timeout=None` waits indefinitely.
+
+## Expectations
+
+Wait for a condition and raise when it does not arrive, which is what a test wants: the `wait_*` calls return a value or `None` and leave the judgement to the caller, while these raise a failure naming what was actually found. **Their default deadlines differ.** `expect_element` and `expect_window` default to `timeout=None` and wait indefinitely, matching the `wait_*` calls they wrap; the state-checking six default to five seconds. So an element that never appears hangs a run where a value that never settles fails -- pass a `timeout` in any suite that must not hang.
+
+| Call | Needs | What it does |
+|------|-------|--------------|
+| [`expect_element(...)`](#expect_element) | [`ELEMENT_TREE`](#cap-element_tree) | wait_for_element, but raises ElementNotFound instead of returning None. |
+| [`expect_window(...)`](#expect_window) | [`WINDOW_LIST`](#cap-window_list) — uses [`WINDOW_EVENTS`](#cap-window_events) if present | wait_for_window, but raises WindowNotFound instead of returning None. |
+| [`expect_text(equals, ...)`](#expect_text) | [`ELEMENT_TREE`](#cap-element_tree) | Fail unless the named element reads `equals`. |
+| [`expect_value(equals, ...)`](#expect_value) | [`ELEMENT_TREE`](#cap-element_tree) | Fail unless the named slider, spinner or progress bar reads `equals`. |
+| [`expect_checked(checked, ...)`](#expect_checked) | [`ELEMENT_TREE`](#cap-element_tree) | Fail unless the named checkbox, radio button or toggle is `checked`. |
+| [`expect_enabled(...)`](#expect_enabled) | [`ELEMENT_TREE`](#cap-element_tree) | Fail unless the named element's enabled state is `enabled`. |
+| [`expect_disabled(...)`](#expect_disabled) | [`ELEMENT_TREE`](#cap-element_tree) | Fail unless the named element is disabled (greyed out). |
+| [`expect_showing(...)`](#expect_showing) | [`ELEMENT_TREE`](#cap-element_tree) | Fail unless the named element is present and visible. |
+
+### `expect_element`
+
+```python
+expect_element(
+    role: str | None = None,
+    name: str | None = None,
+    within: Element | None = None,
+    timeout: float | None = None,
+    interval: float = 0.5,
+)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `role` | `str \| None` | `None` |
+| `name` | `str \| None` | `None` |
+| `within` | `Element \| None` | `None` |
+| `timeout` | `float \| None` | `None` |
+| `interval` | `float` | `0.5` |
+
+**Returns** `Element`
+
+The raising sibling wait_for_element deliberately lacks, for the
+same reason expect_window exists next to wait_for_window: a script
+written against a specific recorded element treats its absence as
+the failure, not a branch to handle.
+`timeout=None` is the default here, and it means **wait for as long
+as it takes**, not "use a default deadline". That is deliberate --
+it matches the `wait_*` family this wraps -- but it differs from the
+state-checking expectations (expect_text, expect_value,
+expect_checked, expect_enabled, expect_disabled, expect_showing),
+which default to five seconds. So an element that never appears
+hangs a run here, where a value that never settles fails in five
+seconds. Pass a timeout in any suite that must not hang.
+
+### `expect_window`
+
+```python
+expect_window(
+    title: str | re.Pattern[str] | None = None,
+    timeout: float | None = None,
+    *,
+    app_id: str | Sequence[str] | None = None,
+    pid: int | None = None,
+)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `title` | `str \| re.Pattern[str] \| None` | `None` |
+| `timeout` | `float \| None` | `None` |
+| `app_id` | `str \| Sequence[str] \| None` | `None` |
+| `pid` | `int \| None` | `None` |
+
+**Returns** `Window`
+
+The raising sibling wait_for_window deliberately lacks (see its
+docstring): a script that already knows the window it wants exist is
+an error, not a branch to handle, is the common case a generated
+replay is written against. See find_windows for how `title`/
+`app_id`/`pid` combine and what `title` accepts.
+
+`timeout=None` is the default here, and it means **wait for as long
+as it takes**, not "use a default deadline" -- matching the `wait_*`
+family this wraps, and unlike the state-checking expectations
+(expect_text, expect_value, expect_checked, expect_enabled,
+expect_disabled, expect_showing), which default to five seconds. A
+window that never opens therefore hangs a run. Pass a timeout in any
+suite that must not.
+
+A lookup and nothing else. It does not raise, focus, resize or
+otherwise disturb the window it hands back -- focus_window() is for
+that, and is deliberately a separate call: an earlier version of
+this method activated every window it found, which is fine for an
+application window and actively destructive for a desktop or a
+menu. Binding the desktop while an application menu was open raised
+the desktop, dismissed the menu, and left the clicks that followed
+landing on nothing -- found live on MATE.
+
+### `expect_text`
+
+```python
+expect_text(
+    role: str | None = None,
+    name: str | None = None,
+    *,
+    equals: str,
+    timeout: float = 5.0,
+    within: Element | None = None,
+)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `role` | `str \| None` | `None` |
+| `name` | `str \| None` | `None` |
+| `equals` | `str` | **required** |
+| `timeout` | `float` | `5.0` |
+| `within` | `Element \| None` | `None` |
+
+Re-read until `timeout` rather than checked once: a check made
+right after the action it verifies would otherwise race the
+application, which has not necessarily finished redrawing by the
+time the click returns.
+
+`timeout` is spent twice over in the worst case -- once waiting for
+the element to exist, where its absence raises `ElementNotFound`,
+and again waiting for the text to match, where a mismatch raises
+`AssertionError` naming both sides.
+
+```python
+gui.button("Save").click()
+gui.expect_text(name="Status", equals="Saved", timeout=10)
+
+# Scope it when more than one window can hold that name.
+gui.expect_text(
+    name="Status",
+    equals="Saved",
+    within=gui.window_element("Editor"),
+)
+```
+
+### `expect_value`
+
+```python
+expect_value(
+    role: str | None = None,
+    name: str | None = None,
+    *,
+    equals: float,
+    timeout: float = 5.0,
+    within: Element | None = None,
+)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `role` | `str \| None` | `None` |
+| `name` | `str \| None` | `None` |
+| `equals` | `float` | **required** |
+| `timeout` | `float` | `5.0` |
+| `within` | `Element \| None` | `None` |
+
+The numeric counterpart of `expect_text`: `Element.value` is a float
+where the control publishes one and None where it does not. Compared
+exactly, as `expect_text` compares text -- a caller wanting tolerance
+uses `wait_until` with its own `abs(...) < eps`.
+
+Two waits, as in `expect_checked`: `expect_element` raises
+`ElementNotFound` where the control never appears, then the value is
+re-read until the deadline, raising `AssertionError`. A control that
+publishes no value at all reads None, which matches no `equals`, so it
+fails rather than passing by accident.
+
+```python
+gui.button("Start").click()
+gui.expect_value(role=Role.PROGRESS_BAR, name="Copying", equals=100.0)
+```
+
+### `expect_checked`
+
+```python
+expect_checked(
+    role: str | None = None,
+    name: str | None = None,
+    *,
+    checked: bool,
+    timeout: float = 5.0,
+    within: Element | None = None,
+)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `role` | `str \| None` | `None` |
+| `name` | `str \| None` | `None` |
+| `checked` | `bool` | **required** |
+| `timeout` | `float` | `5.0` |
+| `within` | `Element \| None` | `None` |
+
+Two waits, not one: `expect_element` first, which raises
+`ElementNotFound` if the control never appears, then the state is
+re-read until the deadline. So "no such control" and "the wrong
+state" are different exceptions, and the worst case is twice
+`timeout` rather than once.
+
+`Element.checkable` is the guard for a widget you do not know, and
+what it rules out is a control that is not a check, radio or toggle at
+all; a role-checkable widget whose toolkit still publishes no state
+passes that guard and reaches the timeout above.
+
+**Whether "it did not say" can be told apart from "it said no"
+depends on the platform, and on Linux it cannot.** On Windows an
+element with no Toggle pattern, and on macOS one publishing neither
+`kAXValueAttribute` nor a menu-item mark, report `Element.checked` as
+None -- which equals neither True nor False, so `checked=False` fails
+there rather than passing by accident, and reading `checked` for None
+is the narrower test. On AT-SPI there is no such signal: dogtail's
+`Node.checked` reads the state set, so it answers a real bool for
+every element and a toolkit that never publishes CHECKED is
+indistinguishable from one reporting "unchecked". `expect_checked(...,
+checked=False)` on Linux can therefore pass without the toolkit having
+reported checked state at all. Where that distinction matters, assert
+the *transition* -- read `checked`, click, and expect the opposite --
+which no amount of silence can satisfy.
+
+```python
+gui.checkbox("Read only").click()
+gui.expect_checked(name="Read only", checked=True)
+
+# Guard a widget you do not know. Note this answers "is this the
+# kind of control that has a checked state", which is the useful
+# question here -- not "does this toolkit publish one". GTK 3
+# publishes no CHECKABLE state for any of its check boxes, so
+# `checkable` falls back to the role; see its own docstring.
+if gui.checkbox("Read only").checkable:
+    gui.expect_checked(name="Read only", checked=True)
+```
+
+### `expect_enabled`
+
+```python
+expect_enabled(
+    role: str | None = None,
+    name: str | None = None,
+    *,
+    enabled: bool = True,
+    timeout: float = 5.0,
+    within: Element | None = None,
+)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `role` | `str \| None` | `None` |
+| `name` | `str \| None` | `None` |
+| `enabled` | `bool` | `True` |
+| `timeout` | `float` | `5.0` |
+| `within` | `Element \| None` | `None` |
+
+The commonest synchronisation a GUI test has -- a Save button that
+enables only once the form validates, a field greyed out while a
+request is in flight. Hand-rolled it is `wait_until(lambda:
+gui.button("Save").enabled)`, which loses the two-phase
+ElementNotFound-then-AssertionError diagnostics this family gives.
+
+Two waits, as in `expect_checked`: `expect_element` raises
+`ElementNotFound` where the control never appears, then
+`Element.enabled` is re-read until the deadline, raising
+`AssertionError`. The worst case is twice `timeout`.
+
+`Element.enabled` answers True wherever the toolkit will not say (see
+its own docstring), so a pass is weaker evidence on Windows and macOS
+than on Linux; `enabled=False` is the stronger direction there, since
+a real "disabled" is the one a lenient backend does not invent.
+
+```python
+gui.text_field("Amount").set_text("100")
+gui.expect_enabled(name="Save")
+
+gui.expect_enabled(name="Save", enabled=False)  # greyed out
+```
+
+### `expect_disabled`
+
+```python
+expect_disabled(
+    role: str | None = None,
+    name: str | None = None,
+    *,
+    timeout: float = 5.0,
+    within: Element | None = None,
+)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `role` | `str \| None` | `None` |
+| `name` | `str \| None` | `None` |
+| `timeout` | `float` | `5.0` |
+| `within` | `Element \| None` | `None` |
+
+The readable spelling of `expect_enabled(..., enabled=False)`; see
+there for the two-phase waiting and the platform-leniency note.
+
+### `expect_showing`
+
+```python
+expect_showing(
+    role: str | None = None,
+    name: str | None = None,
+    timeout: float = 5.0,
+    within: Element | None = None,
+)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `role` | `str \| None` | `None` |
+| `name` | `str \| None` | `None` |
+| `timeout` | `float` | `5.0` |
+| `within` | `Element \| None` | `None` |
+
+Two waits, as in `expect_checked`: `expect_element` raises
+`ElementNotFound` where the control never appears, and only then is
+`Element.visible` re-read until the deadline, raising
+`AssertionError`. The worst case is twice `timeout`.
+
+`Element.visible` means something slightly different on each
+platform, and on Windows and macOS it answers True rather than admit
+it could not tell -- its own docstring has the three definitions and
+says which backend is lenient. So a pass here is weaker evidence on
+those two than it looks; where it matters, the stronger check is that
+the action the element exists for actually worked.
 
 ## Assertions
 
@@ -2518,773 +3657,6 @@ the order changes.
 Compared per role rather than globally: a "Save" button beside a
 "Save" menu item is ordinary, and flagging it would be noise.
 
-## Other
-
-| Call | Needs | What it does |
-|------|-------|--------------|
-| [`click_element(element: Element, button: int = 1)`](#click_element) | [`ELEMENT_GEOMETRY`](#cap-element_geometry), [`POINTER_BUTTON`](#cap-pointer_button), [`POINTER_MOVE`](#cap-pointer_move) | Click a named element through the pointer. `element.click()` ends here. |
-| [`click_via`](#click_via) |  | The default route `element.click()` takes; see `__init__`. |
-| [`double_click(button: int = 1)`](#double_click) | [`POINTER_BUTTON`](#cap-pointer_button) | Press and release a mouse button twice, as one double-click. |
-| [`double_click_element(element: Element)`](#double_click_element) | [`ELEMENT_GEOMETRY`](#cap-element_geometry), [`POINTER_BUTTON`](#cap-pointer_button), [`POINTER_MOVE`](#cap-pointer_move) | Double-click a named element. `element.double_click()` does the same. |
-| [`element_at(x: int, y: int)`](#element_at) | [`ELEMENT_GEOMETRY`](#cap-element_geometry) | The deepest accessible element at a screen coordinate, or None. |
-| [`expect_checked(checked, ...)`](#expect_checked) | [`ELEMENT_TREE`](#cap-element_tree) | Fail unless the named checkbox, radio button or toggle is `checked`. |
-| [`expect_element(...)`](#expect_element) | [`ELEMENT_TREE`](#cap-element_tree) | wait_for_element, but raises ElementNotFound instead of returning None. |
-| [`expect_showing(...)`](#expect_showing) | [`ELEMENT_TREE`](#cap-element_tree) | Fail unless the named element is present and visible. |
-| [`expect_text(equals, ...)`](#expect_text) | [`ELEMENT_TREE`](#cap-element_tree) | Fail unless the named element reads `equals`. |
-| [`expect_window(...)`](#expect_window) | [`WINDOW_LIST`](#cap-window_list) — uses [`WINDOW_EVENTS`](#cap-window_events) if present | wait_for_window, but raises WindowNotFound instead of returning None. |
-| [`extents(element: Element)`](#extents) | [`ELEMENT_GEOMETRY`](#cap-element_geometry) | `element`'s (x, y, width, height) in screen coordinates. |
-| [`focus_window(window: Window, attempts: int = 5)`](#focus_window) | [`WINDOW_ACTIVATE`](#cap-window_activate), [`WINDOW_GEOMETRY`](#cap-window_geometry), [`WINDOW_STATE`](#cap-window_state) | Give `window` focus and confirm it actually took, best-effort. |
-| [`is_button_pressed(button: int)`](#is_button_pressed) | [`INPUT_STATE_QUERY`](#cap-input_state_query) | Whether a mouse button is currently held down. |
-| [`is_key_pressed(key: str)`](#is_key_pressed) | [`INPUT_STATE_QUERY`](#cap-input_state_query) | Whether a key is currently held down. Replaces IsKeyPressed. |
-| [`is_window_cursor(window: Window, shape: int)`](#is_window_cursor) | [`WINDOW_CURSOR_QUERY`](#cap-window_cursor_query) | Whether `window` is currently showing cursor `shape`. |
-| [`lower_window(window: Window)`](#lower_window) | [`WINDOW_LOWER`](#cap-window_lower) | Replaces LowerWindow -- no foreign-toplevel protocol offers this. |
-| [`pointer_position()`](#pointer_position) | [`POINTER_QUERY`](#cap-pointer_query) | The global pointer position. Replaces GetMousePos. |
-| [`require_version(minimum: str)`](#require_version) |  | Raise VersionTooOld unless this pyguitest is at least `minimum`. |
-| [`row_values(row: Element)`](#row_values) |  | `row`'s own column values, as plain text, one per child cell. |
-| [`set_window_title(window: Window, title: str)`](#set_window_title) | [`WINDOW_TITLE_SET`](#cap-window_title_set) | Replaces SetWindowName. Impersonation is possible under X11. |
-| [`tree_items(root: Element, *, role: str \| None = None, max_depth: int = 24)`](#tree_items) | [`ELEMENT_ACTION`](#cap-element_action), [`ELEMENT_TREE`](#cap-element_tree) | Every descendant of `root`, opening collapsed branches to reach them. |
-| [`wait_for_pointer_activation(timeout: float \| None = None)`](#wait_for_pointer_activation) | [`INPUT_CAPTURE`](#cap-input_capture) | Block for one real crossing of a screen edge, and return where. |
-| [`wait_window_focus(window: Window, timeout: float \| None = None, interval: float = 0.1)`](#wait_window_focus) | [`WINDOW_STATE`](#cap-window_state) | Block until `window` holds keyboard focus, or timeout. |
-
-### `click_element`
-
-```python
-click_element(element: Element, button: int = 1)
-```
-
-**Parameters**
-
-| Parameter | Type | Default |
-|-----------|------|---------|
-| `element` | `Element` | **required** |
-| `button` | `int` | `1` |
-
-Where the element publishes no accessible action to name -- a widget
-whose provider offers neither Invoke nor Toggle nor an MSAA default
-action, measured live on a `SysListView32` cell in
-pyguitest-recorder -- `element.click()` calls this instead of raising,
-because a coordinate click is what a person does with such a widget and
-what the refusal used to advise. The element is still the locator: its
-rectangle is read fresh each call rather than baked in ahead of time,
-and only the gesture falls back to the pointer.
-
-The spelling for an element with no session behind it -- one taken
-straight from a backend, where `element.click()` has nothing to
-delegate to. Either reads the same to a caller; this one is also what
-`element.click()` ends up calling.
-
-Needs Capability.ELEMENT_GEOMETRY, plus the pointer capabilities --
-which come from whichever input backend the session was built with
-(`win32`, `macquartz`, X11/XTEST, the portal), not from the
-accessibility one. Raises PyGUITestError where extents() has no
-rectangle for this element -- it is not showing, or the backend reports
-none -- the same split `double_click_element` makes. `element.click()`
-raises ElementNotActionable for that case instead, so that the typed
-refusal a caller already catches keeps its meaning.
-
-### `click_via`
-
-**Returns** `str`
-
-### `double_click`
-
-```python
-double_click(button: int = 1)
-```
-
-**Parameters**
-
-| Parameter | Type | Default |
-|-----------|------|---------|
-| `button` | `int` | `1` |
-
-Whether a pair of clicks *is* a double-click is the toolkit's
-judgement, not this package's: GTK and Qt each measure the gap
-between the two presses against a threshold that defaults to 400ms
-and is settable per desktop.
-
-So the four events go out back-to-back, deliberately skipping the
-`event_delay` pause that calling click() twice would take between
-them. At an `event_delay` of 0.2s that pause alone puts 400ms
-between the presses and delivers two single clicks -- a test that
-then passes against a widget that never saw a double-click, which
-is the failure this package works hardest to avoid. A double-click
-is one user action, so it takes one `event_delay` at the end, the
-same as every other action here.
-
-### `double_click_element`
-
-```python
-double_click_element(element: Element)
-```
-
-**Parameters**
-
-| Parameter | Type | Default |
-|-----------|------|---------|
-| `element` | `Element` | **required** |
-
-The spelling for an element with no session behind it -- one taken
-straight from a backend, where `element.double_click()` has nothing
-to delegate to. Either reads the same to a caller; this one is also
-what `element.double_click()` ends up calling.
-
-Two `element.click()` calls are not a double click: each is a
-separate round trip over the accessibility bus, which is slower
-than any toolkit's double-click interval, so the pair arrives as
-two single clicks and a double-clicked folder icon simply does not
-open.
-
-The element is still the locator -- its rectangle is read fresh
-each call, rather than baked in ahead of time -- and only the
-gesture falls back to the pointer, because that is where this
-package's real double_click lives. Needs Capability.ELEMENT_GEOMETRY.
-
-Raises PyGUITestError if extents() has no rectangle for this element
--- it is not showing, or the backend reports none -- rather than
-ElementNotActionable, which means something more specific: no click
-or press action for element.click() to fall back to.
-
-### `element_at`
-
-```python
-element_at(x: int, y: int)
-```
-
-**Parameters**
-
-| Parameter | Type | Default |
-|-----------|------|---------|
-| `x` | `int` | **required** |
-| `y` | `int` | **required** |
-
-**Returns** `Element | None`
-
-What window_at is for windows, with no `screen` argument: the
-accessible tree is addressed in one desktop-wide coordinate space.
-
-The answer is only as good as the extents behind it. A toolkit that
-misreports them -- GTK4 has been seen placing every widget at the
-origin -- makes one element claim every point, and nothing here can
-tell that apart from a correct answer, so a caller turning a
-coordinate into a locator should check that the element it got back
-really covers the point (extents() says).
-
-### `expect_checked`
-
-```python
-expect_checked(
-    role: str | None = None,
-    name: str | None = None,
-    *,
-    checked: bool,
-    timeout: float = 5.0,
-    within: Element | None = None,
-)
-```
-
-**Parameters**
-
-| Parameter | Type | Default |
-|-----------|------|---------|
-| `role` | `str \| None` | `None` |
-| `name` | `str \| None` | `None` |
-| `checked` | `bool` | **required** |
-| `timeout` | `float` | `5.0` |
-| `within` | `Element \| None` | `None` |
-
-Two waits, not one: `expect_element` first, which raises
-`ElementNotFound` if the control never appears, then the state is
-re-read until the deadline. So "no such control" and "the wrong
-state" are different exceptions, and the worst case is twice
-`timeout` rather than once.
-
-`Element.checkable` is the guard for a widget you do not know, and
-what it rules out is a control that is not a check, radio or toggle at
-all; a role-checkable widget whose toolkit still publishes no state
-passes that guard and reaches the timeout above.
-
-**Whether "it did not say" can be told apart from "it said no"
-depends on the platform, and on Linux it cannot.** On Windows an
-element with no Toggle pattern, and on macOS one publishing neither
-`kAXValueAttribute` nor a menu-item mark, report `Element.checked` as
-None -- which equals neither True nor False, so `checked=False` fails
-there rather than passing by accident, and reading `checked` for None
-is the narrower test. On AT-SPI there is no such signal: dogtail's
-`Node.checked` reads the state set, so it answers a real bool for
-every element and a toolkit that never publishes CHECKED is
-indistinguishable from one reporting "unchecked". `expect_checked(...,
-checked=False)` on Linux can therefore pass without the toolkit having
-reported checked state at all. Where that distinction matters, assert
-the *transition* -- read `checked`, click, and expect the opposite --
-which no amount of silence can satisfy.
-
-```python
-gui.checkbox("Read only").click()
-gui.expect_checked(name="Read only", checked=True)
-
-# Guard a widget you do not know. Note this answers "is this the
-# kind of control that has a checked state", which is the useful
-# question here -- not "does this toolkit publish one". GTK 3
-# publishes no CHECKABLE state for any of its check boxes, so
-# `checkable` falls back to the role; see its own docstring.
-if gui.checkbox("Read only").checkable:
-    gui.expect_checked(name="Read only", checked=True)
-```
-
-### `expect_element`
-
-```python
-expect_element(
-    role: str | None = None,
-    name: str | None = None,
-    within: Element | None = None,
-    timeout: float | None = None,
-    interval: float = 0.5,
-)
-```
-
-**Parameters**
-
-| Parameter | Type | Default |
-|-----------|------|---------|
-| `role` | `str \| None` | `None` |
-| `name` | `str \| None` | `None` |
-| `within` | `Element \| None` | `None` |
-| `timeout` | `float \| None` | `None` |
-| `interval` | `float` | `0.5` |
-
-**Returns** `Element`
-
-The raising sibling wait_for_element deliberately lacks, for the
-same reason expect_window exists next to wait_for_window: a script
-written against a specific recorded element treats its absence as
-the failure, not a branch to handle.
-
-### `expect_showing`
-
-```python
-expect_showing(
-    role: str | None = None,
-    name: str | None = None,
-    timeout: float = 5.0,
-    within: Element | None = None,
-)
-```
-
-**Parameters**
-
-| Parameter | Type | Default |
-|-----------|------|---------|
-| `role` | `str \| None` | `None` |
-| `name` | `str \| None` | `None` |
-| `timeout` | `float` | `5.0` |
-| `within` | `Element \| None` | `None` |
-
-Two waits, as in `expect_checked`: `expect_element` raises
-`ElementNotFound` where the control never appears, and only then is
-`Element.visible` re-read until the deadline, raising
-`AssertionError`. The worst case is twice `timeout`.
-
-`Element.visible` means something slightly different on each
-platform, and on Windows and macOS it answers True rather than admit
-it could not tell -- its own docstring has the three definitions and
-says which backend is lenient. So a pass here is weaker evidence on
-those two than it looks; where it matters, the stronger check is that
-the action the element exists for actually worked.
-
-### `expect_text`
-
-```python
-expect_text(
-    role: str | None = None,
-    name: str | None = None,
-    *,
-    equals: str,
-    timeout: float = 5.0,
-    within: Element | None = None,
-)
-```
-
-**Parameters**
-
-| Parameter | Type | Default |
-|-----------|------|---------|
-| `role` | `str \| None` | `None` |
-| `name` | `str \| None` | `None` |
-| `equals` | `str` | **required** |
-| `timeout` | `float` | `5.0` |
-| `within` | `Element \| None` | `None` |
-
-Re-read until `timeout` rather than checked once: a check made
-right after the action it verifies would otherwise race the
-application, which has not necessarily finished redrawing by the
-time the click returns.
-
-`timeout` is spent twice over in the worst case -- once waiting for
-the element to exist, where its absence raises `ElementNotFound`,
-and again waiting for the text to match, where a mismatch raises
-`AssertionError` naming both sides.
-
-```python
-gui.button("Save").click()
-gui.expect_text(name="Status", equals="Saved", timeout=10)
-
-# Scope it when more than one window can hold that name.
-gui.expect_text(
-    name="Status",
-    equals="Saved",
-    within=gui.window_element("Editor"),
-)
-```
-
-### `expect_window`
-
-```python
-expect_window(
-    title: str | re.Pattern[str] | None = None,
-    timeout: float | None = None,
-    *,
-    app_id: str | Sequence[str] | None = None,
-    pid: int | None = None,
-)
-```
-
-**Parameters**
-
-| Parameter | Type | Default |
-|-----------|------|---------|
-| `title` | `str \| re.Pattern[str] \| None` | `None` |
-| `timeout` | `float \| None` | `None` |
-| `app_id` | `str \| Sequence[str] \| None` | `None` |
-| `pid` | `int \| None` | `None` |
-
-**Returns** `Window`
-
-The raising sibling wait_for_window deliberately lacks (see its
-docstring): a script that already knows the window it wants exist is
-an error, not a branch to handle, is the common case a generated
-replay is written against. See find_windows for how `title`/
-`app_id`/`pid` combine and what `title` accepts.
-
-A lookup and nothing else. It does not raise, focus, resize or
-otherwise disturb the window it hands back -- focus_window() is for
-that, and is deliberately a separate call: an earlier version of
-this method activated every window it found, which is fine for an
-application window and actively destructive for a desktop or a
-menu. Binding the desktop while an application menu was open raised
-the desktop, dismissed the menu, and left the clicks that followed
-landing on nothing -- found live on MATE.
-
-### `extents`
-
-```python
-extents(element: Element)
-```
-
-**Parameters**
-
-| Parameter | Type | Default |
-|-----------|------|---------|
-| `element` | `Element` | **required** |
-
-**Returns** `tuple[int, int, int, int] | None`
-
-None where the element occupies no screen space -- it publishes no
-rectangle, or reports an empty one because it is not showing.
-
-The counterpart of geometry() for elements, and separate from it
-because the two are answered by different backends: a window
-rectangle can come from the compositor, an element's only ever from
-the accessible tree. Needs Capability.ELEMENT_GEOMETRY.
-
-### `focus_window`
-
-```python
-focus_window(window: Window, attempts: int = 5)
-```
-
-**Parameters**
-
-| Parameter | Type | Default |
-|-----------|------|---------|
-| `window` | `Window` | **required** |
-| `attempts` | `int` | `5` |
-
-**Returns** `bool`
-
-Three things activate_window() on its own does not do: it waits for
-the window's geometry to stop changing first (a still-animating
-window can be clicked at a position it is about to leave), it asks
-more than once (a window manager can drop a single request outright,
-focus-stealing prevention being the usual reason), and it checks
-whether the request was honored rather than assuming. Seen live as
-typed text landing in the terminal a replay script was itself
-running in, because the window it had just found did not hold focus
-yet at that instant.
-
-Returns whether `window` ended up focused. Never raises on its own:
-a backend without WINDOW_GEOMETRY, WINDOW_ACTIVATE or WINDOW_STATE
-simply reports False, since not being able to ask is not a different
-answer from "it did not take".
-
-A True here is as good as `active_window()`, which is the thing it
-checks -- and on macOS that is necessary but not sufficient for
-keystrokes to arrive: a panel belonging to another process can take
-them while changing no window-manager focus, so this still reports
-True. See `active_window()` for the measured case and for what to
-check instead when input is vanishing.
-
-`attempts` bounds the retry, and the two ways an attempt can fail are
-treated differently. A `CapabilityUnsupported` means asking is
-impossible, so it reports False at once rather than paying for
-`attempts` identical refusals. Anything else is this attempt failing
--- a dropped request, a window-manager call that hung into a
-`BackendCallTimeout` -- and the next attempt is made, which is what
-the parameter is for.
-
-### `is_button_pressed`
-
-```python
-is_button_pressed(button: int)
-```
-
-**Parameters**
-
-| Parameter | Type | Default |
-|-----------|------|---------|
-| `button` | `int` | **required** |
-
-**Returns** `bool`
-
-Same numbering as click() -- 1 left, 2 middle, 3 right -- and
-reports the *desktop's* state, so a button a user is physically
-holding reads as pressed too, not only one this session injected.
-See the note above for the Wayland and XWayland caveats.
-
-### `is_key_pressed`
-
-```python
-is_key_pressed(key: str)
-```
-
-**Parameters**
-
-| Parameter | Type | Default |
-|-----------|------|---------|
-| `key` | `str` | **required** |
-
-**Returns** `bool`
-
-Takes the same backend-native key name as press_key. Useful for
-asserting a modifier was actually released after a combination; see
-the note above, and be aware key state under XWayland is accurate
-only while an X client holds focus.
-
-### `is_window_cursor`
-
-```python
-is_window_cursor(window: Window, shape: int)
-```
-
-**Parameters**
-
-| Parameter | Type | Default |
-|-----------|------|---------|
-| `window` | `Window` | **required** |
-| `shape` | `int` | **required** |
-
-**Returns** `bool`
-
-Replaces IsWindowCursor. Impossible on Wayland, where cursor shape is
-negotiated privately between client and compositor.
-
-### `lower_window`
-
-```python
-lower_window(window: Window)
-```
-
-**Parameters**
-
-| Parameter | Type | Default |
-|-----------|------|---------|
-| `window` | `Window` | **required** |
-
-Sends a window to the bottom of the stack. There is no Wayland
-route: the foreign-toplevel protocols expose activate and close but
-nothing to lower, so this raises CapabilityUnsupported there rather
-than approximating it by raising everything else.
-
-Not a mirror of activate_window(), which deliberately couples
-raising with focusing: this only restacks, and what happens to
-keyboard focus afterwards is the window manager's policy. Read
-active_window() if the next step depends on it.
-
-### `pointer_position`
-
-```python
-pointer_position()
-```
-
-**Returns** `tuple[int, int]`
-
-In the coordinate space `screens()` reports. Works on X11, Windows
-and macOS; see the note above for why an XWayland answer can be
-silently stale. To check where a click will land, prefer
-window_at()/element_at() over comparing this against an expectation.
-
-### `require_version`
-
-```python
-require_version(minimum: str)
-```
-
-**Parameters**
-
-| Parameter | Type | Default |
-|-----------|------|---------|
-| `minimum` | `str` | **required** |
-
-The counterpart of require() for the package itself rather than the
-desktop: a script written against this release declares that fact up
-front and fails here, naming both versions, rather than mid-run with
-an AttributeError on an API an older release does not have.
-
-Delegates to the module-level pyguitest.require_version(), which
-also works before connect(); this method exists so a script holding
-only `gui` declares its floor the same way it declares the
-capabilities it needs.
-
-### `row_values`
-
-```python
-row_values(row: Element)
-```
-
-**Parameters**
-
-| Parameter | Type | Default |
-|-----------|------|---------|
-| `row` | `Element` | **required** |
-
-**Returns** `tuple[str, ...]`
-
-For a control that nests each row's cells beneath it as children --
-confirmed live against a UIA `ListView` (WinDirStat's real
-extension-summary list, each `list item` holding one `text` child
-per column). Reads each child's `name`, which is where both backends
-put a cell's displayed value.
-
-A GTK `GtkTreeView` never nests this way, whatever its column count:
-it publishes no row element at all. Measured live on
-pyguitest-recorder's probe window -- a one-column `Gtk.TreeView`
-(`First row`/`Second row`/`Third row`, and the `Folders` tree, whose
-rows are `Documents`/`Reports`/`Q1`/`Q2`/`Notes`/`Trash`) -- every
-one of those names is a `table cell` directly inside the table,
-`table row` matches nothing at all, and this method on one of those
-cells answers `()`. Measured again on a three-column
-`Gtk.ListStore`: three `table column header` children (`Name`,
-`Count`, `Color`) followed by the six `table cell`s flat, in
-row-major order. Nothing groups those into rows but the caller
-already knowing the column count, so this method does not cover that
-shape -- reading it means chunking
-`elements(role=Role.TABLE_CELL, within=table)` by the count
-`elements(role=Role.TABLE_COLUMN_HEADER, within=table)` gives, by
-hand, since nothing here has that structure to read automatically.
-
-### `set_window_title`
-
-```python
-set_window_title(window: Window, title: str)
-```
-
-**Parameters**
-
-| Parameter | Type | Default |
-|-----------|------|---------|
-| `window` | `Window` | **required** |
-| `title` | `str` | **required** |
-
-Renames *another* application's window, which X11 permits any client
-to do -- that is the impersonation note, and the reason no Wayland
-protocol offers it. Mostly useful for tagging a window a test
-created so later lookups are unambiguous.
-
-The application may well rename it back: a title is the client's to
-set, and anything that redraws it (a document change, a tab switch)
-overwrites this. Do not use it as durable identity -- `app_id` is
-the stable handle where a backend fills it in.
-
-### `tree_items`
-
-```python
-tree_items(root: Element, *, role: str | None = None, max_depth: int = 24)
-```
-
-**Parameters**
-
-| Parameter | Type | Default |
-|-----------|------|---------|
-| `root` | `Element` | **required** |
-| `role` | `str \| None` | `None` |
-| `max_depth` | `int` | `24` |
-
-**Returns** `list[Element]`
-
-`elements(within=root)` only ever sees what the accessibility tree
-already has *visible* -- a collapsed tree row's children are not
-there to find until something opens it, the same way they are not
-there on screen. This walks `root`, expanding every branch it finds
-still collapsed (`expandable` and not `expanded`) before descending
-into it, so a caller gets every row the user could reach by clicking
-every disclosure triangle in order, not only the ones already open
-when this was called.
-
-`root` is the *container* the rows live in -- the tree, list or table
-element itself, not a row inside it. Where the next section says a
-toolkit publishes revealed rows beside their branch, that is the
-whole reason: a row passed here is not a container of anything, so a
-collapsed one answers nothing.
-
-Where a revealed row goes
--------------------------
-Opening a branch does not put its rows in the same place on every
-toolkit, and `child.children` alone cannot tell the two apart:
-
-- **UI Automation nests them.** The branch's own `children` grows, so
-  reading it after `expand()` finds them. Measured on WinDirStat's
-  real tree, where a `tree item` holds the rows it revealed.
-- **AT-SPI on GTK flattens them.** The opened row keeps *no*
-  children at all, and the rows it revealed are published as new
-  siblings of it, in the container's own child list. Measured live on
-  a GTK3 `GtkTreeView` (the probe window's `Folders` tree): with
-  `Documents` collapsed, `Documents.children` was `[]`, and after
-  `Documents.expand()` it was still `[]` -- while the tree's own
-  children went from `[column header 'Folder', 'Documents', 'Trash']`
-  to `['Folder', 'Documents', 'Reports', 'Notes', 'Trash']`. The
-  revealed rows appear in pre-order beside the row that revealed
-  them, exactly as the flattened list on screen reads. A walk that
-  only recursed into `child.children` therefore found every row that
-  was already open and never one it had just opened itself.
-
-So a container's children are re-read after each expansion, and the
-walk resumes from where it stopped rather than from the snapshot it
-started with. That picks up rows revealed beside their branch (GTK)
-and leaves the nested case (UIA) exactly as it was, since there the
-list does not change and the recursion into the branch finds them
-instead. The one thing this assumes about order is that a toolkit
-publishes revealed rows at or after the position of the row that
-revealed them, which is what pre-order flattening means and what both
-measured toolkits do; one that inserted them *before* their branch
-would leave them unseen. The result is not deduped either, because
-there is nothing to dedupe on: a live backend hands out a fresh
-wrapper per read, so two reads of one row are two objects that merely
-look alike, and a container publishing the same row twice yields it
-twice rather than once.
-
-Only the reads matter here, and one is added where it counts: a
-container is re-read once per expansion, never once per child, so a
-tree with nothing left collapsed costs exactly the walk it did before.
-
-`role` filters what is *returned* -- `Role.TABLE_CELL` for a GTK tree
-view's rows, `Role.TREE_ITEM` for UI Automation's, say -- without
-changing what gets walked or expanded; `None` (the default) returns
-every descendant, matching `elements()`'s own convention. Rows this
-expands stay expanded afterward: collapsing them back would cost a
-second full walk for a state nothing asked to have preserved, the
-same tradeoff `os.walk` makes about a directory's mtimes.
-
-`max_depth` bounds how deep the *containers* nest, the same bound
-`element_at` polices descent with on both backends and for the same
-reason: a cyclic or malformed tree must not spin forever. A real tree
-exhausts its actual depth long before 24 matters; a caller automating
-something deeper can raise it. On a flattening toolkit it bounds less
-than it looks like it does, since every row sits one level below the
-tree itself however deep the branch it came from -- it is not a limit
-on rows. A cycle is still caught: an element listing itself among its
-own children is only walked again where an expansion actually added
-something to walk, and `expand()` no-ops on a row already open.
-
-Needs Capability.ELEMENT_TREE to walk children at all, and
-Capability.ELEMENT_ACTION only where a branch actually has to be
-opened -- a tree with nothing left collapsed runs on the first alone,
-and the second is asked for before the first expansion rather than on
-the way in.
-
-```python
-# `root` is required: pass the container's own Element.
-tree = gui.element(role=Role.TREE, within=gui.window_element("Files"))
-for row in gui.tree_items(tree):
-    print(gui.row_values(row))
-
-# Narrow the walk by role, and bound it on a tree deep enough
-# to be worth not walking all of.
-gui.tree_items(tree, role=Role.TABLE_ROW, max_depth=4)
-```
-
-### `wait_for_pointer_activation`
-
-```python
-wait_for_pointer_activation(timeout: float | None = None)
-```
-
-**Parameters**
-
-| Parameter | Type | Default |
-|-----------|------|---------|
-| `timeout` | `float \| None` | `None` |
-
-**Returns** `tuple[float, float] | None`
-
-Not a query, and deliberately not spelled `pointer_position()`:
-Capability.INPUT_CAPTURE (the `inputcapture` backend, opt-in --
-`connect(backend="inputcapture")`) can only ever answer this at the
-moment the compositor itself decides to divert input here, which
-happens when the user's actual pointer physically moves across one
-of the screen's edges. There is no way to trigger that on demand,
-so this can legitimately block for as long as `timeout` allows
-waiting for someone to do that -- and once it happens, **every
-physical or logical pointer/keyboard/touch device the compositor
-chose to divert stops reaching the desktop at all** until this
-method has read the answer and released it, which it does as its
-very next step. Call this only when that trade is genuinely wanted,
-never as a drop-in replacement for a synchronous position read.
-
-Returns the pointer's position in the coordinate space `Screen`
-reports, or None if `timeout` elapsed with nobody crossing an edge
--- the ordinary outcome, matching every other `wait_for_*` method
-here, not an error. `timeout=None` waits indefinitely.
-
-### `wait_window_focus`
-
-```python
-wait_window_focus(window: Window, timeout: float | None = None, interval: float = 0.1)
-```
-
-**Parameters**
-
-| Parameter | Type | Default |
-|-----------|------|---------|
-| `window` | `Window` | **required** |
-| `timeout` | `float \| None` | `None` |
-| `interval` | `float` | `0.1` |
-
-**Returns** `bool`
-
-A window can exist -- wait_for_window has already returned it -- for
-a moment before the window manager actually gives it focus, e.g. a
-freshly-opened window still animating into place. Nothing else here
-polls for that: activate_window() asks for focus once and returns
-immediately, so a script that clicks or types right after it cannot
-tell whether the request was honored yet, only that it was made.
-Seen live: typed text landing in the terminal a replay script was
-itself running in, because the window it had just clicked into did
-not hold focus yet at that instant.
-
-Returns whether `window` held focus by the deadline -- False is a
-real answer to check, not something to guess from a None.
-
 ## Forwarded to the backend
 
 `Session` writes out the interface above and forwards anything else
@@ -3304,6 +3676,16 @@ prevents by design lives here — on a Wayland session they raise
 ### Element
 
 One node of the accessible tree, as every backend agrees to expose it.
+
+A Protocol rather than a base class: the concrete element belongs to
+whichever backend produced it -- AtspiBackend's is a thin wrapper over a
+dogtail Node and cannot usefully inherit from here -- so this states the
+shape they agree on instead of demanding they share an ancestor.
+
+It exists to be *named*: Session.element, Session.button and the rest are
+annotated with it, which is what makes `gui.button("Save").click()`
+complete and type-check in an editor. Backends stay free to offer more,
+and AtspiBackend's Element keeps `node` for the parts this does not cover.
 
 | Member | What it does |
 |--------|--------------|
@@ -3781,13 +4163,17 @@ the action itself is the better proof.
 
 A toplevel window.
 
+Deliberately not an integer. X11 window ids are reusable, so a stale id can
+silently address a different window; Wayland toplevel handles are objects
+with a lifetime, and this mirrors that. `handle` is backend-private.
+
 | Member | What it does |
 |--------|--------------|
-| `app_id: str` |  |
-| `backend: GUIBackend` |  |
-| `handle: object` |  |
-| `pid: int \| None` |  |
-| `title: str` |  |
+| `app_id: str` | The application identifier the desktop reports, where it reports one at all: a WM_CLASS on X11, an app_id on Wayland, "" elsewhere. |
+| `backend: GUIBackend` | The backend this window came from, and the one that can act on it. |
+| `handle: object` | The backend's own reference to this window -- an X11 id, an HWND, a Wayland toplevel handle. Backend-private: pass the `Window` around rather than this, and never store or compare it across runs. |
+| `pid: int \| None` | The owning process id, or None on a backend that cannot report one. `find_windows(pid=...)` matches nothing rather than everything on such a backend. |
+| `title: str` | The window title as it was when this object was made. Read once and never refreshed -- call `refresh_window` for the current value rather than comparing against a title the application has since changed. |
 
 ### Screen
 
@@ -3795,12 +4181,12 @@ One output.
 
 | Member | What it does |
 |--------|--------------|
-| `height: int` |  |
-| `index: int` |  |
-| `name: str` |  |
-| `scale: float` |  |
+| `height: int` | The output's height in physical pixels. |
+| `index: int` | This output's position in `screens()`, and the number a `screen=` argument takes. |
+| `name: str` | The connector or display name the desktop reports (`HDMI-1`, `eDP-1`), or "" where it reports none. |
+| `scale: float` | The output's DPI divided by 96 -- 1.0 unscaled, 1.5 on a 144 DPI monitor -- and never a pixel count. See `__init__` for how each platform's answer is normalised to that definition. |
 | `size` | The output's (width, height) in pixels. |
-| `width: int` |  |
+| `width: int` | The output's width in physical pixels, the same unit `geometry()` and `screenshot()` work in. |
 
 #### `size`
 
@@ -3810,17 +4196,35 @@ One output.
 
 Where a template image was found.
 
+In whichever coordinate space it was searched in -- screen-absolute or
+otherwise -- the same way geometry()'s (x, y, width, height) leaves that
+to the caller.
+
 | Member | What it does |
 |--------|--------------|
-| `height: int` |  |
-| `score: float` |  |
-| `width: int` |  |
-| `x: int` |  |
-| `y: int` |  |
+| `height: int` | The matched region's height, which is the template's height. |
+| `score: float` | How close the match was, by the metric the search used. Lower is better for the default `"RMSE"`; compare it against the `threshold` that found it rather than against an absolute figure. |
+| `width: int` | The matched region's width, which is the template's width. |
+| `x: int` | The match's left edge, in whichever space the search ran in. |
+| `y: int` | The match's top edge, in whichever space the search ran in. |
 
 ### Application
 
 A program started by `Session.start_app`, and its lifecycle.
+
+Use it as a context manager when the program should not outlive the
+block -- which is almost always::
+
+```python
+with gui.start_app([EDITOR, path]) as app:
+    window = gui.wait_for_window("Editor", timeout=10)
+    ...
+# terminated, and killed if it would not terminate
+```
+
+Unlike a hand-rolled `try`/`finally`, there is no gap between starting
+the program and owning it: the process already exists by the time this
+object does, so nothing can be raised in between and leak it.
 
 | Member | What it does |
 |--------|--------------|
@@ -4100,42 +4504,50 @@ What the current login actually offers.
 | `can_inject_input` | Whether any input mechanism is worth attempting. |
 | `can_use_atspi` | Whether the accessibility layer is actually reachable. |
 | `can_use_clipboard` | Whether the clipboard is reachable on this session. |
-| `desktop: str` |  |
-| `display: str` |  |
-| `dpi_awareness: str` |  |
-| `foreground_is_elevated: bool \| None` |  |
-| `has_atspi: bool` |  |
-| `has_ax: bool` |  |
-| `has_comtypes: bool` |  |
-| `has_dogtail: bool` |  |
-| `has_evdev: bool` |  |
-| `has_input_group: bool` |  |
-| `has_libei: bool` |  |
-| `has_listen_event: bool` |  |
-| `has_portal: bool` |  |
-| `has_post_event: bool` |  |
-| `has_pygobject: bool` |  |
-| `has_pyobjc_application_services: bool` |  |
-| `has_pyobjc_quartz: bool` |  |
-| `has_pywin32: bool` |  |
-| `has_screen_recording: bool` |  |
-| `has_sendinput: bool` |  |
-| `has_uiautomation: bool` |  |
-| `has_uinput: bool` |  |
-| `has_wgc: bool` |  |
-| `has_xlib: bool` |  |
-| `has_xtest: bool` |  |
+| `desktop: str` | The desktop environment that announced itself, from `XDG_CURRENT_DESKTOP`, or "" where nothing did. |
+| `display: str` | The X display this session reaches, from `DISPLAY`, or "" where there is none. |
+| `dpi_awareness: str` | The process's DPI awareness mode, or "" where it could not be read: one of "unaware", "system", "per-monitor", "per-monitor-v2" or "unaware (GDI-scaled)". |
+| `foreground_is_elevated: bool \| None` | Whether the window in the foreground belongs to a high-integrity process, or None where the foreground window has no reachable owning process to ask about. |
+| `has_atspi: bool` | Whether the AT-SPI accessibility bus is reachable, and with it every element lookup on Linux and BSD. |
+| `has_ax: bool` | Whether this process holds the Accessibility grant (`kTCCServiceAccessibility`). Denied, the AX attribute reads return an empty tree rather than raising, so this is the only way to tell "no elements" from "untrusted". |
+| `has_comtypes: bool` | Whether `comtypes` -- and with it UI Automation -- is importable. The one field that decides whether the element half of a Windows session can exist at all; the 'windows' extra installs it. |
+| `has_dogtail: bool` | Whether `dogtail` is importable. Not used for anything here; probed because its presence means the accessibility stack is installed and configured, which is a useful thing to know when `has_atspi` is False. |
+| `has_evdev: bool` | Whether `evdev` is importable, which the uinput input path needs. |
+| `has_input_group: bool` | Whether this user belongs to the group that owns the input device nodes. The fix for a False `uinput_writable` is usually adding the user to it, so the two are reported side by side. |
+| `has_libei: bool` | Whether `python-libei` is importable, and with it the `eiinput` backend -- the only input path a native Wayland session grants without root. |
+| `has_listen_event: bool` | Whether this process holds the Input Monitoring grant (`kTCCServiceListenEvent`). Nothing in this package consumes it yet; it is probed and reported because which grant an event tap needs is the one TCC question ADR 004 leaves open, and the first machine that prints it settles it. |
+| `has_portal: bool` | Whether an `xdg-desktop-portal` implementation is on the session bus, which is how a sandboxed or Wayland session reaches screenshots, clipboard and input capture. |
+| `has_post_event: bool` | Whether this process holds the PostEvent grant (`kTCCServicePostEvent`), which is what `CGEventPost` requires -- not Accessibility, which System Settings happens to file under the same pane. Denied, posted events are dropped with no error. |
+| `has_pygobject: bool` | Whether `gi` is importable, which is how the AT-SPI bus is spoken to. |
+| `has_pyobjc_application_services: bool` | Whether PyObjC's ApplicationServices distribution is importable, which is what the AX element tree is reached through. A separate distribution inside the same extra, so a machine can have exactly one of the two. |
+| `has_pyobjc_quartz: bool` | Whether PyObjC's Quartz distribution is importable. Gates input injection and screen geometry through it, which are `CGEventPost` and `CGGetActiveDisplayList`. The clipboard is deliberately absent from that sentence: no PyObjC binding serves it, and `can_use_clipboard` reaches it through `pbcopy`/`pbpaste` instead -- the tools macOS ships, the same way capture reaches `screencapture`. |
+| `has_pywin32: bool` | Whether `pywin32` is importable. Reported because a Windows reader will ask, not because anything here needs it: everything this package calls is declared in ctypes, and pywin32 is the convenience wrapper it does without. |
+| `has_screen_recording: bool` | Whether this process holds the Screen Recording grant (`kTCCServiceScreenCapture`). Denied, `screencapture` exits 0 and writes a uniformly black image, so an unguarded `capture()` returns a plausible-looking picture of nothing. |
+| `has_sendinput: bool` | Whether user32 exposes `SendInput`, the Windows input transport. |
+| `has_uiautomation: bool` | Whether the third-party `uiautomation` wrapper is importable -- another commonly used route to UI Automation, and another one this package does not take. |
+| `has_uinput: bool` | Whether the kernel's `/dev/uinput` device node exists at all. Present is not usable: see `uinput_writable`. |
+| `has_wgc: bool` | Whether Windows.Graphics.Capture exists on this build. That the API is there, not that any particular window may be captured: a protected or DRM-protected one refuses, which is a per-window question. |
+| `has_xlib: bool` | Whether `python-xlib` is importable, which the `x11` backend needs. |
+| `has_xtest: bool` | Whether the X server carries the XTEST extension, which is how the `x11` backend injects input. |
 | `input_transport` | What will actually inject input here, whether or not it is a tool. |
-| `is_elevated: bool` |  |
-| `is_interactive_desktop: bool` |  |
-| `low_level_hooks_timeout_ms: int` |  |
-| `macos_version: str` |  |
+| `is_elevated: bool` | Whether this process runs at high integrity. UIPI drops input aimed at an elevated window from a process that is not, with no error and no prompt. |
+| `is_interactive_desktop: bool` | Whether this process is attached to the interactive window station. |
+| `low_level_hooks_timeout_ms: int` | How long the system waits for a low-level hook to return before removing it, or 0 off Windows. See _low_level_hooks_timeout_ms: this is the recorder's silent-gap window, and 300 ms is the platform default. |
+| `macos_version: str` | The macOS release (`26.7`), or "" where it could not be read. |
 | `preferred_input` | The input *tool* to try first, or None if none is installed. |
 | `summary()` | A short, user-readable description of this environment. |
-| `uinput_writable: bool` |  |
-| `wayland_display: str` |  |
-| `windows_build: int` |  |
-| `windows_edition: str` |  |
+| `uinput_writable: bool` | Whether this process may actually open `/dev/uinput` for writing. False on a machine where the node exists but the user is not in the group owning it, which is the common case and the one worth reporting separately. |
+| `wayland_display: str` | The Wayland socket name, from `WAYLAND_DISPLAY`, or "" where there is none. Set alongside `display` on an XWayland session, which is what distinguishes one from plain X11. |
+| `windows_build: int` | `sys.getwindowsversion().build`, or 0 where it cannot be read. The version floor every Windows mechanism is conditional on -- 17134 for Windows.Graphics.Capture, 15063 for per-monitor-v2 DPI, 22000 for Windows 11. |
+| `windows_edition: str` | The Windows edition (`Windows 11 Pro`), or "" where it could not be read. |
+| `session_type: SessionType` | Which display server this login is using, as a `SessionType`: WAYLAND, X11, XWAYLAND, WIN32, DARWIN, HEADLESS or UNKNOWN. The single most important field here -- it decides which backends can exist at all. |
+| `compositor: Compositor` | Which compositor or window manager is running, as a `Compositor`: MUTTER, KWIN, WLROOTS, COSMIC, DWM, QUARTZ, OTHER or NONE. What a Wayland session can be asked to do varies by this, not by the protocol. |
+| `input_tools: tuple[str, ...]` | The external input tools found on PATH, in the order they would be tried -- `xdotool`, `ydotool`, `wtype` and the rest. |
+| `capture_tools: tuple[str, ...]` | The external screenshot tools found on PATH, in preference order. |
+| `window_tools: tuple[str, ...]` | The external window-management tools found on PATH, in preference order. |
+| `image_tools: tuple[str, ...]` | The external image tools found on PATH, used for template matching and cropping. |
+| `clipboard_tools: tuple[str, ...]` | The external clipboard tools found on PATH, in preference order. |
+| `notes: tuple[str, ...]` | Everything the probes noticed that is worth telling a human but does not fit a flag: a permission that will prompt, a tool present but broken, a session that lies about itself. `summary()` prints these. |
 
 #### `can_capture`
 
@@ -4278,6 +4690,250 @@ actually carry the events -- and is what `summary()` reports.
 
 **Returns** `str`
 
+### CapabilitySet
+
+The capabilities a backend actually provides.
+
+This is the negotiation surface the audit called for: with 19 legacy
+functions varying by compositor and 6 unavailable everywhere, callers need
+to ask before they depend.
+
+```python
+if gui.supports(Capability.WINDOW_GEOMETRY):
+    ...
+```
+
+| Member | What it does |
+|--------|--------------|
+| `by_tier(tier: Tier)` | The supported capabilities in one tier. |
+| `copy()` | A shallow copy that is still a `CapabilitySet`. |
+| `difference(*others)` | This set minus each of `others`, re-wrapped as __or__ is. |
+| `intersection(*others)` | Intersection with each of `others`, re-wrapped as __or__ is. |
+| `missing` | Every capability this backend does not provide. |
+| `report()` | A user-readable support table, grouped by tier. |
+| `symmetric_difference(other)` | The members in exactly one of this set and `other`, re-wrapped. |
+| `union(*others)` | Union with each of `others`, re-wrapped as __or__ is. |
+
+#### `by_tier`
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `tier` | `Tier` | **required** |
+
+**Returns** `CapabilitySet`
+
+#### `copy`
+
+**Returns** `CapabilitySet`
+
+#### `difference`
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `*others` |  | *any number* |
+
+**Returns** `CapabilitySet`
+
+#### `intersection`
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `*others` |  | *any number* |
+
+**Returns** `CapabilitySet`
+
+#### `missing`
+
+**Returns** `CapabilitySet`
+
+#### `report`
+
+**Returns** `str`
+
+#### `symmetric_difference`
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `other` |  | **required** |
+
+**Returns** `CapabilitySet`
+
+#### `union`
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `*others` |  | *any number* |
+
+**Returns** `CapabilitySet`
+
+## The Session object
+
+A connected automation session.
+
+```python
+Session(
+    self,
+    backend: GUIBackend,
+    environment: Environment,
+    event_delay: float = 0.0,
+    key_delay: float = 0.0,
+    click_via: str = auto,
+) -> None
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `backend` | `GUIBackend` | **required** |
+| `environment` | `Environment` | **required** |
+| `event_delay` | `float` | `0.0` |
+| `key_delay` | `float` | `0.0` |
+| `click_via` | `str` | `'auto'` |
+
+`event_delay` is the pause in seconds after each discrete input event,
+and `key_delay` the pause between characters when typing. Both replace
+X11::GUITest's global delay settings, which were module state there.
+See `connect()` for why `event_delay`'s 0.0 default is worth
+overriding for a script that drives real input.
+
+`click_via` is the route `element.click()` takes when a call passes no
+`via` of its own: `"action"` (the accessible action only), `"pointer"`
+(the user pathway only) or `"auto"` (today's ladder, action first with
+the pointer as the fallback). Settable mid-run, so one assignment can
+switch a whole suite's policy -- and checked on every assignment, not
+only here, for that reason: a misspelling used to be found by
+`resolve_click_route`, which runs on the first *element* click that
+takes the session default, so `connect(click_via="pointr")` reported
+a typo in the setup from somewhere in the middle of a test.
+
+`connect()` is the ordinary way to get one; construct it directly only to pair a backend you built yourself with an environment.
+
+These attributes are public and readable on any session:
+
+| Attribute | What it is |
+|-----------|------------|
+| `backend` | The backend, or composite of backends, this session drives through. |
+| `environment` | The `Environment` this session was opened against. |
+| `event_delay` | Seconds slept after each synthesised event. |
+| `key_delay` | Seconds slept between keystrokes. |
+
+## Helper modules
+
+### `pyguitest.inspect`
+
+Accessible-tree dump, the data and rendering `pyguitest inspect` prints.
+
+| Name | What it is |
+|------|------------|
+| `tree_data(gui, window=None)` | Every window's accessible tree, grouped by owning application. |
+| `format_tree(data)` | Render `tree_data`'s output as an indented tree. |
+
+### `pyguitest.compat`
+
+The X11::GUITest 0.29 migration table, as data.
+
+| Name | What it is |
+|------|------------|
+| `LegacyFunction` | LegacyFunction(name, x11, capability, tier, replacement, note) |
+| `LEGACY` | Every X11::GUITest function, keyed by its Perl name. |
+| `CONSTANTS` | Every `:CONST` symbol a `qw(:ALL)` script could import, keyed by the name as written. |
+| `by_tier(tier: Tier) -> list[LegacyFunction]` | Every legacy function in one tier. |
+| `constant(name: str) -> tuple[str, str] \| None` | What one `:CONST` symbol becomes, or None if it is not one of them. |
+| `unavailable() -> list[LegacyFunction]` | The functions with no Wayland path, X11 and Windows only. |
+| `unported() -> list[LegacyFunction]` | The functions this package does not spell at all, on any backend. |
+| `portable() -> list[LegacyFunction]` | The functions that port unchanged, with no display server involved. |
+
+### `pyguitest.session`
+
+Runtime environment detection.
+
+| Name | What it is |
+|------|------------|
+| `toolkit_accessibility() -> bool \| None` | Whether GTK's AT-SPI bridge is switched on, or None if unknowable. |
+| `assistive_technology_enabled() -> bool \| None` | Whether an assistive technology is announced, or None if unknowable. |
+| `gnome_extension_state(uuid: str = pyguitest-window-control@pyguitest.local) -> str \| None` | A GNOME Shell extension's load state, or None if the question can't be asked. |
+
+## Key names
+
+`send_keys` reads a `{NAME}` sequence as a key name: first against the aliases below, case-insensitively, and otherwise by handing the name to the backend as-is. The default vocabulary is X11 keysym names, so `{Escape}`, `{Return}` and even `{Hiragana_Katakana}` resolve on X11 without being aliases; a name that is neither an alias nor a name the backend knows raises `ValueError`. Prefer an alias: they are the portable spelling, and the same string then works on every backend.
+
+### Modifier prefixes
+
+A prefix holds its key for the next key, or for a parenthesised group. Groups nest, and a `)` releases exactly what its own `(` added.
+
+| Prefix | Holds | Notes |
+|--------|-------|-------|
+| `^` | `Control_L` | Control. |
+| `%` | `Alt_L` | Alt / Option. |
+| `+` | `Shift_L` | Shift. |
+| `#` | `Meta_L` | The `Meta_L` keysym on the Unix backends, which is **not** the Super/Windows key -- use `{LSK}`/`{RSK}` for that. On Windows it is the Windows key. |
+| `&` | `ISO_Level3_Shift` | AltGr, for a third-level character. **Not available on macOS**: `MacquartzBackend` has no `&` modifier, so `&` there is typed as a literal ampersand rather than held. |
+
+### `{}` key aliases
+
+Several aliases can name one key; all spellings are equivalent and matched case-insensitively.
+
+| Key | Aliases |
+|-----|---------|
+| `Alt_L` | `{LAL}` |
+| `Alt_R` | `{RAL}` |
+| `BackSpace` | `{BAC}`, `{BKS}`, `{BS}` |
+| `Break` | `{BRE}` |
+| `Cancel` | `{CAN}` |
+| `Caps_Lock` | `{CAP}` |
+| `Control_L` | `{LCT}` |
+| `Control_R` | `{RCT}` |
+| `Delete` | `{DEL}` |
+| `Down` | `{DOWN}` |
+| `End` | `{END}` |
+| `Escape` | `{ESC}` |
+| `F1` | `{F1}` |
+| `F10` | `{F10}` |
+| `F11` | `{F11}` |
+| `F12` | `{F12}` |
+| `F2` | `{F2}` |
+| `F3` | `{F3}` |
+| `F4` | `{F4}` |
+| `F5` | `{F5}` |
+| `F6` | `{F6}` |
+| `F7` | `{F7}` |
+| `F8` | `{F8}` |
+| `F9` | `{F9}` |
+| `Help` | `{HEL}` |
+| `Home` | `{HOM}` |
+| `Insert` | `{INS}` |
+| `Left` | `{LEF}` |
+| `Menu` | `{MNU}` |
+| `Meta_L` | `{LMA}` |
+| `Meta_R` | `{RMA}` |
+| `Next` | `{PGD}` |
+| `Num_Lock` | `{NUM}` |
+| `Print` | `{PRT}` |
+| `Prior` | `{PGU}` |
+| `Return` | `{ENT}` |
+| `Right` | `{RIG}` |
+| `Scroll_Lock` | `{SCR}` |
+| `Shift_L` | `{LSH}` |
+| `Shift_R` | `{RSH}` |
+| `Super_L` | `{LSK}` |
+| `Super_R` | `{RSK}` |
+| `Tab` | `{TAB}` |
+| `Up` | `{UP}` |
+| `space` | `{SPA}`, `{SPC}` |
+
+On Windows, `win32` also accepts these longer spellings, which the other backends do not: `{BACKSPACE}`, `{CAPSLOCK}`, `{DELETE}`, `{ENTER}`, `{ESCAPE}`, `{INSERT}`, `{NUMLOCK}`, `{PGDN}`, `{PGUP}`, `{SCROLLLOCK}`.
+
 ## Capabilities
 
 The full set, with the tier each sits in and the backends providing
@@ -4305,6 +4961,8 @@ provides the capability at all -- which today is nowhere.
 | <a id="cap-window_state"></a>`WINDOW_STATE` | T3 | AtspiBackend, CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Read minimized and activated state |
 | <a id="cap-window_activate"></a>`WINDOW_ACTIVATE` | T3 | AtspiBackend, CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Raise and focus; there is no raise-without-focus operation |
 | <a id="cap-window_minimize"></a>`WINDOW_MINIMIZE` | T3 | CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Minimize and restore |
+| <a id="cap-window_maximize"></a>`WINDOW_MAXIMIZE` | T3 | CosmicBackend, GnomeShellBackend, Win32Backend, X11Backend | Maximize and restore, and read whether a window is maximized -- only where the desktop has the concept: a tiling compositor does not, and macOS zoom is not it |
+| <a id="cap-window_close"></a>`WINDOW_CLOSE` | T3 | CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Ask the window manager to close one window gracefully -- the route that lets the application prompt to save, where stopping the process cannot |
 | <a id="cap-window_geometry"></a>`WINDOW_GEOMETRY` | T3 | AtspiBackend, CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Read position and size; no foreign-toplevel protocol carries this |
 | <a id="cap-window_placement"></a>`WINDOW_PLACEMENT` | T3 | GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Move to a position; placement is the compositor's prerogative |
 | <a id="cap-window_resize"></a>`WINDOW_RESIZE` | T3 | GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Change width and height; separate from placement because a tiling compositor can size a window without letting anyone position it |
@@ -4338,16 +4996,23 @@ provides the capability at all -- which today is nowhere.
 `Role` holds the AT-SPI role names `element(role=...)` matches on.
 
 ```
-ALERT  CHECK_BOX  CHECK_MENU_ITEM  CHOICE_ROLES  COMBO_BOX  DIAL
-DIALOG  DOCUMENT_FRAME  ENTRY  FILE_CHOOSER  FILLER  FRAME  HEADING
-ICON  IMAGE  LABEL  LAYERED_PANE  LEVEL_BAR  LINK  LIST  LIST_ITEM
-MENU  MENU_ITEM  PAGE_TAB  PAGE_TAB_LIST  PANEL  PARAGRAPH
-PASSWORD_TEXT  PROGRESS_BAR  PUSH_BUTTON  RADIO_BUTTON
-RADIO_MENU_ITEM  SCROLL_BAR  SCROLL_PANE  SEPARATOR  SLIDER
-SPIN_BUTTON  SPLIT_PANE  STATUS_BAR  SWITCH  TABLE  TABLE_CELL
-TABLE_COLUMN_HEADER  TABLE_ROW  TEXT  TEXT_ROLES  TOGGLE_BUTTON
-TOOL_BAR  TREE  TREE_ITEM  TREE_TABLE  VIEWPORT  WINDOW  WINDOW_ROLES
+ALERT  CHECK_BOX  CHECK_MENU_ITEM  COMBO_BOX  DIAL  DIALOG
+DOCUMENT_FRAME  ENTRY  FILE_CHOOSER  FILLER  FRAME  HEADING  ICON
+IMAGE  LABEL  LAYERED_PANE  LEVEL_BAR  LINK  LIST  LIST_ITEM  MENU
+MENU_ITEM  PAGE_TAB  PAGE_TAB_LIST  PANEL  PARAGRAPH  PASSWORD_TEXT
+PROGRESS_BAR  PUSH_BUTTON  RADIO_BUTTON  RADIO_MENU_ITEM  SCROLL_BAR
+SCROLL_PANE  SEPARATOR  SLIDER  SPIN_BUTTON  SPLIT_PANE  STATUS_BAR
+SWITCH  TABLE  TABLE_CELL  TABLE_COLUMN_HEADER  TABLE_ROW  TEXT
+TOGGLE_BUTTON  TOOL_BAR  TREE  TREE_ITEM  TREE_TABLE  VIEWPORT  WINDOW
 ```
+
+`Role` also carries three ready-made groups, for the calls that take several roles at once (`elements(role=...)` accepts a sequence). Each is a set of the names above, not a role itself:
+
+| Group | Holds |
+|-------|-------|
+| `Role.CHOICE_ROLES` | combo box, list, menu, page tab list |
+| `Role.TEXT_ROLES` | entry, password text, spin button, text |
+| `Role.WINDOW_ROLES` | alert, dialog, file chooser, frame, window |
 
 ## Exceptions
 
@@ -4371,6 +5036,236 @@ TOOL_BAR  TREE  TREE_ITEM  TREE_TABLE  VIEWPORT  WINDOW  WINDOW_ROLES
 | `PortalTimeout` | A portal request was accepted but never answered. |
 | `VersionTooOld` | The installed pyguitest is older than the floor a script declared. |
 | `WindowNotFound` | No window matched, or a handle refers to a window that has closed. |
+
+### `AccessibilityViolation`
+
+Subclass of `PyGUITestError`.
+
+Raised by assert_accessible and friends. Unlike ElementNotFound the
+elements are all present -- the complaint is about how they are
+labelled, which is what a screen reader reads out and what this
+package's own locators match on.
+
+### `BackendCallTimeout`
+
+Subclass of `PyGUITestError`.
+
+Distinct from the `timeout` on a `wait_for_*`/`wait_until` call, which
+bounds how long *polling* waits for a condition to become true between
+repeated calls to the backend. This is the narrower, stranger failure
+underneath that: one single call -- not a loop of them -- simply never
+returns at all, with no exception and nothing left to poll. Confirmed
+live against AT-SPI/dogtail (GhostBSD, a `QTreeView` in a torture-test
+fixture): one `find_elements()` call touching that one widget's subtree
+locked up completely -- not slow, stuck -- and took the whole calling
+script down with it, since every `wait_for_*` timeout in that script was
+only ever checking its deadline *between* calls to a function that
+itself never returned control to Python at all. `signal.alarm` does not
+reliably help here either: confirmed live that it did not interrupt this
+specific hang, which is stuck inside a blocking native (GI/D-Bus) call
+that never hands control back to the interpreter loop, and CPython only
+delivers a pending signal between bytecode instructions.
+
+The call is not actually killed when this is raised -- nothing in Python
+can forcibly stop another thread's blocking native call -- so it may
+still be running in the background afterward; see whichever backend
+raised this for what that means there.
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `what` | `str` | **required** |
+| `timeout` | `float` | **required** |
+
+Carries `.what`, `.timeout`.
+
+### `BackendUnavailable`
+
+Subclass of `PyGUITestError`.
+
+### `CapabilityUnsupported`
+
+Subclass of `PyGUITestError`.
+
+Carries the capability and the reason so callers can skip rather than fail
+-- the intended pattern for test suites spanning several desktops.
+
+The message also carries what to do about it. Raised from just over sixty
+places, and before this tail existed the most common one was the only
+failure in the package that said what went wrong without one word about
+the fix.
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `capability` | `Capability` | **required** |
+| `backend` | `str \| None` | `None` |
+| `reason` | `str \| None` | `None` |
+| `hint` | `str \| None` | `None` |
+
+Carries `.capability`, `.backend`, `.reason`, `.hint`.
+
+### `CaptureFallbackWarning`
+
+Subclass of `UserWarning`.
+
+Warned rather than swallowed because the fallback hides a real,
+fixable problem: a screenshot tool that is installed, was selected,
+and does not work. Nothing else would tell anyone -- `pyguitest
+doctor` reports it as present, and the capture it silently rescued
+succeeded.
+
+### `CaptureRegionUnsupported`
+
+Subclass of `PyGUITestError`.
+
+The third capture outcome, distinct from the two `CompositeBackend._grab`
+already knows. A broken *mechanism* (a tool that hangs) is a
+`PyGUITestError` the composite caches, so a dead member is skipped for
+the session. A *malformed* region -- one outside every screen -- is a
+`ValueError` the composite lets propagate, since it would fail
+identically on every member. This is neither: the region is well formed
+and on-screen, but this particular backend cannot capture it -- a
+per-output backend like `cosmic` cannot crop a rectangle that straddles
+two outputs, where a whole-desktop member (`portalcapture`, which shoots
+the whole screen and crops) can. The composite therefore tries the next
+member *without* caching this one: the failure is the region's shape
+against this mechanism, not the mechanism being broken, so the backend
+stays available for every region it can serve.
+
+### `ClipboardMismatch`
+
+Subclass of `PyGUITestError`.
+
+Raised by assert_clipboard. Distinguishes the selection at fault
+(clipboard proper or PRIMARY) in the message, since the two are
+independent and a caller reading the report should not have to guess
+which one was checked.
+
+### `ElementNotActionable`
+
+Subclass of `PyGUITestError`.
+
+The typed answer for "this element is here and cannot be pressed", as
+against ElementNotFound ("it is not there") and CapabilityUnsupported
+("this backend cannot do that at all"). The wording is the backend's,
+which is why one is passed in: what can go wrong is a property of the
+platform's accessibility model, not of this package.
+
+On Linux it is dogtail's own coordinate click needing GNOME's
+gnome-ponytail-daemon -- absent on every other Wayland compositor -- and
+the element's AT-SPI actions holding neither "click" nor "press" to fall
+back to. Seen on KDE's QML-based Kickoff menu, whose category labels
+expose no Action interface at all; coordinate-based clicking still works
+there, only the coordinate-free path does not. On Windows it is a UIA
+element publishing none of the Invoke, Toggle or LegacyIAccessible
+patterns, which leaves no accessible action to perform either.
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `role` | `str` | **required** |
+| `name` | `str` | **required** |
+| `reason` | `str \| None` | `None` |
+
+Carries `.role`, `.name`.
+
+### `ElementNotFound`
+
+Subclass of `PyGUITestError`.
+
+Raised by the convenience finders rather than returning None, so a script
+fails where the mistake is rather than several lines later on an attribute
+of None.
+
+### `FocusMismatch`
+
+Subclass of `PyGUITestError`.
+
+Raised by assert_focused/assert_tab_order -- unlike ElementNotFound, the
+element usually does exist; it simply is not the focused one.
+
+### `HandshakeRefusalWarning`
+
+Subclass of `UserWarning`.
+
+Warned rather than swallowed because the compositor's `wl_display.error`
+sentence is the one diagnostic that says *why* -- and rather than raised
+because a best-effort probe answering "no backend here" must not crash
+`connect()` on a desktop that may simply not be COSMIC's.
+
+### `ImageNotFound`
+
+Subclass of `PyGUITestError`.
+
+### `KeymapWarning`
+
+Subclass of `UserWarning`.
+
+Warned when text is typed through a tool that injects scancodes below the
+compositor: the session's active xkb layout is applied, so "Hello" on an
+AZERTY session arrives as something else.
+
+### `PermissionRequired`
+
+Subclass of [`CapabilityUnsupported`](#capabilityunsupported).
+
+Raised for a declined portal dialog or an inaccessible /dev/uinput -- both
+recoverable by user action, unlike CapabilityUnsupported generally.
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `capability` | `Capability` | **required** |
+| `backend` | `str \| None` | `None` |
+| `reason` | `str \| None` | `None` |
+| `hint` | `str \| None` | `None` |
+
+### `PortalTimeout`
+
+Subclass of `PyGUITestError`.
+
+Distinct from PermissionRequired, which means the user actively declined:
+here the portal took the call and no Response signal ever arrived. The
+ordinary cause is a consent dialog nobody answered; the one that makes
+this a typed error rather than a hang is a portal that died mid-request,
+leaving a caller waiting on a signal that can never come.
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `method` | `str` | **required** |
+| `timeout` | `float` | **required** |
+
+Carries `.method`, `.timeout`.
+
+### `VersionTooOld`
+
+Subclass of `PyGUITestError`.
+
+Raised by require_version(). Exists for scripts that outlive the machine
+they were written on: a generated or shared script states the release it
+was checked against and an older install fails right at that line, naming
+both versions and the upgrade command, instead of part way through a run
+with an AttributeError on an API the older release does not have.
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `minimum` | `str` | **required** |
+| `installed` | `str` | **required** |
+
+Carries `.minimum`, `.installed`.
+
+### `WindowNotFound`
+
+Subclass of `PyGUITestError`.
 
 ## Module-level names
 
@@ -4543,11 +5438,22 @@ quote_for_type(text: str | None) -> str | None
 
 **Returns** `str | None`
 
-Replaces X11::GUITest's QuoteStringForSendKeys, with the same behaviour
-plus the # fix noted above: each of ^ % + ~ # ( ) { } is wrapped in
-braces, so send_keys(quote_for_type(text)) sends `text` literally.
+Replaces X11::GUITest's QuoteStringForSendKeys: each of ^ % + ~ # ( )
+{ } is wrapped in braces -- `#` included, which upstream left out, so a
+`#` in the text was read as a modifier -- and
+send_keys(quote_for_type(text)) then sends `text` literally.
 
-One exception, deliberately kept from upstream: `&` (AltGr) is not
+Two exceptions to "literally", and the first is the one that bites.
+**Whitespace is not escaped and is not literal text either.** `\n` and
+`\r` each send Enter and `\t` sends Tab, because that is what
+send_keys does with them, so text carrying Windows line endings sends
+*two* Returns per break (`"a\r\nb"` arrives as a, Enter, Enter, b) and
+a tab arrives as a focus change rather than as whitespace. Normalise
+the line endings first, or use type_text for text that has to arrive
+exactly as written -- it is the keymap-aware path and reads no syntax
+at all.
+
+The second, deliberately kept from upstream: `&` (AltGr) is not
 escaped, so a `&` in `text` is read as the modifier. `{&}` is the literal
 spelling, but it cannot be passed *in*: braces are escaped too, so
 `quote_for_type("{&}")` returns `{{}&{}}` and the `&` is a modifier

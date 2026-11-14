@@ -476,6 +476,12 @@ _ALL = [
 ]
 
 LEGACY = {f.name: f for f in _ALL}
+"""Every X11::GUITest function, keyed by its Perl name.
+
+The whole migration table as data: each value is a `LegacyFunction`
+carrying the pyguitest replacement, the capability it needs and the
+tier that capability sits in. `by_tier`, `unavailable`, `unported`
+and `portable` are views over this."""
 
 
 # The `:CONST` tag, which `@EXPORT_OK` does not carry and the table above
@@ -516,6 +522,13 @@ CONSTANTS = {
         "the number (XC_WATCH is 150) or define your own constant",
     ),
 }
+"""Every `:CONST` symbol a `qw(:ALL)` script could import, keyed by
+the name as written.
+
+Each value is a (replacement, note) pair. None of them has a
+pyguitest spelling: the button numbers are passed to `click()`
+directly, the cursor shapes to `is_window_cursor()`, and the one
+timeout became an argument."""
 
 
 def constant(name: str) -> tuple[str, str] | None:

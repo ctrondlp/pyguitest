@@ -1252,5 +1252,72 @@ class TestTheIntegrityLevelArithmetic(unittest.TestCase):
         self.assertEqual(self._rid(), 0)
 
 
+class TestTheKeymapUnsafeNoteIsNotSuppressed(unittest.TestCase):
+    """The note has to be decided by the tools this session can actually use.
+
+    It used to ask `tools.best(INPUT_TOOLS, keymap_safe_only=True)`, which
+    calls `discover()` with its defaults -- no compositor filtering, which
+    `discover`'s own docstring says `best()` relies on. So it searched a
+    strictly larger set than the list the note names: on a GNOME/Mutter
+    Wayland session with both `wtype` and `ydotool` installed, the usable
+    list is `('ydotool',)` and is keymap-unsafe, but `best()` answered
+    `wtype` -- installed, keymap-safe, and excluded here by its own
+    `compositors={"wlroots","cosmic"}`. The guard read "a keymap-safe tool
+    exists" and stayed silent in exactly the session where the warning is
+    true, and where trusting `wtype` means typing nothing at all.
+    """
+
+    @staticmethod
+    def _installed():
+        """The real wtype/ydotool entries, as a stand-in PATH would offer."""
+        from pyguitest import tools as real_tools
+
+        wanted = {"wtype": None, "ydotool": None}
+        for tool in real_tools.INPUT_TOOLS:
+            if tool.name in wanted:
+                wanted[tool.name] = tool
+        missing = [name for name, tool in wanted.items() if tool is None]
+        if missing:
+            raise AssertionError(f"INPUT_TOOLS no longer carries {missing}")
+        return tuple(wanted.values())
+
+    def test_the_note_appears_when_only_unusable_tools_are_keymap_safe(self):
+        from pyguitest import tools as real_tools
+
+        installed = self._installed()
+        by_name = {tool.name: tool for tool in installed}
+        # The scenario only means anything if these two really do differ.
+        self.assertTrue(by_name["wtype"].keymap_safe)
+        self.assertFalse(by_name["ydotool"].keymap_safe)
+        self.assertNotIn("mutter", by_name["wtype"].compositors)
+
+        def fake_discover(group, **kwargs):
+            if group is not real_tools.INPUT_TOOLS:
+                return ()
+            compositor = kwargs.get("compositor")
+            if compositor is None:
+                return installed  # what the unfiltered best() used to see
+            return tuple(
+                tool
+                for tool in installed
+                if not tool.compositors or compositor in tool.compositors
+            )
+
+        with mock.patch.object(session._tools, "discover", fake_discover):
+            environment = detect(
+                {
+                    "XDG_SESSION_TYPE": "wayland",
+                    "WAYLAND_DISPLAY": "wayland-0",
+                    "XDG_CURRENT_DESKTOP": "GNOME",
+                }
+            )
+        note = [n for n in environment.notes if "keymap-unsafe" in n]
+        self.assertTrue(
+            note, f"the note was suppressed; notes were {environment.notes}"
+        )
+        self.assertIn("ydotool", note[0])
+        self.assertNotIn("wtype", note[0])
+
+
 if __name__ == "__main__":
     unittest.main()

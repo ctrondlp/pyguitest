@@ -43,7 +43,18 @@ class KeySender:
         # TypeError inside its key lookup halfway through the string.
         self.shift_name = self.modifiers["+"]
         self.held: list[str] = []
-        self.grouped = False
+        self.groups: list[int] = []
+        """How many modifiers were held when each open `(` group began.
+
+        A stack, not a flag. `held` is flat and `)` used to release all of
+        it, so a nested group's close took its parent's modifiers with it:
+        `send_keys("^(+(l)x)")` -- Ctrl+Shift+l, then Ctrl+x -- tapped `x`
+        with nothing held at all, because the inner `)` released Shift
+        *and* Ctrl. Recording the depth each group opened at means a `)`
+        can release exactly what its own `(` added. The docstring's own
+        `^(+(l))` example never showed it: nothing sits between the two
+        `)`, so releasing everything early looked identical.
+        """
 
     # -- the pieces the old closures were ----------------------------------
 
@@ -52,7 +63,24 @@ class KeySender:
         for name in reversed(self.held):
             self.session.release_key(name)
         self.held.clear()
-        self.grouped = False
+        self.groups.clear()
+
+    def close_group(self) -> None:
+        """Release what the innermost open `(` group added, and nothing more.
+
+        What `)` does. An unmatched `)` -- no group open -- releases
+        everything, which is what it did before groups were tracked
+        separately; a script relying on that keeps working rather than
+        gaining a new `ValueError` for something the grammar has always
+        tolerated.
+        """
+        if not self.groups:
+            self.release_held()
+            return
+        depth = self.groups.pop()
+        for name in reversed(self.held[depth:]):
+            self.session.release_key(name)
+        del self.held[depth:]
 
     def press_literal(self, char: str) -> None:
         """Type one character, adding Shift only when it is not already held.
@@ -105,13 +133,24 @@ class KeySender:
         # differently, which is enough to stop the type being inferred.
         last_action: tuple[Callable[[str], None], str] | None = None
         for token in tokens:
-            if token.isdigit():
+            # A signed integer counts as numeric, not just an unsigned one:
+            # `isdigit()` is False for "-1", so a negative repeat count used
+            # to fall through to the key-name branch and be pressed as a key
+            # called "-1". That surfaced from the backend as `unknown key
+            # name '-1'`, which blames the key vocabulary for what is a
+            # malformed count -- and left `count`'s own "non-positive"
+            # guard reachable only by a literal zero.
+            if token.lstrip("-").isdigit() and token.count("-") <= 1:
                 pending_pause = self.count(token, pending_pause, last_action)
                 continue
             if token.upper() == "PAUSE":
                 pending_pause = True
                 continue
-            pending_pause = False
+            if pending_pause:
+                raise ValueError(
+                    f"'PAUSE' in send_keys must be followed by a number of "
+                    f"milliseconds, not {token!r}"
+                )
             if len(token) == 1:
                 last_action = (self.press_literal, token)
             else:
@@ -120,6 +159,17 @@ class KeySender:
                     self.aliases.get(token.upper(), token),
                 )
             last_action[0](last_action[1])
+        if pending_pause:
+            # Every other malformed {} construct in this module raises --
+            # an unterminated brace, an empty brace, an orphan repeat
+            # count. A bare `{PAUSE}` was the one that did not: it set the
+            # flag, the token loop ended with nothing to consume it, and
+            # the call pressed nothing, waited for nothing and said
+            # nothing.
+            raise ValueError(
+                "'PAUSE' in send_keys must be followed by a number of "
+                "milliseconds; '{PAUSE}' on its own waits for nothing"
+            )
 
     def count(
         self,
@@ -132,11 +182,21 @@ class KeySender:
         Returns the new `pending_pause`, which a pause consumes.
         """
         count = int(token)
+        if pending_pause:
+            # Checked before the repeat-count guard below, which would
+            # otherwise reject `{PAUSE 0}` by calling a pause a "repeat
+            # count" and sending a caller to the wrong mental model. A
+            # zero-millisecond pause is a no-op, not a malformed construct.
+            if count < 0:
+                raise ValueError(
+                    f"'PAUSE' in send_keys needs a non-negative number of "
+                    f"milliseconds, not {token!r}"
+                )
+            if count:
+                self.session.wait(count / 1000)
+            return False
         if count <= 0:
             raise ValueError(f"non-positive repeat count {token!r} in send_keys")
-        if pending_pause:
-            self.session.wait(count / 1000)
-            return False
         if last_action is None:
             raise ValueError(f"repeat count {token!r} with no preceding key")
         action, arg = last_action
@@ -174,7 +234,7 @@ class KeySender:
                     self.brace(content)
                     continue
                 if char == ")":
-                    self.release_held()
+                    self.close_group()
                     i += 1
                     continue
                 step = self.character(char, keys, i, n)
@@ -182,7 +242,7 @@ class KeySender:
                     i = step
                     continue
                 i += 1
-                if not self.grouped:
+                if not self.groups:
                     self.release_held()
         except BaseException:
             with contextlib.suppress(Exception):
@@ -204,14 +264,14 @@ class KeySender:
         if char in self.modifiers:
             name = self.modifiers[char]
             if i + 1 < n and keys[i + 1] == "(":
+                self.groups.append(len(self.held))
                 self.session.press_key(name)
                 self.held.append(name)
-                self.grouped = True
                 return i + 2
             self.session.tap_key(name)
             return None
         if char == "(":
-            self.grouped = True
+            self.groups.append(len(self.held))
             return None
         self.press_literal(char)
         return None

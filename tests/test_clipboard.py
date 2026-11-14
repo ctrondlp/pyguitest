@@ -248,6 +248,21 @@ class TestClipboardRunFailures(unittest.TestCase):
                 gui.get_clipboard()
             self.assertIn("did not finish", str(ctx.exception))
 
+    def test_a_selection_that_is_not_utf8_raises_this_packages_error(self):
+        # The selection holds whatever the last application put there, and
+        # nothing obliges that to be UTF-8 -- Latin-1 text from a legacy X11
+        # application decodes to nothing. subprocess raised UnicodeDecodeError
+        # from inside the strict decode, a bare builtin that no caller of this
+        # module has reason to catch.
+        gui = self._backend()
+        with mock.patch(
+            "pyguitest.backends.clipboard.subprocess.run",
+            side_effect=UnicodeDecodeError("utf-8", b"\xe9t\xe9", 0, 1, "invalid"),
+        ):
+            with self.assertRaises(PyGUITestError) as ctx:
+                gui.get_clipboard()
+        self.assertIn("not valid UTF-8", str(ctx.exception))
+
     def test_a_nonzero_exit_raises_with_stderr(self):
         gui = self._backend()
         with mock.patch(

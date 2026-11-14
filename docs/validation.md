@@ -5215,3 +5215,91 @@ when the normal provider serves either would fix COSMIC and niri without
 reopening Xfce -- **not done here**, because it changes which member lists
 windows on every multi-member desktop and the Xfce box was down on the day.
 Validate it there before trusting it.
+
+## WINDOW_CLOSE and WINDOW_MAXIMIZE, live across the fleet (2026-11-12)
+
+The two new window operations, driven end to end on real desktops the day
+they were written. The fixture is a GTK3 window whose `delete-event` handler
+vetoes the close and raises a "Save changes?" dialog when its check button is
+active -- so both directions of `close_window`'s contract are observable: a
+clean window must go away, and a dirty one must prompt *instead of* going
+away.
+
+**Mint (Cinnamon, X11).** `close_window` → the fixture logged the manager's
+`WM_DELETE_WINDOW` arriving as an ordinary delete-event, the clean window
+closed (`wait_window_close` True), and the dirty one stayed with pyguitest
+itself then finding the `Save changes?` dialog by title. `maximize_window`
+grew the window from its 640x480 to the full work area, `is_window_maximized`
+read True, restore cleared it.
+
+**COSMIC (native Wayland, `windows` + `atspi` members, so cosmic owns the
+window family).** Same two close directions through the toplevel manager's
+`close` request -- the request the backend's header had documented as "bound
+but not surfaced" since the file was written. The maximize run found a real
+bug the unit fakes cannot see: the *write* visibly took (the geometry grew to
+the work area) while a poll of `is_window_maximized` answered False for as
+long as nothing else drained the socket -- the compositor pushes the state
+array, but pushed events sit unread until something reads. The fix is the
+same `_refresh()` every sibling read makes, and the regression pin is a
+`_refresh`-call assertion, because the test harness's event delivery bypasses
+the socket and cannot catch it any other way.
+
+**niri (KaOS).** `CloseWindow` closed a real kitty window -- the first window
+write this backend serves beyond resize and activate, niri having no
+minimize but a perfectly good close.
+
+**GNOME (Ubuntu 26.10, Shell 51, both extension eras).** Before the
+extension update: the running 0.4.0-era copy has none of the new methods,
+and the backend composed normally with both capabilities absent and typed
+refusals -- the probe's graceful-degradation contract, live. After installing
+0.6.0-close-maximize and a reboot: both capabilities advertised, the full
+maximize/read/restore cycle ran, the clean close went away and the dirty
+close prompted. This run also exercised the corrected maximize era-bridge
+against the Mutter that disproved the first draft: the live Meta-51 GIR
+shows `Meta.MaximizeFlags` *survives* while `maximize()` lost its argument
+and `get_maximized()` is gone (the break is Mutter 49 by upstream window.h;
+48.0 still has both old forms) -- so the era is probed by `get_maximized`'s
+presence, and the state is read through the `maximized-horizontally`/
+`-vertically` properties, which exist in every era.
+
+**macOS (Sequoia 15.8.1).** `close_window` pressed a real TextEdit window's
+AX close button and the window went away. WINDOW_MAXIMIZE is withheld here
+by design -- zoom is not maximize -- and the suite pins that.
+
+**Windows 10 (native).** The full win32 test file passed on the real
+platform, and `IsZoomed`/`PostMessageW` resolve against the real user32 with
+`SW_MAXIMIZE` = 3. Not yet driven against a live interactive window there
+(SSH is Session 0): the `WM_CLOSE` post and the `SW_MAXIMIZE`-activates
+side effect are documented from the SDK and await the next Scheduled-Task
+round.
+
+~~Not yet run live: sway and Hyprland close (no box up; the Hyprland Lua
+spelling `hl.dsp.window.close` is from the daemon's own enumeration recorded
+in this file), kdotool close (KDE box down; `windowclose` is in kdotool's
+documented command set -- the same README whose explicit "MISSING:
+maximized_vert, maximized_horz" is why KWin gets WINDOW_CLOSE and not
+WINDOW_MAXIMIZE).~~ — **all three closed 2026-11-14.** Each was driven by
+opening a real client, calling `close_window`, and then asking the
+compositor whether the window had gone *and* the client whether it had
+exited of its own accord: a non-negative exit code is what distinguishes
+the graceful toplevel-close these backends promise from a process being
+signalled.
+
+| Backend | Session | Client | Window gone | Client exit |
+|---|---|---|---|---|
+| `sway` | private headless sway 1.12 on Ubuntu 26.10 | `foot` | yes | 1 |
+| `hyprland` | live Omarchy session | `foot` | yes | 1 |
+| `kdotool` | live Fedora 44 KDE session | `konsole` | yes | 0 |
+
+Each composed the backend under test (`sway+atspi+input:wtype+uinput`,
+`hyprland+atspi+input:wtype+...`, `kdotool+atspi+uinput+...`) and reported
+`WINDOW_CLOSE` supported before acting. The sway run is also proven
+non-vacuous: with `close_window`'s `_command(window, "kill")` replaced by a
+`return None`, the same probe reports the window still listed and the
+client never exiting. The headless sway was private to the run — the script
+refuses to start without `wtype`, because a uinput device created against a
+seat-less sway would type into the live desktop instead.
+
+Still not run live: the Windows `WM_CLOSE` post and the
+`SW_MAXIMIZE`-activates side effect against a live interactive window, which
+is the paragraph above this one.

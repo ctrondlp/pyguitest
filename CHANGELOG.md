@@ -7,6 +7,443 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.26.0] — 2026-11-13
+
+A minor, for the new public API: `close_window`, `maximize_window`/
+`is_window_maximized`, `drag_element`, and the `expect_enabled`/
+`expect_disabled`/`expect_value` trio. One behaviour change besides:
+`focused()` and `focus_tracking_works()` no longer raise
+`CapabilityUnsupported` on a session with no element backend — they answer
+`None`/`False` instead, as their docstrings already promised.
+
+### Added
+
+- **`close_window(window)` — ask the window manager to close one window
+  gracefully, with `Capability.WINDOW_CLOSE`.** The route that leaves the
+  application its say, which `Application.stop()` cannot: an editor with
+  unsaved work answers with its "Save changes?" dialog instead of going
+  away, so both directions become testable — that a clean window really
+  closes (`wait_window_close`), and that a dirty one really prompts
+  (`expect_window`). Served on X11 (`_NET_CLOSE_WINDOW`, so the manager
+  forwards it as `WM_DELETE_WINDOW`), Windows (`WM_CLOSE`, posted rather
+  than sent so a prompting application cannot block the caller), macOS
+  (pressing the window's own AX close button, behind the Accessibility
+  grant like the other AX window writes), COSMIC (the toplevel manager's
+  `close` request, bound since the backend's first day and now surfaced),
+  sway (`kill` — the graceful xdg close, despite the name), Hyprland
+  (`closewindow`, with the Lua spelling the daemon itself enumerates), niri
+  (`CloseWindow` — its first window write beyond resize and activate, since
+  niri has no minimize but does have close), KWin (`kdotool windowclose`),
+  and GNOME (a new `CloseWindow` method in the pyguitest-window-control
+  extension; the backend probes for it at connect the way it probes
+  `CaptureWindow`, so an older installed extension simply never advertises
+  the capability). The composite routes it to the member that issued the
+  window's handle, like every other window operation. The extension's
+  `version-name` moves to `0.6.0-close-maximize` — the string that tells an
+  installed build from the one gnome-shell is still running, which matters
+  here more than usual: an old loaded copy loses the two new capabilities
+  *silently* (the probes degrade quietly by design), so the refusal message
+  and `version-name` are what say "log out and back in".
+- **`maximize_window(window)` / `is_window_maximized(window)` — maximize,
+  restore, and read the state back, with `Capability.WINDOW_MAXIMIZE`.**
+  `minimize_window` had no counterpart for the other direction of growth,
+  and `WINDOW_STATE` reads only minimized and activated, so the maximized
+  state was unwritable and unreadable both. One message maximizes both axes
+  on X11 (`_NET_WM_STATE` naming both MAXIMIZED atoms, so there is no
+  half-maximized intermediate state — and the read demands both atoms, so a
+  window tiled to one edge is honestly not "maximized"); Windows pairs
+  `ShowWindow(SW_MAXIMIZE)` with an `IsZoomed` read-back exactly as
+  minimize does with `IsIconic`; COSMIC uses the toplevel manager's
+  `set_maximized`/`unset_maximized` and reads the state array the
+  compositor already pushes; GNOME gains `MaximizeWindow`/
+  `IsWindowMaximized` extension methods (probed at connect like
+  CloseWindow, and bridging Mutter's two maximize-API eras inside the
+  extension). Deliberately withheld where the concept does not exist
+  rather than approximated: a tiling compositor's layout owns every
+  window's size (sway, Hyprland, niri), macOS zoom is a fit-to-content
+  rather than a maximize, and kdotool's own documentation lists the
+  maximize properties as missing with no state read.
+- **`drag_element(source, target)` — the element form of `drag`.** `click` and
+  `double_click` already had element forms that read each rectangle fresh;
+  drag was coordinate-only, leaving a caller to read `extents()` on both ends
+  and do the centre-point arithmetic by hand. Both endpoints are now locators,
+  read fresh each call, and every keyword argument is `drag`'s.
+- **`expect_enabled` / `expect_disabled` / `expect_value` complete the
+  `expect_*` family.** `expect_enabled` is the common synchronisation case a
+  Save button that enables only once a form validates otherwise hand-rolled as
+  `wait_until(lambda: gui.button("Save").enabled)`, losing the family's
+  two-phase `ElementNotFound`-then-`AssertionError` diagnostics. `expect_value`
+  is the numeric counterpart of `expect_text` for a slider, spinner or
+  progress bar.
+
+### Fixed
+
+- **A hung AT-SPI read no longer wedges `windows()`.** `windows()` read a
+  frame's `roleName`/`name` and its application's `name` as bare dogtail
+  attribute accesses, bypassing the `BackendCallTimeout` bound every other
+  AT-SPI round trip in the backend uses — so the GhostBSD-class hang that
+  bound exists for could freeze `windows()`, and with it `active_window`,
+  `find_windows`, `wait_for_window`, `is_window_open` and `refresh_window`,
+  with no timeout and no recovery. Those reads are now bounded like their
+  siblings.
+- **`focus_tracking_works()` and `focused()` answer instead of raising on a
+  session with no element backend.** Both fell through to an unguarded
+  whole-desktop `elements()` scan, which raised `CapabilityUnsupported` on a
+  session that serves no `ELEMENT_TREE` (e.g. KDE via `kdotool` + `uinput`,
+  no AT-SPI) — breaking the very probe callers are told to ask before
+  depending on focus. `focused()` returns `None` and `focus_tracking_works()`
+  returns `False` there now, as their docstrings promise. One visible
+  ripple: `capture_on_failure` on such a session now writes a
+  `-focused.json` recording "no focused element" (`null`) where it used to
+  record the attempt as an error — the bundle gained a file and lost an
+  error field there.
+- **`CapabilitySet`'s set operators refuse a non-set operand cleanly.**
+  `gui.capabilities | ["x"]` raised a confusing `'NotImplementedType' object
+  is not iterable` instead of the builtin's `unsupported operand type(s)`
+  `TypeError`; the forward operators now guard the operand as the reflected
+  ones already did.
+- **`expect_checked` no longer calls an unknown state "unchecked".** Where a
+  toolkit publishes no checked state (`Element.checked` is `None`, on Windows
+  and macOS), the failure message read "expected X to be unchecked, but it is
+  unchecked"; it now says the state is unknown. The `expect_*` failure
+  messages also name the role when the lookup gave no name, rather than
+  printing "expected None …".
+- **`capture_on_failure` artifacts no longer overwrite each other within one
+  second.** The filename carried a one-second timestamp, so two failures of
+  the same assertion in the same second collided; a per-bundle serial makes
+  each unique.
+- **Windows `window_events()` no longer leaks its hook and pump thread on a
+  failed seed.** The `windows()` call that seeds the known-window set sat
+  between a successful `SetWinEventHook` install and the teardown block, so a
+  raise there left the system-wide hooks installed and the daemon pump thread
+  running for the life of the process; the seed is inside the teardown now.
+- **A keymap with an unnamed modifier index no longer drops a higher named
+  one.** `xkb`'s modifier decode walked `range(len(mod_names))`, which stops
+  short when a NULL-named index leaves a hole below a named modifier — so a
+  character needing that modifier could be typed without it. It walks the real
+  modifier indices now.
+- **A per-window screenshot prefers the member that issued the window.** On
+  COSMIC + XWayland an x11-issued window was captured through the
+  higher-priority WINDOW_CAPTURE provider's whole-output crop, baking in
+  whatever occluded it, where the issuing member's own per-window grab reads
+  the window un-occluded — the same "prefer the issuer" rule the window
+  operations already follow.
+- **A per-window screenshot re-homes the handle before measuring it.** The
+  rectangle-plus-crop route asks `_geometry_of` for the window's bounds, and
+  its fallback — the branch taken when the window's own member serves no
+  WINDOW_GEOMETRY — handed the provider the original handle rather than
+  re-homing it the way every other cross-backend window call does. On a
+  session whose window list comes from a WINDOW_EVENTS-only member
+  (`kwinevents` paired with `x11`, no kdotool installed), `screenshot
+  (window=…)` reached `X11Backend.geometry()` with a KWin UUID string and
+  died inside python-xlib with a bare `AttributeError` — the exact crash
+  class `_issuer` exists to prevent. A raw handle is still left alone, since
+  only its caller knows whose namespace it came from.
+- **`press_key`/`tap_key` accept the keypad, the brackets and `Page_Up` on
+  uinput.** The backend translates X11 keysym names — the spelling this
+  package documents — into evdev's, and the table was missing three families
+  that other backends accept: `Page_Up`/`Page_Down` (X11's own aliases for
+  `Prior`/`Next`, and the spelling `docs/input.md`'s key-name table teaches),
+  `bracketleft`/`bracketright`/`period`, and the whole keypad
+  (`KP_Add` … `KP_9`). Each raised `unknown key name` here while the
+  identical call worked on X11, Windows and macOS, so a script written from
+  the documentation died on the one Linux backend that needs no X server.
+- **A uinput `type_text` that dies mid-character no longer leaves Shift
+  held.** The Shift for a capital was pressed, the character written, and
+  Shift released with nothing unwinding the press if the character's own
+  write raised in between. The device is held open for the session, so the
+  kernel kept Shift logically down for every later keystroke — the rest of
+  the run typing capitals and symbols, with nothing raised to say why. Same
+  invariant, and the same deliberate not-a-`finally` shape, as
+  `Session.drag` and `send_keys`. Verified against a real kernel device
+  rather than a mock: on Ubuntu 26.10 (GNOME/Wayland) the write for the
+  shifted character was made to fail against a live uinput device, and the
+  kernel's own key state for that device — `EVIOCGKEY`, not anything
+  pyguitest reports about itself — showed Shift back up afterwards, where
+  without the unwind it showed Shift still held.
+- **`close()` on the libei backend attempts every step.** The four teardown
+  steps ran bare, so a device whose EIS connection had already gone away
+  server-side — a compositor restart mid-run, the commonest way
+  `stop_emulating()` raises — skipped the keymap's fd and the portal
+  `Session.Close()` below it, stranding the approved input-injection grant
+  in xdg-desktop-portal until the process exited. Every step now runs and
+  the first failure is raised once they all have. Verified against a real
+  approved grant, which needs a consent dialog and so a human at the box:
+  on Ubuntu 26.10 (GNOME/Wayland), with emulation actually started and
+  `stop_emulating` made to raise, the portal's `Session.Close()` was still
+  called and the injected `RuntimeError` was the one raised.
+- **A Ctrl-C while waiting for input capture no longer leaves the pointer
+  diverted.** Verified on a real InputCapture session on Ubuntu 26.10,
+  again from the box: interrupting the wait left `disable()` called and
+  re-raised the `KeyboardInterrupt`.
+  `wait_for_pointer_activation` sits in a main loop until someone
+  physically crosses a barrier, which makes interrupting it the expected way
+  out rather than an exotic one — and the `PortalError` clauses could not
+  catch that, so capture stayed enabled and the barriers stayed armed after
+  the test was abandoned. Guarded with the same `BaseException` reach the
+  `eiinput` constructor already uses for its own long wait.
+- **A capture session COSMIC stops is reported, not waited out.**
+  `ext_image_copy_capture_session_v1.stopped` was unhandled in the
+  buffer-constraint negotiation, where no frame object exists yet to carry a
+  `failed` event — so a window that closed as `capture(window=…)` started
+  left the loop waiting for a message that was never coming, surfacing ten
+  seconds later as a bare socket timeout naming nothing.
+- **A nested `send_keys` group no longer releases its parent's modifier.**
+  The held modifiers were one flat list and any `)` released all of it, so
+  `send_keys("^(+(l)x)")` -- Ctrl+Shift+l, then Ctrl+x -- tapped `x` with
+  nothing held at all: the inner `)` let go of Shift *and* Ctrl. Each `(`
+  now records the depth it opened at and its `)` releases exactly what it
+  added. The docstring's own `^(+(l))` example never showed this, because
+  with nothing between the two `)` an early release looks identical, which
+  is why the existing test could not catch it either. An unmatched `)`
+  still releases everything, as it always has.
+- **`quote_for_type` round-trips a carriage return.** `\r` is not
+  `send_keys` syntax, so it passed through unescaped -- and then raised
+  `ValueError("no static key mapping")`, because the shared character table
+  carried `\n` and `\t` and not `\r`. The documented
+  `send_keys(quote_for_type(text))` therefore broke on any text with
+  Windows line endings, with an error the contract did not list (it names
+  `&` as its one exception). `\r` now maps to Return like `\n`, matching
+  what X11Backend's own table has always done; a CRLF sends two Returns,
+  since both characters are line endings and dropping one would silently
+  edit the caller's text.
+- **A `wait_*` call no longer overshoots its own timeout.** `_poll_until`
+  checked the deadline before sleeping and then slept the full `interval`,
+  so the last pass ran over by up to one interval: `timeout=0.05` with
+  `interval=1.0` blocked for a full second, twenty times the bound it was
+  given. The sleep is clamped to what is left, the way the sibling
+  `_in_event_slices` already clamped its slice. Every public method built
+  on the helper inherits the fix -- `wait_until`, `wait_for_element`,
+  `wait_until_gone`, `wait_for_file`, `wait_for_process`,
+  `wait_window_close` and `wait_for_window`'s polling branch.
+- **`wait_for_process` can report a match at pid 0.** The poll loop decided
+  "found" by truthiness, and a pid of `0` is falsy -- so Windows' System
+  Idle Process, which `CreateToolhelp32Snapshot` enumerates like any other,
+  matched on every single poll and still timed out reporting `None`,
+  indistinguishable from a process that never started.
+- **`{PAUSE}` with no number raises instead of doing nothing.** It set a
+  flag that nothing consumed, so the call pressed nothing, waited for
+  nothing and said nothing -- the one malformed `{}` construct in the
+  grammar that was swallowed rather than reported. `{PAUSE TAB}`, which
+  silently dropped the pause and tapped Tab, raises too.
+- **`{PAUSE 0}` is a no-op rather than an error about repeat counts.** The
+  non-positive guard ran before the code knew whether the number was a
+  pause or a repeat, so a zero-length pause was refused as a "non-positive
+  repeat count" -- an accurate complaint about the wrong thing, pointing a
+  caller at counts when they had written a pause.
+- **`pyguitest inspect` no longer prints an unknown checked state as
+  "unchecked".** `Element.checked`/`.selected` are `bool | None`, and
+  `None` means the toolkit published no state at all -- which Windows UIA
+  and macOS AX both do for a control that is checkable by role. The tree
+  dump collapsed it into `[unchecked]`, showing a confirmed-looking state
+  nobody had read; it now says `checked unknown`. The same
+  collapse-of-None-into-False that `expect_checked`'s failure message was
+  rewritten to stop making.
+- **`doctor`'s keymap-unsafe warning is no longer suppressed by a tool it
+  cannot use.** The guard asked `tools.best(INPUT_TOOLS,
+  keymap_safe_only=True)`, which calls `discover()` with its defaults and
+  so performs no compositor filtering -- a strictly larger set than the
+  list the note itself names. On a GNOME/Mutter Wayland session with
+  `wtype` and `ydotool` both installed, the usable set is `('ydotool',)`
+  and is keymap-unsafe, but `best()` answered `wtype`: installed,
+  keymap-safe, and excluded from that session by its own
+  `compositors={"wlroots","cosmic"}`. So the warning stayed silent in
+  exactly the session where it is true, and where a reader trusting `wtype`
+  gets a tool that types nothing at all. The question is now asked of the
+  same filtered set the note reports.
+- **A handle from another backend is no longer reported as a vanished
+  window.** Every X11 failure shared one sentence: a window that really had
+  been destroyed makes Xlib raise, and "window is gone" is right for it --
+  but a handle from another backend's namespace (a KWin UUID string, a GNOME
+  Shell stable_sequence integer) is not a window object at all, so the
+  failure is an `AttributeError` for an Xlib method it does not have. Calling
+  that "window is gone" described a window that was on screen the whole time,
+  and leaked python-xlib's own type error into the message. Found live on KDE
+  Wayland with the members forced to `kwinevents` + `x11`:
+  `screenshot(window=...)` on a native Wayland window answered "window is
+  gone: 'str' object has no attribute 'get_geometry'". It now says it is not
+  an X11 window handle, names the type, and points at the real cause -- X11
+  does not see native Wayland windows at all, so there is nothing for the
+  composite's re-homing to re-home onto either.
+- **`move_window`/`resize_window` ask as a user action, not as the
+  application.** `_NET_MOVERESIZE_WINDOW` carried EWMH source indication 1
+  ("the application itself"), which §9.11 expressly lets a window manager
+  treat differently from a request made on a user's behalf — demote, reorder
+  or ignore. It was the one request in the X11 backend still claiming that;
+  `close_window` and `maximize_window` already send 2, for the reason
+  `close_window`'s docstring spells out.
+- **A mid-construction failure in the KWin events backend releases the bus
+  name.** `_host_service()` claims `org.pyguitest.KWinEvents` and exports
+  the object before the KWin script is loaded, and a script that fails to
+  load is a documented reason construction raises. Nothing could release the
+  name afterwards — `close()` is never reached on an object no caller was
+  handed — and because it was claimed without `DO_NOT_QUEUE`, a later
+  `connect()` in the same process queued behind the abandoned ownership and
+  then timed out blaming "another instance", which was this process all
+  along.
+- **UI Automation's desktop element is asked for safely.**
+  `GetRootElement()` was the one COM call in the backend left unwrapped, so
+  an RPC failure to an out-of-process provider came out of `root_element()`
+  and `find_elements()` as a raw `COMError` rather than the typed refusal
+  every other call in that module translates it into.
+- **A clipboard holding non-UTF-8 bytes raises this package's own error.**
+  The selection is whatever the last application put there, and a legacy
+  X11 application's Latin-1 text decodes to nothing: `subprocess` raised a
+  bare `UnicodeDecodeError` from inside the strict decode, breaking the
+  module's contract that a clipboard failure arrives as a `PyGUITestError`.
+  Still strict rather than lossy — handing back mojibake would leave
+  `assert_clipboard` comparing against a silently mangled string.
+
+- Tests now pin the argument guards that were documented and unexercised:
+  `click_via`'s refusal of an unknown route (and acceptance of the three
+  real ones), `glide`'s negative duration and non-positive rate, `drag`'s
+  negative settle, `find_windows` refusing to match every window, and
+  `elements` refusing a `Window` as a container. Each fails when its guard
+  is removed. Argument validation is the easiest thing to delete by
+  accident and the hardest to notice gone: every sane input still works.
+
+- **A negative repeat count in `send_keys` was pressed as a key.**
+  `{a -1}` reached the key-name branch instead of the count branch, because
+  the gate was `token.isdigit()` and that is False for `"-1"` — so the
+  token was handed to the backend as a key called `-1`, surfacing as
+  `ValueError: unknown key name '-1'`, which blames the key vocabulary for
+  a malformed count. It also left `count`'s own "non-positive repeat count"
+  guard reachable by a literal zero alone. A signed integer now counts as
+  numeric, so `{a -1}` is refused the way `{a 0}` always was, and
+  `{PAUSE n}` refuses a negative n rather than reaching `wait()` with a
+  negative number of seconds. Found by writing tests for the grammar edges
+  the reference had just started promising.
+
+### Documentation
+
+- **`examples/07_keys_and_pointer.py` could not run.** It sent
+  `"hello{SPACE}world"`, and `SPACE` is not a key name: the shared aliases
+  spell it `{SPC}`/`{SPA}`, win32's longer spellings do not include it, and
+  it is not an X11 keysym name either. `send_keys` does not reject an
+  unknown brace name — it hands the name to the backend — so the line
+  raised `ValueError: unknown key name 'SPACE'` on X11 and on Windows,
+  working only on uinput, whose own table happens to map it through to
+  `KEY_SPACE`. Now `{SPC}`, and `tests/test_docs.py` checks every brace
+  name in every shipped example and doc against the aliases and the keysym
+  table, so a name no backend can resolve cannot ship again.
+- **The `{}` key aliases were documented nowhere.** `send_keys` named
+  `KEY_ALIASES`, a name that appeared in no document, so the only way to
+  learn the forty-eight abbreviations was to read `backends/base.py`.
+  `docs/api.md` now has a **Key names** section, generated from
+  `GUIBackend.KEY_ALIASES`/`MODIFIER_KEYS` so it cannot drift, listing
+  every alias against the key it names, every modifier prefix, and the two
+  per-platform differences that were previously stated as flat facts: `#`
+  is the `Meta_L` keysym on the Unix backends rather than Super (`{LSK}`/
+  `{RSK}` are Super), and `&` does not exist on macOS, where
+  `MacquartzBackend` has no such modifier and types a literal ampersand
+  instead.
+- **`send_keys`'s grammar was missing most of itself.** Now documented:
+  that groups nest and a `)` releases exactly what its own `(` added (with
+  `^(+(l)x)` as the example, where the old `^(+(l))` could not show it
+  because nothing sits between the two `)`); that `{PAUSE n}`'s number is
+  required, `{PAUSE}` and `{PAUSE TAB}` raising rather than waiting for
+  nothing, and `{PAUSE 0}` being a legal no-op; that `\r` sends Enter and
+  `\t` sends Tab; that a repeat count works on any key or character and
+  must be positive; and what a bare `(...)`, an unmatched `)`, and an
+  unclosed group at the end of a string each do.
+- **`quote_for_type` promised a round trip it does not make.** Its contract
+  read "sends `text` literally", but whitespace is neither escaped nor
+  literal: `\n` and `\r` each send Enter and `\t` sends Tab, so text with
+  Windows line endings sends *two* Returns per break (`"a\r\nb"` arrives as
+  a, Enter, Enter, b) and a tab arrives as a focus change. The docstring
+  now says so and points at `type_text` for text that must arrive exactly
+  as written.
+- **`wait_for_window` listed the wrong set of event-driven backends.** It
+  named `win32`, GNOME Shell, KWin, sway and niri, omitting COSMIC — which
+  declares `WINDOW_EVENTS` and implements both `window_events` and
+  `wait_for_window`, and which api.md's own capability table already
+  listed. The docs claimed polling on Pop!_OS where there is notification.
+- **The six convenience locators never said they raise.** `button`,
+  `text_field`, `dropdown`, `checkbox`, `menu_item` and `link` show a
+  return type of `Element` and delegate to `element()`, which raises
+  `ElementNotFound` — stated in `element()`'s docstring and in none of
+  theirs, inviting `if gui.button("Save"):`. Each now says it, and
+  `require()` names the `CapabilityUnsupported` it raises, which the call
+  api.md's opening example puts on its second line had never done.
+- **The two `expect_*` default deadlines differ, and nothing said so.**
+  `expect_element` and `expect_window` default to `timeout=None` and wait
+  indefinitely, matching the `wait_*` calls they wrap; the six
+  state-checking expectations default to five seconds. So an element that
+  never appears hangs a run where a value that never settles fails. Both
+  docstrings and the new group blurb now say it.
+- **`docs/api.md` was discarding documentation it already had.** Its
+  "Other" bucket held twenty-seven of the hundred `Session` members,
+  including the whole `expect_*` family scattered alphabetically between
+  `is_window_cursor` and `row_values`; there is now an **Expectations**
+  group and every member sits in a named section, "Other" being empty.
+  Eight `Environment` fields were missing from the page altogether —
+  `session_type` and `compositor` among them, which getting-started.md
+  tells a reader to look at — because a dataclass field with no
+  class-level default is invisible to `inspect.getmembers`. Nineteen more
+  carried PEP 257 attribute docstrings that the generator threw away,
+  leaving opaque names (`has_wgc`, `has_listen_event`, `dpi_awareness`)
+  against empty cells. Class bodies were dropped in favour of the summary
+  line alone, so `Window`'s own warning that `handle` is backend-private
+  and that a stale X11 id can silently address a different window reached
+  no page. And each exception got one line, so `CapabilityUnsupported`'s
+  `.capability`/`.backend`/`.reason`/`.hint` — the attributes its docstring
+  calls "the intended pattern for test suites spanning several desktops" —
+  were undocumented, as was `PermissionRequired` being a *subclass* of it,
+  which decides whether `except CapabilityUnsupported` quietly turns a
+  missing grant into a skip.
+- **The reference now documents every public name it names.** Added:
+  `CapabilitySet`'s own `by_tier`/`missing`/`report`, which a reader
+  holding `gui.capabilities` could not find; a **Session object** section
+  carrying the constructor's `event_delay`/`key_delay`/`click_via`
+  parameters and the four readable instance attributes, none of which the
+  page had (an attribute assigned in `__init__` is not a class member, so
+  nothing enumerated them); a **Helper modules** section for
+  `pyguitest.inspect`, `pyguitest.compat` and the three `pyguitest.session`
+  probes, each a public `__all__` that appeared nowhere; and `Role`'s three
+  `*_ROLES` groups, which sat in the flat list of role names where a reader
+  would take `WINDOW_ROLES` for a role and pass it to `element(role=...)`.
+- **Every table row says something.** Thirty-six rows named a field and
+  then left the description blank — `has_input_group`, `uinput_writable`,
+  `session_type`, `Window.handle`, `ImageMatch.score` among them. All now
+  carry PEP 257 attribute docstrings in their class bodies; `Window` and
+  `Screen` grew bare annotations to hang them on, which add no class
+  attribute and so cannot clash with `__slots__`.
+- `tests/test_api_docs.py` gained the checks the byte-comparison cannot
+  make: no row may have an empty description, there may be no catch-all
+  "Other" section, and every public `Session` member must appear in exactly
+  one group. All three fail when the defect they describe is put back.
+- `docs/recipes.md`'s one-line grammar summary omitted `&`, `~`, nesting
+  groups, repeat counts and `{PAUSE}`, and now links the **Key names**
+  section instead of half-listing it.
+- **`click_via`'s whole reference entry was "Returns `str`".** Its
+  docstring said "see `__init__`", which the reference does not render, so
+  the three legal routes (`"action"`, `"pointer"`, `"auto"`) and the
+  `ValueError` on anything else were documented nowhere a reader looks.
+  Both now live on the property itself.
+- **Five calls raised exceptions their docstrings never named**: `glide`
+  (`ValueError` on a negative `duration` or a non-positive `rate`), `drag`
+  (`ValueError` on a negative `settle`), `find_windows` (`ValueError` with
+  no filter at all), `elements` (`TypeError` when `within` is a Window
+  rather than an Element) and `wait_for_idle` (`PyGUITestError` where the
+  clock is coarser than `interval`).
+- Two `Environment` fields pointed at private helpers a reader cannot
+  follow — `macos_version` at `_darwin_version`, `foreground_is_elevated`
+  at its own probe — and now state the fact instead.
+- `docs/input.md` told readers to run `pyguitest report`, a subcommand that
+  does not exist — the capability report runs on the bare `pyguitest`
+  invocation.
+- `docs/ai-assistants.md`'s title-matching rule recommended `app_id=` for a
+  set of calls that included `window_element`, which takes only a title.
+- `docs/developers/structure.md`'s backend tree had drifted five files
+  behind the directory (macos, macquartz, clipboard, inputcapture,
+  kwinevents).
+- The `## [0.20.2]` section had no link-reference footer and `[0.21.0]`'s
+  compare range skipped it. `## [0.15.1]` had the same pair of defects —
+  no footer, and `[0.16.0]` comparing from `v0.15.0` straight past it — so
+  the diff attributed to 0.16.0 covered 0.15.1's changes too.
+- `docs/validation.md` gains the dated record of the WINDOW_CLOSE /
+  WINDOW_MAXIMIZE live runs across the fleet.
+
 ## [0.25.0] — 2026-11-10
 
 A minor rather than a patch, by the same rule 0.24.0 applied: behaviour a
@@ -269,7 +706,11 @@ desktops; the measurements are in `docs/validation.md`.
 Together these take a recorded script from driving three of six controls on
 macOS to all six, and from five of six to all six on COSMIC.
 
-## [0.22.1] — 2026-11-06
+## 0.22.1 — 2026-11-06 (never released; shipped in 0.23.0)
+
+This version was written up but never tagged or published. Everything
+below first reached users in 0.23.0, so `pip install pyguitest==0.22.1`
+has never resolved and the entry is kept only for the record.
 
 A patch: no call is added or removed, and no signature changes. What changes
 is which backends a plain `connect()` composes on macOS, and it changes
@@ -6225,13 +6666,14 @@ First public release.
 - A `pyguitest` command-line entry point.
 - PEP 561 type information (`py.typed`); no hard runtime dependencies.
 
-[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.25.0...HEAD
+[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.26.0...HEAD
+[0.26.0]: https://github.com/ctrondlp/pyguitest/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/ctrondlp/pyguitest/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/ctrondlp/pyguitest/compare/v0.23.0...v0.24.0
-[0.23.0]: https://github.com/ctrondlp/pyguitest/compare/v0.22.1...v0.23.0
-[0.22.1]: https://github.com/ctrondlp/pyguitest/compare/v0.22.0...v0.22.1
+[0.23.0]: https://github.com/ctrondlp/pyguitest/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/ctrondlp/pyguitest/compare/v0.21.0...v0.22.0
-[0.21.0]: https://github.com/ctrondlp/pyguitest/compare/v0.20.1...v0.21.0
+[0.21.0]: https://github.com/ctrondlp/pyguitest/compare/v0.20.2...v0.21.0
+[0.20.2]: https://github.com/ctrondlp/pyguitest/compare/v0.20.1...v0.20.2
 [0.20.1]: https://github.com/ctrondlp/pyguitest/compare/v0.20.0...v0.20.1
 [0.20.0]: https://github.com/ctrondlp/pyguitest/compare/v0.19.1...v0.20.0
 [0.19.1]: https://github.com/ctrondlp/pyguitest/compare/v0.19.0...v0.19.1
@@ -6242,7 +6684,8 @@ First public release.
 [0.16.3]: https://github.com/ctrondlp/pyguitest/compare/v0.16.2...v0.16.3
 [0.16.2]: https://github.com/ctrondlp/pyguitest/compare/v0.16.1...v0.16.2
 [0.16.1]: https://github.com/ctrondlp/pyguitest/compare/v0.16.0...v0.16.1
-[0.16.0]: https://github.com/ctrondlp/pyguitest/compare/v0.15.0...v0.16.0
+[0.16.0]: https://github.com/ctrondlp/pyguitest/compare/v0.15.1...v0.16.0
+[0.15.1]: https://github.com/ctrondlp/pyguitest/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/ctrondlp/pyguitest/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/ctrondlp/pyguitest/compare/v0.12.0...v0.14.0
 [0.12.0]: https://github.com/ctrondlp/pyguitest/compare/v0.11.0...v0.12.0

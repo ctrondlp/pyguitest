@@ -47,6 +47,7 @@ _COMMON = {
     Capability.WINDOW_PID,
     Capability.WINDOW_AT_POINT,
     Capability.WINDOW_MINIMIZE,
+    Capability.WINDOW_CLOSE,
     Capability.SCREEN_INFO,
 }
 
@@ -220,6 +221,17 @@ class SwayBackend(_WindowBackend):
         return self._command(
             window, "move scratchpad" if minimized else "scratchpad show"
         )
+
+    def close_window(self, window):
+        """Ask sway to close a window, via `kill`.
+
+        Despite the name, sway's `kill` is the graceful route: it sends the
+        surface an xdg toplevel close event rather than touching the
+        process, so an application with unsaved work answers with its own
+        "Save changes?" dialog -- the behaviour `close_window` promises.
+        """
+        self.require(Capability.WINDOW_CLOSE)
+        return self._command(window, "kill")
 
     def _subscription_transport(self):
         """A transport dedicated to this one subscription.
@@ -579,6 +591,22 @@ class HyprlandBackend(_WindowBackend):
             ),
         )
 
+    def close_window(self, window):
+        """Ask Hyprland to close a window, via `closewindow`.
+
+        The dispatcher sends the surface an xdg toplevel close event, so the
+        application keeps its "Save changes?" say. The Lua spelling is
+        `hl.dsp.window.close` -- in the daemon's own enumeration of
+        `hl.dsp.window` (close, float, move, resize, set_prop, ...; see
+        docs/validation.md's `hyprctl repl` dump), not guessed.
+        """
+        self.require(Capability.WINDOW_CLOSE)
+        return self._dispatch(
+            window,
+            "closewindow",
+            lua=lambda target: f'hl.dsp.window.close({{ window = "{target}" }})',
+        )
+
     def minimize_window(self, window, minimized=True):
         """Minimize by moving to a special workspace.
 
@@ -849,6 +877,18 @@ class NiriBackend(_WindowBackend):
         self.require(Capability.WINDOW_ACTIVATE)
         return self.transport.action("FocusWindow", id=self._handle(window))
 
+    def close_window(self, window):
+        """Ask niri to close a window, via the `CloseWindow` action.
+
+        niri's one graceful close -- the same request `niri msg action
+        close-window` sends; the client answers with its own "Save
+        changes?" dialog where it has one. Notable as the first window
+        *write* this backend serves beyond resize and activate: niri has no
+        minimize at all, but it does have close.
+        """
+        self.require(Capability.WINDOW_CLOSE)
+        return self.transport.action("CloseWindow", id=self._handle(window))
+
     def resize_window(self, window, width, height):
         """Resize a window to `width` by `height`.
 
@@ -1082,6 +1122,17 @@ class KdotoolBackend(_WindowBackend):
         """Minimize a window, or restore it when `minimized` is False."""
         self.require(Capability.WINDOW_MINIMIZE)
         return self._act(window, "windowminimize" if minimized else "windowactivate")
+
+    def close_window(self, window):
+        """Ask KWin to close a window, via kdotool's `windowclose`.
+
+        KWin's close request reaches the client as an ordinary xdg close,
+        so the application keeps its "Save changes?" say -- `windowclose`
+        is in kdotool's documented command set, alongside the
+        `windowminimize`/`windowactivate` this backend already drives.
+        """
+        self.require(Capability.WINDOW_CLOSE)
+        return self._act(window, "windowclose")
 
     def _app_id_of(self, handle):
         """Return a window's application identity from `getwindowclassname`.

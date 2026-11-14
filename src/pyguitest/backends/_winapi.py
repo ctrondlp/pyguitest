@@ -63,6 +63,12 @@ WM_SETTEXT = 0x000C
 top-level windows. Both work cross-process; the difference is which one a
 given window class responds to."""
 
+WM_CLOSE = 0x0010
+"""Ask a window to close itself -- the graceful route. The application's own
+window procedure decides what that means (`DefWindowProc` destroys; an editor
+with unsaved work shows its "Save changes?" prompt instead), which is exactly
+the behaviour `close_window` promises over killing the process."""
+
 SMTO_ABORTIFHUNG = 0x0002
 """`SendMessageTimeout`'s flag for "give up if the target is not pumping
 messages". The platform expects applications to hang, and this is the one
@@ -92,9 +98,18 @@ GA_ROOT = 2
 window rather than a control inside one."""
 
 SW_MINIMIZE = 6
+"""`ShowWindow`'s minimize verb; `IsIconic` is the read that verifies it."""
+
+SW_MAXIMIZE = 3
+"""`ShowWindow`'s maximize verb; `IsZoomed` is the read that verifies it.
+Unlike every call `_winapi.py`'s SWP_NOACTIVATE rule covers, this one
+*activates* the window as a documented side effect -- there is no
+non-activating spelling (`SW_SHOWMAXIMIZED` is the same value 3) -- which
+is why `maximize_window`'s docstring warns about focus."""
+
 SW_RESTORE = 9
-"""`ShowWindow`'s commands: minimize, and restore whatever the window was
-before it was minimized."""
+"""`ShowWindow`'s restore verb: back to whatever the window was before it
+was minimized or maximized."""
 
 SWP_NOZORDER = 0x0004
 SWP_NOACTIVATE = 0x0010
@@ -658,6 +673,8 @@ def _declare_user32(lib):
     lib.IsWindow.restype = wintypes.BOOL
     lib.IsIconic.argtypes = (wintypes.HWND,)
     lib.IsIconic.restype = wintypes.BOOL
+    lib.IsZoomed.argtypes = (wintypes.HWND,)
+    lib.IsZoomed.restype = wintypes.BOOL
     lib.OpenClipboard.argtypes = (wintypes.HWND,)
     lib.OpenClipboard.restype = wintypes.BOOL
     lib.CloseClipboard.argtypes = ()
@@ -720,6 +737,16 @@ def _declare_user32(lib):
         wintypes.LPARAM,
     )
     lib.PostThreadMessageW.restype = wintypes.BOOL
+    # Posted, not sent: close_window must not block on a target that answers
+    # WM_CLOSE by opening a modal "Save changes?" prompt, which SendMessage
+    # would wait out for as long as the dialog stays up.
+    lib.PostMessageW.argtypes = (
+        wintypes.HWND,
+        wintypes.UINT,
+        wintypes.WPARAM,
+        wintypes.LPARAM,
+    )
+    lib.PostMessageW.restype = wintypes.BOOL
 
 
 def _declare_kernel32(lib):

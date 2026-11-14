@@ -259,5 +259,39 @@ class TestAvailability(unittest.TestCase):
         self.assertEqual(recorder.touched, set(xkb._REQUIRED_SYMBOLS))
 
 
+class TestNeededMods(unittest.TestCase):
+    """The modifier-mask decode, pinned where a real keymap cannot reach it.
+
+    A real keymap names its modifier indices densely, so `len(mod_names) ==
+    num_mods` and the old `range(len(mod_names))` happened to cover every
+    bit. The bug only bites a keymap with a NULL-named index *below* a named
+    one -- a hole in the dict -- which libxkbcommon can produce but the
+    bundled us/fr layouts do not, so it is exercised directly here.
+    """
+
+    def test_a_named_modifier_past_the_dict_length_is_not_dropped(self):
+        # Index 2 is unnamed (a hole), so len(mod_names) == 3 while the real
+        # indices run to 4. The old range(len(mod_names)) == {0,1,2} never
+        # checked bit 3 or bit 4, silently dropping those modifiers.
+        mod_names = {0: "Shift", 1: "Lock", 3: "Mod3", 4: "Mod5"}
+        self.assertEqual(xkb.Keymap._needed_mods(mod_names, 1 << 3), ("Mod3",))
+        self.assertEqual(xkb.Keymap._needed_mods(mod_names, 1 << 4), ("Mod5",))
+        self.assertEqual(
+            xkb.Keymap._needed_mods(mod_names, (1 << 0) | (1 << 4)),
+            ("Shift", "Mod5"),
+        )
+
+    def test_ascending_index_order_and_no_modifier_cases(self):
+        mod_names = {0: "Shift", 1: "Lock", 3: "Mod3"}
+        self.assertEqual(
+            xkb.Keymap._needed_mods(mod_names, (1 << 3) | (1 << 0)),
+            ("Shift", "Mod3"),
+        )
+        self.assertEqual(xkb.Keymap._needed_mods(mod_names, 0), ())
+        # A set bit at an unnamed index names nothing (same as before -- an
+        # unnamed modifier cannot be expressed as a name anyway).
+        self.assertEqual(xkb.Keymap._needed_mods(mod_names, 1 << 2), ())
+
+
 if __name__ == "__main__":
     unittest.main()

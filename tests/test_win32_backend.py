@@ -143,6 +143,7 @@ class Win32TestCase(unittest.TestCase):
     def setUp(self):
         """Build the desktop, patch it into `_winapi`, and construct the backend."""
         self.windows = {}
+        self.posted = []
         self.monitor_info = {}
         self.metrics = dict(self.METRICS)
         self.clipboard = {}
@@ -206,6 +207,7 @@ class Win32TestCase(unittest.TestCase):
             IsWindow=lambda hwnd: hwnd in self.windows,
             IsWindowVisible=lambda hwnd: self.windows[hwnd]["visible"],
             IsIconic=lambda hwnd: self.windows[hwnd]["iconic"],
+            IsZoomed=lambda hwnd: self.windows[hwnd].get("zoomed", False),
             GetWindowLongPtrW=lambda hwnd, index: self.windows[hwnd]["style"],
             GetWindow=lambda hwnd, index: self.windows[hwnd]["owner"],
             GetAncestor=lambda hwnd, flag: self.windows[hwnd]["root"],
@@ -242,6 +244,7 @@ class Win32TestCase(unittest.TestCase):
             TranslateMessage=lambda *args: 1,
             DispatchMessageW=lambda *args: 0,
             PostThreadMessageW=self._post_thread_message,
+            PostMessageW=self._post_message,
         )
 
     # -- the desktop's own behaviour ---------------------------------------
@@ -357,6 +360,7 @@ class Win32TestCase(unittest.TestCase):
     def _show_window(self, hwnd, command):
         if self.show_window_honoured:
             self.windows[hwnd]["iconic"] = command == _winapi.SW_MINIMIZE
+            self.windows[hwnd]["zoomed"] = command == _winapi.SW_MAXIMIZE
         return 1
 
     def _set_window_text(self, hwnd, text):
@@ -460,6 +464,19 @@ class Win32TestCase(unittest.TestCase):
         if message == _winapi.WM_QUIT:
             self.quit_posted.set()
         return 1
+
+    def _post_message(self, hwnd, message, wparam, lparam):
+        """`PostMessageW`: recorded, then honoured only for a live handle.
+
+        Returning 0 for a handle no window has is how the real call
+        reports a stale hwnd; `post_message_honoured = False` models the
+        race where the window dies between `_hwnd`'s IsWindow gate and the
+        post itself.
+        """
+        self.posted.append((hwnd, message, wparam, lparam))
+        if not getattr(self, "post_message_honoured", True):
+            return 0
+        return 1 if hwnd in self.windows else 0
 
     def fire_window_event(self, event, hwnd):
         """Call the registered `WinEventProc` as Windows would for one event.
@@ -990,6 +1007,56 @@ class TestWindowOperations(Win32TestCase):
             self.gui.minimize_window(window)
         self.assertIn("did not minimize", str(raised.exception))
 
+    def test_a_maximized_window_is_zoomed_and_restores(self):
+        # winuser.h: SW_MAXIMIZE == SW_SHOWMAXIMIZED == 3.
+        self.assertEqual(_winapi.SW_MAXIMIZE, 3)
+        window = self.only_window()
+        self.gui.maximize_window(window)
+        self.assertTrue(self.windows[1]["zoomed"])
+        self.assertTrue(self.gui.is_window_maximized(window))
+        self.gui.maximize_window(window, maximized=False)
+        self.assertFalse(self.windows[1]["zoomed"])
+        self.assertFalse(self.gui.is_window_maximized(window))
+
+    def test_a_maximize_that_did_not_take_raises(self):
+        # The same IsZoomed read-back minimize has with IsIconic: a platform
+        # quietly declining must not read as success.
+        window = self.only_window()
+        self.show_window_honoured = False
+        with self.assertRaises(PyGUITestError) as raised:
+            self.gui.maximize_window(window)
+        self.assertIn("did not maximize", str(raised.exception))
+
+    def test_close_posts_wm_close_without_verifying_the_window_gone(self):
+        # An application may answer WM_CLOSE with a modal "Save changes?"
+        # prompt instead of closing -- the behaviour the operation exists
+        # to allow -- so unlike minimize there is no read-back to disagree
+        # with, and the message is posted, never sent, so a prompting
+        # target cannot block the caller.
+        window = self.only_window()
+        self.gui.close_window(window)
+        self.assertIn((window.handle, _winapi.WM_CLOSE, 0, 0), self.posted)
+
+    def test_close_of_a_stale_handle_raises_window_not_found(self):
+        # PostMessageW answering zero means the handle no longer names a
+        # window -- the same WindowNotFound every operation raises for a
+        # stale handle. (This one is refused by _hwnd's IsWindow gate; the
+        # test below reaches the post's own failure branch.)
+        with self.assertRaises(WindowNotFound):
+            self.gui.close_window(Window(handle=4242, backend=self.gui))
+        self.assertEqual(self.posted, [], "a stale handle must not be posted to")
+
+    def test_a_post_that_fails_after_the_gate_raises_window_not_found(self):
+        # The race _hwnd cannot close: the window dies between IsWindow and
+        # PostMessageW. The zero return is the only report, and it must
+        # surface as the same typed WindowNotFound -- this is the one path
+        # that exercises close_window's own zero-return branch.
+        window = self.only_window()
+        self.post_message_honoured = False
+        with self.assertRaises(WindowNotFound):
+            self.gui.close_window(window)
+        self.assertEqual(self.posted, [(window.handle, _winapi.WM_CLOSE, 0, 0)])
+
     def test_the_title_is_set_through_set_window_text(self):
         window = self.only_window()
         self.gui.set_window_title(window, "renamed")
@@ -1339,6 +1406,26 @@ class TestWindowEvents(Win32TestCase):
         )
         self.assertFalse(self.quit_posted.is_set())
         generator.close()
+        self.assertTrue(self.quit_posted.is_set())
+        self.assertEqual(len(self.unhooked), len(self.event_hooks))
+
+    def test_a_failing_windows_seed_still_tears_down_the_hook_and_pump(self):
+        # The `known` set is seeded from `windows()`, which can raise -- a
+        # transient EnumWindows failure, or a window dying mid-enumeration. The
+        # seed used to sit between a successful hook install and the
+        # try/finally that stops the pump, so a raise there leaked the
+        # system-wide hooks and left the daemon pump thread running forever
+        # with its sink queue growing unboundedly. Seeded inside the try now,
+        # the teardown still runs.
+        def boom():
+            raise RuntimeError("EnumWindows failed")
+
+        self.gui.windows = boom
+        with self.assertRaises(RuntimeError):
+            self.run_generator(self.gui.window_events(timeout=5.0))
+        # Every hook that was installed is unhooked, and WM_QUIT was posted to
+        # stop the pump -- nothing leaked.
+        self.assertEqual(len(self.event_hooks), len(_WINDOW_EVENT_RANGES))
         self.assertTrue(self.quit_posted.is_set())
         self.assertEqual(len(self.unhooked), len(self.event_hooks))
 

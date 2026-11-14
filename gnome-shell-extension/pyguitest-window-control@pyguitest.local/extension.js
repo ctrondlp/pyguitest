@@ -32,6 +32,7 @@
 import Cairo from 'gi://cairo';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
 
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
@@ -83,6 +84,20 @@ const IFACE_XML = `
       <arg type="u" direction="in" name="id"/>
       <arg type="b" direction="in" name="minimize"/>
       <arg type="b" direction="out" name="ok"/>
+    </method>
+    <method name="CloseWindow">
+      <arg type="u" direction="in" name="id"/>
+      <arg type="b" direction="out" name="ok"/>
+    </method>
+    <method name="MaximizeWindow">
+      <arg type="u" direction="in" name="id"/>
+      <arg type="b" direction="in" name="maximize"/>
+      <arg type="b" direction="out" name="ok"/>
+    </method>
+    <method name="IsWindowMaximized">
+      <arg type="u" direction="in" name="id"/>
+      <arg type="b" direction="out" name="ok"/>
+      <arg type="b" direction="out" name="maximized"/>
     </method>
     <method name="WindowAtPoint">
       <arg type="i" direction="in" name="x"/>
@@ -287,6 +302,72 @@ class PyguitestService {
         else
             window.unminimize();
         return true;
+    }
+
+    // Meta.Window.delete is the compositor's ordinary close request -- the
+    // client receives it as a normal close and keeps its "Save changes?"
+    // say, unlike anything that touches the process. Id 0 doubles as the
+    // backend's existence probe (never a real stable_sequence, so it
+    // answers false without touching any window), the same contract
+    // CaptureWindow's probe established.
+    CloseWindow(id) {
+        const window = this._findWindow(id);
+        if (!window)
+            return false;
+        window.delete(global.get_current_time());
+        return true;
+    }
+
+    // Mutter 49 dropped the flags ARGUMENT from maximize()/unmaximize()
+    // (upstream window.h: 48.0 still has the MetaMaximizeFlags parameter
+    // and get_maximized(); 49.0 has neither). The Meta.MaximizeFlags enum
+    // itself survives even on 51 (set_maximize_flags still takes it --
+    // measured against the live Mutter 51 GIR, where an enum-keyed era
+    // check would have taken the wrong branch). What really marks the old
+    // era is get_maximized(), removed in 49 -- so its *presence* is the
+    // probe, never a call this file depends on, which is why it is not in
+    // REQUIRED_WINDOW_METHODS.
+    MaximizeWindow(id, maximize) {
+        const window = this._findWindow(id);
+        if (!window)
+            return false;
+        const oldEra = typeof window.get_maximized === 'function';
+        if (maximize) {
+            if (oldEra)
+                window.maximize(Meta.MaximizeFlags.BOTH);
+            else
+                window.maximize();
+        } else if (oldEra) {
+            window.unmaximize(Meta.MaximizeFlags.BOTH);
+        } else {
+            window.unmaximize();
+        }
+        return true;
+    }
+
+    IsWindowMaximized(id) {
+        const window = this._findWindow(id);
+        if (!window)
+            return [false, false];
+        // The two GObject properties span every Mutter era (checked in
+        // upstream window.c at 45.0 through 51.0) -- unlike get_maximized()
+        // (gone in 49) and is_maximized() (new in 49) -- so the read needs
+        // no era split at all. Guarded loudly: a property read that went
+        // away would otherwise answer undefined && undefined -> false,
+        // reporting "not maximized" where the truth is "this extension
+        // needs updating" -- the silent failure REQUIRED_WINDOW_METHODS
+        // exists to prevent, which cannot list properties itself because
+        // its check is typeof === 'function'.
+        const horizontal = window.maximized_horizontally;
+        const vertical = window.maximized_vertically;
+        if (horizontal === undefined || vertical === undefined) {
+            throw new Error(
+                'Meta.Window no longer publishes maximized-horizontally/' +
+                'maximized-vertically; pyguitest-window-control needs updating');
+        }
+        // Both axes, deliberately: a window tiled to one edge is maximized
+        // on one axis only, and is not what MaximizeWindow sets.
+        return [true, !!(horizontal && vertical)];
     }
 
     // Async because the Mutter >=51 path (_captureModern) is: Meta
@@ -622,6 +703,7 @@ class PyguitestService {
 // guarantee in either direction.
 const REQUIRED_WINDOW_METHODS = [
     'activate',
+    'delete',
     'get_compositor_private',
     'get_frame_rect',
     'get_pid',
@@ -629,8 +711,10 @@ const REQUIRED_WINDOW_METHODS = [
     'get_title',
     'has_focus',
     'is_override_redirect',
+    'maximize',
     'minimize',
     'move_resize_frame',
+    'unmaximize',
     'unminimize',
 ];
 

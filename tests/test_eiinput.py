@@ -687,6 +687,50 @@ class TestClose(LibeiTestCase):
         self.assertIsNone(self.gui._sender)
         self.assertIsNone(self.gui._connection)
 
+    def test_a_failing_stop_emulating_still_closes_the_portal_session(self):
+        # The commonest way stop_emulating() raises is the EIS connection
+        # having gone away server-side (a compositor restart mid-run). Before
+        # every step was attempted, that skipped Session.Close() below it and
+        # stranded the approved input-injection grant in xdg-desktop-portal
+        # until the process exited -- the exact leak the constructor's own
+        # teardown exists to prevent.
+        closed = []
+        self.gui._session = types.SimpleNamespace(close=lambda: closed.append(True))
+        self.gui._emulation_started = True
+        self.gui._device = types.SimpleNamespace(
+            stop_emulating=lambda: (_ for _ in ()).throw(RuntimeError("EIS gone"))
+        )
+        with self.assertRaises(RuntimeError):
+            self.gui.close()
+        self.assertEqual(closed, [True])
+        self.assertIsNone(self.gui._session)
+        self.assertIsNone(self.gui._device)
+        self.assertFalse(self.gui._emulation_started)
+
+    def test_the_first_failure_is_the_one_raised(self):
+        # Two steps fail; the earlier one explains what actually went wrong.
+        self.gui._emulation_started = True
+        self.gui._device = types.SimpleNamespace(
+            stop_emulating=lambda: (_ for _ in ()).throw(RuntimeError("first"))
+        )
+        self.gui._session = types.SimpleNamespace(
+            close=lambda: (_ for _ in ()).throw(RuntimeError("second"))
+        )
+        with self.assertRaises(RuntimeError) as caught:
+            self.gui.close()
+        self.assertEqual(str(caught.exception), "first")
+
+    def test_close_is_idempotent_after_a_failure(self):
+        # The attribute clearing is unconditional so a second close() cannot
+        # re-enter a device that is already gone.
+        self.gui._emulation_started = True
+        self.gui._device = types.SimpleNamespace(
+            stop_emulating=lambda: (_ for _ in ()).throw(RuntimeError("EIS gone"))
+        )
+        with self.assertRaises(RuntimeError):
+            self.gui.close()
+        self.gui.close()  # must not raise a second time
+
 
 class TestNegotiation(unittest.TestCase):
     """What is left here after libei.portal took the D-Bus plumbing.

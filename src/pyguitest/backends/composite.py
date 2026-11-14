@@ -84,6 +84,9 @@ _DISPATCH = {
     "resize_window": Capability.WINDOW_RESIZE,
     "activate_window": Capability.WINDOW_ACTIVATE,
     "minimize_window": Capability.WINDOW_MINIMIZE,
+    "maximize_window": Capability.WINDOW_MAXIMIZE,
+    "is_window_maximized": Capability.WINDOW_MAXIMIZE,
+    "close_window": Capability.WINDOW_CLOSE,
     "window_events": Capability.WINDOW_EVENTS,
     "wait_for_window": Capability.WINDOW_EVENTS,
     "locate": Capability.IMAGE_LOCATE,
@@ -132,6 +135,9 @@ _WINDOW_ARGUMENT = frozenset(
         "resize_window",
         "activate_window",
         "minimize_window",
+        "maximize_window",
+        "is_window_maximized",
+        "close_window",
         "set_window_title",
         "lower_window",
         "is_window_cursor",
@@ -498,6 +504,17 @@ class CompositeBackend(GUIBackend):
         backend that cannot read this handle at all. Falls back to the
         provider when the owner does not serve geometry, or when the owner
         is unknown.
+
+        The fallback re-homes first, the way `_route_window` does when an
+        issuer cannot serve an operation. Without it this branch handed the
+        provider a handle from someone else's namespace -- the one thing
+        `_issuer` exists to prevent -- and `capture(window=...)` on a
+        session whose window list comes from a WINDOW_EVENTS-only member
+        (kwinevents paired with x11, no kdotool installed) reached
+        `X11Backend.geometry()` with a KWin UUID string and died in
+        python-xlib with a bare AttributeError. A raw handle is left alone:
+        only its caller knows whose namespace it is from, which is the
+        historic behaviour `_issuer` documents for it.
         """
         owner = self._owner(window)
         if owner is not None and Capability.WINDOW_GEOMETRY in owner.capabilities:
@@ -507,6 +524,16 @@ class CompositeBackend(GUIBackend):
         if source is None:
             return None
         self._check_implemented(source, "geometry", Capability.WINDOW_GEOMETRY)
+        if self._issuer(window) is not None:
+            # Best-effort, exactly as `_rehomed` documents: where the
+            # provider can see the window this repairs the handle, and where
+            # it cannot -- measured live on KDE Wayland, where `x11.windows()`
+            # lists only the XWayland video bridge because KWrite is a native
+            # Wayland client with no X11 window at all -- it hands back the
+            # original and lets the provider give its own answer. Refusing
+            # here instead would reject the cases that work: a handle a
+            # provider happens to read fine needs no re-homing at all.
+            window = self._rehomed(window, source)
         return source.geometry(window)
 
     def _capture_members(self):
@@ -603,12 +630,15 @@ class CompositeBackend(GUIBackend):
         The only operation here that can need two members. Three routes, in
         order:
 
-        1. a member declaring WINDOW_CAPTURE gets a `window` straight
-           through -- a native per-window grab, so an occluded or partly
-           offscreen window still comes back whole and undamaged. Only
-           when that member is the one that *issued* the window, though:
-           handles are backend-private, so a foreign one is meaningless to
-           it. See _issuer.
+        1. a `window` goes to a native per-window grab, so an occluded or
+           partly offscreen window still comes back whole and undamaged.
+           The MEMBER that issued the window is preferred whenever it can
+           grab -- the same prefer-the-issuer rule _route_window and
+           _geometry_of apply -- and the highest-priority WINDOW_CAPTURE
+           member takes a raw handle, or a window it issued itself.
+           Handles are backend-private, so a foreign one is meaningless to
+           anyone else; a window from a backend that is not a member at
+           all never takes this route. See _owner and _issuer.
         2. otherwise a `window` is resolved to its rectangle -- through the
            member that owns it where possible -- and handed to a
            SCREEN_CAPTURE member as a region. Cropped out of a screen shot,
@@ -640,8 +670,31 @@ class CompositeBackend(GUIBackend):
         # at all, since the root is unreadable and no screenshot tool can
         # run. That is a real session, not a contrived one.
         if window is not None:
-            native = self.provider(Capability.WINDOW_CAPTURE)
             issuer = self._issuer(window)
+            # Prefer the MEMBER that issued the window's handle when it can
+            # grab the window natively, exactly as _route_window and
+            # _geometry_of prefer the issuer. On COSMIC + XWayland the window
+            # is x11-issued (x11 serves the window family) while the
+            # highest-priority WINDOW_CAPTURE provider is cosmic; grabbing
+            # through cosmic there falls back to the whole-output crop below,
+            # which bakes in whatever occludes the window, where
+            # x11.capture(window=...) reads the window's own drawable
+            # un-occluded. When the issuer *is* the top provider (or there is
+            # none), this is identical to the provider path that follows.
+            # `_owner`, not `_issuer`: a Window naming a backend that is not
+            # a member is positively foreign (see _owner's docstring), and
+            # this branch must not become the one place the composite calls
+            # a backend it does not contain -- the foreign window falls
+            # through to the geometry-plus-crop route instead, as it always
+            # did.
+            owner = self._owner(window)
+            if (
+                owner is not None
+                and Capability.WINDOW_CAPTURE in owner.capabilities
+                and self._implements(owner, "capture")
+            ):
+                return owner.capture(window=window, path=path)
+            native = self.provider(Capability.WINDOW_CAPTURE)
             if native is not None and issuer in (None, native):
                 self._check_implemented(native, "capture", Capability.WINDOW_CAPTURE)
                 return native.capture(window=window, path=path)

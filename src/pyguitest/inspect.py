@@ -82,6 +82,13 @@ def tree_data(gui, window=None):
     ]
 
 
+def _tristate(value, yes, no):
+    """`yes`, `no`, or "<yes> unknown" for a state the toolkit never published."""
+    if value is None:
+        return f"{yes} unknown"
+    return yes if value else no
+
+
 def _label(node, top_level):
     """One node's text, e.g. 'Window: Preferences [frame]'.
 
@@ -95,10 +102,16 @@ def _label(node, top_level):
         flags.append("disabled")
     if not node["visible"]:
         flags.append("hidden")
+    # None is a third state, not a falsy second one: it means the toolkit
+    # published no checked/selected state at all, which Windows UIA and
+    # macOS AX both do for a control that is checkable by role. Collapsing
+    # it into "unchecked" printed a confirmed-looking state nobody had
+    # read -- the same mistake `Session.expect_checked`'s message was
+    # rewritten to stop making, reintroduced independently here.
     if "checked" in node:
-        flags.append("checked" if node["checked"] else "unchecked")
+        flags.append(_tristate(node["checked"], "checked", "unchecked"))
     if "selected" in node:
-        flags.append("selected" if node["selected"] else "unselected")
+        flags.append(_tristate(node["selected"], "selected", "unselected"))
 
     if top_level:
         text = f"Window: {node['name']} [{node['role']}]"
