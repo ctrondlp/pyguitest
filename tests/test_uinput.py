@@ -77,6 +77,23 @@ def fake_evdev():
         KEY_NEXT=407,
         KEY_PREVIOUS=412,
         KEY_PRINT=210,
+        # The punctuation and keypad keys evdev spells differently again.
+        # Deliberately listed under their evdev names only: a namespace with
+        # no KEY_BRACKETLEFT/KEY_PERIOD/KEY_KP_ADD is what makes the keysym
+        # translation load-bearing here rather than incidental.
+        KEY_LEFTBRACE=26,
+        KEY_RIGHTBRACE=27,
+        KEY_DOT=52,
+        KEY_KPPLUS=78,
+        KEY_KPMINUS=74,
+        KEY_KPASTERISK=55,
+        KEY_KPSLASH=98,
+        KEY_KPENTER=96,
+        KEY_KPDOT=83,
+        KEY_KPCOMMA=121,
+        KEY_KP0=82,
+        KEY_KP5=76,
+        KEY_KP9=73,
     )
     module = types.ModuleType("evdev")
     module.ecodes = ecodes
@@ -308,6 +325,45 @@ class TestKeyboard(UinputTestCase):
                 self.gui.press_key(name)
                 self.assertEqual(self.device.events[-1][1], code)
 
+    def test_the_documented_page_up_spelling_is_accepted_not_just_prior(self):
+        # docs/input.md's own key-name table teaches `Page_Up`/`Page_Down`,
+        # and X11 accepts them as aliases for Prior/Next -- so did Windows
+        # and macOS, while this backend raised `unknown key name` for the
+        # spelling the documentation hands the reader.
+        for name, code in [("Page_Up", 104), ("Page_Down", 109)]:
+            with self.subTest(name=name):
+                self.device.events.clear()
+                self.gui.press_key(name)
+                self.assertEqual(self.device.events[-1][1], code)
+
+    def test_punctuation_and_keypad_keysyms_are_accepted(self):
+        # The same divergence class as Return/Escape, found by asking which
+        # keysym names the other backends take that this one refused:
+        # evdev spells these LEFTBRACE/DOT/KPPLUS/KP0.
+        for name, code in [
+            ("bracketleft", 26),
+            ("bracketright", 27),
+            ("period", 52),
+            ("KP_Add", 78),
+            ("KP_Subtract", 74),
+            ("KP_Multiply", 55),
+            ("KP_Divide", 98),
+            ("KP_Enter", 96),
+            ("KP_Decimal", 83),
+            ("KP_Separator", 121),
+            ("KP_0", 82),
+            ("KP_5", 76),
+            ("KP_9", 73),
+        ]:
+            with self.subTest(name=name):
+                self.device.events.clear()
+                self.gui.press_key(name)
+                self.assertEqual(self.device.events[-1][1], code)
+
+    def test_sys_req_is_print_screen_like_print(self):
+        self.gui.press_key("Sys_Req")
+        self.assertEqual(self.device.events[-1][1], 99)  # KEY_SYSRQ
+
     def test_evdev_names_still_work(self):
         # This backend's own KEY_ALIASES emit evdev spellings, so the keysym
         # table has to be consulted before the KEY_<NAME> fallback, not
@@ -324,6 +380,48 @@ class TestKeyboard(UinputTestCase):
         codes = [(c, v) for _, c, v in self.device.events]
         self.assertIn((42, 1), codes)  # shift down for 'B'
         self.assertIn((42, 0), codes)  # shift up
+
+    def test_a_write_that_dies_mid_character_does_not_leave_shift_held(self):
+        # The device is held open for the whole session, so a write that
+        # fails between Shift going down and coming back up leaves Shift
+        # logically held in the kernel for every later keystroke: the rest
+        # of the run types capitals and symbols with nothing raised to say
+        # why. Same invariant Session.drag and send_keys already keep.
+        class DyingDevice(FakeDevice):
+            def write(self, etype, code, value):
+                # Fail on the character's own key-down, after Shift is down.
+                if code == 48 and value == 1:  # KEY_B
+                    raise OSError(19, "No such device")
+                super().write(etype, code, value)
+
+        from pyguitest.backends import uinput
+
+        device = DyingDevice()
+        gui = uinput.UinputBackend(screen_size=(1920, 1080), device=device)
+        with self.assertWarns(Warning), self.assertRaises(OSError):
+            gui.type_text("B")
+        self.assertIn((1, 42, 1), device.events)  # Shift pressed
+        self.assertIn((1, 42, 0), device.events)  # and released on the way out
+
+    def test_the_original_error_survives_a_failing_shift_release(self):
+        # Not a plain `finally`, for Session.drag's reason: when the device
+        # is gone, the unwinding release fails too, and the caller must
+        # still learn what actually broke rather than "release failed".
+        class FullyDeadDevice(FakeDevice):
+            def write(self, etype, code, value):
+                if code == 48:  # KEY_B: the character, and then everything
+                    raise OSError(19, "No such device")
+                if self.events and code == 42 and value == 0:
+                    raise OSError(5, "Input/output error")
+                super().write(etype, code, value)
+
+        from pyguitest.backends import uinput
+
+        device = FullyDeadDevice()
+        gui = uinput.UinputBackend(screen_size=(1920, 1080), device=device)
+        with self.assertWarns(Warning), self.assertRaises(OSError) as caught:
+            gui.type_text("B")
+        self.assertEqual(caught.exception.errno, 19)  # the cause, not the cleanup
 
     def test_typing_is_keymap_unsafe_and_can_be_refused(self):
         # Same trap as ydotool: injection happens below the compositor.

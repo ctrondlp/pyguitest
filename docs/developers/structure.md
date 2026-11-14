@@ -68,17 +68,22 @@ pyguitest/
 │       ├── windows.py          sway, Hyprland, niri, KDE window control
 │       ├── cosmic.py           COSMIC window control, a stdlib Wayland client
 │       ├── gnomeshell.py       window control via a GNOME Shell extension
+│       ├── kwinevents.py       window events on KDE, via an ad hoc KWin script
 │       ├── displayconfig.py    Mutter's DisplayConfig, no shell extension needed
 │       ├── portalrequest.py    the XDG portal request/response dance, shared
 │       ├── portal.py           input via the RemoteDesktop XDG portal
 │       ├── portalcapture.py    screenshots via the Screenshot XDG portal
 │       ├── eiinput.py          input via libei, keymap-safe, over that portal
+│       ├── inputcapture.py     the pointer at a screen-edge crossing, via the portal
 │       ├── atspi.py            element automation via dogtail
 │       ├── uia.py              Windows elements via UI Automation
 │       ├── win32.py            Windows windows, events, input, capture, clipboard
+│       ├── macos.py            macOS elements, windows and screens, via AX/CoreGraphics
+│       ├── macquartz.py        macOS pointer and keyboard, via CGEventPost
 │       ├── input.py            injection via CLI tools; ydotool's evdev codes
 │       ├── uinput.py           injection in-process via python-evdev
 │       ├── capture.py          screenshots via desktop tools
+│       ├── clipboard.py        clipboard text via wl-clipboard/xclip/xsel/pbcopy
 │       ├── crop.py             cutting a rectangle out, via ImageMagick
 │       ├── imagesearch.py      locate a template image via ImageMagick
 │       └── x11.py              X11 via python-xlib

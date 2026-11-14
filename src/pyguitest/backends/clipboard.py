@@ -202,6 +202,20 @@ class ToolClipboardBackend(GUIBackend):
                 f"{' '.join(argv)} did not finish within "
                 f"{_SUBPROCESS_TIMEOUT}s; it is installed but not responding"
             ) from exc
+        except UnicodeDecodeError as exc:
+            # The selection is whatever the last application put there, and
+            # nothing obliges that to be UTF-8: Latin-1 text from a legacy
+            # X11 application, or a truncated blob the tool still reports as
+            # text/plain, both arrive as bytes this cannot decode. Strict
+            # decoding is deliberate -- handing back mojibake would make
+            # assert_clipboard compare against a silently mangled string --
+            # but the error has to be this package's own, named, rather than
+            # a bare UnicodeDecodeError from inside subprocess.
+            raise PyGUITestError(
+                f"{' '.join(argv)} returned bytes that are not valid UTF-8 "
+                f"({exc.reason} at byte {exc.start}); the selection holds "
+                f"text in another encoding, or data that is not text"
+            ) from exc
         if result.returncode != 0:
             detail = (
                 (result.stderr or "").strip() or "no output"

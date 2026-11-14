@@ -1710,13 +1710,15 @@ _AX_ONLY = frozenset(
         Capability.WINDOW_PLACEMENT,
         Capability.WINDOW_RESIZE,
         Capability.WINDOW_MINIMIZE,
+        Capability.WINDOW_CLOSE,
     }
 )
 """What the Accessibility grant buys, and exactly what it gates.
 
-The three element capabilities and the three AX-backed window writes, and nothing
+The three element capabilities and the four AX-backed window writes, and nothing
 else -- ADR 004 §6's rule of withdrawing what Accessibility actually gates and no
-more. `WINDOW_ACTIVATE` is deliberately not among them even though `AXRaise` can
+more (close is a write too: it presses the window's own AX close button).
+`WINDOW_ACTIVATE` is deliberately not among them even though `AXRaise` can
 serve it, because the AppKit route needs no grant: the set describes what the
 backend can *do*, not what its most capable route needs.
 """
@@ -2369,6 +2371,47 @@ class MacosBackend(GUIBackend):
                 Capability.WINDOW_MINIMIZE,
                 self.name,
                 f"could not minimize {window!r}: AX answered {err}",
+            )
+
+    def close_window(self, window):
+        """Close a window by pressing its own AX close button.
+
+        AX has no window-level close attribute to write the way minimize has
+        `kAXMinimizedAttribute`; the close *button* is the documented surface,
+        published as `kAXCloseButtonAttribute` on every standard window, and
+        pressing it is exactly the user's click -- an application with
+        unsaved work answers with its "Save changes?" sheet rather than
+        dying, which is the behaviour `close_window` promises over stopping
+        the process. A window publishing no close button (a palette, a
+        sheet) is a structural refusal no retry can change, so it raises
+        `CapabilityUnsupported` the way `minimize_window`'s AX refusals do.
+        """
+        self.require(Capability.WINDOW_CLOSE)
+        node = self._require_ax_window(window, Capability.WINDOW_CLOSE, "close")
+        err, button = self._copy(node, self._ax.kAXCloseButtonAttribute)
+        if err or button is None:
+            raise CapabilityUnsupported(
+                Capability.WINDOW_CLOSE,
+                self.name,
+                f"{window!r} publishes no close button: "
+                f"AX answered {err or 'no value'}",
+            )
+        try:
+            # The plain string, as every other action this backend performs
+            # is spelled -- PyObjC's kAXPressAction *is* the str "AXPress".
+            pressed = self._ax.AXUIElementPerformAction(button, "AXPress")
+        except Exception as exc:  # noqa: BLE001 - a binding that refused
+            raise CapabilityUnsupported(
+                Capability.WINDOW_CLOSE,
+                self.name,
+                f"could not press {window!r}'s close button: {exc}",
+            ) from exc
+        self._forget_windows()
+        if pressed:
+            raise CapabilityUnsupported(
+                Capability.WINDOW_CLOSE,
+                self.name,
+                f"could not close {window!r}: AX answered {pressed}",
             )
 
     def activate_window(self, window):

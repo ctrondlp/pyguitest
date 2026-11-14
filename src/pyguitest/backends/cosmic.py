@@ -24,8 +24,9 @@ client has bound -- and adds each output's own origin, so the coordinates it
 reports are absolute screen coordinates even on a multi-output desktop. That
 sum is taken when the rectangle is *read* rather than when the event arrived,
 because an output can be re-announced at a new origin afterwards. The
-management protocol's `close` request has no corresponding capability here
-(`Capability` has no WINDOW_CLOSE), so it is bound but not surfaced.
+management protocol's `close` request is surfaced as `close_window` /
+`Capability.WINDOW_CLOSE`; the compositor forwards it to the client as an
+ordinary xdg close, so the application keeps its "Save changes?" say.
 """
 
 from __future__ import annotations
@@ -105,7 +106,10 @@ _ZTH_GEOMETRY = 9
 
 # -- zcosmic_toplevel_manager_v1 -------------------------------------------
 
+_ZTM_CLOSE = 1
 _ZTM_ACTIVATE = 2
+_ZTM_SET_MAXIMIZED = 3
+_ZTM_UNSET_MAXIMIZED = 4
 _ZTM_SET_MINIMIZED = 5
 _ZTM_UNSET_MINIMIZED = 6
 
@@ -153,6 +157,16 @@ _CCS_DESTROY = 1
 _CCS_BUFFER_SIZE = 0
 _CCS_SHM_FORMAT = 1
 _CCS_DONE = 4
+_CCS_STOPPED = 5
+"""The capture session ended before, or instead of, handing over a frame.
+
+The protocol names three reasons: the capture source was destroyed, the user
+ended the capture, or an unrecoverable runtime error. Arriving *before*
+`done` is the case worth naming, because no frame object exists yet to carry
+a `failed` event -- so with this unhandled the negotiation loop simply waited
+for a message that was never coming and surfaced ten seconds later as a bare
+socket timeout.
+"""
 _CCF_DESTROY = 0
 _CCF_ATTACH_BUFFER = 1
 _CCF_DAMAGE_BUFFER = 2
@@ -814,8 +828,14 @@ class _CosmicConnection:
                             fmt = fourcc
                     elif opcode == _CCS_DONE:
                         break
-                    # dmabuf_device/dmabuf_format are ignored; a stopped
-                    # session surfaces as the frame never becoming ready below.
+                    elif opcode == _CCS_STOPPED:
+                        raise OSError(
+                            "COSMIC ended the capture session before offering "
+                            "a buffer format; the window or output being "
+                            "captured most likely went away"
+                        )
+                    # dmabuf_device/dmabuf_format are ignored: this backend
+                    # asks for shm, and the dmabuf offers are advisory.
                 else:
                     self._handle(object_id, opcode, payload)
             if not width or not height or not fmt:
@@ -866,6 +886,17 @@ class _CosmicConnection:
                                 f"(reason {_Reader(payload).uint()})"
                             )
                         continue  # transform/damage/presentation_time: ignore
+                    if object_id == session and opcode == _CCS_STOPPED:
+                        # The protocol says a pending frame fails when its
+                        # session stops, so `failed` above is the usual way
+                        # this surfaces. Answering the session event too
+                        # costs nothing and keeps the one ordering where it
+                        # arrives alone from becoming another socket timeout.
+                        raise OSError(
+                            "COSMIC ended the capture session while the frame "
+                            "was being captured; the window or output being "
+                            "captured most likely went away"
+                        )
                     self._handle(object_id, opcode, payload)
                 data = mmap.mmap(fd, size, mmap.MAP_SHARED, mmap.PROT_READ)
                 try:
@@ -894,6 +925,8 @@ _COSMIC_CAPABILITIES = frozenset(
         Capability.WINDOW_GEOMETRY,
         Capability.WINDOW_ACTIVATE,
         Capability.WINDOW_MINIMIZE,
+        Capability.WINDOW_MAXIMIZE,
+        Capability.WINDOW_CLOSE,
         Capability.WINDOW_AT_POINT,
         Capability.WINDOW_EVENTS,
     }
@@ -1094,6 +1127,40 @@ class CosmicBackend(_WindowBackend):
         cosmic = self._cosmic_of(window)
         opcode = _ZTM_SET_MINIMIZED if minimized else _ZTM_UNSET_MINIMIZED
         self._conn._send(self._conn._manager, opcode, [("o", cosmic)])
+
+    def maximize_window(self, window: Window, maximized: bool = True) -> None:
+        """Maximize a window, or restore it when `maximized` is False."""
+        self.require(Capability.WINDOW_MAXIMIZE)
+        cosmic = self._cosmic_of(window)
+        opcode = _ZTM_SET_MAXIMIZED if maximized else _ZTM_UNSET_MAXIMIZED
+        self._conn._send(self._conn._manager, opcode, [("o", cosmic)])
+
+    def is_window_maximized(self, window: Window) -> bool:
+        """Whether the toplevel's advertised state carries `maximized`.
+
+        The same read `is_window_viewable` makes of `minimized`, with the
+        same `_refresh()` first: the compositor pushes the state array on
+        every change, but pushed events sit unread in the socket until
+        something drains it -- measured live on COSMIC, where the maximize
+        visibly took (the geometry grew to the work area) while a poll of
+        this read answered False for as long as nothing else drained.
+        """
+        self.require(Capability.WINDOW_MAXIMIZE)
+        self._refresh()
+        return _STATE_MAXIMIZED in self._toplevel(window).states
+
+    def close_window(self, window: Window) -> None:
+        """Ask COSMIC to close a window, via the manager's `close` request.
+
+        The compositor forwards it to the client as an ordinary xdg
+        toplevel close, so the application keeps its say -- unsaved work
+        gets its "Save changes?" dialog rather than a dead process. A
+        request, not a guarantee: verifying the window actually went away
+        is `wait_window_close`'s job.
+        """
+        self.require(Capability.WINDOW_CLOSE)
+        cosmic = self._cosmic_of(window)
+        self._conn._send(self._conn._manager, _ZTM_CLOSE, [("o", cosmic)])
 
     def _output_for_region(
         self, region: tuple[int, int, int, int]

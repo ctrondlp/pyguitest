@@ -179,10 +179,11 @@ its typing reaches an application, while `wtype -k Return` exits zero and
 nothing receives it. So from 0.23.0 `wtype` keeps `TEXT_ENTRY` on COSMIC and
 gives up `KEY_EVENT`, and the `uinput` backend beside it serves keys instead
 — which means COSMIC wants the `uinput` extra installed for anything that
-presses a key rather than typing text, and `pyguitest report` shows the two
-capabilities served by different members. wlroots compositors are
-unaffected: the same call works on sway and Hyprland, which is why this is
-scoped to the one compositor rather than taken off the tool.
+presses a key rather than typing text, and `pyguitest` (run with no
+subcommand) shows the two capabilities served by different members.
+wlroots compositors are unaffected: the same call works on sway and
+Hyprland, which is why this is scoped to the one compositor rather than
+taken off the tool.
 
 `pyguitest doctor` prints whichever of these apply to your machine.
 
@@ -236,7 +237,7 @@ backend, so input needs nothing named:
 gui = pyguitest.connect()
 ```
 
-It was opt-in until 0.22.1. Composing it asks for nothing — the PostEvent
+It was opt-in until 0.23.0. Composing it asks for nothing — the PostEvent
 *request* is behind `connect(backend="macquartz", backend_options={"request":
 True})` — and the capability is reported only where the preflight says the
 grant is already there.

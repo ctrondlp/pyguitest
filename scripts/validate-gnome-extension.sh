@@ -97,6 +97,24 @@ for m in ListWindows; do
     && ok "$m responded" || bad "$m failed"
 done
 
+# The 0.6.0-close-maximize methods, probed with the reserved id 0 (never a
+# real stable_sequence, so nothing on screen is touched) -- the same probe
+# the backend itself makes at connect. A shell still running an older copy
+# fails these three and nothing else, which is exactly the
+# log-out-and-back-in diagnosis.
+gdbus call --session --dest org.gnome.Shell --object-path "$OBJ" \
+  --method "$IFACE.CloseWindow" 0 >/dev/null 2>&1 \
+  && ok "CloseWindow responded to the id-0 probe" \
+  || bad "CloseWindow missing -- shell is running an extension older than 0.6.0-close-maximize"
+gdbus call --session --dest org.gnome.Shell --object-path "$OBJ" \
+  --method "$IFACE.MaximizeWindow" 0 false >/dev/null 2>&1 \
+  && ok "MaximizeWindow responded to the id-0 probe" \
+  || bad "MaximizeWindow missing -- shell is running an extension older than 0.6.0-close-maximize"
+gdbus call --session --dest org.gnome.Shell --object-path "$OBJ" \
+  --method "$IFACE.IsWindowMaximized" 0 >/dev/null 2>&1 \
+  && ok "IsWindowMaximized responded to the id-0 probe" \
+  || bad "IsWindowMaximized missing -- shell is running an extension older than 0.6.0-close-maximize"
+
 if gdbus introspect --session --dest org.gnome.Shell --object-path "$OBJ" 2>/dev/null \
     | grep -q "a(uisiiiibbs)"; then
   ok "ListWindows carries wm_class -- shell is running 0.4.0-appid or later"

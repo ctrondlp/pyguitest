@@ -1124,6 +1124,118 @@ class TestWindows(AtspiTestCase):
         self.assertEqual(windows[0].app_id, "gedit")
 
 
+class _HangingNameNode(FakeNode):
+    """A frame whose `name` read never returns.
+
+    The `.name` half of the live-confirmed GhostBSD hang `_run_bounded`
+    exists for, one level up from `find_elements`'s `findChildren` (see
+    `_HangingFindChildrenNode`): construction still works (only the getter
+    hangs, and `__init__` only ever *sets* the name), so `windows()` reaches
+    the read and must bound it.
+    """
+
+    @property
+    def name(self):
+        import time
+
+        time.sleep(999)
+        return ""  # pragma: no cover - never reached within the test timeout
+
+    @name.setter
+    def name(self, value):
+        self._name = value
+
+
+class _HangingRoleNode(FakeNode):
+    """A frame whose `roleName` read never returns -- the role half."""
+
+    @property
+    def roleName(self):
+        import time
+
+        time.sleep(999)
+        return ""  # pragma: no cover - never reached within the test timeout
+
+    @roleName.setter
+    def roleName(self, value):
+        self._rolename = value
+
+
+class _RaisingNameNode(FakeNode):
+    """A frame whose `name` read fails outright (RuntimeError, not a hang).
+
+    A frame dying mid-enumeration: `windows()` degrades it to an empty title
+    rather than crashing, the same way the app-children read degrades a dead
+    application.
+    """
+
+    @property
+    def name(self):
+        raise RuntimeError("name read failed")
+
+    @name.setter
+    def name(self, value):
+        self._name = value
+
+
+class TestWindowsBoundedReads(AtspiTestCase):
+    """windows()'s per-frame `roleName`/`name`/`app.name` reads are bounded.
+
+    They are the same shape of AT-SPI round trip as every `Element` property
+    and `_frame_pid`, and were the one set this method left unbounded: a hang
+    in any of them wedged windows() -- and `active_window`, `find_windows`,
+    `wait_for_window`, `is_window_open`, `refresh_window`, which all funnel
+    through it -- with no timeout and no recovery. See atspi.py `windows()`
+    and `_run_bounded`.
+    """
+
+    def test_a_hung_frame_name_is_reported_not_hung(self):
+        gui = self.backend(call_timeout=0.05)
+        app = self.frame.parent
+        hung = _HangingNameNode("x", "frame", [], (0, 0), (400, 300))
+        hung.parent = app
+        app.children.append(hung)
+        self.addCleanup(app.children.remove, hung)
+        with self.assertRaises(pyguitest.BackendCallTimeout):
+            gui.windows()
+
+    def test_a_hung_role_read_is_reported_not_hung(self):
+        gui = self.backend(call_timeout=0.05)
+        app = self.frame.parent
+        hung = _HangingRoleNode("x", "frame", [], (0, 0), (400, 300))
+        hung.parent = app
+        app.children.append(hung)
+        self.addCleanup(app.children.remove, hung)
+        with self.assertRaises(pyguitest.BackendCallTimeout):
+            gui.windows()
+
+    def test_a_hung_app_name_is_reported_not_hung(self):
+        gui = self.backend(call_timeout=0.05)
+        child = FakeNode("Second window", "frame", [], (0, 0), (400, 300))
+        hung_app = _HangingNameNode("x", "application", [child])
+        child.parent = hung_app
+        gui._tree.root.children.append(hung_app)
+        self.addCleanup(gui._tree.root.children.remove, hung_app)
+        with self.assertRaises(pyguitest.BackendCallTimeout):
+            gui.windows()
+
+    def test_an_ordinary_name_failure_degrades_to_an_empty_title(self):
+        # A non-timeout read failure (a frame dying mid-walk) is not fatal:
+        # the good window is still listed, and the broken frame still becomes
+        # a window -- just with an empty title rather than taking windows()
+        # down with it.
+        gui = self.backend(call_timeout=0.05)
+        app = self.frame.parent
+        broken = _RaisingNameNode("x", "frame", [], (0, 0), (400, 300))
+        broken.parent = app
+        broken._pid = 77
+        app.children.append(broken)
+        self.addCleanup(app.children.remove, broken)
+        titles = {w.title for w in gui.windows()}
+        self.assertIn("Document - Editor", titles)
+        self.assertIn("", titles)
+
+
 class TestActiveWindow(AtspiTestCase):
     """active_window() must not depend on pyatspi being importable.
 

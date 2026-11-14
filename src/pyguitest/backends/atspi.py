@@ -2654,17 +2654,56 @@ class AtspiBackend(GUIBackend):
                 # open, wait_window_close) fail for reasons having nothing
                 # to do with the window they actually asked about.
                 continue
-            for frame in frames:
-                if frame.roleName in Role.WINDOW_ROLES:
-                    found.append(
-                        Window(
-                            handle=frame,
-                            backend=self,
-                            title=frame.name or "",
-                            app_id=app.name or "",
-                            pid=_frame_pid(frame),
-                        )
+
+            # `app.name`, `frame.roleName` and `frame.name` are the same
+            # shape of read as `_frame_pid` below and every `Element`
+            # property: ordinarily instant but confirmed able to hang
+            # outright on GhostBSD (see `_run_bounded`). Bound by
+            # `self._call_timeout`, exactly like the `applications()` and
+            # `list(a.children)` reads above, so a wedged native read raises
+            # `BackendCallTimeout` (re-raised, same as those) instead of
+            # hanging `windows()` -- and with it `active_window`,
+            # `find_windows`, `wait_for_window`, `is_window_open` and
+            # `refresh_window`, which all funnel through here -- with no
+            # timeout and no recovery. The whole per-application harvest
+            # runs in ONE bounded worker rather than one per attribute:
+            # `windows()` sits on the polling hot path, `_run_bounded`
+            # costs a thread per call, and a desktop has a couple of orders
+            # of magnitude more children than applications. A hang anywhere
+            # in the harvest still times the worker out; a frame dying
+            # mid-walk still degrades (role unreadable -> skipped, name
+            # unreadable -> ""), same as the per-read form did.
+            def harvest(app=app, frames=frames):
+                try:
+                    app_id = getattr(app, "name", "") or ""
+                except Exception:  # noqa: BLE001 - an unnamed application
+                    app_id = ""
+                kept = []
+                for frame in frames:
+                    try:
+                        role = getattr(frame, "roleName", "")
+                    except Exception:  # noqa: BLE001 - died mid-enumeration
+                        continue
+                    if role not in Role.WINDOW_ROLES:
+                        continue
+                    try:
+                        title = getattr(frame, "name", "") or ""
+                    except Exception:  # noqa: BLE001 - an unnamed frame
+                        title = ""
+                    kept.append((frame, title))
+                return app_id, kept
+
+            app_id, kept = _run_bounded(self._call_timeout, harvest)
+            for frame, title in kept:
+                found.append(
+                    Window(
+                        handle=frame,
+                        backend=self,
+                        title=title,
+                        app_id=app_id,
+                        pid=_frame_pid(frame),
                     )
+                )
         return found
 
     def active_window(self):

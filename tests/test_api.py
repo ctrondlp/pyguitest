@@ -1118,6 +1118,33 @@ class TestPollUntil(unittest.TestCase):
         self.assertEqual(gui._poll_until(producer, 2, 0.01), "done")
         self.assertEqual(len(calls), 3)
 
+    def test_the_sleep_is_clamped_to_what_is_left_of_the_timeout(self):
+        # The deadline was checked before the sleep and the sleep was the
+        # full interval, so the last pass overshot the caller's own timeout
+        # by up to one interval: timeout=0.05 with interval=1.0 blocked for
+        # a full second, a twentyfold overrun of a bound every public
+        # wait_*/expect_* documents in seconds.
+        gui = session()
+        started = time.monotonic()
+        self.assertIsNone(gui._poll_until(lambda: None, 0.05, 1.0))
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 0.5, f"overshot the 0.05s timeout by {elapsed:.3f}s")
+
+    def test_a_falsy_answer_can_still_count_as_found(self):
+        # `found` exists for wait_for_process, whose real answer can be pid
+        # 0 -- Windows' System Idle Process. Plain truthiness read that as
+        # "nothing yet" and polled the whole timeout out.
+        gui = session()
+        self.assertEqual(
+            gui._poll_until(lambda: 0, 0.05, 0.01, found=lambda v: v is not None), 0
+        )
+
+    def test_truthiness_is_still_the_default_so_wait_until_keeps_working(self):
+        # wait_until passes a predicate whose False means "not yet": the
+        # default must not treat that as an answer.
+        gui = session()
+        self.assertIsNone(gui._poll_until(lambda: False, 0.05, 0.01))
+
 
 class TestWaitUntil(unittest.TestCase):
     def test_returns_true_immediately_when_predicate_is_already_true(self):
@@ -1230,11 +1257,79 @@ class TestExpectShowing(unittest.TestCase):
             gui.expect_showing(role=Role.PUSH_BUTTON, name="Save", timeout=0.05)
 
 
+class TestExpectEnabled(unittest.TestCase):
+    def test_passes_when_already_enabled(self):
+        gui = session()
+        gui.expect_enabled(name="OK", timeout=0.2)
+
+    def test_passes_when_disabled_and_disabled_expected(self):
+        gui = session()
+        gui.expect_enabled(name="Cancel", enabled=False, timeout=0.2)
+        gui.expect_disabled(name="Cancel", timeout=0.2)
+
+    def test_raises_a_readable_error_when_not_enabled(self):
+        gui = session()
+        with self.assertRaisesRegex(
+            AssertionError, "expected 'Cancel' to be enabled, but it is disabled"
+        ):
+            gui.expect_enabled(name="Cancel", timeout=0.05)
+
+    def test_expect_disabled_raises_when_the_control_is_enabled(self):
+        gui = session()
+        with self.assertRaisesRegex(
+            AssertionError, "expected 'OK' to be disabled, but it is enabled"
+        ):
+            gui.expect_disabled(name="OK", timeout=0.05)
+
+    def test_a_role_only_call_names_the_role(self):
+        gui = session()
+        with self.assertRaisesRegex(
+            AssertionError, "expected the 'push button' element to be disabled"
+        ):
+            gui.expect_disabled(role=Role.PUSH_BUTTON, timeout=0.05)
+
+
+class TestExpectValue(unittest.TestCase):
+    def test_passes_when_the_value_matches(self):
+        gui = session()
+        element = FakeElement(Role.PROGRESS_BAR, "Copying")
+        element.value = 100.0
+        with mock.patch.object(
+            pyguitest.Session, "expect_element", return_value=element
+        ):
+            gui.expect_value(name="Copying", equals=100.0, timeout=0.2)
+
+    def test_raises_a_readable_error_on_mismatch(self):
+        gui = session()
+        element = FakeElement(Role.PROGRESS_BAR, "Copying")
+        element.value = 40.0
+        with mock.patch.object(
+            pyguitest.Session, "expect_element", return_value=element
+        ):
+            with self.assertRaisesRegex(
+                AssertionError,
+                "expected 'Copying' to have value 100.0, but it reads 40.0",
+            ):
+                gui.expect_value(name="Copying", equals=100.0, timeout=0.05)
+
+    def test_a_valueless_control_fails_rather_than_matching(self):
+        # None publishes no value and matches no `equals`, so it fails rather
+        # than passing by accident.
+        gui = session()
+        element = FakeElement(Role.PUSH_BUTTON, "OK")
+        element.value = None
+        with mock.patch.object(
+            pyguitest.Session, "expect_element", return_value=element
+        ):
+            with self.assertRaises(AssertionError):
+                gui.expect_value(name="OK", equals=0.0, timeout=0.05)
+
+
 class TestTheTwoPhaseExpectations(unittest.TestCase):
-    """What `expect_text`/`expect_checked`/`expect_showing` share.
+    """What the expect_* family shares.
 
     Each is two sequential waits -- find the element, then watch its state --
-    and both are handed the same `timeout`. That is documented on all three
+    and both are handed the same `timeout`. That is documented on all of them
     because it surprises people twice: the budget is twice what the argument
     reads as, and the two phases fail with different exception types.
     """
@@ -1243,6 +1338,8 @@ class TestTheTwoPhaseExpectations(unittest.TestCase):
         ("expect_text", {"name": "Name", "equals": "nope"}),
         ("expect_checked", {"name": "Remember me", "checked": True}),
         ("expect_showing", {"role": Role.PUSH_BUTTON, "name": "Save"}),
+        ("expect_enabled", {"name": "Save", "enabled": False}),
+        ("expect_value", {"name": "Save", "equals": 99.0}),
     )
 
     def test_both_phases_are_given_the_whole_timeout(self):
@@ -1269,6 +1366,7 @@ class TestTheTwoPhaseExpectations(unittest.TestCase):
                 found = FakeElement(Role.PUSH_BUTTON, "Save", visible=False)
                 found.checked = False
                 found.text = "actual"
+                found.value = 1.0
                 recorder = Recorder(found)
                 with (
                     mock.patch.object(
@@ -1306,14 +1404,17 @@ class TestTheTwoPhaseExpectations(unittest.TestCase):
                         **{**kwargs, "name": "NoSuchElementAnywhere"},
                     )
 
-    def test_expect_checked_on_a_state_free_control_reports_unchecked(self):
-        """The documented trap, pinned so the message cannot quietly improve.
+    def test_expect_checked_on_a_state_free_control_reports_the_state_unknown(self):
+        """The documented trap, pinned so the wording stays honest.
 
         `Element.checked` is None where the toolkit publishes no such state,
         which equals neither True nor False -- so the wait runs to its
-        deadline and the message then calls None "unchecked", because None is
-        falsey. A reader who does not know that reads it as a real state.
-        `Element.checkable` is the read that tells them apart.
+        deadline either way. The message now says the state is *unknown*
+        rather than calling None "unchecked" because None is falsey: that
+        collapse read as a real state, and for checked=False produced the
+        self-contradictory "expected X to be unchecked, but it is
+        unchecked". `Element.checkable` is still the programmatic read that
+        tells the two apart.
         """
         gui = session()
         stateless = FakeElement(Role.CHECK_BOX, "Remember me")
@@ -1323,9 +1424,31 @@ class TestTheTwoPhaseExpectations(unittest.TestCase):
         ):
             with self.assertRaisesRegex(
                 AssertionError,
-                "expected 'Remember me' to be checked, but it is unchecked",
+                "expected 'Remember me' to be checked, "
+                "but it is in an unknown checked state",
             ):
                 gui.expect_checked(name="Remember me", checked=True, timeout=0.05)
+            with self.assertRaisesRegex(
+                AssertionError,
+                "expected 'Remember me' to be unchecked, "
+                "but it is in an unknown checked state",
+            ):
+                gui.expect_checked(name="Remember me", checked=False, timeout=0.05)
+
+    def test_a_role_only_expectation_names_the_role_not_none(self):
+        # A role-only lookup gives no name to interpolate; the failure
+        # message used to read "expected None to be checked".
+        gui = session()
+        unchecked = FakeElement(Role.CHECK_BOX, "Remember me")
+        unchecked.checked = False
+        with mock.patch.object(
+            pyguitest.Session, "expect_element", return_value=unchecked
+        ):
+            with self.assertRaisesRegex(
+                AssertionError,
+                "expected the 'check box' element to be checked",
+            ):
+                gui.expect_checked(role=Role.CHECK_BOX, checked=True, timeout=0.05)
 
 
 class TestWaitUntilGone(unittest.TestCase):
@@ -2069,6 +2192,60 @@ class TestClickElement(unittest.TestCase):
         gui = pyguitest.Session(backend, pyguitest.detect())
         with self.assertRaises(PyGUITestError):
             gui.click_element(element)
+        self.assertEqual(backend.events, [])
+
+
+class TestDragElement(unittest.TestCase):
+    """`drag_element`: the element form of `drag`, both ends locators.
+
+    The gesture itself is `drag`'s; what is pinned here is that both
+    rectangles are read fresh and turned into centres, the press lands at the
+    source centre and the release at the target centre, and a missing
+    rectangle on either end refuses before anything is pressed.
+    """
+
+    def test_presses_at_the_source_centre_and_releases_at_the_target_centre(self):
+        source = FakeElement(Role.TABLE_ROW, "Row 4")
+        target = FakeElement(Role.TABLE_ROW, "Row 1")
+        backend = _RecordingPointerAndExtents(
+            {"Row 4": (10, 20, 30, 40), "Row 1": (10, 200, 30, 40)}
+        )
+        gui = pyguitest.Session(backend, pyguitest.detect())
+        gui.drag_element(source, target, duration=0.0, settle=0.0)
+        self.assertEqual(backend.moved_to[0], (10 + 15, 20 + 20))  # source centre
+        self.assertEqual(backend.moved_to[-1], (10 + 15, 200 + 20))  # target centre
+        self.assertEqual(backend.events[0], ("press", 1))
+        self.assertEqual(backend.events[-1], ("release", 1))
+
+    def test_the_button_argument_reaches_the_drag(self):
+        source = FakeElement(Role.TABLE_ROW, "Row 4")
+        target = FakeElement(Role.TABLE_ROW, "Row 1")
+        backend = _RecordingPointerAndExtents(
+            {"Row 4": (0, 0, 10, 10), "Row 1": (100, 100, 10, 10)}
+        )
+        gui = pyguitest.Session(backend, pyguitest.detect())
+        gui.drag_element(source, target, button=3, duration=0.0, settle=0.0)
+        self.assertEqual(backend.events[0], ("press", 3))
+        self.assertEqual(backend.events[-1], ("release", 3))
+
+    def test_raises_without_source_extents_before_pressing(self):
+        source = FakeElement(Role.TABLE_ROW, "Ghost")
+        target = FakeElement(Role.TABLE_ROW, "Row 1")
+        backend = _RecordingPointerAndExtents({"Row 1": (10, 200, 30, 40)})
+        gui = pyguitest.Session(backend, pyguitest.detect())
+        with self.assertRaisesRegex(PyGUITestError, "to drag"):
+            gui.drag_element(source, target)
+        self.assertEqual(backend.events, [])
+
+    def test_raises_without_target_extents_before_pressing(self):
+        # Both rectangles are read before the gesture starts, so a missing
+        # target rectangle refuses with nothing pressed -- no stuck button.
+        source = FakeElement(Role.TABLE_ROW, "Row 4")
+        target = FakeElement(Role.TABLE_ROW, "Ghost")
+        backend = _RecordingPointerAndExtents({"Row 4": (10, 20, 30, 40)})
+        gui = pyguitest.Session(backend, pyguitest.detect())
+        with self.assertRaisesRegex(PyGUITestError, "to drag onto"):
+            gui.drag_element(source, target)
         self.assertEqual(backend.events, [])
 
 
@@ -3225,6 +3402,14 @@ class TestFocused(unittest.TestCase):
         self.gui.backend.elements[6].focused = True  # "Preferences", a FRAME
         self.assertEqual(self.gui.focused().name, "Preferences")
 
+    def test_none_rather_than_raising_without_an_element_tree(self):
+        # A session with no element backend at all (e.g. KDE via kdotool +
+        # uinput, no AT-SPI) serves no ELEMENT_TREE. The docstring promises
+        # "... or None" and never documents raising -- but the unguarded
+        # whole-desktop elements() fallback raised CapabilityUnsupported.
+        gui = pyguitest.Session(FakeImageBackend(), pyguitest.detect())
+        self.assertIsNone(gui.focused())
+
 
 class TestFocusTrackingWorks(unittest.TestCase):
     """The live probe for desktops that never publish per-widget focus.
@@ -3249,6 +3434,13 @@ class TestFocusTrackingWorks(unittest.TestCase):
         # widget is, which is exactly the case the probe exists to catch.
         self.gui.backend.elements[6].focused = True  # "Preferences", a FRAME
         self.assertFalse(self.gui.focus_tracking_works())
+
+    def test_false_rather_than_raising_without_an_element_tree(self):
+        # The probe callers are told to ask *before* depending on focus must
+        # not itself raise: on a session with no element backend it answered
+        # CapabilityUnsupported instead of False.
+        gui = pyguitest.Session(FakeImageBackend(), pyguitest.detect())
+        self.assertFalse(gui.focus_tracking_works())
 
 
 class TestAssertFocused(unittest.TestCase):
@@ -3623,12 +3815,17 @@ class TestCaptureOnFailure(unittest.TestCase):
 
     def test_repeated_failures_do_not_overwrite_each_other(self):
         # A parameterized suite failing the same assertion in several cases
-        # would otherwise leave only the last image.
+        # would otherwise leave only the last image. Asserted on *distinct*
+        # destination paths, not call count: the pre-serial naming
+        # (stem-stamp-pid, one-second resolution) handed all three failures
+        # the same filename within a second, and counting capture() calls
+        # could not see the collision.
         for _ in range(3):
             with self.assertRaises(ValueError):
                 with self.gui.capture_on_failure(self.directory, name="same"):
                     raise ValueError("nope")
         self.assertEqual(len(self.backend.captured_paths), 3)
+        self.assertEqual(len(set(self.backend.captured_paths)), 3)
 
     def test_the_directory_is_created_if_it_does_not_exist(self):
         nested = os.path.join(self.directory, "artifacts", "run-1")
@@ -3647,7 +3844,11 @@ class TestCaptureOnFailure(unittest.TestCase):
             with self.assertRaises(ValueError):
                 with self.gui.capture_on_failure():
                     raise ValueError("nope")
-        self.assertEqual(len(os.listdir(target)), 1)
+        # Two artifacts land here: the screenshot, and -focused.json --
+        # focused() answers None rather than raising on this backend, which
+        # serves no element tree, so that attempt succeeds and records "no
+        # focused element" instead of an error.
+        self.assertEqual(len(os.listdir(target)), 2)
         for name in os.listdir(target):
             os.unlink(os.path.join(target, name))
         os.rmdir(target)
@@ -3774,3 +3975,130 @@ class TestRequireVersion(unittest.TestCase):
     def test_the_error_and_function_are_public_exports(self):
         self.assertIn("require_version", pyguitest.__all__)
         self.assertIn("VersionTooOld", pyguitest.__all__)
+
+
+class TestArgumentValidation(unittest.TestCase):
+    """The guards that refuse a nonsensical argument before acting on it.
+
+    Each of these is documented on the call it belongs to and none of them
+    had a test. Argument validation is the easiest thing to delete by
+    accident during a refactor and the hardest to notice gone: the call
+    still works for every sane input, and the insane one silently becomes a
+    negative sleep, an unfiltered window list, or a key named "-1".
+    """
+
+    def test_an_unknown_click_route_is_refused_on_assignment(self):
+        """Not on the first element click that happens to take the default.
+
+        Which is the whole reason `click_via` is a property: a misspelling
+        used to surface from `resolve_click_route`, a long way from the
+        line that wrote it.
+        """
+        gui = session()
+        for route in ("pointr", "", "ACTION", "both"):
+            with self.subTest(route=route):
+                with self.assertRaises(ValueError) as caught:
+                    gui.click_via = route
+                self.assertIn("unknown click route", str(caught.exception))
+        self.assertEqual(gui.click_via, "auto")
+
+    def test_every_documented_click_route_is_accepted(self):
+        gui = session()
+        for route in ("action", "pointer", "auto"):
+            with self.subTest(route=route):
+                gui.click_via = route
+                self.assertEqual(gui.click_via, route)
+
+    def test_glide_refuses_a_negative_duration_and_a_dead_rate(self):
+        gui = session()
+        with self.assertRaises(ValueError):
+            gui.glide(10, 10, duration=-1)
+        for rate in (0, -5):
+            with self.subTest(rate=rate):
+                with self.assertRaises(ValueError):
+                    gui.glide(10, 10, rate=rate)
+
+    def test_drag_refuses_a_negative_settle(self):
+        gui = session()
+        with self.assertRaises(ValueError):
+            gui.drag((0, 0), (5, 5), settle=-1)
+
+    def test_find_windows_refuses_to_match_everything(self):
+        """An unfiltered call would be `windows()` wearing a filter's name."""
+        gui = session()
+        with self.assertRaises(ValueError) as caught:
+            gui.find_windows()
+        self.assertIn("title", str(caught.exception))
+
+    def test_elements_refuses_a_window_as_a_container(self):
+        """`within=` takes an Element; a Window has a different lookup.
+
+        A TypeError rather than a silent empty result, because a Window is
+        exactly the thing a caller reaches for first and
+        `window_element(window)` is the answer.
+        """
+        gui = session()
+        window = pyguitest.Window(handle=1, backend=gui.backend)
+        with self.assertRaises(TypeError) as caught:
+            gui.elements(within=window)
+        self.assertIn("window_element", str(caught.exception))
+
+
+class TestExpectTimeoutDefaults(unittest.TestCase):
+    """The two `expect_*` default deadlines, which differ on purpose.
+
+    `expect_element` and `expect_window` wrap `wait_*` calls and inherit
+    their `timeout=None` means-forever contract; the six state-checking
+    expectations default to five seconds. That asymmetry is the likeliest
+    beginner trap in the library -- an element that never appears hangs a
+    run where a value that never settles fails -- and it is now written
+    down in both docstrings and in the reference's Expectations blurb.
+    Nothing pinned it, so "tidying" the signatures would have silently
+    falsified all three.
+    """
+
+    WAIT_FOREVER = ("expect_element", "expect_window")
+    FIVE_SECONDS = (
+        "expect_text",
+        "expect_value",
+        "expect_checked",
+        "expect_enabled",
+        "expect_disabled",
+        "expect_showing",
+    )
+
+    def default_timeout(self, name):
+        import inspect as inspect_module
+
+        parameter = inspect_module.signature(
+            getattr(pyguitest.Session, name)
+        ).parameters.get("timeout")
+        self.assertIsNotNone(parameter, f"{name} has no timeout parameter")
+        return parameter.default
+
+    def test_the_element_and_window_expectations_wait_forever(self):
+        for name in self.WAIT_FOREVER:
+            with self.subTest(call=name):
+                self.assertIsNone(
+                    self.default_timeout(name),
+                    f"{name} is documented as waiting indefinitely by "
+                    "default, matching the wait_* call it wraps",
+                )
+
+    def test_the_state_expectations_default_to_five_seconds(self):
+        for name in self.FIVE_SECONDS:
+            with self.subTest(call=name):
+                self.assertEqual(
+                    self.default_timeout(name),
+                    5.0,
+                    f"{name} is documented as giving up after five seconds",
+                )
+
+    def test_both_groups_are_documented_as_differing(self):
+        """The asymmetry has to stay written down wherever it is stated."""
+        import inspect as inspect_module
+
+        for name in self.WAIT_FOREVER:
+            doc = inspect_module.getdoc(getattr(pyguitest.Session, name)) or ""
+            with self.subTest(call=name):
+                self.assertIn("wait for as long", doc)

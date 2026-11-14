@@ -49,7 +49,8 @@ rules below are one shape of that mistake.
    `find_window`, `find_windows`, `wait_for_window`, `expect_window` and
    `window_element` match a plain string literally, as a substring, so
    `"^Save"` matches only a title containing the characters `^Save`. For a
-   pattern, pass `re.compile(...)`. Prefer `app_id=` where it is known: it
+   pattern, pass `re.compile(...)`. On all of these but `window_element`
+   (which takes only a title), prefer `app_id=` where it is known: it
    survives a title that changes with the document.
 
 7. **Set text through the element, not the keyboard.**
@@ -116,7 +117,7 @@ rules below are one shape of that mistake.
     a Mac with nothing granted, so do not tell a user to change privacy
     settings before calling `pointer_position()` or `windows()`. Code cannot
     grant anything either way, so check `supports()` and let `require()` fail
-    by name. (Input was opt-in before 0.22.1, and older scripts naming
+    by name. (Input was opt-in before 0.23.0, and older scripts naming
     `["macquartz", "macos"]` still work unchanged.)
 
 ## A correct script, end to end

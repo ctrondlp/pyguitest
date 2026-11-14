@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import itertools
 import json
 import math
 import os
@@ -88,7 +89,7 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T")
 
-__version__ = "0.25.0"
+__version__ = "0.26.0"
 
 __all__ = [
     "connect",
@@ -146,13 +147,24 @@ _SENDKEYS_SPECIAL = re.compile(r"([\^%+~#(){}])")
 
 
 def quote_for_type(text: str | None) -> str | None:
-    """Escape the characters `send_keys` reads as syntax.
+    r"""Escape the characters `send_keys` reads as syntax.
 
-    Replaces X11::GUITest's QuoteStringForSendKeys, with the same behaviour
-    plus the # fix noted above: each of ^ % + ~ # ( ) { } is wrapped in
-    braces, so send_keys(quote_for_type(text)) sends `text` literally.
+    Replaces X11::GUITest's QuoteStringForSendKeys: each of ^ % + ~ # ( )
+    { } is wrapped in braces -- `#` included, which upstream left out, so a
+    `#` in the text was read as a modifier -- and
+    send_keys(quote_for_type(text)) then sends `text` literally.
 
-    One exception, deliberately kept from upstream: `&` (AltGr) is not
+    Two exceptions to "literally", and the first is the one that bites.
+    **Whitespace is not escaped and is not literal text either.** `\n` and
+    `\r` each send Enter and `\t` sends Tab, because that is what
+    send_keys does with them, so text carrying Windows line endings sends
+    *two* Returns per break (`"a\r\nb"` arrives as a, Enter, Enter, b) and
+    a tab arrives as a focus change rather than as whitespace. Normalise
+    the line endings first, or use type_text for text that has to arrive
+    exactly as written -- it is the keymap-aware path and reads no syntax
+    at all.
+
+    The second, deliberately kept from upstream: `&` (AltGr) is not
     escaped, so a `&` in `text` is read as the modifier. `{&}` is the literal
     spelling, but it cannot be passed *in*: braces are escaped too, so
     `quote_for_type("{&}")` returns `{{}&{}}` and the `&` is a modifier
@@ -851,7 +863,18 @@ class Session:
 
     @property
     def click_via(self) -> str:
-        """The default route `element.click()` takes; see `__init__`."""
+        """The default route `element.click()` takes.
+
+        Used when a call passes no `via` of its own: `"action"` (the
+        accessible action only), `"pointer"` (the user pathway only) or
+        `"auto"` (action first, with the pointer as the fallback).
+
+        Settable mid-run, so one assignment switches a whole suite's
+        policy, and checked on every assignment rather than only in the
+        constructor: assigning anything else raises ValueError at the line
+        that did it, instead of surfacing from the first element click that
+        happened to take the session default.
+        """
         return self._click_via
 
     @click_via.setter
@@ -903,7 +926,10 @@ class Session:
         """Raise unless every capability is available.
 
         For declaring a test suite's needs up front rather than failing part
-        way through a run.
+        way through a run. Raises CapabilityUnsupported, naming the first
+        missing capability and what this session composed, so a suite can
+        skip rather than fail -- see the class for the attributes a skip
+        decision reads.
         """
         for capability in capabilities:
             if capability not in self.capabilities:
@@ -1218,6 +1244,23 @@ class Session:
         self.backend.release_button(button)
         self._after_event()
 
+    def _element_center(self, element: Element, verb: str) -> tuple[int, int]:
+        """The screen centre of an element's rectangle, read fresh each call.
+
+        The shared core of the element-targeted pointer gestures: the
+        element stays the locator -- its rectangle is read now rather than
+        baked in ahead of time -- and only the gesture itself falls back to
+        the pointer. Raises PyGUITestError where extents() has no rectangle
+        (the element is not showing, or the backend reports none), naming
+        `verb` so the message says which gesture could not place its pointer.
+        Needs Capability.ELEMENT_GEOMETRY.
+        """
+        extents = self.extents(element)
+        if extents is None:
+            raise PyGUITestError(f"{element.name!r} has no extents to {verb}")
+        x, y, width, height = extents
+        return x + width // 2, y + height // 2
+
     def double_click_element(self, element: Element) -> None:
         """Double-click a named element. `element.double_click()` does the same.
 
@@ -1242,11 +1285,8 @@ class Session:
         ElementNotActionable, which means something more specific: no click
         or press action for element.click() to fall back to.
         """
-        extents = self.extents(element)
-        if extents is None:
-            raise PyGUITestError(f"{element.name!r} has no extents to double-click")
-        x, y, width, height = extents
-        self.move_mouse(x + width // 2, y + height // 2)
+        cx, cy = self._element_center(element, "double-click")
+        self.move_mouse(cx, cy)
         self.double_click()
 
     def click_element(self, element: Element, button: int = 1) -> None:
@@ -1275,12 +1315,61 @@ class Session:
         raises ElementNotActionable for that case instead, so that the typed
         refusal a caller already catches keeps its meaning.
         """
-        extents = self.extents(element)
-        if extents is None:
-            raise PyGUITestError(f"{element.name!r} has no extents to click")
-        x, y, width, height = extents
-        self.move_mouse(x + width // 2, y + height // 2)
+        cx, cy = self._element_center(element, "click")
+        self.move_mouse(cx, cy)
         self.click(button)
+
+    def drag_element(
+        self,
+        source: Element,
+        target: Element,
+        *,
+        button: int = 1,
+        duration: float = 0.3,
+        rate: float = 120.0,
+        via: Sequence[tuple[int, int]] = (),
+        ease: Callable[[float], float] | None = None,
+        settle: float = 0.05,
+    ) -> None:
+        """Drag `source` onto `target`: press at one element, glide to the other.
+
+        The element form of `drag`, standing to it exactly as `click_element`
+        stands to the pointer `click`: both endpoints are locators, their
+        rectangles read fresh each call rather than baked in by a caller
+        doing the `extents()` arithmetic by hand, and only the gesture itself
+        falls back to the pointer. Reorder a list by dragging one row onto
+        another, drop a file onto a trash button, move a node between panes.
+
+        Every keyword argument but drag's `screen` is here and means the
+        same there -- `via` waypoints, `duration`/`rate`/`ease` for the
+        glide, and `settle` for the pauses around the button events a fussy
+        drop target needs. `screen` is deliberately absent: both ends come
+        from extents(), which are already absolute screen coordinates, the
+        same reason click_element takes no screen either. The
+        press-glide-release shape, and why a bare press-release is not a
+        drag, are drag()'s to explain.
+
+        Needs Capability.ELEMENT_GEOMETRY for both elements, plus the pointer
+        capabilities drag() needs. Raises PyGUITestError where either element
+        has no rectangle -- it is not showing, or the backend reports none --
+        the same split click_element makes.
+
+            rows = gui.elements(role=Role.TABLE_ROW, within=gui.window_element("Files"))
+            gui.drag_element(rows[3], rows[0])  # move the fourth row to the top
+            gui.drag_element(gui.element(name="report.pdf"), gui.button("Trash"))
+        """
+        start = self._element_center(source, "drag")
+        end = self._element_center(target, "drag onto")
+        self.drag(
+            start,
+            end,
+            button=button,
+            duration=duration,
+            rate=rate,
+            via=via,
+            ease=ease,
+            settle=settle,
+        )
 
     def scroll(self, dx: int = 0, dy: int = 0) -> None:
         """Scroll by whole wheel detents: `dy` positive is up, `dx` right.
@@ -1494,6 +1583,9 @@ class Session:
             # Through waypoints, slowly: a menu that opens on hover needs
             # the pointer to actually pass along the path.
             gui.glide(600, 400, via=[(300, 100), (450, 250)], duration=1.0)
+
+        Raises ValueError if `duration` is negative or `rate` is not
+        positive.
         """
         if duration < 0:
             raise ValueError(f"duration must not be negative, got {duration!r}")
@@ -1766,6 +1858,8 @@ class Session:
             # A drop target that reads a too-quick release as a click on
             # itself needs a longer pause around the button events.
             gui.drag((120, 400), (600, 400), settle=0.2)
+
+        Raises ValueError if `settle` is negative.
         """
         if settle < 0:
             raise ValueError(f"settle must not be negative, got {settle!r}")
@@ -1897,8 +1991,9 @@ class Session:
         characters:
 
             ^ % + # &   modifiers: Ctrl, Alt, Shift, Meta, AltGr
-            ~ or \n     Enter
-            ( )         group the following keys under a modifier
+            ~ \n \r     Enter
+            \t          Tab
+            ( )         group keys under a modifier; groups nest
             { }         escape a special character, name a key by
                         abbreviation, repeat one, or pause
 
@@ -1908,22 +2003,60 @@ class Session:
 
             gui.send_keys("Hello, how are you?\n")
             gui.send_keys("%(f)q")  # Alt-f, then plain q
-            gui.send_keys("^(+(l))")  # Ctrl-Shift-l
+            gui.send_keys("^(+(l)x)")  # Ctrl-Shift-l, then Ctrl-x
             gui.send_keys("+(abc)")  # Shift held: ABC
             gui.send_keys("{BAC}")  # Backspace
             gui.send_keys("{F1 F2 F3}")  # F1, F2, F3
             gui.send_keys("{TAB 3}")  # Tab, three times
             gui.send_keys("{PAUSE 500}")  # sleep 500ms
 
-        Key names inside `{}` are looked up case-insensitively in the active
-        backend's KEY_ALIASES, or else passed to press_key as written, so an
-        unabbreviated name works too: `{BackSpace}` in place of `{bac}`.
+        **Groups nest, and a `)` releases exactly what its own `(` added**
+        -- which is what the `^(+(l)x)` line above shows: Ctrl and Shift
+        are held for `l`, the inner `)` lets go of Shift alone, and `x`
+        arrives with Ctrl still down. The older `^(+(l))` spelling never
+        demonstrated it, since nothing sits between the two `)`.
+
+        `{PAUSE n}` waits n milliseconds, and **the number is required**:
+        `{PAUSE}` and `{PAUSE TAB}` both raise ValueError rather than
+        silently waiting for nothing. `{PAUSE 0}` is a legal no-op. PAUSE
+        may share a brace with keys, as in `{TAB PAUSE 100}`.
+
+        A repeat count works on any key or literal character -- `{a 3}`
+        types `aaa` -- and must be positive: `{a 0}` and `{a -1}` both
+        raise ValueError, as does a count with no key in front of it. A
+        `{PAUSE n}` likewise refuses a negative n rather than sleeping for
+        it. `{{}` and `{}}` are the
+        literal braces. A bare `(...)` with no modifier in front is legal
+        and groups nothing, an unmatched `)` releases whatever is held, and
+        a group left unclosed at the end of the string is released on the
+        way out, as is anything still held when a key in the middle fails.
+
+        Key names inside `{}` are looked up case-insensitively against the
+        aliases -- see **Key names** in docs/api.md for the full table, and
+        for which modifier prefixes differ per platform (`#` is Meta rather
+        than Super on the Unix backends, and `&` does not exist on macOS).
+        A name that is not an alias is passed to press_key as written, so
+        an unabbreviated name works where the backend knows it:
+        `{BackSpace}` in place of `{bac}`. The aliases are the portable
+        spelling, and they are short -- `{SPC}`, not `{SPACE}`, which no
+        backend but uinput resolves.
 
         This is the classic ASCII grammar, faithfully ported -- not a
         keymap-aware text-entry path. Use type_text for arbitrary or
-        non-ASCII text; this raises ValueError for a character with no
-        static key mapping (see GUIBackend.resolve_char_key), for malformed
-        `{}` syntax, and for a `{}` key name this backend does not resolve.
+        non-ASCII text.
+
+        Two different failures, and which one you catch matters. A
+        `ValueError` means the string itself is wrong: a character with no
+        static key mapping (see GUIBackend.resolve_char_key), malformed
+        `{}` syntax, or a `{}` name that is not a key at all. A
+        `CapabilityUnsupported` means the string is fine and this *desktop*
+        cannot serve it -- a real key with no keycode in the server's
+        current keymap. `gui.send_keys("{Hiragana_Katakana}")` on an
+        ordinary US layout is the second kind: X11 resolves the name to a
+        genuine keysym and then finds no physical key bound to it. The
+        contract named only `ValueError` before, so a caller following it
+        with `except ValueError` saw an uncaught error for a condition that
+        is about the keyboard rather than their own call.
         """
         KeySender(self).send(keys)
 
@@ -1994,6 +2127,10 @@ class Session:
         can be used here. Like `app_id`, it matches nothing on a backend
         that cannot fill `Window.pid` (kdotool is one -- see the KDE notes),
         rather than everything.
+
+        Raises ValueError unless at least one of `title`, `app_id` or `pid`
+        is given: an unfiltered call would return every window, which is
+        what `windows()` is for.
         """
         if title is None and app_id is None and pid is None:
             raise ValueError("find_windows needs title, app_id, or pid")
@@ -2187,8 +2324,9 @@ class Session:
         producer: Callable[[], _T | None],
         timeout: float | None,
         interval: float,
+        found: Callable[[_T | None], bool] = bool,
     ) -> _T | None:
-        """Call `producer()` every `interval` seconds until it is truthy.
+        """Call `producer()` every `interval` seconds until it has an answer.
 
         The shape shared by every wait_* method below: each is either "poll
         for X and return it once found" (a window, an element, a pid) or
@@ -2198,15 +2336,37 @@ class Session:
         `timeout=None` waits indefinitely. Private: a caller wanting the
         matched value back, not just whether one arrived, has no public
         equivalent of this today -- wait_until only reports True/False.
+
+        `found` decides what counts as an answer and defaults to plain
+        truthiness, which is right for every producer that returns an
+        object or None -- and for `wait_until`, whose predicate uses False
+        to mean "not yet". A producer whose genuine answer can be falsy
+        passes its own instead: `wait_for_process` does, because a pid of 0
+        is a real match (Windows' System Idle Process, which
+        `CreateToolhelp32Snapshot` enumerates like any other) that `bool`
+        read as "nothing yet" -- so it polled out the whole timeout and
+        reported None, indistinguishable from a process that never
+        appeared.
+
+        The sleep is clamped to whatever is left of the deadline, the way
+        `_in_event_slices` clamps its own slice. Sleeping a full `interval`
+        on the last pass overshot the caller's timeout by up to one
+        interval: measured at a full 1.0s for `timeout=0.05,
+        interval=1.0`, a twentyfold overrun of a bound every public
+        `wait_*`/`expect_*` documents in seconds.
         """
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
-            found = producer()
-            if found:
-                return found
-            if deadline is not None and time.monotonic() >= deadline:
+            value = producer()
+            if found(value):
+                return value
+            if deadline is None:
+                time.sleep(interval)
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 return None
-            time.sleep(interval)
+            time.sleep(min(interval, remaining))
 
     def _in_event_slices(
         self, attempt: Callable[[float], _T | None], timeout: float | None
@@ -2275,7 +2435,8 @@ class Session:
         Delegates to the backend's own event-driven implementation where
         Capability.WINDOW_EVENTS is available and only `title` was asked for
         -- real notification, not polling. Those backends are `win32`, on
-        Windows, and GNOME Shell, KWin, sway and niri on their desktops;
+        Windows, and GNOME Shell, KWin, COSMIC, sway and niri on their
+        desktops;
         macOS is not one of them, its AXObserver being a later phase, and
         neither is any X11 session. Everywhere else -- both of those, and any
         call that names `app_id` or `pid`, because the event-driven
@@ -2344,6 +2505,14 @@ class Session:
         an error, not a branch to handle, is the common case a generated
         replay is written against. See find_windows for how `title`/
         `app_id`/`pid` combine and what `title` accepts.
+
+        `timeout=None` is the default here, and it means **wait for as long
+        as it takes**, not "use a default deadline" -- matching the `wait_*`
+        family this wraps, and unlike the state-checking expectations
+        (expect_text, expect_value, expect_checked, expect_enabled,
+        expect_disabled, expect_showing), which default to five seconds. A
+        window that never opens therefore hangs a run. Pass a timeout in any
+        suite that must not.
 
         A lookup and nothing else. It does not raise, focus, resize or
         otherwise disturb the window it hands back -- focus_window() is for
@@ -2637,6 +2806,14 @@ class Session:
         same reason expect_window exists next to wait_for_window: a script
         written against a specific recorded element treats its absence as
         the failure, not a branch to handle.
+        `timeout=None` is the default here, and it means **wait for as long
+        as it takes**, not "use a default deadline". That is deliberate --
+        it matches the `wait_*` family this wraps -- but it differs from the
+        state-checking expectations (expect_text, expect_value,
+        expect_checked, expect_enabled, expect_disabled, expect_showing),
+        which default to five seconds. So an element that never appears
+        hangs a run here, where a value that never settles fails in five
+        seconds. Pass a timeout in any suite that must not hang.
         """
         element = self.wait_for_element(
             role=role, name=name, within=within, timeout=timeout, interval=interval
@@ -2656,6 +2833,21 @@ class Session:
                 f"no element with {wanted} appeared within {timeout:g}s"
             )
         raise ElementNotFound(f"no element with {wanted}")
+
+    @staticmethod
+    def _expect_label(role: str | None, name: str | None) -> str:
+        """How an expect_* failure names the element it was looking for.
+
+        The `name` when the call gave one; otherwise the role, so a
+        role-only call reads "expected the 'push button' element ..."
+        rather than the misleading "expected None ..." that interpolating
+        `name!r` unconditionally produced.
+        """
+        if name is not None:
+            return repr(name)
+        if role is not None:
+            return f"the {role!r} element"
+        return "the element"
 
     def expect_text(
         self,
@@ -2694,7 +2886,8 @@ class Session:
         if self.wait_until(lambda: element.text == equals, timeout=timeout):
             return
         raise AssertionError(
-            f"expected {name!r} to read {equals!r}, but it reads {element.text!r}"
+            f"expected {self._expect_label(role, name)} to read {equals!r}, "
+            f"but it reads {element.text!r}"
         )
 
     def expect_checked(
@@ -2751,8 +2944,20 @@ class Session:
         if self.wait_until(lambda: element.checked == checked, timeout=timeout):
             return
         wanted = "checked" if checked else "unchecked"
-        actual = "checked" if element.checked else "unchecked"
-        raise AssertionError(f"expected {name!r} to be {wanted}, but it is {actual}")
+        state = element.checked
+        if state is None:
+            # None is the "the toolkit published no checked state" value this
+            # method's own docstring describes for Windows/macOS. Collapsing it
+            # to "unchecked" made the message read "expected X to be unchecked,
+            # but it is unchecked" -- both sides identical, hiding that the real
+            # state is unknown, not False.
+            actual = "in an unknown checked state (the toolkit publishes none)"
+        else:
+            actual = "checked" if state else "unchecked"
+        raise AssertionError(
+            f"expected {self._expect_label(role, name)} to be {wanted}, "
+            f"but it is {actual}"
+        )
 
     def expect_showing(
         self,
@@ -2780,7 +2985,106 @@ class Session:
         )
         if self.wait_until(lambda: element.visible, timeout=timeout):
             return
-        raise AssertionError(f"expected {name!r} to be showing, but it is not visible")
+        raise AssertionError(
+            f"expected {self._expect_label(role, name)} to be showing, "
+            "but it is not visible"
+        )
+
+    def expect_enabled(
+        self,
+        role: str | None = None,
+        name: str | None = None,
+        *,
+        enabled: bool = True,
+        timeout: float = 5.0,
+        within: Element | None = None,
+    ) -> None:
+        """Fail unless the named element's enabled state is `enabled`.
+
+        The commonest synchronisation a GUI test has -- a Save button that
+        enables only once the form validates, a field greyed out while a
+        request is in flight. Hand-rolled it is `wait_until(lambda:
+        gui.button("Save").enabled)`, which loses the two-phase
+        ElementNotFound-then-AssertionError diagnostics this family gives.
+
+        Two waits, as in `expect_checked`: `expect_element` raises
+        `ElementNotFound` where the control never appears, then
+        `Element.enabled` is re-read until the deadline, raising
+        `AssertionError`. The worst case is twice `timeout`.
+
+        `Element.enabled` answers True wherever the toolkit will not say (see
+        its own docstring), so a pass is weaker evidence on Windows and macOS
+        than on Linux; `enabled=False` is the stronger direction there, since
+        a real "disabled" is the one a lenient backend does not invent.
+
+            gui.text_field("Amount").set_text("100")
+            gui.expect_enabled(name="Save")
+
+            gui.expect_enabled(name="Save", enabled=False)  # greyed out
+        """
+        element = self.expect_element(
+            role=role, name=name, within=within, timeout=timeout
+        )
+        if self.wait_until(lambda: element.enabled == enabled, timeout=timeout):
+            return
+        wanted = "enabled" if enabled else "disabled"
+        actual = "enabled" if element.enabled else "disabled"
+        raise AssertionError(
+            f"expected {self._expect_label(role, name)} to be {wanted}, "
+            f"but it is {actual}"
+        )
+
+    def expect_disabled(
+        self,
+        role: str | None = None,
+        name: str | None = None,
+        *,
+        timeout: float = 5.0,
+        within: Element | None = None,
+    ) -> None:
+        """Fail unless the named element is disabled (greyed out).
+
+        The readable spelling of `expect_enabled(..., enabled=False)`; see
+        there for the two-phase waiting and the platform-leniency note.
+        """
+        self.expect_enabled(
+            role=role, name=name, enabled=False, timeout=timeout, within=within
+        )
+
+    def expect_value(
+        self,
+        role: str | None = None,
+        name: str | None = None,
+        *,
+        equals: float,
+        timeout: float = 5.0,
+        within: Element | None = None,
+    ) -> None:
+        """Fail unless the named slider, spinner or progress bar reads `equals`.
+
+        The numeric counterpart of `expect_text`: `Element.value` is a float
+        where the control publishes one and None where it does not. Compared
+        exactly, as `expect_text` compares text -- a caller wanting tolerance
+        uses `wait_until` with its own `abs(...) < eps`.
+
+        Two waits, as in `expect_checked`: `expect_element` raises
+        `ElementNotFound` where the control never appears, then the value is
+        re-read until the deadline, raising `AssertionError`. A control that
+        publishes no value at all reads None, which matches no `equals`, so it
+        fails rather than passing by accident.
+
+            gui.button("Start").click()
+            gui.expect_value(role=Role.PROGRESS_BAR, name="Copying", equals=100.0)
+        """
+        element = self.expect_element(
+            role=role, name=name, within=within, timeout=timeout
+        )
+        if self.wait_until(lambda: element.value == equals, timeout=timeout):
+            return
+        raise AssertionError(
+            f"expected {self._expect_label(role, name)} to have value {equals!r}, "
+            f"but it reads {element.value!r}"
+        )
 
     def wait_for_file(
         self, path: str, timeout: float | None = None, interval: float = 0.5
@@ -2848,7 +3152,14 @@ class Session:
                     return pid
             return None
 
-        return self._poll_until(first_match, timeout, interval)
+        # `is not None`, not truthiness: pid 0 is a real process on Windows
+        # -- the System Idle Process, which CreateToolhelp32Snapshot
+        # enumerates like any other -- and reading it as "nothing yet" made
+        # a match that was there on every single poll time out and report
+        # None.
+        return self._poll_until(
+            first_match, timeout, interval, found=lambda pid: pid is not None
+        )
 
     def wait_for_idle(
         self,
@@ -2895,6 +3206,9 @@ class Session:
             # Idle is not "finished": confirm the visible outcome as well.
             gui.wait_for_idle(app.pid, timeout=60)
             gui.expect_text(name="Status", equals="Ready", timeout=10)
+
+        Raises PyGUITestError where this platform's clock resolution is
+        coarser than `interval`, since idleness could not be measured.
         """
         deadline = None if timeout is None else time.monotonic() + timeout
         reading = _process_cpu_seconds(pid)
@@ -3176,6 +3490,9 @@ class Session:
         walks it once. Confirmed live: on AT-SPI, walking a ~130-element
         window role by role (16 calls) took over a minute; the same 16 roles
         in one call took a few seconds, the walk's own cost either way.
+
+        Raises TypeError if `within` is a Window rather than an Element --
+        `window_element(window)` is the Element for a window.
         """
         if isinstance(within, Window):
             # The one mix-up the two window types invite: `find_window` returns
@@ -3520,6 +3837,15 @@ class Session:
         claiming the same state, and _focus_scope for why the search is
         scoped before it is broadened.
         """
+        # Focus is read off the accessible tree. A session with no element
+        # backend at all (e.g. KDE via kdotool + uinput, no AT-SPI) has no
+        # focus feature, so answer None rather than letting the unguarded
+        # `elements()` below raise CapabilityUnsupported: this is the "... or
+        # None" the docstring promises, and the value focus_tracking_works()
+        # needs to return False -- it is the probe callers are told to ask
+        # *before* depending on focus, so it must not itself raise.
+        if not self.supports(Capability.ELEMENT_TREE):
+            return None
         scope = self._focus_scope()
         if scope is not None:
             within = self.elements(predicate=lambda e: e.focused, within=scope)
@@ -3733,6 +4059,9 @@ class Session:
         like a button to a user usually publishes a different role -- reach
         for menu_item(), or element(role=...), rather than assuming this
         covers them.
+
+        Raises ElementNotFound if nothing matches, the same as element():
+        it never returns None, so there is nothing to test for.
         """
         return self.element(role=Role.PUSH_BUTTON, name=name, within=within)
 
@@ -3746,6 +4075,9 @@ class Session:
 
         A read-only field is still returned; it simply never reports typed
         input (its READ_ONLY state is the honest signal to check first).
+
+        Raises ElementNotFound if nothing matches, the same as element():
+        it never returns None, so there is nothing to test for.
         """
         for role in (Role.ENTRY, Role.TEXT, Role.PASSWORD_TEXT):
             found = self.elements(role=role, name=name, within=within)
@@ -3760,6 +4092,9 @@ class Session:
         and discards the name set on it, so the stable name often travels in
         the accessible *description* instead. Try the description before
         giving up.
+
+        Raises ElementNotFound if nothing matches, the same as element():
+        it never returns None, so there is nothing to test for.
         """
         try:
             return self.element(role=Role.COMBO_BOX, name=name, within=within)
@@ -3773,6 +4108,9 @@ class Session:
         own role. Read the returned element's `checked` to see its state,
         and `checkable` first: `checked` answers a real boolean on
         everything, whether or not it has a box to check.
+
+        Raises ElementNotFound if nothing matches, the same as element():
+        it never returns None, so there is nothing to test for.
         """
         return self.element(role=Role.CHECK_BOX, name=name, within=within)
 
@@ -3788,6 +4126,9 @@ class Session:
         reports its state through `checked`. Top-level menu bar entries
         ("File") may publish `menu` rather than `menu item` depending on the
         toolkit; use element(role=...) where that distinction matters.
+
+        Raises ElementNotFound if nothing matches, the same as element():
+        it never returns None, so there is nothing to test for.
         """
         return self.element(role=Role.MENU_ITEM, name=name, within=within)
 
@@ -3799,6 +4140,9 @@ class Session:
         announced, so this raising ElementNotFound on every link in such an
         app is a sign of that rather than of a wrong name -- see
         docs/troubleshooting.md.
+
+        Raises ElementNotFound if nothing matches, the same as element():
+        it never returns None, so there is nothing to test for.
         """
         return self.element(role=Role.LINK, name=name, within=within)
 
@@ -4054,6 +4398,74 @@ class Session:
         with activate_window() where the next step is input.
         """
         self.backend.minimize_window(window, minimized)
+
+    def maximize_window(self, window: Window, maximized: bool = True) -> None:
+        """Maximize a window, or restore it when `maximized` is False.
+
+        The counterpart of `minimize_window` for the other direction of
+        growth, with the state read `is_window_maximized` to verify it --
+        drive a layout at its largest for a responsive-UI check, then
+        restore and confirm the window really left the state.
+
+        On Windows -- and only there -- maximizing also *activates* the
+        window: `SW_MAXIMIZE` is documented to, and no non-activating
+        spelling exists, where every other backend's maximize leaves focus
+        alone. Re-focus the window your next input is for.
+
+        Needs Capability.WINDOW_MAXIMIZE, which is declared only where the
+        desktop genuinely has the concept: X11, Windows, COSMIC, and GNOME
+        (with a current pyguitest-window-control extension). A tiling
+        compositor's layout owns every window's size -- sway, Hyprland and
+        niri have no real maximize -- macOS zoom is a fit-to-content rather
+        than a maximize, and KWin via kdotool documents the maximize
+        properties as unimplemented, so none of those claim it.
+
+            gui.maximize_window(window)
+            assert gui.is_window_maximized(window)
+            gui.maximize_window(window, maximized=False)
+        """
+        self.backend.maximize_window(window, maximized)
+
+    def is_window_maximized(self, window: Window) -> bool:
+        """Whether `window` is currently maximized.
+
+        The read half of WINDOW_MAXIMIZE: `WINDOW_STATE` covers minimized
+        and activated only, so this is what verifies a `maximize_window`
+        took -- and `False` for a half-maximized (tiled-to-one-edge) window,
+        which carries a state `maximize_window` never sets.
+        """
+        return self.backend.is_window_maximized(window)
+
+    def close_window(self, window: Window) -> None:
+        """Ask the window manager to close `window` gracefully.
+
+        The route that leaves the application its say -- which
+        `Application.stop()` cannot, because it ends the process. An editor
+        with unsaved work answers this with its "Save changes?" dialog
+        instead of going away, so the operation exists for two different
+        tests: that a clean window really closes, and that a dirty one
+        really prompts. Needs Capability.WINDOW_CLOSE.
+
+        A request, not a guarantee. Returning without raising means the
+        request was delivered; whether the window then closes is the
+        application's decision, made in its own time. Verify the outcome
+        rather than trusting the call:
+
+            gui.close_window(window)
+            assert gui.wait_window_close(window, timeout=5)
+
+            # The dirty-document test: closing must prompt, not close.
+            gui.type_text("draft")
+            gui.close_window(window)
+            dialog = gui.expect_window("Save", timeout=5)
+
+        Closing one window of a multi-window application leaves the rest
+        running; whether closing the *last* window ends the process is the
+        application's policy (most Linux/Windows applications exit, most
+        macOS applications stay running), so a teardown that must end the
+        process still belongs to `Application.stop()`.
+        """
+        self.backend.close_window(window)
 
     def window_events(self, timeout: float | None = None) -> Iterator[WindowEvent]:
         """Yield WindowEvents as the compositor reports them.
@@ -4435,13 +4847,29 @@ class _CaptureOnFailure:
         self.name = name
         self.window = window
 
+    _sequence = itertools.count(1)
+    """Bundle serial, shared process-wide (`next()` is atomic under the GIL).
+
+    The wall-clock stamp below has one-second resolution, so two failures of
+    the same assertion inside one second -- a parametrized test failing twice
+    in a tight loop -- used to produce the same filename, and the later bundle
+    silently clobbered the earlier one even though the naming comment claimed
+    otherwise. The serial makes every bundle's token unique within a process;
+    the pid keeps it unique across processes.
+    """
+
     def _destination(
-        self, exception: BaseException, suffix: str = "", extension: str = "png"
+        self,
+        exception: BaseException,
+        token: str,
+        suffix: str = "",
+        extension: str = "png",
     ) -> str:
         """Where to write one artifact, named after the failure and the moment it hit.
 
-        `suffix` distinguishes it from the others in the same bundle, e.g.
-        "-tree".
+        `token` is computed once per bundle (see `__exit__`) so the four
+        artifacts of one failure share a prefix and group together;
+        `suffix` distinguishes them within it, e.g. "-tree".
         """
         directory = (
             self.directory
@@ -4450,11 +4878,7 @@ class _CaptureOnFailure:
         )
         os.makedirs(directory, exist_ok=True)
         stem = self.name or type(exception).__name__
-        # A monotonic-ish suffix rather than a bare name: a test run that
-        # fails the same assertion in several cases would otherwise have
-        # each failure overwrite the last, leaving only the final one.
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        filename = f"{stem}-{stamp}-{os.getpid()}{suffix}.{extension}"
+        filename = f"{stem}-{token}{suffix}.{extension}"
         return os.path.join(directory, filename)
 
     def _write_json(self, path: str, data: object) -> str:
@@ -4504,18 +4928,25 @@ class _CaptureOnFailure:
         if exception is None:
             return False
         failure_object: Any = exception
+        # One token per bundle, so the four artifacts share a prefix and a
+        # second failure in the same wall-clock second cannot clobber this
+        # one -- see `_sequence`.
+        token = (
+            f"{time.strftime('%Y%m%d-%H%M%S')}"
+            f"-{os.getpid()}-{next(_CaptureOnFailure._sequence)}"
+        )
         self._attempt(
             failure_object,
             "screenshot",
             lambda: self.session.screenshot(
-                path=self._destination(exception), window=self.window
+                path=self._destination(exception, token), window=self.window
             ),
         )
         self._attempt(
             failure_object,
             "accessibility_tree",
             lambda: self._write_json(
-                self._destination(exception, "-tree", "json"),
+                self._destination(exception, token, "-tree", "json"),
                 inspect.tree_data(self.session),
             ),
         )
@@ -4523,7 +4954,7 @@ class _CaptureOnFailure:
             failure_object,
             "active_window",
             lambda: self._write_json(
-                self._destination(exception, "-window", "json"),
+                self._destination(exception, token, "-window", "json"),
                 _window_fields(self.session.active_window()),
             ),
         )
@@ -4531,7 +4962,7 @@ class _CaptureOnFailure:
             failure_object,
             "focused_element",
             lambda: self._write_json(
-                self._destination(exception, "-focused", "json"),
+                self._destination(exception, token, "-focused", "json"),
                 _element_fields(self.session.focused()),
             ),
         )

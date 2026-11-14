@@ -119,6 +119,47 @@ class TestModifiers(unittest.TestCase):
             + [("release", "Shift_L"), ("release", "Control_L")],
         )
 
+    def test_an_inner_group_closing_keeps_the_outer_modifier_held(self):
+        # The case the test above cannot show: with nothing between the two
+        # `)`, releasing everything early looks identical to releasing one
+        # group. Put a key after the inner `)` and the difference is the
+        # whole meaning of the chord -- `^(+(l)x)` is Ctrl+Shift+l then
+        # Ctrl+x, and a flat release tapped `x` with nothing held at all.
+        gui = session()
+        gui.send_keys("^(+(l)x)")
+        self.assertEqual(
+            gui.backend.events,
+            [("press", "Control_L"), ("press", "Shift_L")]
+            + tap("l")
+            + [("release", "Shift_L")]
+            + tap("x")
+            + [("release", "Control_L")],
+        )
+
+    def test_three_deep_groups_unwind_one_at_a_time(self):
+        gui = session()
+        gui.send_keys("^(%(+(a)b)c)")
+        self.assertEqual(
+            gui.backend.events,
+            [("press", "Control_L"), ("press", "Alt_L"), ("press", "Shift_L")]
+            + tap("a")
+            + [("release", "Shift_L")]
+            + tap("b")
+            + [("release", "Alt_L")]
+            + tap("c")
+            + [("release", "Control_L")],
+        )
+
+    def test_an_unmatched_close_paren_still_releases_everything(self):
+        # Tolerated before groups were tracked separately, so it stays
+        # tolerated: a script relying on it does not gain a new ValueError.
+        gui = session()
+        gui.send_keys("^(a))")
+        self.assertEqual(
+            gui.backend.events,
+            [("press", "Control_L")] + tap("a") + [("release", "Control_L")],
+        )
+
     def test_sequential_groups(self):
         gui = session()
         gui.send_keys("%(fa)^(m)")
@@ -244,6 +285,109 @@ class TestBraceSets(unittest.TestCase):
             gui.send_keys("{TAB 0}")
 
 
+class TestDocumentedGrammarEdges(unittest.TestCase):
+    """The shapes `Session.send_keys`'s docstring promises, pinned.
+
+    Each of these is now stated in the reference, and none of them had a
+    test: the parser could change and the documentation would quietly
+    become wrong. They are odd shapes rather than ones anybody writes on
+    purpose, which is exactly why nothing would notice.
+    """
+
+    def test_a_bare_group_with_no_modifier_groups_nothing(self):
+        gui = session()
+        gui.send_keys("(ab)")
+        self.assertEqual(gui.backend.events, tap("a") + tap("b"))
+
+    def test_an_unmatched_close_paren_is_tolerated(self):
+        gui = session()
+        gui.send_keys("a)b")
+        self.assertEqual(gui.backend.events, tap("a") + tap("b"))
+
+    def test_an_unmatched_close_paren_releases_what_is_held(self):
+        """It lets go of the modifier rather than carrying it onward."""
+        gui = session()
+        gui.send_keys("^(a)b)c")
+        self.assertEqual(
+            gui.backend.events,
+            [("press", "Control_L")]
+            + tap("a")
+            + [("release", "Control_L")]
+            + tap("b")
+            + tap("c"),
+        )
+
+    def test_a_repeat_count_works_on_a_literal_character(self):
+        gui = session()
+        gui.send_keys("{a 3}")
+        self.assertEqual(gui.backend.events, tap("a") * 3)
+
+    def test_a_non_positive_repeat_count_is_refused(self):
+        for keys in ("{a 0}", "{a -1}"):
+            with self.subTest(keys=keys):
+                gui = session()
+                with self.assertRaises(ValueError):
+                    gui.send_keys(keys)
+
+    def test_pause_may_share_a_brace_with_keys(self):
+        gui = session()
+        with mock.patch.object(pyguitest.Session, "wait") as waited:
+            gui.send_keys("{TAB PAUSE 100}")
+        self.assertEqual(gui.backend.events, tap("Tab"))
+        waited.assert_called_once_with(0.1)
+
+    def test_a_zero_pause_is_a_legal_no_op(self):
+        """Legal, and it does not even reach `wait`."""
+        gui = session()
+        with mock.patch.object(pyguitest.Session, "wait") as waited:
+            gui.send_keys("{PAUSE 0}")
+        self.assertEqual(gui.backend.events, [])
+        waited.assert_not_called()
+
+    def test_a_negative_pause_is_refused(self):
+        """Or it would reach `wait` with a negative number of seconds.
+
+        Reachable only since a signed token began counting as numeric: a
+        `-5` used to be rejected one branch earlier, as a key name that is
+        not a number of milliseconds.
+        """
+        gui = session()
+        with mock.patch.object(pyguitest.Session, "wait") as waited:
+            with self.assertRaises(ValueError):
+                gui.send_keys("{PAUSE -5}")
+        waited.assert_not_called()
+
+    def test_a_negative_repeat_count_is_a_count_not_a_key_name(self):
+        """`isdigit()` is False for "-1", which hid this for a long time.
+
+        The token fell through to the key-name branch and was pressed as a
+        key called "-1" -- surfacing from a real backend as `unknown key
+        name '-1'`, blaming the key vocabulary for a malformed count, and
+        leaving the "non-positive" guard reachable only by a literal zero.
+        """
+        gui = session()
+        with self.assertRaises(ValueError) as caught:
+            gui.send_keys("{a -1}")
+        self.assertIn("repeat count", str(caught.exception))
+        self.assertEqual(gui.backend.events, tap("a"))
+
+    def test_pause_without_a_number_is_refused(self):
+        for keys in ("{PAUSE}", "{PAUSE TAB}"):
+            with self.subTest(keys=keys):
+                gui = session()
+                with self.assertRaises(ValueError):
+                    gui.send_keys(keys)
+
+    def test_carriage_return_is_enter(self):
+        r"""A carriage return is Enter, like `~` and `\n`.
+
+        Which is why quote_for_type sends two Returns for a CRLF.
+        """
+        gui = session()
+        gui.send_keys("\r")
+        self.assertEqual(gui.backend.events, tap("Return"))
+
+
 class TestCombination(unittest.TestCase):
     def test_the_module_docstrings_own_example(self):
         gui = session()
@@ -319,6 +463,24 @@ class TestQuoteForType(unittest.TestCase):
         # it being a modifier there too -- a literal # slipped through
         # unescaped. quote_for_type fixes that.
         self.assertEqual(pyguitest.quote_for_type("#"), "{#}")
+
+    def test_a_carriage_return_round_trips(self):
+        # quote_for_type promises send_keys(quote_for_type(text)) sends
+        # `text` literally, with `&` as the single documented exception.
+        # `\r` is not send_keys syntax, so it passed through unescaped --
+        # and then raised ValueError("no static key mapping"), because the
+        # shared character table had `\n` and `\t` and not `\r`. Any text
+        # with Windows line endings hit it.
+        gui = session()
+        gui.send_keys(pyguitest.quote_for_type("a\rb"))
+        self.assertEqual(gui.backend.events, tap("a") + tap("Return") + tap("b"))
+
+    def test_a_crlf_sends_two_returns_rather_than_swallowing_one(self):
+        # Both characters are line endings; dropping one would be a silent
+        # edit of the caller's own text.
+        gui = session()
+        gui.send_keys(pyguitest.quote_for_type("\r\n"))
+        self.assertEqual(gui.backend.events, tap("Return") + tap("Return"))
 
     def test_altgr_is_deliberately_left_unescaped(self):
         # Matches upstream: & is the one modifier this helper does not quote.

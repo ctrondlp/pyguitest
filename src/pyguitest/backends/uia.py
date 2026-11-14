@@ -1494,7 +1494,28 @@ class UiaBackend(GUIBackend):
         things the first real run confirms.
         """
         self.require(Capability.ELEMENT_TREE)
-        return Element(self._uia().GetRootElement(), self)
+        return Element(self._root_node(), self)
+
+    def _root_node(self):
+        """The desktop element pointer, or a typed refusal.
+
+        `GetRootElement` is an ordinary cross-process call into the UI
+        Automation core, and fails the way `FindAll` and `ElementFromPoint`
+        on the same object do -- an RPC failure to an out-of-process
+        provider, a session-state transition, an automation object that has
+        been disconnected. Every other COM call in this backend translates
+        that into a typed refusal; this one used to let a raw `COMError`
+        out of `root_element()` and `find_elements()`, which is not part of
+        this package's API.
+        """
+        try:
+            return self._uia().GetRootElement()
+        except Exception as exc:  # noqa: BLE001 - a core that will not answer
+            raise CapabilityUnsupported(
+                Capability.ELEMENT_TREE,
+                self.name,
+                f"UI Automation would not hand back the desktop element: {exc}",
+            ) from exc
 
     def find_elements(
         self,
@@ -1526,7 +1547,7 @@ class UiaBackend(GUIBackend):
         ancestor and descendant queries without a dedicated relation API.
         """
         self.require(Capability.ELEMENT_TREE)
-        root = within.node if within is not None else self._uia().GetRootElement()
+        root = within.node if within is not None else self._root_node()
         conditions = self._conditions(role, name, enabled, visible, description)
         matches = self._build_predicate(
             role, name, enabled, visible, description, predicate

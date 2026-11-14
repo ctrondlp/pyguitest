@@ -137,6 +137,24 @@ class GnomeShellBackend(GUIBackend):
                 f"`pyguitest doctor` spells out the fix): {exc}"
             ) from exc
         self._can_capture, self._capture_note = self._probe_capture()
+        self._can_close, self._close_note = self._probe_close()
+        # Chained on the close probe rather than run unconditionally:
+        # CloseWindow and the maximize pair shipped in the same extension
+        # revision, so an extension without the one has not got the other,
+        # and the skip keeps connect() on an old install at two bounded
+        # round trips instead of three -- the 5s _CALL_TIMEOUT_MS exists
+        # because a wedged shell makes each one cost its whole bound.
+        if self._can_close:
+            self._can_maximize, self._maximize_note = self._probe_maximize()
+        else:
+            self._can_maximize = False
+            self._maximize_note = (
+                "the running extension predates MaximizeWindow (it has no "
+                "CloseWindow either, and the two ship in the same revision). "
+                "If you have just installed or updated the extension, "
+                "gnome-shell is still running the old copy -- on Wayland it "
+                "cannot reload in place, so log out and back in"
+            )
 
     def _probe_capture(self):
         """Whether this extension and shell can capture, and why not.
@@ -170,6 +188,47 @@ class GnomeShellBackend(GUIBackend):
         if not ok:
             return False, (
                 note or "the extension reported that this GNOME Shell cannot capture"
+            )
+        return True, ""
+
+    def _probe_close(self):
+        """Whether the running extension has CloseWindow, and why not.
+
+        The same probe-at-construction contract as `_probe_capture`, with
+        the same reserved id: 0 is never a real stable_sequence, so the
+        extension answers False without touching any window -- what is
+        being tested is that the method exists at all, since CloseWindow
+        postdates the window-control methods an older installed copy
+        already has, and `capabilities` must not advertise what the
+        *running* copy cannot do.
+        """
+        try:
+            self._call("CloseWindow", "(u)", (0,))
+        except Exception as exc:
+            return False, (
+                f"the running extension has no CloseWindow method ({exc}). "
+                "If you have just installed or updated the extension, "
+                "gnome-shell is still running the old copy -- on Wayland it "
+                "cannot reload in place, so log out and back in"
+            )
+        return True, ""
+
+    def _probe_maximize(self):
+        """Whether the running extension has MaximizeWindow, and why not.
+
+        The `_probe_close` contract again, with the same reserved id 0.
+        One probe covers both MaximizeWindow and IsWindowMaximized: the two
+        ship in the same extension revision, so an extension with one has
+        the other.
+        """
+        try:
+            self._call("MaximizeWindow", "(ub)", (0, False))
+        except Exception as exc:
+            return False, (
+                f"the running extension has no MaximizeWindow method ({exc}). "
+                "If you have just installed or updated the extension, "
+                "gnome-shell is still running the old copy -- on Wayland it "
+                "cannot reload in place, so log out and back in"
             )
         return True, ""
 
@@ -212,6 +271,14 @@ class GnomeShellBackend(GUIBackend):
         }
         if self._can_capture:
             capabilities.add(Capability.WINDOW_CAPTURE)
+        # Gated like WINDOW_CAPTURE and for the same reason: CloseWindow
+        # and MaximizeWindow postdate the other window methods, so an older
+        # installed copy of the extension serves everything above and not
+        # these.
+        if self._can_close:
+            capabilities.add(Capability.WINDOW_CLOSE)
+        if self._can_maximize:
+            capabilities.add(Capability.WINDOW_MAXIMIZE)
         return CapabilitySet(capabilities)
 
     def _handle(self, window):
@@ -532,6 +599,49 @@ class GnomeShellBackend(GUIBackend):
         self.require(Capability.WINDOW_MINIMIZE)
         handle = self._handle(window)
         (ok,) = self._call("MinimizeWindow", "(ub)", (handle, minimized))
+        if not ok:
+            raise WindowNotFound(f"no window with id {handle!r}")
+
+    def maximize_window(self, window, maximized=True):
+        """Maximize a window, or restore it when `maximized` is False.
+
+        Declared only when the running extension has the method -- see
+        `_probe_maximize`, the same contract CloseWindow has.
+        """
+        self.require(Capability.WINDOW_MAXIMIZE, self._maximize_note or None)
+        handle = self._handle(window)
+        (ok,) = self._call("MaximizeWindow", "(ub)", (handle, maximized))
+        if not ok:
+            raise WindowNotFound(f"no window with id {handle!r}")
+
+    def is_window_maximized(self, window):
+        """Whether Mutter reports the window fully maximized.
+
+        The extension reads the `maximized-horizontally`/`-vertically`
+        GObject properties, which exist in every Mutter era, so the read
+        needs no era handling anywhere -- the era bridge (the maximize API
+        changed shape in Mutter 49) lives only on the write side, inside
+        the extension.
+        """
+        self.require(Capability.WINDOW_MAXIMIZE, self._maximize_note or None)
+        handle = self._handle(window)
+        ok, maximized = self._call("IsWindowMaximized", "(u)", (handle,))
+        if not ok:
+            raise WindowNotFound(f"no window with id {handle!r}")
+        return bool(maximized)
+
+    def close_window(self, window):
+        """Ask Mutter to close a window gracefully, through the extension.
+
+        `Meta.Window.delete` is the compositor's ordinary close request, so
+        the application keeps its "Save changes?" say. Declared only when
+        the *running* extension has the method -- see `_probe_close`; an
+        older installed copy simply never advertises WINDOW_CLOSE, and
+        `require` refuses here the way every missing capability refuses.
+        """
+        self.require(Capability.WINDOW_CLOSE, self._close_note or None)
+        handle = self._handle(window)
+        (ok,) = self._call("CloseWindow", "(u)", (handle,))
         if not ok:
             raise WindowNotFound(f"no window with id {handle!r}")
 

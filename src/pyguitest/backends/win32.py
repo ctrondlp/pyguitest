@@ -870,6 +870,8 @@ class Win32Backend(GUIBackend):
                 Capability.WINDOW_PLACEMENT,
                 Capability.WINDOW_RESIZE,
                 Capability.WINDOW_MINIMIZE,
+                Capability.WINDOW_MAXIMIZE,
+                Capability.WINDOW_CLOSE,
                 Capability.WINDOW_PID,
                 Capability.WINDOW_AT_POINT,
                 Capability.WINDOW_TITLE_SET,
@@ -1762,6 +1764,54 @@ class Win32Backend(GUIBackend):
             wanted = "minimize" if minimized else "restore"
             raise PyGUITestError(f"{window!r} did not {wanted}: IsIconic disagrees")
 
+    def maximize_window(self, window, maximized=True):
+        """Maximize `window`, or restore it when `maximized` is False.
+
+        `ShowWindow` + an `IsZoomed` read-back, the exact shape
+        `minimize_window` has with `IsIconic`, and for the same reason: the
+        call's own return answers a different question, and a platform
+        quietly declining must not read as success.
+
+        One Windows-only side effect, documented because no spelling avoids
+        it: `SW_MAXIMIZE` *activates* the window ("Activates the window and
+        displays it maximized" -- and `SW_SHOWMAXIMIZED` is the same value),
+        where X11's `_NET_WM_STATE`, COSMIC's `set_maximized` and Mutter's
+        `maximize()` all leave focus alone. A test that maximizes a
+        background window here has moved the keyboard focus with it.
+        """
+        self.require(Capability.WINDOW_MAXIMIZE)
+        lib = self._lib()
+        handle = self._hwnd(window)
+        lib.ShowWindow(handle, _winapi.SW_MAXIMIZE if maximized else _winapi.SW_RESTORE)
+        if bool(lib.IsZoomed(handle)) != maximized:
+            wanted = "maximize" if maximized else "restore"
+            raise PyGUITestError(f"{window!r} did not {wanted}: IsZoomed disagrees")
+
+    def is_window_maximized(self, window):
+        """Whether `window` is maximized, as `IsZoomed` answers it."""
+        self.require(Capability.WINDOW_MAXIMIZE)
+        return bool(self._lib().IsZoomed(self._hwnd(window)))
+
+    def close_window(self, window):
+        """Ask a window to close itself, by posting `WM_CLOSE`.
+
+        Posted rather than sent, and deliberately *not* verified the way
+        `minimize_window` reads `IsIconic` back: an application may answer
+        WM_CLOSE with a modal "Save changes?" prompt instead of closing --
+        the behaviour this operation exists to allow -- so "the window is
+        still there" is not a failure, and a `SendMessage` would block for
+        as long as that prompt stays up. What *is* checked is delivery:
+        `PostMessageW` answering zero means the handle no longer names a
+        window, reported as the same `WindowNotFound` every other operation
+        raises for a stale handle. A caller that needs the window gone
+        verifies with `wait_window_close`.
+        """
+        self.require(Capability.WINDOW_CLOSE)
+        lib = self._lib()
+        handle = self._hwnd(window)
+        if not lib.PostMessageW(handle, _winapi.WM_CLOSE, 0, 0):
+            raise WindowNotFound(f"no window with handle {handle!r} to close")
+
     def set_window_title(self, window, title):
         """Replace `window`'s title, verifying that it took.
 
@@ -1872,9 +1922,18 @@ class Win32Backend(GUIBackend):
         if result["error"] is not None:
             pump.join(timeout=2.0)
             raise result["error"]
-        known = {window.handle for window in self.windows()}
         deadline = None if timeout is None else time.monotonic() + timeout
         try:
+            # Seeded inside the try, not before it: `windows()` can raise (a
+            # transient EnumWindows failure, a window dying mid-enumeration
+            # surfacing as an error), and from this point the system-wide
+            # hooks and their pump thread are live -- unwound without the
+            # finally below they stayed installed for the life of the
+            # process, the daemon thread pumping forever and the sink queue
+            # growing unboundedly with no consumer. The hook-before-seed
+            # ordering `_classify_window_event`'s docstring relies on is
+            # unchanged.
+            known = {window.handle for window in self.windows()}
             while True:
                 remaining = None
                 if deadline is not None:

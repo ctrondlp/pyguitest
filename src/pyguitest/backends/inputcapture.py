@@ -224,6 +224,19 @@ class InputCaptureBackend(GUIBackend):
             with contextlib.suppress(Exception):
                 self._session.disable()
             raise PyGUITestError(str(exc)) from exc
+        except BaseException:
+            # `wait_for_activation` runs a main loop until someone physically
+            # crosses a barrier, so it can legitimately sit here for minutes
+            # -- which makes a Ctrl-C during the wait the expected way out,
+            # not an exotic one. The clauses above catch only PortalError, so
+            # that interrupt used to leave the barriers armed and capture
+            # enabled: the user's own pointer stays diverted from their
+            # desktop after the test they just aborted. Same reason, and the
+            # same BaseException reach, as the constructor's teardown in
+            # eiinput.py.
+            with contextlib.suppress(Exception):
+                self._session.disable()
+            raise
         self._session.release(activation.activation_id, activation.cursor_position)
         self._session.disable()
         if activation.cursor_position is None:

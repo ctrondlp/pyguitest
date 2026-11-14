@@ -751,6 +751,47 @@ class TestTheCapabilitySet(UiaTestCase):
         self.assertEqual(element.name, "Save")
 
 
+class TestTheDesktopElementIsAskedForSafely(UiaTestCase):
+    """GetRootElement is a cross-process call, and fails like the others.
+
+    Every other COM call in the backend translates a provider failure into a
+    typed refusal. This one did not, so an RPC failure to an out-of-process
+    provider -- or a session-state transition -- came out of `root_element()`
+    and `find_elements()` as a raw COMError that no documented `except`
+    catches.
+    """
+
+    def _make_it_fail(self):
+        """A desktop element the UIA core refuses to hand back."""
+
+        def refuse():
+            raise OSError(
+                "-2147220991: an event was unable to invoke any of the subscribers"
+            )
+
+        self.automation.GetRootElement = refuse
+
+    def test_root_element_translates_a_refusal(self):
+        self._make_it_fail()
+        with self.assertRaises(CapabilityUnsupported) as ctx:
+            self.backend.root_element()
+        self.assertIn("desktop element", str(ctx.exception))
+
+    def test_an_unscoped_search_translates_the_same_refusal(self):
+        self._make_it_fail()
+        with self.assertRaises(CapabilityUnsupported):
+            self.backend.find_elements(name="Save")
+
+    def test_a_scoped_search_never_asks_for_the_root_at_all(self):
+        # `within=` supplies its own node, so a desktop element the core will
+        # not hand back must not break a search that never needed it.
+        self._make_it_fail()
+        scope = self.node(name="Dialog")
+        self.add(scope, name="Save")
+        found = self.backend.find_elements(name="Save", within=self.element(scope))
+        self.assertEqual([element.name for element in found], ["Save"])
+
+
 class TestFindingElements(UiaTestCase):
     """The search, which is asked twice: once of UIA, once of the predicate."""
 

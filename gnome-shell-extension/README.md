@@ -65,9 +65,12 @@ to reinstall.
 **After updating the extension, log out and back in again.** On Wayland the
 shell keeps running the code it loaded at login, so a copy you have just
 overwritten still reports `ACTIVE` while behaving like the old one. The usual
-symptom is `UnknownMethod: No such method "CaptureWindow"` from pyguitest,
-and that error suggests logging out for this reason. `metadata.json`'s
-`version-name` (currently `0.5.0-safewrite`) tells builds apart, but
+symptom is `UnknownMethod: No such method "CaptureWindow"` from pyguitest —
+and for the newer `CloseWindow`/`MaximizeWindow`/`IsWindowMaximized` methods
+there is no error at all: the backend's connect-time probes swallow the
+UnknownMethod and simply withhold `WINDOW_CLOSE`/`WINDOW_MAXIMIZE`, with the
+log-out diagnosis carried in the refusal a call then raises. `metadata.json`'s
+`version-name` (currently `0.6.0-close-maximize`) tells builds apart, but
 `gnome-extensions info` may report the installed copy rather than the loaded
 one. Note that the older `0.4.0-appid` is still named throughout the docs and
 the validation script as the build that *added* `wm_class` to `ListWindows`;
@@ -110,6 +113,21 @@ name to own, since this runs inside the shell process, which already owns
 `GnomeShellBackend` talks to this over ordinary PyGObject (`gi.repository.Gio`)
 — the same dependency the `atspi` extra already needs, so there is nothing
 new to install on the Python side once the extension itself is enabled.
+
+## Close and maximize
+
+`CloseWindow(id) → ok` asks Mutter to close one window gracefully
+(`Meta.Window.delete`, so the application keeps its "Save changes?" say),
+`MaximizeWindow(id, maximize) → ok` maximizes or restores, and
+`IsWindowMaximized(id) → (ok, maximized)` reads the state back through the
+`maximized-horizontally`/`-vertically` properties, which exist in every
+Mutter era. All three treat id 0 as an existence probe — never a real
+`stable_sequence`, answered without touching any window — which is how
+pyguitest's backend decides at connect time whether the *running* copy has
+them; an older loaded copy just never advertises the two capabilities. The
+maximize write bridges Mutter's API change at 49 (`maximize()` lost its
+flags argument; `get_maximized()` went away and its *presence* is the era
+probe).
 
 ## Window capture
 

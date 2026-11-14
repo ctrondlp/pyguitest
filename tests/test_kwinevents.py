@@ -58,6 +58,41 @@ class TestKWinEventsBackend(unittest.TestCase):
         gui = self._backend()
         gui.close()  # must not raise, even though connect=False touched no D-Bus
 
+    def test_a_failing_script_load_releases_what_hosting_already_claimed(self):
+        # The one construction ordering that leaks: _host_service() has
+        # already owned the bus name and exported the object when the script
+        # load fails, which the factory's own docstring names as a real
+        # reason construction raises. No caller is ever handed the object, so
+        # nothing can call close() -- the name stayed owned for the life of
+        # the process, and because it was claimed without DO_NOT_QUEUE a
+        # later connect() queued behind it and then blamed "another
+        # instance", which was this same process.
+        from pyguitest.errors import BackendUnavailable
+
+        claimed = {}
+
+        def fake_host(backend):
+            backend._Gio = mock.Mock()
+            backend._own_name_id = 7
+            backend._registration_id = 3
+            backend._connection = mock.Mock()
+            claimed["gio"] = backend._Gio
+            claimed["connection"] = backend._connection
+
+        def failing_script(backend):
+            raise BackendUnavailable("KWin would not load the script")
+
+        with (
+            mock.patch.object(KWinEventsBackend, "_host_service", fake_host),
+            mock.patch.object(
+                KWinEventsBackend, "_load_and_run_script", failing_script
+            ),
+            self.assertRaises(BackendUnavailable),
+        ):
+            KWinEventsBackend()
+        claimed["gio"].bus_unown_name.assert_called_once_with(7)
+        claimed["connection"].unregister_object.assert_called_once_with(3)
+
     def test_window_events_drains_already_queued_events_in_order(self):
         gui = self._backend()
         gui._events.append(("new", "{uuid-1}", "First"))

@@ -218,6 +218,33 @@ class FakeProxy:
         self.windows[i] = tuple(window)
         return FakeReply((True,))
 
+    def _MaximizeWindow(self, wid, maximize):
+        i = self._index(wid)
+        if i is None:
+            return FakeReply((False,))
+        if not hasattr(self, "maximized"):
+            self.maximized = set()
+        if maximize:
+            self.maximized.add(wid)
+        else:
+            self.maximized.discard(wid)
+        return FakeReply((True,))
+
+    def _IsWindowMaximized(self, wid):
+        if self._index(wid) is None:
+            return FakeReply((False, False))
+        return FakeReply((True, wid in getattr(self, "maximized", set())))
+
+    def _CloseWindow(self, wid):
+        # Id 0 is the backend's existence probe -- never a real
+        # stable_sequence -- so it answers False without touching anything,
+        # the same contract the real extension gives it.
+        i = self._index(wid)
+        if i is None:
+            return FakeReply((False,))
+        del self.windows[i]
+        return FakeReply((True,))
+
     def _WindowAtPoint(self, x, y):
         for window in reversed(self.windows):
             wid, _pid, _title, wx, wy, ww, wh, minimized, _focused = window
@@ -450,6 +477,29 @@ class TestPlacement(GnomeShellTestCase):
         with self.assertRaises(WindowNotFound):
             self.gui.minimize_window(9999)
 
+    def test_maximize_restore_and_the_state_read(self):
+        window = self.gui.windows()[0]
+        self.assertFalse(self.gui.is_window_maximized(window))
+        self.gui.maximize_window(window)
+        self.assertTrue(self.gui.is_window_maximized(window))
+        self.gui.maximize_window(window, maximized=False)
+        self.assertFalse(self.gui.is_window_maximized(window))
+
+    def test_maximize_unknown_window_raises(self):
+        with self.assertRaises(WindowNotFound):
+            self.gui.maximize_window(9999)
+        with self.assertRaises(WindowNotFound):
+            self.gui.is_window_maximized(9999)
+
+    def test_close_asks_the_extension_and_the_window_goes(self):
+        window = self.gui.windows()[0]
+        self.gui.close_window(window)
+        self.assertNotIn("Editor", [w.title for w in self.gui.windows()])
+
+    def test_close_unknown_window_raises(self):
+        with self.assertRaises(WindowNotFound):
+            self.gui.close_window(9999)
+
     def test_hit_test(self):
         self.assertEqual(self.gui.window_at(50, 50).title, "Editor")
         self.assertEqual(self.gui.window_at(900, 50).title, "Browser")
@@ -459,6 +509,52 @@ class TestPlacement(GnomeShellTestCase):
         window = self.gui.windows()[0]
         self.gui.minimize_window(window)
         self.assertIsNone(self.gui.window_at(50, 50))
+
+
+class TestCloseProbe(GnomeShellTestCase):
+    """WINDOW_CLOSE is declared only when the RUNNING extension has the method.
+
+    CloseWindow postdates the rest: an installed older copy serves
+    everything else, so this is the WINDOW_CAPTURE contract again.
+    """
+
+    def test_a_current_extension_advertises_window_close(self):
+        self.assertIn(Capability.WINDOW_CLOSE, self.gui.capabilities)
+        self.assertIn(Capability.WINDOW_MAXIMIZE, self.gui.capabilities)
+
+    def test_an_old_extension_without_closewindow_withholds_it(self):
+        test_connection = self.connection
+
+        class OldProxy(FakeProxy):
+            """A pre-CloseWindow extension: D-Bus answers UnknownMethod."""
+
+            def call_sync(self, method, parameters, flags, timeout, cancellable):
+                if method in ("CloseWindow", "MaximizeWindow", "IsWindowMaximized"):
+                    raise Exception(
+                        "GDBus.Error:org.freedesktop.DBus.Error.UnknownMethod: "
+                        f"No such method {method}"
+                    )
+                return super().call_sync(
+                    method, parameters, flags, timeout, cancellable
+                )
+
+        gui = self.module.GnomeShellBackend(proxy=OldProxy(connection=test_connection))
+        self.assertNotIn(Capability.WINDOW_CLOSE, gui.capabilities)
+        self.assertNotIn(Capability.WINDOW_MAXIMIZE, gui.capabilities)
+        # And the call refuses the way every missing capability refuses --
+        # typed, up front, and CARRYING the probe's diagnosis (the same
+        # "log out and back in" capture()'s refusal carries), rather than
+        # the bare dead-end "run pyguitest doctor" line.
+        with self.assertRaises(CapabilityUnsupported) as caught:
+            gui.close_window(1)
+        self.assertIn("log out and back in", str(caught.exception))
+        with self.assertRaises(CapabilityUnsupported) as caught:
+            gui.maximize_window(1)
+        self.assertIn("log out and back in", str(caught.exception))
+        self.assertIn("MaximizeWindow", str(caught.exception))
+        with self.assertRaises(CapabilityUnsupported) as caught:
+            gui.is_window_maximized(1)
+        self.assertIn("log out and back in", str(caught.exception))
 
 
 class TestCapabilities(GnomeShellTestCase):

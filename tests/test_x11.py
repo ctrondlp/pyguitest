@@ -161,6 +161,11 @@ class FakeWindow:
             if self.frame_extents is None:
                 return None
             return types.SimpleNamespace(value=list(self.frame_extents))
+        if atom == "_NET_WM_STATE":
+            state = getattr(self, "wm_state", None)
+            if state is None:
+                return None
+            return types.SimpleNamespace(value=list(state))
         return types.SimpleNamespace(value=[4242])  # _NET_WM_PID
 
     def xtest_compare_cursor(self, cursor):
@@ -789,6 +794,23 @@ class TestWindows(X11TestCase):
         flags = _ROOT.sent_events[0][0].data[1][0]
         self.assertEqual(flags & 0xFF, 10)
 
+    def test_moveresize_claims_a_user_action_not_an_application_request(self):
+        # Bits 12-15 are EWMH's source indication. 2 is "pager/taskbar",
+        # i.e. acting for the user; 1 is "the application itself", which
+        # §9.11 lets a window manager treat differently -- demote, reorder
+        # or ignore. close_window and maximize_window already send 2, and
+        # move/resize claiming to be the application was the odd one out.
+        window = self.gui.windows()[0]
+        self.gui.move_window(window, 0, 0)
+        flags = _ROOT.sent_events[0][0].data[1][0]
+        self.assertEqual((flags >> 12) & 0xF, 2)
+
+    def test_resize_claims_the_same_source_as_move(self):
+        window = self.gui.windows()[0]
+        self.gui.resize_window(window, 640, 480)
+        flags = _ROOT.sent_events[0][0].data[1][0]
+        self.assertEqual((flags >> 12) & 0xF, 2)
+
     def test_net_client_list_is_used_when_the_wm_maintains_it(self):
         # Regression: the tree walk sees a WM's decoration frames and any
         # client sub-windows alongside the toplevel, so one application can
@@ -869,11 +891,111 @@ class TestWindows(X11TestCase):
         self.gui.minimize_window(window, minimized=False)
         self.assertTrue(window.handle.mapped)
 
+    def test_maximize_sends_net_wm_state_with_both_atoms(self):
+        # One message naming both MAXIMIZED atoms -- EWMH lets a message
+        # carry two properties exactly so a maximize is one request, not
+        # two half-maximized intermediate states.
+        window = self.gui.windows()[0]
+        self.gui.maximize_window(window)
+        message, mask = _ROOT.sent_events[0]
+        self.assertIs(message.window, window.handle)
+        self.assertEqual(
+            mask,
+            self.gui._X.SubstructureRedirectMask | self.gui._X.SubstructureNotifyMask,
+        )
+        self.assertEqual(message.client_type, "_NET_WM_STATE")
+        fmt, values = message.data
+        self.assertEqual(fmt, 32)
+        action, vert, horz, source, _zero = values
+        self.assertEqual(action, 1)  # add
+        self.assertEqual(
+            {vert, horz},
+            {"_NET_WM_STATE_MAXIMIZED_VERT", "_NET_WM_STATE_MAXIMIZED_HORZ"},
+        )
+        self.assertEqual(source, 2)
+        _ROOT.sent_events.clear()
+        self.gui.maximize_window(window, maximized=False)
+        message, _mask = _ROOT.sent_events[0]
+        self.assertEqual(message.data[1][0], 0)  # remove
+
+    def test_is_window_maximized_needs_both_atoms(self):
+        # A half-maximized (tiled-to-one-edge) window carries exactly one
+        # of the pair, and is not what maximize_window ever sets.
+        window = self.gui.windows()[0]
+        self.assertFalse(self.gui.is_window_maximized(window))
+        window.handle.wm_state = ["_NET_WM_STATE_MAXIMIZED_VERT"]
+        self.assertFalse(self.gui.is_window_maximized(window))
+        window.handle.wm_state = [
+            "_NET_WM_STATE_MAXIMIZED_VERT",
+            "_NET_WM_STATE_MAXIMIZED_HORZ",
+        ]
+        self.assertTrue(self.gui.is_window_maximized(window))
+
+    def test_close_sends_net_close_window_to_the_root(self):
+        # The EWMH request, so the manager forwards it to the client as an
+        # ordinary WM_DELETE_WINDOW and the application keeps its "Save
+        # changes?" say -- never XDestroyWindow.
+        window = self.gui.windows()[0]
+        self.gui.close_window(window)
+        sent = _ROOT.sent_events
+        self.assertEqual(len(sent), 1)
+        message, mask = sent[0]
+        self.assertIs(message.window, window.handle)
+        self.assertEqual(message.client_type, "_NET_CLOSE_WINDOW")
+        # The same mask _moveresize uses: requests *to the manager* about a
+        # window go to the root with substructure redirection.
+        self.assertEqual(
+            mask,
+            self.gui._X.SubstructureRedirectMask | self.gui._X.SubstructureNotifyMask,
+        )
+        fmt, values = message.data
+        self.assertEqual(fmt, 32)
+        # data.l[0] is the timestamp slot, l[1] the source indicator: 2,
+        # "direct user action", the value that entitles the request to be
+        # honoured now rather than demoted like an application's own
+        # unsolicited one.
+        self.assertEqual(values[0], self.gui._X.CurrentTime)
+        self.assertEqual(values[1], 2)
+        self.assertEqual(values[2:], [0, 0, 0])
+
     def test_is_window_viewable_reads_map_state(self):
         window = self.gui.windows()[0]
         self.assertTrue(self.gui.is_window_viewable(window))
         self.gui.minimize_window(window)
         self.assertFalse(self.gui.is_window_viewable(window))
+
+    def test_a_foreign_handle_is_not_reported_as_a_vanished_window(self):
+        """A handle from another backend is not an X11 window at all.
+
+        Measured live on KDE Wayland with a composite of kwinevents + x11:
+        `screenshot(window=...)` on a native Wayland window reported
+        "window is gone: 'str' object has no attribute 'get_geometry'" --
+        about a window that was open the whole time, leaking python-xlib's
+        own type error. x11 simply cannot see a Wayland client.
+        """
+        for call in (
+            lambda: self.gui.geometry("{a-kwin-uuid}"),
+            lambda: self.gui.is_window_viewable("{a-kwin-uuid}"),
+            lambda: self.gui.is_window_maximized("{a-kwin-uuid}"),
+        ):
+            with self.subTest(call=call):
+                with self.assertRaises(WindowNotFound) as ctx:
+                    call()
+                message = str(ctx.exception)
+                self.assertIn("not an X11 window handle", message)
+                self.assertIn("str", message)
+                self.assertNotIn("window is gone", message)
+
+    def test_a_destroyed_window_is_still_reported_as_gone(self):
+        """The other half: a real Xlib failure keeps the old sentence."""
+
+        class Destroyed:
+            def get_geometry(self):
+                raise Exception("BadWindow")
+
+        with self.assertRaises(WindowNotFound) as ctx:
+            self.gui.geometry(Destroyed())
+        self.assertIn("window is gone", str(ctx.exception))
 
     def test_is_window_viewable_for_a_destroyed_window(self):
         class Destroyed:

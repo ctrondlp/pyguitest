@@ -1060,6 +1060,35 @@ class TestWindowWrites(BackendTestCase):
         self.backend.minimize_window(self.terminal, minimized=False)
         self.assertEqual(self.node.written[-1], ("kAXMinimizedAttribute", False))
 
+    def test_closing_presses_the_windows_own_close_button(self):
+        # AX has no window-level close attribute; the close *button* is the
+        # documented surface, and pressing it is exactly the user's click.
+        button = FakeElement(role="AXButton")
+        self.node.attrs["kAXCloseButtonAttribute"] = button
+        self.backend.close_window(self.terminal)
+        self.assertEqual(button.performed, ["AXPress"])
+
+    def test_a_close_button_press_the_ax_refuses_is_typed_too(self):
+        # The third refusal branch: the button exists but AXPress answers an
+        # error (the window mid-teardown, the app wedged). Typed, naming the
+        # capability, like the other two.
+        button = FakeElement(role="AXButton")
+        self.node.attrs["kAXCloseButtonAttribute"] = button
+        self.ax.action_error = -25205
+        with self.assertRaises(CapabilityUnsupported) as caught:
+            self.backend.close_window(self.terminal)
+        self.assertIs(caught.exception.capability, Capability.WINDOW_CLOSE)
+        self.assertIn("-25205", str(caught.exception))
+
+    def test_a_window_with_no_close_button_refuses_typed(self):
+        # A palette or sheet publishes none -- a structural refusal no retry
+        # can change, so it is CapabilityUnsupported, not a crash and not a
+        # retryable error.
+        with self.assertRaises(CapabilityUnsupported) as caught:
+            self.backend.close_window(self.terminal)
+        self.assertIs(caught.exception.capability, Capability.WINDOW_CLOSE)
+        self.assertIn("close button", str(caught.exception))
+
     def test_every_write_needs_the_grant(self):
         # The capability set and the code agreeing: without Accessibility these refuse
         # before touching AX, which is what `_AX_ONLY` promises.
@@ -1069,6 +1098,7 @@ class TestWindowWrites(BackendTestCase):
             lambda: backend.move_window(window, 1, 1),
             lambda: backend.resize_window(window, 1, 1),
             lambda: backend.minimize_window(window),
+            lambda: backend.close_window(window),
         ):
             with self.assertRaises(CapabilityUnsupported):
                 call()
@@ -1360,6 +1390,15 @@ class TestWindowCapture(BackendTestCase):
         # the call -- ADR 004 §6 is about what AX gates and no more.
         self.assertIn(Capability.WINDOW_CAPTURE, self.make().capabilities)
         self.assertIn(Capability.WINDOW_CAPTURE, self.make(trusted=False).capabilities)
+
+    def test_maximize_is_never_claimed(self):
+        # macOS zoom is a fit-to-content, not a maximize; the Session
+        # docstring promises the capability is withheld here, grant or no
+        # grant, and this is the pin on that promise.
+        self.assertNotIn(Capability.WINDOW_MAXIMIZE, self.make().capabilities)
+        self.assertNotIn(
+            Capability.WINDOW_MAXIMIZE, self.make(trusted=False).capabilities
+        )
 
     def test_a_window_is_captured_by_the_number_it_carries(self):
         backend, calls = self.make_capturing(onscreen=self.onscreen_windows())

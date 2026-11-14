@@ -7,6 +7,7 @@ prose, so these do.
 
 import pathlib
 import re
+import subprocess
 import unittest
 
 from pyguitest import hints, tools
@@ -369,6 +370,202 @@ class TestLinksAndAnchorsResolve(unittest.TestCase):
                     target.startswith("#"),
                     f"README links to {target}; PyPI cannot serve that, so the "
                     "link has to be an absolute URL",
+                )
+
+
+class TestChangelogVersionLinksResolve(unittest.TestCase):
+    """Every version heading links somewhere a reader can actually go.
+
+    0.22.1 was written up as a release but never tagged, never pushed and
+    never published, so two compare links -- its own, and 0.23.0's, whose
+    range started at it -- pointed through a tag GitHub does not have and
+    404'd. Five docs pages also told readers a fix landed in a version
+    `pip install` cannot resolve. Nothing checked either, because a dead
+    reference-style link still renders as a link.
+    """
+
+    CHANGELOG = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    _VERSION_HEADING = re.compile(r"^## \[([0-9][^\]]*)\]", re.MULTILINE)
+    _LINK_DEFINITION = re.compile(r"^\[([0-9][^\]]*)\]:\s*(\S+)$", re.MULTILINE)
+    _COMPARE = re.compile(r"compare/v(\d+\.\d+\.\d+)\.\.\.v(\S+)$")
+
+    def headings(self):
+        """Released versions, newest first -- the order they appear in."""
+        found = self._VERSION_HEADING.findall(self.CHANGELOG)
+        # Guard against the regex silently matching nothing and every
+        # assertion below passing over an empty list.
+        self.assertGreater(len(found), 20, "the version headings stopped parsing")
+        return found
+
+    def definitions(self):
+        return dict(self._LINK_DEFINITION.findall(self.CHANGELOG))
+
+    def test_every_version_heading_has_a_link_definition(self):
+        defined = self.definitions()
+        for version in self.headings():
+            with self.subTest(version=version):
+                self.assertIn(
+                    version,
+                    defined,
+                    f"## [{version}] is written as a reference link with no "
+                    f"[{version}]: definition, so it renders as dead brackets",
+                )
+
+    def test_no_link_definition_outlives_its_heading(self):
+        headings = set(self.headings())
+        for version in sorted(self.definitions()):
+            with self.subTest(version=version):
+                self.assertIn(
+                    version,
+                    headings,
+                    f"[{version}]: is defined with no ## [{version}] heading "
+                    "above it -- a leftover from a renamed or dropped release",
+                )
+
+    def test_each_compare_range_starts_at_the_release_before_it(self):
+        """Which is what makes the tags in the URL ones that exist.
+
+        A range may only reach back to the previous *released* version. An
+        unreleased one named here is a tag no clone has, and the link 404s.
+        """
+        order = self.headings()
+        defined = self.definitions()
+        for index, version in enumerate(order):
+            url = defined.get(version, "")
+            match = self._COMPARE.search(url)
+            if match is None:
+                # The oldest release has nothing to compare against and
+                # links to its tree instead.
+                self.assertEqual(version, order[-1], f"{version}: {url}")
+                continue
+            lower, upper = match.groups()
+            previous = order[index + 1] if index + 1 < len(order) else None
+            with self.subTest(version=version):
+                self.assertEqual(upper, version, f"{version} compares to v{upper}")
+                if previous is not None:
+                    self.assertEqual(
+                        lower,
+                        previous,
+                        f"[{version}] compares from v{lower}, but the release "
+                        f"before it is {previous} -- v{lower} is not a tag",
+                    )
+
+    def test_every_released_heading_was_actually_tagged(self):
+        """The invariant the internal checks above cannot see.
+
+        0.22.1 was *self-consistently* documented -- its own heading, its
+        own definition, and 0.23.0's range reaching back to it all agreed
+        -- so no amount of cross-checking the file against itself could
+        notice that the tag behind all three was never created. Only
+        ground truth outside the document can, so this one asks git.
+
+        Skipped where the clone has no tags to ask about: CI checks out at
+        depth 1 and fetches none. It runs where releases are prepared,
+        which is where a heading can be written for a tag that never
+        follows.
+        """
+        tags = subprocess.run(
+            ["git", "-C", str(ROOT), "tag", "--list", "v*"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if tags.returncode != 0 or not tags.stdout.strip():
+            self.skipTest("no tags in this clone (a shallow or archived checkout)")
+        present = {line.strip().lstrip("v") for line in tags.stdout.splitlines()}
+        headings = self.headings()
+        # The newest heading is the release being prepared: its version is
+        # bumped in the working tree before the tag it describes exists.
+        for version in headings[1:]:
+            with self.subTest(version=version):
+                self.assertIn(
+                    version,
+                    present,
+                    f"## [{version}] is written as a released version, but "
+                    f"v{version} is not a tag -- so its compare link 404s and "
+                    "`pip install` cannot resolve it. Tag it, or mark the "
+                    "heading unreleased the way 0.22.1 is",
+                )
+
+    def test_no_page_sends_a_reader_to_an_unreleased_version(self):
+        """The 0.22.1 docs half of the same defect.
+
+        A version with no bracketed heading was never released, so telling
+        a reader a change landed there leaves them nothing to install.
+        """
+        released = set(self.headings())
+        unreleased = re.compile(r"\b0\.22\.1\b")
+        pages = sorted((ROOT / "docs").rglob("*.md")) + [ROOT / "README.md"]
+        self.assertNotIn("0.22.1", released)
+        for page in pages:
+            with self.subTest(page=page.name):
+                self.assertIsNone(
+                    unreleased.search(page.read_text(encoding="utf-8")),
+                    f"{page.name} names 0.22.1, which was never published -- "
+                    "the change it describes shipped in 0.23.0",
+                )
+
+
+class TestSendKeysExamplesResolve(unittest.TestCase):
+    """Every `{NAME}` in a shipped send_keys example must name a real key.
+
+    `examples/07_keys_and_pointer.py` shipped
+    `gui.send_keys("hello{SPACE}world")`. The grammar does not reject an
+    unknown brace name -- it hands the name to the backend -- and `SPACE`
+    is not one of the shared aliases (`SPC` and `SPA` are), not one of
+    win32's long names, and not an X11 keysym name either, so the line
+    raised `ValueError: unknown key name 'SPACE'` on both X11 and Windows.
+    It happened to work on uinput alone, whose own table maps the name
+    through to `KEY_SPACE`, which is why nothing noticed.
+    """
+
+    _BRACE = re.compile(r"\{([A-Za-z][A-Za-z0-9_]*)(\s+\d+)?\}")
+    _CALL = re.compile(r"send_keys\(\s*([\"'])(.*?)\1")
+    # `{PAUSE n}` is grammar, not a key name, and is checked in
+    # tests/test_sendkeys.py instead.
+    _RESERVED = {"PAUSE"}
+
+    def pages(self):
+        root = ROOT
+        found = sorted((root / "examples").rglob("*.py"))
+        found += sorted((root / "docs").rglob("*.md"))
+        found.append(root / "README.md")
+        return found
+
+    def brace_names(self):
+        """Every brace name inside a real send_keys(...) string literal."""
+        seen = []
+        for page in self.pages():
+            text = page.read_text(encoding="utf-8")
+            for line_number, line in enumerate(text.splitlines(), 1):
+                for call in self._CALL.finditer(line):
+                    for brace in self._BRACE.finditer(call.group(2)):
+                        name = brace.group(1)
+                        if name.upper() not in self._RESERVED:
+                            seen.append((page, line_number, name))
+        # Guard against the regexes silently matching nothing.
+        self.assertTrue(seen, "no send_keys brace names found to check")
+        return seen
+
+    def test_every_brace_name_is_an_alias_or_a_keysym(self):
+        from pyguitest.backends.base import GUIBackend
+
+        try:
+            from Xlib import XK
+        except ImportError:  # pragma: no cover - depends on the platform
+            self.skipTest(
+                "python-xlib is not installed, so keysym names cannot be resolved here"
+            )
+        aliases = {name.upper() for name in GUIBackend.KEY_ALIASES}
+        for page, line_number, name in self.brace_names():
+            with self.subTest(page=page.name, name=name):
+                self.assertTrue(
+                    name.upper() in aliases or XK.string_to_keysym(name) != 0,
+                    f"{page.name}:{line_number} sends {{{name}}}, which is "
+                    "neither a shared key alias nor an X11 keysym name, so "
+                    "the backend raises ValueError for it. The aliases are "
+                    "short (SPC, BAC, ENT, ESC); a long name like SPACE is "
+                    "not one of them",
                 )
 
 

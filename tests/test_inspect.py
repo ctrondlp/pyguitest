@@ -182,6 +182,36 @@ class TestFormatTree(unittest.TestCase):
         self.assertIn("Application: editor", text)
         self.assertIn("Window: Preferences [frame]", text)
 
+    def test_a_state_the_toolkit_never_published_is_not_called_unchecked(self):
+        # Element.checked is `bool | None`, and None means the toolkit
+        # published no state at all -- which Windows UIA and macOS AX both
+        # do for a control that is checkable by role. Printing [unchecked]
+        # for it showed a confirmed-looking state nobody had read, the
+        # same collapse-of-None-into-False that expect_checked's own
+        # message was rewritten to stop making.
+        app = _FakeElement(role="application", name="editor")
+        unknown = _FakeElement(
+            role=Role.CHECK_BOX, name="Read only", checkable=True, checked=None
+        )
+        window = _FakeElement(
+            role=Role.FRAME, name="Preferences", parent=app, children=[unknown]
+        )
+        text = format_tree(tree_data(_FakeGui({Role.FRAME: [window]})))
+        self.assertIn("checked unknown", text)
+        self.assertNotIn("[unchecked]", text)
+
+    def test_a_real_unchecked_state_still_reads_unchecked(self):
+        app = _FakeElement(role="application", name="editor")
+        off = _FakeElement(
+            role=Role.CHECK_BOX, name="Read only", checkable=True, checked=False
+        )
+        window = _FakeElement(
+            role=Role.FRAME, name="Preferences", parent=app, children=[off]
+        )
+        text = format_tree(tree_data(_FakeGui({Role.FRAME: [window]})))
+        self.assertIn("unchecked", text)
+        self.assertNotIn("unknown", text)
+
     def test_nested_children_are_indented_with_tree_connectors(self):
         app = _FakeElement(role="application", name="editor")
         checkbox = _FakeElement(role=Role.CHECK_BOX, name="Enable notifications")

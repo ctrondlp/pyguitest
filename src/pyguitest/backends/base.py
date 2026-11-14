@@ -166,6 +166,22 @@ class Screen:
 
     __slots__ = ("index", "width", "height", "scale", "name")
 
+    index: int
+    """This output's position in `screens()`, and the number a `screen=`
+    argument takes."""
+    width: int
+    """The output's width in physical pixels, the same unit `geometry()`
+    and `screenshot()` work in."""
+    height: int
+    """The output's height in physical pixels."""
+    scale: float
+    """The output's DPI divided by 96 -- 1.0 unscaled, 1.5 on a 144 DPI
+    monitor -- and never a pixel count. See `__init__` for how each
+    platform's answer is normalised to that definition."""
+    name: str
+    """The connector or display name the desktop reports (`HDMI-1`,
+    `eDP-1`), or "" where it reports none."""
+
     def __init__(
         self,
         index: int,
@@ -212,10 +228,17 @@ class ImageMatch(NamedTuple):
     """
 
     x: int
+    """The match's left edge, in whichever space the search ran in."""
     y: int
+    """The match's top edge, in whichever space the search ran in."""
     width: int
+    """The matched region's width, which is the template's width."""
     height: int
+    """The matched region's height, which is the template's height."""
     score: float
+    """How close the match was, by the metric the search used. Lower is
+    better for the default `"RMSE"`; compare it against the `threshold`
+    that found it rather than against an absolute figure."""
 
 
 def identity_scope(backend: GUIBackend | None) -> object:
@@ -390,6 +413,27 @@ class Window:
     """
 
     __slots__ = ("handle", "backend", "title", "app_id", "pid")
+
+    # Bare annotations: they add no class attribute, so they cannot clash
+    # with __slots__, and they are where each field's documentation lives
+    # -- a slot descriptor carries none of its own.
+    handle: object
+    """The backend's own reference to this window -- an X11 id, an HWND, a
+    Wayland toplevel handle. Backend-private: pass the `Window` around
+    rather than this, and never store or compare it across runs."""
+    backend: GUIBackend
+    """The backend this window came from, and the one that can act on it."""
+    title: str
+    """The window title as it was when this object was made. Read once and
+    never refreshed -- call `refresh_window` for the current value rather
+    than comparing against a title the application has since changed."""
+    app_id: str
+    """The application identifier the desktop reports, where it reports one
+    at all: a WM_CLASS on X11, an app_id on Wayland, "" elsewhere."""
+    pid: int | None
+    """The owning process id, or None on a backend that cannot report one.
+    `find_windows(pid=...)` matches nothing rather than everything on such
+    a backend."""
 
     def __init__(
         self,
@@ -952,6 +996,16 @@ _SENDKEYS_PLAIN = {
     "`": "grave",
     " ": "space",
     "\n": "Return",
+    # Return as well, matching `\n` and X11Backend's own _CONTROL_KEYSYMS,
+    # which has always mapped it. Absent here, `send_keys("\r")` raised
+    # ValueError("no static key mapping") -- and because `\r` is not
+    # send_keys syntax, `quote_for_type` passes it through untouched, so the
+    # documented `send_keys(quote_for_type(text))` round trip broke on any
+    # text carrying a carriage return (anything with Windows line endings,
+    # or echoed clipboard content) with an error the contract does not list.
+    # A CRLF therefore sends two Returns: both characters are line endings,
+    # and swallowing one would be a silent edit of the caller's own text.
+    "\r": "Return",
     "\t": "Tab",
 }
 """char -> X11 keysym name, unshifted. Values for GUIBackend.resolve_char_key."""
@@ -1318,6 +1372,41 @@ class GUIBackend(ABC):
     def minimize_window(self, window: Window, minimized: bool = True) -> None:
         """Minimize a window, or restore it when `minimized` is False."""
         self.require(Capability.WINDOW_MINIMIZE)
+        raise NotImplementedError
+
+    def maximize_window(self, window: Window, maximized: bool = True) -> None:
+        """Maximize a window, or restore it when `maximized` is False.
+
+        Offered only where the desktop genuinely has the concept: a tiling
+        compositor's layout owns every window's size, and macOS zoom is a
+        fit-to-content, not a maximize -- those backends withhold
+        WINDOW_MAXIMIZE rather than approximate it.
+        """
+        self.require(Capability.WINDOW_MAXIMIZE)
+        raise NotImplementedError
+
+    def is_window_maximized(self, window: Window) -> bool:
+        """Whether `window` is currently maximized.
+
+        The read half of WINDOW_MAXIMIZE -- WINDOW_STATE covers minimized
+        and activated only, so without this the state `maximize_window`
+        writes could not be verified.
+        """
+        self.require(Capability.WINDOW_MAXIMIZE)
+        raise NotImplementedError
+
+    def close_window(self, window: Window) -> None:
+        """Ask the window manager to close `window` gracefully.
+
+        A request, not a guarantee: the application decides what a close
+        means, and one with unsaved work may answer with a "Save changes?"
+        dialog instead of going away -- which is exactly what distinguishes
+        this from `Application.stop()`, and why a caller verifying the
+        window is gone pairs it with `wait_window_close` rather than
+        trusting the return. Returning without raising means the request
+        was delivered, nothing more.
+        """
+        self.require(Capability.WINDOW_CLOSE)
         raise NotImplementedError
 
     def capture(

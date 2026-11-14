@@ -265,6 +265,20 @@ class Keymap:
         # uppercase letter when plain Shift also works.
         return min(masks[i] for i in range(count))
 
+    @staticmethod
+    def _needed_mods(mod_names, mask):
+        """The names of the modifiers `mask` selects, in ascending index order.
+
+        Walks the real modifier indices (`mod_names`'s keys), not
+        `range(len(mod_names))`: `_mod_names` skips any index whose name is
+        NULL, so the dict has holes, and the truncated range both stops short
+        of a named modifier sitting at a high index -- dropping it, e.g. an
+        AltGr/ISO_Level3_Shift at a bit the range never reaches, so the
+        character would be typed WITHOUT its needed modifier -- and wastes
+        steps on unnamed low indices.
+        """
+        return tuple(mod_names[i] for i in sorted(mod_names) if mask & (1 << i))
+
     def _build_index(self):
         """Map every reachable keysym to a key and the modifiers it needs.
 
@@ -282,11 +296,7 @@ class Keymap:
             levels = self._lib.xkb_keymap_num_levels_for_key(self._keymap, keycode, 0)
             for level in range(levels):
                 mask = self._mask_at(keycode, 0, level)
-                needed = tuple(
-                    mod_names[i]
-                    for i in range(len(mod_names))
-                    if mask & (1 << i) and i in mod_names
-                )
+                needed = self._needed_mods(mod_names, mask)
                 for keysym in self._syms_at(keycode, 0, level):
                     # Lowest level wins: an earlier, simpler way to produce
                     # the same keysym is always preferable.
