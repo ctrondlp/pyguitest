@@ -43,6 +43,7 @@ window enumeration here.
 from __future__ import annotations
 
 import contextlib
+import functools
 import re
 import subprocess
 import time
@@ -85,6 +86,28 @@ Generous for the case it is there for -- KWin removes one copy per call and
 schedules each removal on its own loop, so this is several rounds of a
 round-trip and a `deleteLater` -- and short enough that a KWin whose
 scripting is wedged refuses the session rather than hanging it."""
+_PLUGIN_NAME = "pyguitest-window-events"
+"""What this script is called inside KWin, whatever path it was loaded from.
+
+KWin addresses a loaded script by its plugin name, and the one-argument
+`loadScript(path)` makes that name the file's *path*: two installs of this
+package, or one harness deploying it to two directories, then register two
+names and neither one's sweep can see the other's copy -- measured, with
+every window event arriving twice. The two-argument
+`loadScript(path, pluginName)` takes this instead, and three things follow,
+all measured on Plasma 6:
+
+- `isScriptLoaded` answers about the *name* (True) and not the path
+  (False), so the sweep must name the same thing the load did;
+- a second `loadScript` under a name already loaded is **refused** with
+  `-1`, which makes two copies of *this* name impossible rather than
+  merely detectable -- the duplication the sweep exists for cannot arise
+  for a session that got this far;
+- one `unloadScript(name)` clears it.
+
+The path is swept as well as the name, for the upgrade case: a copy left
+behind by a version that named scripts by their path is invisible to a
+sweep of this name alone."""
 _SWEEP_POLL = 0.05
 _SWEEP_MIN_CALL_MS = 100
 """The least a sweep call is given, once its budget is spent.
@@ -409,22 +432,24 @@ class KWinEventsBackend(GUIBackend):
         safe to issue without knowing whether a load took, which both uses
         below depend on.
 
-        **What that name does not cover**, stated rather than left to be
-        discovered: it is the *deployment path*, so two installs of this
-        package -- or one test harness that deploys it to two directories --
-        register two different plugin names, and a sweep of either cannot
-        see a copy loaded under the other. Measured by accident on a KDE
-        box: three probe trees of one afternoon each left a copy of their
-        own, two of them outlived their files (KWin keeps the compiled
-        script), and every window event arrived twice until each name was
-        unloaded by hand. One install on a desktop has one path and is not
-        affected. The fix is KWin's **two**-argument
-        `loadScript(path, pluginName)`, which would let every session
-        register the same constant name and make the sweep reach any copy
-        whatever directory it came from; it is not done here because it
-        changes how every KDE session registers its script -- including
-        what KWin's own duplicate check then compares -- and that is not
-        something to land on unit tests alone. See `docs/validation.md`.
+        That path-as-name is what the two-argument
+        `loadScript(path, pluginName)` replaces, and why: the name was the
+        *deployment path*, so two installs of this package -- or one test
+        harness deploying it to two directories -- registered two names and
+        neither one's sweep could see the other's copy. Measured by
+        accident on a KDE box: three probe trees of one afternoon each left
+        a copy, two outlived their files (KWin keeps the compiled script),
+        and every window event arrived twice until each name was unloaded
+        by hand. `_PLUGIN_NAME` carries what the constant buys, all of it
+        measured on the same box; the one-argument form remains the
+        fallback for a KWin that will not take a name, with the gap above.
+
+        A load that answers `-1` is KWin refusing it -- the name is already
+        taken, which after a sweep that reported the name clear means a
+        copy appeared in between -- and that is a refusal here rather than
+        a script id nobody can address: `/Scripting/Script-1` is a path no
+        object sits at, so the proxy and `run` below would fail with a
+        message about the wrong thing.
 
         KWin registers the script *before* replying with its id
         (`scripts.append(script); return id;`), so a `loadScript` that
@@ -461,6 +486,11 @@ class KWinEventsBackend(GUIBackend):
         script_path = str(
             resources.files("pyguitest.backends") / "_kwin_window_events.js"
         )
+        # What the script is *called* in KWin, as opposed to where it
+        # lives. The path is the fallback name, and `_sweep` is run over
+        # both: this install's own path-named copy is what an older
+        # version of this package would have left behind.
+        plugin = [_PLUGIN_NAME]
         kwin = self._Gio.DBusProxy.new_for_bus_sync(
             self._Gio.BusType.SESSION,
             self._Gio.DBusProxyFlags.NONE,
@@ -471,7 +501,7 @@ class KWinEventsBackend(GUIBackend):
             None,
         )
 
-        def unload(timeout_ms=-1):
+        def unload(timeout_ms=-1, name=None):
             """Unload the script by plugin name, best-effort.
 
             Best-effort in every use: before a load it clears a predecessor
@@ -484,13 +514,13 @@ class KWinEventsBackend(GUIBackend):
             with contextlib.suppress(Exception):
                 kwin.call_sync(
                     "unloadScript",
-                    self._GLib.Variant("(s)", (script_path,)),
+                    self._GLib.Variant("(s)", (name or plugin[0],)),
                     self._Gio.DBusCallFlags.NONE,
                     timeout_ms,
                     None,
                 )
 
-        def still_loaded(timeout_ms=-1):
+        def still_loaded(timeout_ms=-1, name=None):
             """Whether KWin still has a script under this plugin name.
 
             `_UNSUPPORTED` where the method is not there to call -- D-Bus
@@ -504,7 +534,7 @@ class KWinEventsBackend(GUIBackend):
             try:
                 answer = kwin.call_sync(
                     "isScriptLoaded",
-                    self._GLib.Variant("(s)", (script_path,)),
+                    self._GLib.Variant("(s)", (name or plugin[0],)),
                     self._Gio.DBusCallFlags.NONE,
                     timeout_ms,
                     None,
@@ -516,15 +546,52 @@ class KWinEventsBackend(GUIBackend):
             except Exception:  # noqa: BLE001 - an answer in another shape
                 return None
 
+        def load():
+            """Load the script under `_PLUGIN_NAME`, or under its path.
+
+            The two-argument form first, which is what keeps the name
+            independent of the directory the package sits in. A KWin that
+            does not take it leaves the one-argument form and the
+            path-as-name behaviour that came before -- worse, but not a
+            reason to refuse the session, and `plugin` then records what
+            the unloads must name.
+            """
+            try:
+                return kwin.call_sync(
+                    "loadScript",
+                    self._GLib.Variant("(ss)", (script_path, _PLUGIN_NAME)),
+                    self._Gio.DBusCallFlags.NONE,
+                    -1,
+                    None,
+                ).unpack()[0]
+            except Exception as refused:  # noqa: BLE001 - an older KWin
+                if not _is_missing_method(refused) and "signature" not in str(refused):
+                    raise
+                plugin[0] = script_path
+                return kwin.call_sync(
+                    "loadScript",
+                    self._GLib.Variant("(s)", (script_path,)),
+                    self._Gio.DBusCallFlags.NONE,
+                    -1,
+                    None,
+                ).unpack()[0]
+
+        # Both names: the constant this load will use, and the path an
+        # older version of this package would have left a copy under.
         self._sweep(unload, still_loaded)
+        if plugin[0] != script_path:
+            self._sweep(
+                functools.partial(unload, name=script_path),
+                functools.partial(still_loaded, name=script_path),
+            )
         try:
-            script_id = kwin.call_sync(
-                "loadScript",
-                self._GLib.Variant("(s)", (script_path,)),
-                self._Gio.DBusCallFlags.NONE,
-                -1,
-                None,
-            ).unpack()[0]
+            script_id = load()
+            if script_id == -1:
+                raise BackendUnavailable(
+                    f"KWin refused to load the window-events script: "
+                    f"{plugin[0]!r} is already taken, so a copy was "
+                    "registered under it between the sweep and the load"
+                )
             script = self._Gio.DBusProxy.new_for_bus_sync(
                 self._Gio.BusType.SESSION,
                 self._Gio.DBusProxyFlags.NONE,

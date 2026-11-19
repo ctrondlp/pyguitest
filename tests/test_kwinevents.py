@@ -271,6 +271,8 @@ class TestKWinEventsBackend(unittest.TestCase):
         mute_after=None,
         refusal="GDBus.Error:org.freedesktop.DBus.Error.UnknownMethod: no such method",
         named_load=True,
+        refuse_load=False,
+        path_copies=0,
     ):
         """Drive the real `_load_and_run_script` with faked D-Bus.
 
@@ -293,6 +295,10 @@ class TestKWinEventsBackend(unittest.TestCase):
         since that is the older-KWin case the fallback exists for.
         `named_load=False` is a KWin with no two-argument `loadScript`, so
         the caller has to name the script by its path instead.
+        `refuse_load=True` is KWin's duplicate check answering `-1`.
+        `path_copies` is how many copies are resident under the *path*
+        name, which is what a version of this package that named scripts by
+        their path would have left behind.
 
         Every call's `timeout_msec` is recorded alongside the method, so a
         test can see that the sweep bounded its own calls rather than
@@ -302,7 +308,7 @@ class TestKWinEventsBackend(unittest.TestCase):
         timeouts = []
         names = []
         kwin = mock.Mock()
-        resident = [copies]
+        resident = {"name": copies, "path": path_copies}
         asked = [0]
 
         def call_sync(
@@ -328,6 +334,11 @@ class TestKWinEventsBackend(unittest.TestCase):
                         "Message recipient disconnected before a reply arrived"
                     )
             if method == "loadScript":
+                if refuse_load:
+                    # KWin's duplicate check: the name is already taken.
+                    variant = mock.Mock()
+                    variant.unpack.return_value = (-1,)
+                    return variant
                 if signature == "(ss)" and not named_load:
                     # An older KWin: no two-argument form to call, so the
                     # caller has to fall back to naming it by its path.
@@ -338,12 +349,13 @@ class TestKWinEventsBackend(unittest.TestCase):
                 variant = mock.Mock()
                 variant.unpack.return_value = (42,)
                 return variant
+            which = "path" if values and str(values[0]).endswith(".js") else "name"
             if method == "isScriptLoaded":
-                return self._variant_answer(bool(resident[0]))
+                return self._variant_answer(bool(resident[which]))
             if method == "unloadScript":
-                removed = bool(resident[0]) and unloadable
+                removed = bool(resident[which]) and unloadable
                 if removed:
-                    resident[0] -= 1
+                    resident[which] -= 1
                 return self._variant_answer(removed)
             return mock.Mock()
 
@@ -445,14 +457,26 @@ class TestKWinEventsBackend(unittest.TestCase):
         gui._load_and_run_script()
         self.assertEqual(
             methods,
-            ["isScriptLoaded", "unloadScript", "isScriptLoaded", "loadScript", "run"],
+            [
+                "isScriptLoaded",
+                "unloadScript",
+                "isScriptLoaded",
+                "isScriptLoaded",
+                "loadScript",
+                "run",
+            ],
         )
 
     def test_a_clean_kwin_is_asked_once_and_not_unloaded(self):
         gui = self._backend()
         methods = self._script_harness(gui, fail_on=None)
         gui._load_and_run_script()
-        self.assertEqual(methods, ["isScriptLoaded", "loadScript", "run"])
+        # Two questions, not one: the constant plugin name this load uses,
+        # and the path a version that named scripts by their path would
+        # have left a copy under.
+        self.assertEqual(
+            methods, ["isScriptLoaded", "isScriptLoaded", "loadScript", "run"]
+        )
 
     def test_every_resident_copy_is_swept_not_only_the_first(self):
         """Two killed sessions leave two copies; one unload removes one.
@@ -561,6 +585,97 @@ class TestKWinEventsBackend(unittest.TestCase):
         ):
             self.assertFalse(kwinevents._is_missing_method(RuntimeError(other)), other)
 
+    def test_the_script_is_named_by_a_constant_not_by_its_path(self):
+        """The name KWin addresses the script by cannot be the directory.
+
+        Measured on Plasma 6: with `loadScript(path, pluginName)` the
+        script answers `isScriptLoaded` under the *name* and not under the
+        path -- so two installs of this package register one name between
+        them, and a sweep of it reaches a copy whichever directory it came
+        from. Named by the path instead, three probe trees of one afternoon
+        each left their own copy and every window event arrived twice.
+        """
+        from pyguitest.backends import kwinevents
+
+        gui = self._backend()
+        methods = self._script_harness(gui, fail_on=None, copies=1)
+        gui._load_and_run_script().close()
+        used = {
+            name
+            for method, name in zip(methods, self.sweep_names, strict=True)
+            if method == "loadScript"
+        }
+        self.assertEqual(used, {kwinevents._PLUGIN_NAME})
+        # And the unloads name the same thing -- the sweep of this
+        # install's own path aside, which is the upgrade case below.
+        unloaded = [
+            name
+            for method, name in zip(methods, self.sweep_names, strict=True)
+            if method == "unloadScript"
+        ]
+        self.assertIn(kwinevents._PLUGIN_NAME, unloaded)
+
+    def test_a_copy_left_under_the_old_path_name_is_swept_too(self):
+        """The upgrade case: a predecessor that named scripts by their path.
+
+        Such a copy is invisible to a sweep of the constant name, so the
+        path is swept as well -- this install's own path, which is what
+        that predecessor would have used.
+        """
+        from pyguitest.backends import kwinevents
+
+        gui = self._backend()
+        methods = self._script_harness(gui, fail_on=None, path_copies=1, copies=1)
+        gui._load_and_run_script()
+        asked = {
+            name
+            for method, name in zip(methods, self.sweep_names, strict=True)
+            if method in ("isScriptLoaded", "unloadScript")
+        }
+        # Both names, which is the point: the constant this load uses and
+        # the path a predecessor would have used. Either alone leaves a
+        # producer behind -- the constant misses the old copy, the path
+        # misses every copy from here on.
+        self.assertIn(kwinevents._PLUGIN_NAME, asked)
+        self.assertTrue(
+            any(str(name).endswith("_kwin_window_events.js") for name in asked),
+            asked,
+        )
+        self.assertIn("loadScript", methods)
+
+    def test_a_load_kwin_refuses_is_a_refusal_not_a_script_id(self):
+        """`-1` is KWin's duplicate check, not a script to address.
+
+        Measured: a second `loadScript` under a name already loaded answers
+        `-1`. Taken as an id, the proxy below would be built for
+        `/Scripting/Script-1` -- a path nothing sits at -- and the failure
+        would surface as "could not load/run" about the wrong thing.
+        """
+        from pyguitest.errors import BackendUnavailable
+
+        gui = self._backend()
+        methods = self._script_harness(gui, fail_on=None, refuse_load=True)
+        with self.assertRaises(BackendUnavailable) as refusal:
+            gui._load_and_run_script()
+        self.assertIn("already taken", str(refusal.exception))
+        self.assertNotIn("run", methods)
+
+    def test_a_kwin_without_the_two_argument_load_falls_back_to_the_path(self):
+        """An older KWin keeps working, with the behaviour it always had.
+
+        No two-argument `loadScript` to call, so the script is named by its
+        path -- and the unloads have to name the same thing, or the closer
+        would leave it resident.
+        """
+        gui = self._backend()
+        methods = self._script_harness(gui, fail_on=None, named_load=False)
+        gui._load_and_run_script().close()
+        self.assertEqual(methods[-1], "unloadScript")
+        self.assertTrue(
+            str(self.sweep_names[-1]).endswith("_kwin_window_events.js"),
+            self.sweep_names[-1],
+        )
+
     def test_a_query_that_times_out_is_not_read_as_a_missing_method(self):
         """A timeout is an open question, not a desktop that cannot answer.
 
@@ -603,8 +718,18 @@ class TestKWinEventsBackend(unittest.TestCase):
         gui = self._backend()
         methods = self._script_harness(gui, fail_on="isScriptLoaded")
         gui._load_and_run_script()
+        # One best-effort unload per name swept -- the constant and the
+        # path -- since neither can be checked on such a KWin.
         self.assertEqual(
-            methods, ["isScriptLoaded", "unloadScript", "loadScript", "run"]
+            methods,
+            [
+                "isScriptLoaded",
+                "unloadScript",
+                "isScriptLoaded",
+                "unloadScript",
+                "loadScript",
+                "run",
+            ],
         )
 
     def test_closing_unloads_the_script_it_ran(self):

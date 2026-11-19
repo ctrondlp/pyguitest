@@ -51,6 +51,22 @@ All notable changes to pyguitest are recorded here. The format follows
   returned. The context is kept at hosting time and both the loop and the
   timeout run on it. A backend hosting nothing uses the default context, as
   it always did.
+- **The KWin script is registered under a constant name, not under its
+  own path.** `loadScript(path)` makes the plugin name the file's path, and
+  every unload names that — so two installs of this package, or one harness
+  deploying it to two directories, registered two names and neither one's
+  sweep could see the other's copy: measured on a KDE box, two copies left
+  from earlier deployments whose files were already deleted, with every
+  window event arriving twice. The two-argument
+  `loadScript(path, pluginName)` is used instead, and on Plasma 6 that
+  closes the problem at the root rather than merely making it detectable:
+  `isScriptLoaded` answers about the name, and a **second load under a name
+  already loaded is refused with `-1`**, so two copies of this script cannot
+  coexist at all. A load that answers `-1` is now a refusal naming the
+  taken name rather than a script id nobody can address. The path is swept
+  alongside the name for the upgrade case — a copy left by a version that
+  named scripts by their path — and a KWin with no two-argument form falls
+  back to the old spelling.
 - **A sweep query that times out is no longer read as "no such method".**
   Both came back as a failed call, so either was taken for "nothing can be
   checked on this KWin" and the load went ahead — and since the sweep now

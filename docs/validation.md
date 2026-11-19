@@ -5822,17 +5822,42 @@ Timeout was reached (24)`. The first classifies as "no such method" and keeps
 the single best-effort unload; the second does not, and is retried for the
 sweep's budget before refusing. Both strings are pinned in the tests.
 
-What this does **not** cover is therefore written into the sweep's own
-docstring rather than left to be rediscovered: one install on a desktop has
-one path and is swept completely, while two installs -- or a harness
-deploying the package twice -- register two plugin names and neither sweep
-sees the other's copy. KWin's two-argument `loadScript(path, pluginName)`
-would close it by giving every session one constant name, and that change is
-written but not landed: it alters how every KDE session registers its script,
-including what KWin's own duplicate check then compares, which wants a live
-KWin behind it rather than unit tests. The box this would be measured on was
-at its login greeter when the round finished (my own fault -- a cleanup
-pattern of `kwin_` matched `kwin_wayland`), so it waits.
+**And the name is now a constant, measured before it was trusted.** The gap
+above is a property of naming a script by its path, which is what the
+one-argument `loadScript(path)` does. KWin's two-argument
+`loadScript(path, pluginName)` takes a name instead, and the four things that
+decide whether that is safe were asked of Plasma 6 directly:
+
+| question | answer |
+|---|---|
+| does the two-argument form load? | yes, script id `0` |
+| what does `isScriptLoaded` answer about? | the **name** (True); the path answers False |
+| a second load under a name already loaded | **`-1`** -- KWin's duplicate check refuses it |
+| another path under the same name | `-1` as well |
+| one `unloadScript(name)` | clears it |
+
+The third row is the one that changes the story: under a constant name a
+second copy cannot be registered at all, so the duplication this sweep was
+built to prevent is impossible for a session that got as far as loading --
+confirmed end to end, with a service hosted and a second copy attempted
+while it ran: refused with `-1`, and one event per window change throughout.
+The `-1` is also why the load now checks for it rather than building a proxy
+for `/Scripting/Script-1`, a path nothing sits at.
+
+Three end-to-end runs on the live session, each with its own dialog: plain;
+with a predecessor's copy planted under the **path** name, which is what a
+version of this package that named scripts by their path would have left and
+what a sweep of the constant alone cannot see (so both names are swept); and
+with a copy planted under the **constant** name, the ordinary
+SIGKILLed-session case. One event per change in all three, and nothing left
+loaded under either name after each.
+
+The rest of the round's KWin work was re-driven on the same session and
+holds: the ownership wait owns the name in 0.00s with and without a pushed
+thread-default context, refuses a second instance in 0.00s ("it answered that
+org.pyguitest.KWinEvents is taken"), ends at 5.01s on a bus that never
+answers ("the session bus did not answer the request within 5.0s"), and
+`window_events` dispatches inside a pushed context.
 
 **macOS (Sequoia 15.8.1), the join and the activation.** One TextEdit run,
 twenty-three checks, and two of them are the round's own:
