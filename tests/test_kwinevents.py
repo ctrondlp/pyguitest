@@ -262,7 +262,16 @@ class TestKWinEventsBackend(unittest.TestCase):
             sources[0].destroyed, "the deadline outlived the wait it was bounding"
         )
 
-    def _script_harness(self, gui, fail_on, copies=0, unloadable=True, mute_after=None):
+    def _script_harness(
+        self,
+        gui,
+        fail_on,
+        copies=0,
+        unloadable=True,
+        mute_after=None,
+        refusal="GDBus.Error:org.freedesktop.DBus.Error.UnknownMethod: no such method",
+        named_load=True,
+    ):
         """Drive the real `_load_and_run_script` with faked D-Bus.
 
         The test above replaces the whole helper, so it cannot see what
@@ -278,7 +287,12 @@ class TestKWinEventsBackend(unittest.TestCase):
         the case the sweep has to refuse rather than load on top of.
         `mute_after` is a KWin that answers `isScriptLoaded` that many
         times and then stops -- the case where clearance is never
-        established rather than denied.
+        established rather than denied. `refusal` is the text a refused
+        call comes back with, which is how a method that is *not there*
+        is told from one that timed out: an `UnknownMethod` by default,
+        since that is the older-KWin case the fallback exists for.
+        `named_load=False` is a KWin with no two-argument `loadScript`, so
+        the caller has to name the script by its path instead.
 
         Every call's `timeout_msec` is recorded alongside the method, so a
         test can see that the sweep bounded its own calls rather than
@@ -286,24 +300,41 @@ class TestKWinEventsBackend(unittest.TestCase):
         """
         methods = []
         timeouts = []
+        names = []
         kwin = mock.Mock()
         resident = [copies]
         asked = [0]
 
         def call_sync(
-            method, _params=None, _flags=None, timeout_ms=-1, _cancellable=None
+            method, params=None, _flags=None, timeout_ms=-1, _cancellable=None
         ):
             methods.append(method)
             timeouts.append(timeout_ms)
+            # `params` is what the fake `Variant` below produced: the
+            # signature and the values, so the fake can see whether the
+            # caller asked for the two-argument `loadScript` and what name
+            # it is addressing a script by.
+            signature, values = params if isinstance(params, tuple) else ("()", ())
+            names.append(values[-1] if values else None)
             # The refusal is checked first, so `fail_on="loadScript"` really
             # fails the load rather than being answered by the branch below.
             if method == fail_on:
-                raise RuntimeError(f"KWin refused {method}")
+                raise RuntimeError(f"KWin refused {method}: {refusal}")
             if method == "isScriptLoaded":
                 asked[0] += 1
                 if mute_after is not None and asked[0] > mute_after:
-                    raise RuntimeError("KWin stopped answering isScriptLoaded")
+                    raise RuntimeError(
+                        "GDBus.Error:org.freedesktop.DBus.Error.NoReply: "
+                        "Message recipient disconnected before a reply arrived"
+                    )
             if method == "loadScript":
+                if signature == "(ss)" and not named_load:
+                    # An older KWin: no two-argument form to call, so the
+                    # caller has to fall back to naming it by its path.
+                    raise RuntimeError(
+                        "GDBus.Error:org.freedesktop.DBus.Error.UnknownMethod: "
+                        "No such method 'loadScript' with signature '(ss)'"
+                    )
                 variant = mock.Mock()
                 variant.unpack.return_value = (42,)
                 return variant
@@ -330,7 +361,9 @@ class TestKWinEventsBackend(unittest.TestCase):
             gio.DBusProxy.new_for_bus_sync.side_effect = [kwin, script]
         gui._Gio = gio
         gui._GLib = mock.Mock()
+        gui._GLib.Variant.side_effect = lambda signature, values: (signature, values)
         self.sweep_timeouts = timeouts
+        self.sweep_names = names
         return methods
 
     @staticmethod
@@ -502,6 +535,63 @@ class TestKWinEventsBackend(unittest.TestCase):
         for timeout in swept:
             self.assertLessEqual(timeout, budget)
             self.assertGreaterEqual(timeout, kwinevents._SWEEP_MIN_CALL_MS)
+
+    def test_the_two_refusals_are_told_apart_by_what_gio_really_says(self):
+        """Pinned to the text Gio produces, measured on a real session bus.
+
+        A method a service does not have comes back as
+        `g-dbus-error-quark: GDBus.Error:org.freedesktop.DBus.Error.UnknownMethod`,
+        and a call that ran out of time as `g-io-error-quark: Timeout was
+        reached` -- neither of which carries a code this module could read
+        without importing GLib, which is the one dependency it may not
+        have. So the name is matched in the message, and these are the
+        messages.
+        """
+        from pyguitest.backends import kwinevents
+
+        missing = (
+            "Error: g-dbus-error-quark: GDBus.Error:"
+            "org.freedesktop.DBus.Error.UnknownMethod: Invalid method call (19)"
+        )
+        self.assertTrue(kwinevents._is_missing_method(RuntimeError(missing)))
+        for other in (
+            "Error: g-io-error-quark: Timeout was reached (24)",
+            "GDBus.Error:org.freedesktop.DBus.Error.NoReply: no reply",
+            "GDBus.Error:org.freedesktop.DBus.Error.AccessDenied: refused",
+        ):
+            self.assertFalse(kwinevents._is_missing_method(RuntimeError(other)), other)
+
+    def test_a_query_that_times_out_is_not_read_as_a_missing_method(self):
+        """A timeout is an open question, not a desktop that cannot answer.
+
+        The two came back the same way -- a failed call -- and the sweep
+        read either as "nothing can be checked here", so it fell straight
+        through to the single unload and loaded another producer. Since the
+        sweep now bounds its own calls, a timeout is the likelier of the
+        two. `UnknownMethod` keeps the fallback (the test below); a
+        `NoReply` is retried for the budget and then refuses.
+        """
+        from pyguitest.backends import kwinevents
+        from pyguitest.errors import BackendUnavailable
+
+        gui = self._backend()
+        methods = self._script_harness(
+            gui,
+            fail_on="isScriptLoaded",
+            copies=1,
+            refusal=(
+                "GDBus.Error:org.freedesktop.DBus.Error.NoReply: "
+                "Message did not receive a reply"
+            ),
+        )
+        with (
+            mock.patch.object(kwinevents, "_SWEEP_TIMEOUT", 0.05),
+            mock.patch.object(kwinevents, "_SWEEP_POLL", 0.01),
+            self.assertRaises(BackendUnavailable) as refusal,
+        ):
+            gui._load_and_run_script()
+        self.assertIn("did not answer", str(refusal.exception))
+        self.assertNotIn("loadScript", methods)
 
     def test_a_kwin_that_will_not_say_gets_the_single_best_effort_unload(self):
         """`isScriptLoaded` missing is not a reason to refuse a session.

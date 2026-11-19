@@ -51,6 +51,14 @@ All notable changes to pyguitest are recorded here. The format follows
   returned. The context is kept at hosting time and both the loop and the
   timeout run on it. A backend hosting nothing uses the default context, as
   it always did.
+- **A sweep query that times out is no longer read as "no such method".**
+  Both came back as a failed call, so either was taken for "nothing can be
+  checked on this KWin" and the load went ahead — and since the sweep now
+  bounds its own calls, a timeout is the likelier of the two. An
+  `UnknownMethod` still keeps the single best-effort unload (an older KWin
+  has nothing to ask); a call that timed out or was refused is retried for
+  the sweep's budget and then refuses, because the question of whether a
+  copy is resident was never answered.
 - **A sweep that cannot confirm clearance refuses instead of loading.** The
   pre-load sweep asks KWin whether a copy of the script is still resident,
   and a query that *fails* answers "cannot say". Taken as "nothing left"

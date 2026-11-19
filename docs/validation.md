@@ -5810,6 +5810,30 @@ earlier measurement had it. Worth knowing twice over: it is the duplication
 the sweep exists to prevent, reproduced by accident, and it is a trap for
 any deployment that unloads by path.
 
+**The two refusals, measured on a real session bus.** A sweep query that
+cannot be answered is not the same as one there is no method for, and this
+module cannot read a GLib error *code* -- PyGObject is the dependency it may
+be missing -- so it matches the error name in the text. What Gio actually
+produces, driven here against the development box's own bus: a method the
+service does not have is `g-dbus-error-quark: GDBus.Error:org.freedesktop.
+DBus.Error.UnknownMethod: Invalid method call (19)`, and a call that ran out
+of its 200ms budget against a deliberately slow service is `g-io-error-quark:
+Timeout was reached (24)`. The first classifies as "no such method" and keeps
+the single best-effort unload; the second does not, and is retried for the
+sweep's budget before refusing. Both strings are pinned in the tests.
+
+What this does **not** cover is therefore written into the sweep's own
+docstring rather than left to be rediscovered: one install on a desktop has
+one path and is swept completely, while two installs -- or a harness
+deploying the package twice -- register two plugin names and neither sweep
+sees the other's copy. KWin's two-argument `loadScript(path, pluginName)`
+would close it by giving every session one constant name, and that change is
+written but not landed: it alters how every KDE session registers its script,
+including what KWin's own duplicate check then compares, which wants a live
+KWin behind it rather than unit tests. The box this would be measured on was
+at its login greeter when the round finished (my own fault -- a cleanup
+pattern of `kwin_` matched `kwin_wayland`), so it waits.
+
 **macOS (Sequoia 15.8.1), the join and the activation.** One TextEdit run,
 twenty-three checks, and two of them are the round's own:
 

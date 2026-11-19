@@ -95,6 +95,33 @@ session -- into a guaranteed "cannot say". A tenth of a second is enough for
 a KWin that is answering at all."""
 
 
+_UNSUPPORTED = object()
+"""The answer "there is no such method to call", as distinct from no answer.
+
+D-Bus reports a method a service does not have as `UnknownMethod` (or
+`UnknownInterface`), which is a fact about the service: no retry invents it,
+so a sweep that cannot ask whether a script is loaded falls back to the
+single best-effort unload. A call that *timed out* or was refused is the
+other thing entirely -- the question is still open -- and the two were one
+answer until a timeout became likely enough to matter (see
+`_sweep`)."""
+
+_MISSING_METHOD = ("unknownmethod", "unknowninterface", "unknownobject", "notsupported")
+"""The D-Bus error names that mean "no such method here".
+
+Matched on the text because Gio raises these as a `GLib.Error` whose domain
+and code depend on how the error came back (an error *name* on the wire, a
+local `G_DBUS_ERROR` otherwise), while the name itself is in the message
+either way -- and this file cannot import GLib at module scope, since
+PyGObject is exactly what it may not have."""
+
+
+def _is_missing_method(refusal):
+    """Whether a failed call means the method is not there to call."""
+    text = f"{type(refusal).__name__}: {refusal}".lower()
+    return any(name in text for name in _MISSING_METHOD)
+
+
 def _gio():
     """Import Gio (and GLib, for Variant construction), or return None.
 
@@ -311,14 +338,22 @@ class KWinEventsBackend(GUIBackend):
         twice, and a refusal naming the leftover is something a caller can
         act on (restart KWin's scripting, or the session).
 
-        `still_loaded` answering None on the *first* question -- a KWin
-        that will not take `isScriptLoaded` at all -- is not "nothing
-        left": one unload is issued and the load proceeds, which is
-        exactly what this did before the loop existed. A None *after* a
-        copy has been seen is a different answer and refuses: the question
-        that mattered went unanswered, so clearance was never established,
-        and loading on top of what may still be there is the duplication
-        this exists to prevent.
+        Three answers, not two, and the third is split. `_UNSUPPORTED` is
+        a KWin that does not have `isScriptLoaded` at all: nothing here can
+        be checked on such a desktop, so it gets the single best-effort
+        unload this did before the loop existed, and the load proceeds.
+        None is a question that was *asked* and not answered -- a call that
+        timed out, a KWin that refused it -- which says nothing about
+        whether a copy is resident; it is retried for as long as the budget
+        lasts and refuses if it never clears. The two used to be one
+        answer, and since the calls are now bounded by the sweep's own
+        budget, a timeout is the more likely of them: read as "no such
+        method" it skipped straight to loading another producer.
+
+        A None *after* a copy has been seen refuses for the same reason:
+        the question that mattered went unanswered, so clearance was never
+        established, and loading on top of what may still be there is the
+        duplication this exists to prevent.
 
         Both calls are bounded by the sweep's own budget rather than by the
         proxy's default (25s): the deadline is taken before the first
@@ -333,22 +368,22 @@ class KWinEventsBackend(GUIBackend):
             return max(_SWEEP_MIN_CALL_MS, int((deadline - time.monotonic()) * 1000))
 
         loaded = still_loaded(budget())
-        if loaded is None:
+        if loaded is _UNSUPPORTED:
             unload(budget())
             return
-        while loaded and time.monotonic() < deadline:
+        while loaded is not False and time.monotonic() < deadline:
             unload(budget())
             # Asked after a pause, not straight away: the removal KWin
             # schedules only takes effect once its own loop runs, so an
             # immediate re-read answers True about a script already going.
             time.sleep(_SWEEP_POLL)
             loaded = still_loaded(budget())
-        if loaded or loaded is None:
+        if loaded is not False:
             why = (
                 "is still loaded"
                 if loaded
-                else "may still be loaded -- KWin stopped answering "
-                "isScriptLoaded partway through"
+                else "may still be loaded -- KWin did not answer "
+                "isScriptLoaded within the sweep's budget"
             )
             raise BackendUnavailable(
                 f"a copy of the window-events KWin script {why} "
@@ -373,6 +408,23 @@ class KWinEventsBackend(GUIBackend):
         returns False -- when none is loaded under it. That makes the unload
         safe to issue without knowing whether a load took, which both uses
         below depend on.
+
+        **What that name does not cover**, stated rather than left to be
+        discovered: it is the *deployment path*, so two installs of this
+        package -- or one test harness that deploys it to two directories --
+        register two different plugin names, and a sweep of either cannot
+        see a copy loaded under the other. Measured by accident on a KDE
+        box: three probe trees of one afternoon each left a copy of their
+        own, two of them outlived their files (KWin keeps the compiled
+        script), and every window event arrived twice until each name was
+        unloaded by hand. One install on a desktop has one path and is not
+        affected. The fix is KWin's **two**-argument
+        `loadScript(path, pluginName)`, which would let every session
+        register the same constant name and make the sweep reach any copy
+        whatever directory it came from; it is not done here because it
+        changes how every KDE session registers its script -- including
+        what KWin's own duplicate check then compares -- and that is not
+        something to land on unit tests alone. See `docs/validation.md`.
 
         KWin registers the script *before* replying with its id
         (`scripts.append(script); return id;`), so a `loadScript` that
@@ -441,9 +493,13 @@ class KWinEventsBackend(GUIBackend):
         def still_loaded(timeout_ms=-1):
             """Whether KWin still has a script under this plugin name.
 
-            None where it will not say: the method is missing, the call
-            failed, the budget ran out. That is not False, and the sweep
-            treats it as "cannot check" rather than as "nothing left".
+            `_UNSUPPORTED` where the method is not there to call -- D-Bus
+            answers that as `UnknownMethod`/`UnknownInterface`, and no
+            retry invents it. None where the call was made and produced no
+            usable answer: it timed out, KWin refused it, the reply came
+            back in another shape. Neither is False, and the sweep treats
+            the two differently (see `_sweep`): the first is a desktop that
+            cannot be checked, the second a question still open.
             """
             try:
                 answer = kwin.call_sync(
@@ -453,8 +509,8 @@ class KWinEventsBackend(GUIBackend):
                     timeout_ms,
                     None,
                 )
-            except Exception:  # noqa: BLE001 - a KWin that will not say
-                return None
+            except Exception as refusal:  # noqa: BLE001 - a KWin that will not say
+                return _UNSUPPORTED if _is_missing_method(refusal) else None
             try:
                 return bool(answer.unpack()[0])
             except Exception:  # noqa: BLE001 - an answer in another shape
