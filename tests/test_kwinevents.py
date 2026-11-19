@@ -93,6 +93,74 @@ class TestKWinEventsBackend(unittest.TestCase):
         claimed["gio"].bus_unown_name.assert_called_once_with(7)
         claimed["connection"].unregister_object.assert_called_once_with(3)
 
+    def _ownership_harness(self, gui, verdicts):
+        """Drive the real `_host_service` with a faked `bus_own_name`.
+
+        Gio's real ordering, one callback per main-context iteration:
+        `bus_acquired` first, as soon as the connection is up, and only
+        afterwards the outcome of `RequestName` -- `name_acquired`, or
+        `name_lost` for a name another connection holds. `verdicts` is what
+        follows `bus_acquired`, so an empty list models an answer that has
+        not come yet.
+        """
+        pending = []
+
+        def bus_own_name(_bus, _name, _flags, on_bus, on_name, on_lost):
+            connection = mock.Mock()
+            connection.register_object.return_value = 3
+            pending.append(lambda: on_bus(connection, _name))
+            for verdict in verdicts:
+                handler = on_name if verdict else on_lost
+                pending.append(lambda handler=handler: handler(connection, _name))
+            return 7
+
+        def iteration(_may_block):
+            if pending:
+                pending.pop(0)()
+            return bool(pending)
+
+        gui._Gio = mock.Mock()
+        gui._Gio.DBusNodeInfo.new_for_xml.return_value.interfaces = [mock.Mock()]
+        gui._Gio.bus_own_name.side_effect = bus_own_name
+        gui._GLib = mock.Mock()
+        gui._GLib.MainContext.default.return_value.iteration.side_effect = iteration
+
+    def test_hosting_waits_for_the_name_not_the_bus(self):
+        # `bus_acquired` fires before `RequestName` is even sent, so it says
+        # nothing about ownership; a name another session already holds is
+        # answered `name_lost` an iteration later. Returning on the first
+        # callback let a second process come up believing it owned the name
+        # -- and sweep the live session's KWin script out from under it.
+        from pyguitest.errors import BackendUnavailable
+
+        gui = self._backend()
+        self._ownership_harness(gui, verdicts=[False])
+        with self.assertRaises(BackendUnavailable):
+            gui._host_service()
+        # The object was still exported on the connection first in hand;
+        # close() is what releases it, as the constructor's cleanup does.
+        self.assertEqual(gui._registration_id, 3)
+
+    def test_hosting_returns_once_the_name_is_acquired(self):
+        gui = self._backend()
+        self._ownership_harness(gui, verdicts=[True])
+        gui._host_service()
+        self.assertEqual(gui._own_name_id, 7)
+        self.assertEqual(gui._registration_id, 3)
+
+    def test_hosting_does_not_take_a_pending_answer_for_ownership(self):
+        # No verdict at all within the wait: not owned, not "probably ours".
+        from pyguitest.backends import kwinevents
+        from pyguitest.errors import BackendUnavailable
+
+        gui = self._backend()
+        self._ownership_harness(gui, verdicts=[])
+        with (
+            mock.patch.object(kwinevents, "_OWN_NAME_TIMEOUT", 0.05),
+            self.assertRaises(BackendUnavailable),
+        ):
+            gui._host_service()
+
     def _script_harness(self, gui, fail_on):
         """Drive the real `_load_and_run_script` with faked D-Bus.
 

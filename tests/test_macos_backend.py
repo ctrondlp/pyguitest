@@ -19,7 +19,6 @@ import os
 import re
 import sys
 import tempfile
-import time
 import types
 import unittest
 from unittest import mock
@@ -365,6 +364,27 @@ def point(x, y):
 def size(width, height):
     """An `AXValue`-shaped size, which is what an AX window publishes."""
     return FakeValue(types.SimpleNamespace(width=float(width), height=float(height)))
+
+
+class _Clock:
+    """A `time` stand-in whose `sleep` is the only thing that moves it.
+
+    The lag tests used to measure the backend's wait on the real clock, and a
+    runner paused for a few tens of milliseconds between two steps -- a
+    loaded CI machine -- could push the simulated report ahead of the write,
+    or the elapsed time past an upper bound, with the backend doing nothing
+    wrong. Here `monotonic` answers only what `sleep` has added, so a test
+    reads how long the backend *chose* to wait and nothing about scheduling.
+    """
+
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
 
 
 class BackendTestCase(unittest.TestCase):
@@ -862,6 +882,72 @@ class TestTheWindowJoin(BackendTestCase):
         self.assertEqual(titles[256], "live_doc.txt")
         self.assertEqual(titles[48], "pyguitest - caffeinate")
 
+    def _stack_doc3_on_doc4(self, *, names=False):
+        """TextEdit's doc3 moved onto doc4, on both sides of the join.
+
+        The live measurement: two documents on one rectangle, the front one
+        (268) listed first by the server and enumerated first by AX, so the
+        last-wins map named 268 after the rear one. `names` gives the two
+        entries the `kCGWindowName` a Screen Recording grant would.
+        """
+        onscreen = self.onscreen_windows()
+        onscreen[2] = window(
+            265, 2829, "TextEdit", (205, 145, 673, 439), name="doc3" if names else None
+        )
+        if names:
+            onscreen[1] = window(
+                268, 2829, "TextEdit", (205, 145, 673, 439), name="doc4"
+            )
+        applications = self.applications()
+        doc3 = applications[2829].windows[1]
+        doc3.attrs["kAXPositionAttribute"] = point(205, 145)
+        return self.make(onscreen=onscreen, applications=applications)
+
+    def test_two_windows_on_one_rectangle_get_no_title_rather_than_the_wrong_one(self):
+        # Measured on Sequoia 15.8 with two TextEdit documents moved onto each other:
+        # `active_window()` answered the front one's handle under the *rear* one's
+        # title, because the map was keyed by rectangle and the last AX window
+        # enumerated named both. Nothing in the join can tell which title is whose,
+        # so neither gets one -- the same ambiguity `_ax_window_match` refuses to
+        # write through -- and the windows that are alone on their rectangles keep
+        # theirs.
+        backend = self._stack_doc3_on_doc4()
+        titles = {w.handle: w.title for w in backend.windows()}
+        self.assertEqual(titles[268], "")
+        self.assertEqual(titles[265], "")
+        self.assertEqual(titles[263], "live_doc2.txt")
+        self.assertEqual(titles[256], "live_doc.txt")
+        self.assertEqual(backend.active_window().handle, 48, "handles stay right")
+
+    def test_a_shared_rectangle_falls_back_to_the_per_window_coregraphics_name(self):
+        # With the Screen Recording grant, CoreGraphics names each entry itself, and
+        # that name is keyed by window number rather than by rectangle -- so it is
+        # the one source that *can* tell the two apart, and it is what the join
+        # answers once AX cannot.
+        backend = self._stack_doc3_on_doc4(names=True)
+        titles = {w.handle: w.title for w in backend.windows()}
+        self.assertEqual(titles[268], "doc4")
+        self.assertEqual(titles[265], "doc3")
+
+    def test_an_untitled_window_on_the_rectangle_is_still_a_second_window(self):
+        # A panel sized to its parent is the other shape the write side names, and
+        # it has no title to clash with -- but it is still a second AX window the
+        # rectangle cannot tell from the first, so the first's title cannot be
+        # trusted to be the one behind this handle either.
+        applications = self.applications()
+        applications[690].windows.append(
+            FakeElement(
+                role="AXWindow",
+                attrs={
+                    "kAXTitleAttribute": None,
+                    "kAXPositionAttribute": point(153, 79),
+                    "kAXSizeAttribute": size(877, 499),
+                },
+            )
+        )
+        backend = self.make(onscreen=self.onscreen_windows(), applications=applications)
+        self.assertEqual({w.handle: w.title for w in backend.windows()}[48], "")
+
     def test_a_malformed_ax_window_list_degrades_rather_than_mismatches(self):
         # Measured: Finder answers `kAXWindowsAttribute` with an `AXScrollArea` rather
         # than with its windows, and that element's rect matches nothing on screen. A
@@ -1029,20 +1115,38 @@ class TestWindowWrites(BackendTestCase):
         self.backend.resize_window(self.terminal, 800, 600)
         self.assertEqual(self.node.written[-1][0], "kAXSizeAttribute")
 
+    def _controlled_clock(self):
+        """Run the backend's waits on a `_Clock`, and hand the clock back."""
+        clock = _Clock()
+        patcher = mock.patch.object(macos, "time", clock)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return clock
+
     def _window_server_lags(self, handle, bounds, by=0.03):
-        """Report `bounds` for `handle` only `by` seconds from now.
+        """Report `bounds` for `handle` only `by` seconds after AX takes a write.
 
         The way the live window server trails an AX write. Measured on
         Sequoia 15.8: AX reads a written frame back at once, and
         CoreGraphics agrees 10-49ms later -- the lag here sits inside that
         band. Enumerations before then answer the old rectangle, exactly as
-        they did live.
+        they did live. The lag starts when the fake accepts the write, not
+        when the test set it up, and runs on the controlled clock, which is
+        returned so a test can read what the backend waited.
         """
-        real = self.quartz.CGWindowListCopyWindowInfo
-        reports_at = time.monotonic() + by
+        clock = self._controlled_clock()
+        real_enumerate = self.quartz.CGWindowListCopyWindowInfo
+        real_set = self.ax.AXUIElementSetAttributeValue
+        reports_at = [None]
+
+        def set_(element, attribute, value):
+            err = real_set(element, attribute, value)
+            if not err and reports_at[0] is None:
+                reports_at[0] = clock.now + by
+            return err
 
         def enumerate_(options, window):
-            if time.monotonic() >= reports_at:
+            if reports_at[0] is not None and clock.now >= reports_at[0]:
                 for entry in self.quartz.onscreen + self.quartz.everything:
                     if entry["kCGWindowNumber"] == handle:
                         x, y, w, h = bounds
@@ -1054,9 +1158,11 @@ class TestWindowWrites(BackendTestCase):
                                 "Height": float(h),
                             }
                         )
-            return real(options, window)
+            return real_enumerate(options, window)
 
+        self.ax.AXUIElementSetAttributeValue = set_
         self.quartz.CGWindowListCopyWindowInfo = enumerate_
+        return clock
 
     def test_a_write_waits_for_the_window_server_to_report_it(self):
         # Measured on Sequoia 15.8, ten alternating moves of a TextEdit window:
@@ -1066,14 +1172,39 @@ class TestWindowWrites(BackendTestCase):
         # is what makes `geometry()` straight after a move answer the move.
         self.backend._WRITE_SETTLE = 1.0
         self.backend._WRITE_POLL = 0.001
-        self._window_server_lags(48, (200, 120, 877, 499))
-        started = time.monotonic()
+        clock = self._window_server_lags(48, (200, 120, 877, 499))
         self.backend.move_window(self.terminal, 200, 120)
-        elapsed = time.monotonic() - started
         self.assertEqual(self.backend.geometry(self.terminal)[:2], (200, 120))
         # It waited for the report, and stopped there rather than at the bound.
-        self.assertGreaterEqual(elapsed, 0.03)
-        self.assertLess(elapsed, 0.5)
+        self.assertGreaterEqual(clock.now, 0.03)
+        self.assertLess(clock.now, 0.05)
+
+    def test_a_move_of_a_point_waits_for_the_server_like_any_other(self):
+        # `_close` lets the join survive a rounding step between the two
+        # sides, and that same tolerance let the *old* rectangle pass for the
+        # new one when the move was that small: (153, 79) to (154, 79) is
+        # within it, so the server's stale report "agreed" with AX on the
+        # first look and the wait returned with the server still behind --
+        # `geometry()` straight after the move answered 153. The wait now
+        # holds until the server reports something other than what it
+        # reported before the write.
+        self.backend._WRITE_SETTLE = 1.0
+        self.backend._WRITE_POLL = 0.001
+        clock = self._window_server_lags(48, (154, 79, 877, 499))
+        self.backend.move_window(self.terminal, 154, 79)
+        self.assertEqual(self.backend.geometry(self.terminal)[:2], (154, 79))
+        self.assertGreaterEqual(clock.now, 0.03)
+        self.assertLess(clock.now, 0.05)
+
+    def test_a_write_that_changes_nothing_does_not_wait(self):
+        # The exception the rule above needs: a move to where the window
+        # already is leaves the server nothing to report, and waiting the
+        # whole bound for it would turn every no-op into half a second.
+        self.backend._WRITE_SETTLE = 1.0
+        clock = self._controlled_clock()
+        self.backend.move_window(self.terminal, 153, 79)
+        self.assertEqual(self.node.written[-1][0], "kAXPositionAttribute")
+        self.assertEqual(clock.now, 0.0)
 
     def test_a_resize_straight_after_a_move_finds_the_window(self):
         # The live failure that found the gap: `move_window` then
@@ -1093,12 +1224,12 @@ class TestWindowWrites(BackendTestCase):
         # control back, and the caches are dropped so the next read is fresh.
         self.backend._WRITE_SETTLE = 0.05
         self.backend._WRITE_POLL = 0.001
+        clock = self._controlled_clock()
         self.backend.windows()
-        started = time.monotonic()
         self.backend.move_window(self.terminal, 200, 120)
-        elapsed = time.monotonic() - started
-        self.assertGreaterEqual(elapsed, 0.05)
-        self.assertLess(elapsed, 1.0)
+        # Right up to the bound, and one poll at most past it.
+        self.assertGreaterEqual(clock.now, 0.05)
+        self.assertLess(clock.now, 0.052)
         self.assertEqual(self.node.written[-1][0], "kAXPositionAttribute")
         self.assertIsNone(self.backend._cache_onscreen)
         self.assertIsNone(self.backend._cache_all)
@@ -1549,6 +1680,57 @@ class TestWindowWrites(BackendTestCase):
         backend = self.make(trusted=False, onscreen=self.onscreen_windows())
         with mock.patch.dict(sys.modules, {"AppKit": self._appkit_that_activates()}):
             backend.activate_window(macos.Window(268, backend, pid=2829))
+
+    def test_a_stale_rectangle_cannot_aim_a_raise_at_a_neighbour(self):
+        """The activation re-reads the join like every other write does.
+
+        The same swap as the minimize test above: doc4 listed at (205, 145),
+        then doc4 and doc3 trade places. Matched against the cached listing,
+        the handle for doc4 resolves to the AX window now at (205, 145) --
+        doc3 -- and `AXRaise` brings the wrong document forward; worse, the
+        raise having "worked" skips the front-window check that would have
+        caught the sibling coming forward. Re-read first, the raise reaches
+        doc4.
+        """
+        doc4 = [w for w in self.backend.windows() if w.handle == 268][0]
+        doc4_node, doc3_node = self.ax.applications[2829].windows[:2]
+        doc4_node.actions.append("AXRaise")
+        doc3_node.actions.append("AXRaise")
+        self.quartz.onscreen[1] = window(268, 2829, "TextEdit", (600, 400, 673, 439))
+        self.quartz.onscreen[2] = window(265, 2829, "TextEdit", (205, 145, 673, 439))
+        doc4_node.attrs["kAXPositionAttribute"] = point(600, 400)
+        doc3_node.attrs["kAXPositionAttribute"] = point(205, 145)
+        with mock.patch.dict(sys.modules, {"AppKit": self._appkit_that_activates()}):
+            self.backend.activate_window(doc4)
+        self.assertEqual(doc4_node.performed, ["AXRaise"])
+        self.assertEqual(doc3_node.performed, [], "raised the neighbour")
+
+    def test_a_raise_ax_refused_is_this_attempts_failure_not_the_windows(self):
+        """An aimed raise AX would not complete leaves `focus_window` its retries.
+
+        The raise reaches doc3 -- the right window, matched by its own
+        rectangle -- and AX answers `-25204`, the application being busy;
+        AppKit then brings TextEdit forward with 268 still on top. Before the
+        front-window check existed that returned, and `focus_window` retried
+        on its own focus read; refusing with `CapabilityUnsupported`, which
+        `focus_window` treats as final, would have turned those retries into
+        a single attempt. So it is a plain `PyGUITestError` naming AX's
+        answer and the window that did come forward.
+        """
+        doc3 = [w for w in self.backend.windows() if w.handle == 265][0]
+        doc3_node = self.ax.applications[2829].windows[1]
+        doc3_node.actions.append("AXRaise")
+        self.ax.action_error = -25204
+        with (
+            mock.patch.dict(sys.modules, {"AppKit": self._appkit_that_activates()}),
+            self.assertRaises(PyGUITestError) as refusal,
+        ):
+            self.backend.activate_window(doc3)
+        self.assertNotIsInstance(refusal.exception, CapabilityUnsupported)
+        self.assertIn("AX refused to raise it", str(refusal.exception))
+        self.assertIn("-25204", str(refusal.exception))
+        self.assertIn("268", str(refusal.exception))
+        self.assertEqual(doc3_node.performed, ["AXRaise"], "the raise was aimed")
 
     def test_a_successful_raise_is_trusted_over_the_window_servers_order(self):
         """When `AXRaise` was aimed and answered, the order is not re-read.

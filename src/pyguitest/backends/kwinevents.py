@@ -166,17 +166,33 @@ class KWinEventsBackend(GUIBackend):
             self._scripting = _Closer(lambda: None)
 
     def _host_service(self):
-        """Own `_BUS_NAME` and export the Notify method, waiting for both."""
+        """Own `_BUS_NAME` and export the Notify method, waiting for both.
+
+        Waits for the *name*, not the bus. Gio fires `bus_acquired` as soon
+        as it is connected to the session bus -- before `RequestName` has
+        even been sent -- and only then reports the outcome, as
+        `name_acquired` or, for a name another connection already owns
+        (queued behind it, since nothing here asks for `DO_NOT_QUEUE`), as
+        `name_lost`. Returning on `bus_acquired` returned before the answer,
+        so a second session in another process came up believing it owned
+        the name -- and `_load_and_run_script`'s sweep, which is safe only
+        because the name is owned first, then unloaded the live session's
+        script. The object is still exported on `bus_acquired`, where the
+        connection is first in hand; it is only the verdict that waits.
+        """
         node_info = self._Gio.DBusNodeInfo.new_for_xml(_IFACE_XML)
         interface_info = node_info.interfaces[0]
         acquired = []
 
         def on_bus_acquired(connection, _name):
-            """Export the Notify method on the bus name just acquired."""
+            """Export the Notify method on the connection just made."""
             self._connection = connection
             self._registration_id = connection.register_object(
                 _OBJECT_PATH, interface_info, self._handle_method_call, None, None
             )
+
+        def on_name_acquired(_connection, _name):
+            """Record that the bus name is ours."""
             acquired.append(True)
 
         def on_name_lost(_connection, _name):
@@ -188,7 +204,7 @@ class KWinEventsBackend(GUIBackend):
             _BUS_NAME,
             self._Gio.BusNameOwnerFlags.NONE,
             on_bus_acquired,
-            None,
+            on_name_acquired,
             on_name_lost,
         )
         context = self._GLib.MainContext.default()

@@ -1799,6 +1799,25 @@ failed. Keyed so that "not tried yet" and "tried, no connection" stay
 distinguishable; opening one costs a round trip and `click` is this module's
 hottest path."""
 
+_A11Y_BUS_LOCK = threading.RLock()
+"""Makes the asynchronous action route one thread's at a time.
+
+Two things in it are not safe to share. The cache: two threads finding it
+empty would both dial, and the second to finish could read `failed_at`
+before the first had written it. And the main context: GLib's
+`push_thread_default` *acquires* the context, so a second thread pushing
+while the first still owns it fails -- loudly, with a critical, and without
+pushing -- and GDBus then delivers that thread's reply on whatever context
+it was left with, while `_dispatch_action` polls the shared one and finds
+nothing. That is an application's prompt refusal reported as "pending", and
+then, after a liveness read that succeeds, as a click that worked.
+
+Held across the whole dispatch -- dial, push, call, settle, pop -- so that a
+second session on another thread waits for the first one's settle time
+rather than racing it. Re-entrant because `_dispatch_action` takes it and
+then calls `_a11y_connection`, which takes it too, and the latter is also
+called on its own."""
+
 _A11Y_RETRY_AFTER = 30.0
 """Seconds before a failed attempt to open the accessibility-bus connection
 is made again.
@@ -1892,41 +1911,63 @@ def _a11y_connection():
     authentication would otherwise hold the first `click` of the session
     indefinitely, before the settle clock in `_dispatch_action` had even
     started -- with the bounded synchronous route, the one that *can* bail
-    out, never reached.
+    out, never reached. The handshake gets a `Gio.Cancellable` that is
+    cancelled when the bound fires, so the worker thread `_run_bounded`
+    leaves behind is released rather than parked in authentication for the
+    life of the process.
+
+    A cached connection that has since closed -- the bus went away, or
+    dropped this client -- is not handed out: every call on it would fail
+    with Gio's closed-connection error, which is neither a no-reply nor a
+    refusal the caller can act on, and the synchronous route would never be
+    reached. It is dropped and the bus dialled again, which either yields a
+    live connection or becomes an ordinary cached failure.
     """
-    if "connection" in _A11Y_BUS_CACHE:
-        connection = _A11Y_BUS_CACHE["connection"]
-        if connection is not None:
-            return connection
-        if time.monotonic() - _A11Y_BUS_CACHE["failed_at"] < _A11Y_RETRY_AFTER:
-            return None
-    connection = None
-    try:
-        gio, _glib = _gi_dbus()
-        address = _a11y_bus_address()
-        if address:
-            connection = _run_bounded(
-                _A11Y_BUS_TIMEOUT,
-                gio.DBusConnection.new_for_address_sync,
-                address,
-                gio.DBusConnectionFlags.AUTHENTICATION_CLIENT
-                | gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,
-                None,
-                None,
-            )
-    except Exception:  # noqa: BLE001 - every failure means "fall back"
+    with _A11Y_BUS_LOCK:
+        if "connection" in _A11Y_BUS_CACHE:
+            connection = _A11Y_BUS_CACHE["connection"]
+            if connection is not None:
+                if not connection.is_closed():
+                    return connection
+            elif time.monotonic() - _A11Y_BUS_CACHE["failed_at"] < _A11Y_RETRY_AFTER:
+                return None
         connection = None
-    _A11Y_BUS_CACHE["connection"] = connection
-    if connection is None:
-        _A11Y_BUS_CACHE["failed_at"] = time.monotonic()
-    return connection
+        try:
+            gio, _glib = _gi_dbus()
+            address = _a11y_bus_address()
+            if address:
+                cancellable = gio.Cancellable.new()
+                try:
+                    connection = _run_bounded(
+                        _A11Y_BUS_TIMEOUT,
+                        gio.DBusConnection.new_for_address_sync,
+                        address,
+                        gio.DBusConnectionFlags.AUTHENTICATION_CLIENT
+                        | gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,
+                        None,
+                        cancellable,
+                    )
+                except BackendCallTimeout:
+                    cancellable.cancel()
+                    raise
+        except Exception:  # noqa: BLE001 - every failure means "fall back"
+            connection = None
+        # The failure clock goes in before the verdict is published, so a
+        # reader that sees None always finds the timestamp beside it.
+        if connection is None:
+            _A11Y_BUS_CACHE["failed_at"] = time.monotonic()
+        _A11Y_BUS_CACHE["connection"] = connection
+        return connection
 
 
 def _action_context(glib):
     """The one `GLib.MainContext` every dispatched action's reply lands on.
 
     Created on first use and kept in `_A11Y_BUS_CACHE` beside the
-    connection, so that it lives exactly as long as the connection does.
+    connection, so that it lives as long as the route does -- across a
+    connection that closed and was redialled too, since the closed
+    connection's outstanding calls complete onto it with errors that the
+    next dispatch drains like any other late reply.
     One context rather than one per dispatch because GDBus attaches both the
     reply and the reply *timeout* to whichever context was thread-default
     when the call was made, and a context nobody iterates again never
@@ -2013,20 +2054,15 @@ def _dispatch_action(node, index, settle=_ACTION_SETTLE):
     inside a `click`. It is the one shared context `_action_context` keeps,
     drained before the call goes out, so that earlier dispatches' late
     replies and expired timeouts are processed rather than left behind.
-    """
-    connection = _a11y_connection()
-    if connection is None:
-        return _Dispatch.UNUSABLE
-    try:
-        gio, glib = _gi_dbus()
-        atspi = _gi_atspi()
-        bus_name = node.app.bus_name
-        path = node.path
-    except Exception:  # noqa: BLE001 - an unusable route, not a failed action
-        return _Dispatch.UNUSABLE
-    if not bus_name or not path:
-        return _Dispatch.UNUSABLE
+    The whole of that -- push, call, settle, pop -- runs under
+    `_A11Y_BUS_LOCK`, since a context has one owner at a time (see there).
 
+    The settle loop drains the context *after* its last sleep and only then
+    consults the clock: a reply that lands during the sleep that carries the
+    clock past the deadline is already queued when the loop wakes, and
+    testing the clock first would have reported it as pending -- a liveness
+    read, and a 2s wait, for an answer that was already there.
+    """
     outcome = []
 
     def replied(source, result, _data):
@@ -2035,31 +2071,47 @@ def _dispatch_action(node, index, settle=_ACTION_SETTLE):
         except Exception as exc:  # noqa: BLE001 - re-raised below, not swallowed
             outcome.append((False, exc))
 
-    context = _action_context(glib)
-    context.push_thread_default()
-    try:
-        while context.pending():
-            context.iteration(False)
-        connection.call(
-            bus_name,
-            path,
-            atspi.DBUS_INTERFACE_ACTION,
-            "DoAction",
-            glib.Variant("(i)", (index,)),
-            glib.VariantType("(b)"),
-            gio.DBusCallFlags.NONE,
-            _ACTION_REPLY_TIMEOUT_MS,
-            None,
-            replied,
-            None,
-        )
-        deadline = time.monotonic() + settle
-        while not outcome and time.monotonic() < deadline:
+    with _A11Y_BUS_LOCK:
+        connection = _a11y_connection()
+        if connection is None:
+            return _Dispatch.UNUSABLE
+        try:
+            gio, glib = _gi_dbus()
+            atspi = _gi_atspi()
+            bus_name = node.app.bus_name
+            path = node.path
+        except Exception:  # noqa: BLE001 - an unusable route, not a failed action
+            return _Dispatch.UNUSABLE
+        if not bus_name or not path:
+            return _Dispatch.UNUSABLE
+
+        context = _action_context(glib)
+        context.push_thread_default()
+        try:
             while context.pending():
                 context.iteration(False)
-            time.sleep(0.01)
-    finally:
-        context.pop_thread_default()
+            connection.call(
+                bus_name,
+                path,
+                atspi.DBUS_INTERFACE_ACTION,
+                "DoAction",
+                glib.Variant("(i)", (index,)),
+                glib.VariantType("(b)"),
+                gio.DBusCallFlags.NONE,
+                _ACTION_REPLY_TIMEOUT_MS,
+                None,
+                replied,
+                None,
+            )
+            deadline = time.monotonic() + settle
+            while True:
+                while context.pending():
+                    context.iteration(False)
+                if outcome or time.monotonic() >= deadline:
+                    break
+                time.sleep(0.01)
+        finally:
+            context.pop_thread_default()
     if not outcome:
         return _Dispatch.PENDING
     if not outcome[0][0]:
@@ -2115,6 +2167,11 @@ def _run_bounded(seconds, fn, *args, **kwargs):
         return value
     raise value
 
+
+_UNRESOLVED = object()
+"""`_top_window_at`'s answer when the geometry source cannot say which window
+is on top at a point -- distinct from None, which is its answer when the
+source can say and says none is."""
 
 _UNPLACED = -1_000_000
 """Below this, an x or y is a "no position" marker rather than a coordinate.
@@ -2288,11 +2345,25 @@ class AtspiBackend(GUIBackend):
     def _source_rects(self, frame, size=None):
         """Every rectangle the geometry source has for `frame`, best first.
 
+        `_source_listings` without the windows: the `(x, y, width, height)`
+        of each, for a caller that only compares positions
+        (`_verify_app_coords`).
+        """
+        return [rect for _window, rect in self._source_listings(frame, size)]
+
+    def _source_listings(self, frame, size=None, scoped=False):
+        """Every listing the geometry source has for `frame`, best first.
+
         The windows carrying `frame`'s pid, or -- only when no window
-        carries it at all -- the ones sharing its title; each as the
-        `(x, y, width, height)` the source reports, with any whose
-        geometry cannot be read left out, so an application with one
-        unreadable toplevel is still placed by its others.
+        carries it at all -- the ones sharing its title; each as
+        `(window, rect)`, the source's own `Window` and the
+        `(x, y, width, height)` it reports for it, with any whose geometry
+        cannot be read left out, so an application with one unreadable
+        toplevel is still placed by its others. The window is kept beside
+        the rectangle because it is the identity `_on_top` compares against
+        the source's `window_at` answer: two listings can share a rectangle
+        -- a dialog sized and placed exactly over its parent -- and only the
+        window itself tells them apart.
 
         Pid is normally the only identity the two backends share -- their
         Window objects are never the same object -- and the title fallback
@@ -2331,6 +2402,20 @@ class AtspiBackend(GUIBackend):
         no pid at all still needs a non-empty title, since there an empty
         one would match every untitled window on the desktop.
 
+        With `scoped` set -- a lookup the caller has narrowed to one process,
+        `element_at(pid=)` -- the title fallback admits only windows whose
+        pid the source does *not* know. The scope is a promise that the
+        answer comes from that process, and a window the source positively
+        attributes to another one, however its title reads, would place the
+        process's widgets at another process's coordinates: process 42's
+        untitled-by-the-compositor `Editor` placed by process 99's `Editor`.
+        Unscoped the fallback stays as wide as it was, because there the
+        differing pid can be the *same* process seen through two lenses --
+        a sandboxed application whose accessibility connection goes through
+        a proxy answers the bus's pid query with the proxy's pid, while the
+        compositor lists the real one -- and the title is what still pairs
+        them.
+
         And a window whose size differs from `size` in *opposite directions*
         on the two axes -- wider but shorter, or narrower but taller -- is
         not a candidate either, whatever the magnitudes. Decoration can only
@@ -2357,7 +2442,12 @@ class AtspiBackend(GUIBackend):
         if pid is not None:
             matched = [w for w in windows if getattr(w, "pid", None) == pid]
         if not matched and title:
-            matched = [w for w in windows if getattr(w, "title", None) == title]
+            matched = [
+                w
+                for w in windows
+                if getattr(w, "title", None) == title
+                and (not scoped or getattr(w, "pid", None) is None)
+            ]
         ranked = []
         for window in matched:
             rect = self._source_rect(window)
@@ -2373,11 +2463,11 @@ class AtspiBackend(GUIBackend):
                     continue
                 misfit = abs(dw) + abs(dh)
             same_title = (getattr(window, "title", None) or "") == title
-            ranked.append(((0 if same_title else 1, misfit), rect))
+            ranked.append(((0 if same_title else 1, misfit), (window, rect)))
         # A stable sort: windows the ranking cannot separate keep the
         # source's own order, which is all the old first-listed rule was.
         ranked.sort(key=lambda item: item[0])
-        return [rect for _, rect in ranked]
+        return [listing for _, listing in ranked]
 
     def _source_rect(self, window):
         """`(x, y, width, height)` the geometry source reports for `window`, or None."""
@@ -2511,24 +2601,27 @@ class AtspiBackend(GUIBackend):
         placement = self._placement(frame)
         return None if placement is None else placement[0]
 
-    def _placement(self, frame):
+    def _placement(self, frame, scoped=False):
         """`_window_origin`'s answer paired with the listing it came from.
 
-        `(origin, rect)`: the screen position of `frame`'s WINDOW-coordinate
-        origin, and the geometry source's own rectangle for the window the
-        frame was placed by -- the same tuple `_source_rect` reports, so a
+        `(origin, listing)`: the screen position of `frame`'s
+        WINDOW-coordinate origin, and the `(window, rect)` the geometry
+        source lists for the window the frame was placed by -- the source's
+        own `Window` and the rectangle `_source_rect` reports for it -- so a
         caller can tell two of an application's toplevels apart by which
-        listing each one landed on (`_hits_in` does). None exactly where
-        `_window_origin` is.
+        listing each one landed on, and hold that listing against the
+        source's `window_at` (`_hits_in` and `_on_top` do). `scoped` is
+        `_source_listings`'. None exactly where `_window_origin` is.
         """
         own = self._raw_extents(frame, window=True)
         if own is None:
             return None
-        rects = self._source_rects(frame, size=own[2:])
-        if not rects:
+        listings = self._source_listings(frame, size=own[2:], scoped=scoped)
+        if not listings:
             return None
-        inset = self._client_inset(frame, own, rects[0])
-        return (rects[0][0] - inset[0], rects[0][1] - inset[1]), rects[0]
+        _window, rect = listings[0]
+        inset = self._client_inset(frame, own, rect)
+        return (rect[0] - inset[0], rect[1] - inset[1]), listings[0]
 
     def _placed_extents(self, node):
         """`node`'s screen rectangle, placed by its window rather than reported.
@@ -2735,18 +2828,30 @@ class AtspiBackend(GUIBackend):
         no geometry source to place window-relative rectangles onto the screen,
         even a scoped answer cannot be trusted, so that too is refused.
 
+        Where screen coordinates are trustworthy on their own -- X11 -- the
+        pid is accepted and ignored, as the `Session` contract says: every
+        application is asked and the answer is whatever is really at the
+        point, which is what a caller that resolved the window itself wants
+        to check against, not a sweep that excludes everything but its own
+        guess. The scope earns its keep on Wayland, where it is what makes the
+        lookup possible at all.
+
         A pid names a process, though, and a process with a dialog up has two
         toplevels, both admitted by the scope. Where two *placed* toplevels
         both claim the point, the smallest-answer rule above would let a
         small control in the rear window beat a large one in the front, so
         the geometry source is asked which window is on top there
         (`_on_top`) and only that window's answer stands; if it cannot say,
-        the lookup answers None rather than guess. A toplevel hit-tested in
-        screen coordinates has no listing to compare, so overlapping
-        same-process windows there are still settled by specificity alone,
-        as they always were unscoped.
+        the lookup answers None rather than guess. A scoped lookup holds even
+        a lone placed hit against that answer: the one toplevel that could be
+        hit-tested is not thereby the one on top -- a dialog whose extents
+        AT-SPI cannot read is skipped, and the main window beneath it would
+        otherwise answer for a point the dialog covers. A toplevel
+        hit-tested in screen coordinates has no listing to compare, so
+        overlapping same-process windows there are still settled by
+        specificity alone, as they always were unscoped.
         """
-        scoped = pid is not None
+        scoped = pid is not None and not self._screen_coords_trustworthy
         if not self._screen_coords_trustworthy and not (
             scoped and self._window_geometry_source is not None
         ):
@@ -2762,54 +2867,71 @@ class AtspiBackend(GUIBackend):
         for app in applications:
             if scoped and self._app_pid(app) != pid:
                 continue
-            hits.extend(self._hits_in(app, x, y))
-        for node, window, _placed_by in self._on_top(hits, x, y):
+            hits.extend(self._hits_in(app, x, y, scoped=scoped))
+        for node, window, _placed_by in self._on_top(hits, x, y, scoped=scoped):
             area = self._area(node, window)
             if best is None or area < best_area:
                 best, best_area = node, area
         return Element(best) if best is not None else None
 
-    def _on_top(self, hits, x, y):
+    def _on_top(self, hits, x, y, scoped=False):
         """`hits` narrowed to the toplevel the geometry source puts on top.
 
-        Only where it has to choose: two or more hits placed by *different*
-        listings both cover the point, which is one process's overlapping
-        windows -- a dialog over its main window, most often. The source's
-        `window_at` resolves stacking the way `windows()` is ordered, and
-        the hit whose listing is that window is the one a pointer there
-        would reach. Hits with no listing (a toplevel hit-tested in screen
-        coordinates) are not comparable and pass through untouched.
+        Where there is something to hold against the source: hits placed by
+        two or more *different* listings both cover the point -- one
+        process's overlapping windows, a dialog over its main window most
+        often -- or, `scoped`, any placed hit at all, since a scoped caller
+        was promised the window on top and the one toplevel that could be
+        hit-tested is not thereby it. The source's `window_at` resolves
+        stacking the way `windows()` is ordered, and the hit whose listing
+        *is* that window -- the same `Window`, still at the same rectangle,
+        so a dialog sized and placed exactly over its parent is told from it
+        and a window that moved since it was placed is not mistaken for
+        itself -- is the one a pointer there would reach. Hits with no
+        listing (a toplevel hit-tested in screen coordinates) are not
+        comparable and pass through untouched.
 
-        Empty when the source cannot name the window on top, or names one
-        that none of the hits was placed by -- the window the caller placed
-        has been covered by another process's since, say. Either way the
-        answer would be a guess between windows, and a wrong guess records
-        a locator from the rear window, so none is the better answer.
+        Empty when the source names a window on top that none of the hits
+        was placed by -- the window the caller placed has been covered by
+        another process's since, say -- or names none at all there. Either
+        way the hits are wrong about the point, and a wrong answer records a
+        locator from the rear window, so none is the better answer.
+
+        A source that *cannot* say (`_UNRESOLVED`) leaves a scoped lookup
+        with a guess between windows, which it refuses: empty. Unscoped, the
+        hits stand as they are -- that is the specificity rule the unscoped
+        lookup has always applied, and a source that cannot resolve stacking
+        is no reason to answer less than before it was wired in. One placed
+        listing with nothing to hold it against stands on either path.
         """
         listings = {placed_by for _node, _window, placed_by in hits if placed_by}
-        if len(listings) < 2:
+        if not listings or (len(listings) < 2 and not scoped):
             return hits
-        top = self._top_rect_at(x, y)
-        return [hit for hit in hits if hit[2] is None or hit[2] == top]
+        top = self._top_window_at(x, y)
+        if top is _UNRESOLVED:
+            return hits if len(listings) < 2 or not scoped else []
+        top_listing = None if top is None else (top, self._source_rect(top))
+        return [hit for hit in hits if hit[2] is None or hit[2] == top_listing]
 
-    def _top_rect_at(self, x, y):
-        """The geometry source's rectangle for its topmost window at a point.
+    def _top_window_at(self, x, y):
+        """The geometry source's topmost window at a point.
 
-        None where the source has no `window_at`, lists no window there, or
-        fails -- a sibling backend's own failure is not ours, same as
-        `_source_rects`. The rectangle is `_source_rect`'s, so it compares
-        equal to the listing a frame was placed by.
+        The source's own `Window`, which compares equal to the one its
+        `windows()` listed -- backends define window equality by handle --
+        so it can be held against the listing a frame was placed by. None
+        where the source lists no window there. `_UNRESOLVED` where it
+        cannot say: no `window_at`, or one that fails -- a sibling backend's
+        own failure is not ours, same as `_source_listings`.
         """
         source = self._window_geometry_source
         if source is None:
-            return None
+            return _UNRESOLVED
         try:
             if not source.supports(Capability.WINDOW_AT_POINT):
-                return None
-            window = source.window_at(x, y)
+                return _UNRESOLVED
+            return source.window_at(x, y)
         except Exception:  # noqa: BLE001 - a sibling backend's own failure is not ours
-            return None
-        return None if window is None else self._source_rect(window)
+            return _UNRESOLVED
 
     def _app_pid(self, app):
         """The process id of one AT-SPI application, or None if it will not say.
@@ -2830,17 +2952,19 @@ class AtspiBackend(GUIBackend):
         except Exception:  # noqa: BLE001 - an app that will not answer is not it
             return None
 
-    def _hits_in(self, app, x, y):
+    def _hits_in(self, app, x, y, scoped=False):
         """The deepest believable node under each of one app's toplevels.
 
         Each paired with whether it was found in WINDOW coordinates, which
         `_area` needs to read its rectangle in the same space, and with the
         geometry source's listing the toplevel was placed by (None for one
         hit-tested in screen coordinates), which `_on_top` needs to tell
-        two placed toplevels of one process apart. The point is moved into
-        that space once per toplevel, up front, and every step below --
-        `_descend`, `_past_a_container`, `_covers` -- then compares like
-        with like without knowing which space it is in.
+        two placed toplevels of one process apart. `scoped` is
+        `_source_listings`': a lookup narrowed to one process does not let
+        a toplevel be placed by another process's window. The point is
+        moved into that space once per toplevel, up front, and every step
+        below -- `_descend`, `_past_a_container`, `_covers` -- then compares
+        like with like without knowing which space it is in.
 
         Which space is decided the way `_extents` decides it, in the same
         order: a pure Wayland session is placed without asking
@@ -2872,7 +2996,7 @@ class AtspiBackend(GUIBackend):
                 ):
                     window, px, py = False, x, y
                 else:
-                    placement = self._placement(frame)
+                    placement = self._placement(frame, scoped=scoped)
                     if placement is None:
                         continue
                     (ox, oy), placed_by = placement

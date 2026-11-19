@@ -12,6 +12,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -412,6 +413,31 @@ class AtspiTestCase(unittest.TestCase):
         return self.atspi.AtspiBackend(
             dataclasses.replace(env, session_type=session_type), **kwargs
         )
+
+    def _open_a_dialog_over_the_main_window(self):
+        """One process, two placed toplevels overlapping at (150, 150).
+
+        The fixture's main frame (800x600, listed at the screen origin) gets a
+        20x20 button at (140, 140); a 300x200 "Save As" frame, listed at
+        (100, 100), carries a 280x180 panel from (10, 10). Screen (150, 150)
+        is inside both: the main window's tiny button and the dialog's big
+        panel. The size filter in `_source_listings` pairs each frame with
+        its own listing (each is hundreds of pixels from the other's), so
+        the stacking question is the only one left open. Both frames answer
+        (0, 0) for SCREEN and WINDOW alike -- the GTK4 shape -- so on X11
+        too they are placed, not believed. Returns the offsets and sizes the
+        source lists, main window first.
+        """
+        self.frame._pid = 4242
+        self.frame.parent._pid = 4242
+        hidden = FakeNode("Hidden", "push button", position=(140, 140), size=(20, 20))
+        hidden.parent = self.frame
+        self.frame.children.append(hidden)
+        panel = FakeNode("Files", "panel", position=(10, 10), size=(280, 180))
+        dialog = FakeNode("Save As", "frame", [panel], (0, 0), (300, 200), pid=4242)
+        dialog.parent = self.frame.parent
+        self.frame.parent.children.append(dialog)
+        return [(0, 0), (100, 100)], [(800, 600), (300, 200)]
 
 
 class TestAvailability(AtspiTestCase):
@@ -1527,7 +1553,7 @@ class _FakeStackingGeometrySource(_FakeManyWindowsGeometrySource):
 
     def window_at(self, x, y, screen=0):
         self.asked_at.append((x, y))
-        return self._listed[self._top][0]
+        return None if self._top is None else self._listed[self._top][0]
 
 
 class _FakeTitleOnlyGeometrySource:
@@ -1608,29 +1634,6 @@ class TestWaylandElementGeometry(AtspiTestCase):
         with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
             self.assertEqual(gui.element_at(50, 67, pid=4242).name, "OK")
 
-    def _open_a_dialog_over_the_main_window(self):
-        """One process, two placed toplevels overlapping at (150, 150).
-
-        The fixture's main frame (800x600, listed at the screen origin) gets a
-        20x20 button at (140, 140); a 300x200 "Save As" frame, listed at
-        (100, 100), carries a 280x180 panel from (10, 10). Screen (150, 150)
-        is inside both: the main window's tiny button and the dialog's big
-        panel. The size filter in `_source_rects` pairs each frame with its
-        own listing (each is hundreds of pixels from the other's), so the
-        stacking question is the only one left open. Returns the offsets the
-        source lists, main window first.
-        """
-        self.frame._pid = 4242
-        self.frame.parent._pid = 4242
-        hidden = FakeNode("Hidden", "push button", position=(140, 140), size=(20, 20))
-        hidden.parent = self.frame
-        self.frame.children.append(hidden)
-        panel = FakeNode("Files", "panel", position=(10, 10), size=(280, 180))
-        dialog = FakeNode("Save As", "frame", [panel], (0, 0), (300, 200), pid=4242)
-        dialog.parent = self.frame.parent
-        self.frame.parent.children.append(dialog)
-        return [(0, 0), (100, 100)], [(800, 600), (300, 200)]
-
     def test_scoped_element_at_follows_the_source_to_the_window_on_top(self):
         # Specificity alone would answer the rear window's 20x20 button, the
         # smaller of the two covering nodes -- a locator from a window the
@@ -1682,10 +1685,11 @@ class TestWaylandElementGeometry(AtspiTestCase):
         with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
             self.assertIsNone(gui.element_at(150, 150, pid=4242))
 
-    def test_scoped_element_at_does_not_ask_about_stacking_for_one_window(self):
-        # With only the fixture's one toplevel covering the point there is
-        # nothing to choose between, so the source is never asked -- the
-        # stacking query is an extra round trip only the overlap case pays.
+    def test_scoped_element_at_holds_even_one_window_against_the_source(self):
+        # A single toplevel covering the point is still checked: the one
+        # window that *could* be hit-tested is not thereby the one on top,
+        # so a scoped lookup asks the source once even here. With the
+        # fixture's own window on top, the answer stands.
         self.frame._pid = 4242
         self.frame.parent._pid = 4242
         source = _FakeStackingGeometrySource(4242, [(0, 32)], top=0)
@@ -1693,7 +1697,106 @@ class TestWaylandElementGeometry(AtspiTestCase):
         gui.set_window_geometry_source(source)
         with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
             self.assertEqual(gui.element_at(50, 67, pid=4242).name, "OK")
-        self.assertEqual(source.asked_at, [])
+        self.assertEqual(source.asked_at, [(50, 67)])
+
+    def test_scoped_element_at_answers_none_when_the_only_hit_is_under_the_top_window(
+        self,
+    ):
+        # The dialog on top publishes no extents, so it cannot be hit-tested
+        # and contributes no hit; the main window beneath is the only hit
+        # there is. One hit is not proof of anything: the source says the
+        # dialog is on top, and the main window's button is behind it, so
+        # the answer is None rather than a widget the pointer cannot reach.
+        offsets, sizes = self._open_a_dialog_over_the_main_window()
+        dialog = self.frame.parent.children[-1]
+        dialog._component = False
+        source = _FakeStackingGeometrySource(4242, offsets, top=1, sizes=sizes)
+        gui = self.backend(SessionType.WAYLAND)
+        gui.set_window_geometry_source(source)
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertIsNone(gui.element_at(150, 150, pid=4242))
+        self.assertEqual(source.asked_at, [(150, 150)])
+
+    def test_scoped_element_at_answers_none_where_the_source_lists_no_window(self):
+        # The frame claims the point -- a client-side shadow margin does --
+        # but the compositor says nothing is there. Input there reaches
+        # whatever is beneath, so neither does this answer the frame.
+        self.frame._pid = 4242
+        self.frame.parent._pid = 4242
+        source = _FakeStackingGeometrySource(4242, [(0, 32)], top=None)
+        gui = self.backend(SessionType.WAYLAND)
+        gui.set_window_geometry_source(source)
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertIsNone(gui.element_at(50, 67, pid=4242))
+
+    def test_scoped_element_at_stands_on_one_window_the_source_cannot_rank(self):
+        # A source with no `window_at` cannot say what is on top, and with
+        # one placed window there is nothing to guess between, so the lone
+        # hit stands -- the behaviour from before stacking was consulted.
+        self.frame._pid = 4242
+        self.frame.parent._pid = 4242
+        gui = self.backend(SessionType.WAYLAND)
+        gui.set_window_geometry_source(_FakeWindowGeometrySource(4242, (0, 32)))
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertEqual(gui.element_at(50, 67, pid=4242).name, "OK")
+
+    def test_scoped_element_at_tells_two_windows_at_one_rectangle_apart(self):
+        # A dialog sized and placed exactly over its parent: both listings
+        # report the same rectangle, so comparing rectangles would let the
+        # rear window's hit pass as the top one's and specificity would
+        # pick its tiny button. The listing is the source's own Window, and
+        # only the window that *is* the one on top gets through.
+        self.frame._pid = 4242
+        self.frame.parent._pid = 4242
+        hidden = FakeNode("Hidden", "push button", position=(140, 140), size=(20, 20))
+        hidden.parent = self.frame
+        self.frame.children.append(hidden)
+        panel = FakeNode("Files", "panel", position=(10, 10), size=(780, 580))
+        dialog = FakeNode("Save As", "frame", [panel], (0, 0), (800, 600), pid=4242)
+        dialog.parent = self.frame.parent
+        self.frame.parent.children.append(dialog)
+        source = _FakeStackingGeometrySource(
+            4242, [(0, 0), (0, 0)], top=1, titles=["Document - Editor", "Save As"]
+        )
+        gui = self.backend(SessionType.WAYLAND)
+        gui.set_window_geometry_source(source)
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertEqual(gui.element_at(150, 150, pid=4242).name, "Files")
+
+    def test_scoped_element_at_does_not_borrow_another_processs_window(self):
+        # The scoped process has no listing of its own -- the compositor
+        # has not mapped its window yet, say -- but another process has a
+        # same-sized window with the same title. Unscoped, the title
+        # fallback pairs them; scoped, the caller was promised *this*
+        # process, and a widget of it placed at another process's
+        # coordinates is exactly the wrong locator, so nothing is placed.
+        self.frame._pid = 4242
+        self.frame.parent._pid = 4242
+        gui = self.backend(SessionType.WAYLAND)
+        gui.set_window_geometry_source(
+            _FakeManyWindowsGeometrySource(99, [(0, 32)], titles=["Document - Editor"])
+        )
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertIsNone(gui.element_at(50, 67, pid=4242))
+            # The unscoped fallback is deliberately left as wide as it was:
+            # a sandboxed application answers the bus's pid query with its
+            # proxy's pid while the compositor lists the real one, and the
+            # title is what still pairs them for `extents()`.
+            button = gui.find_element(name="OK")
+            self.assertEqual(gui.extents(button), (10, 52, 80, 30))
+
+    def test_scoped_element_at_still_places_by_title_where_the_source_has_no_pids(self):
+        # COSMIC's listing carries no pid at all; a window the source cannot
+        # attribute to anyone is not a window it attributes to someone else,
+        # so the title fallback stays open to it under a scope.
+        self.frame._pid = 4242
+        self.frame.parent._pid = 4242
+        gui = self.backend(SessionType.WAYLAND)
+        gui.set_window_geometry_source(
+            _FakeTitleOnlyGeometrySource("Document - Editor", (0, 32))
+        )
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertEqual(gui.element_at(50, 67, pid=4242).name, "OK")
 
     def test_scoped_element_at_on_wayland_places_without_trusting_the_frame(self):
         # A frame whose SCREEN and WINDOW rectangles differ is what
@@ -2952,6 +3055,50 @@ class TestAppCoordsTrustworthy(AtspiTestCase):
             # nothing of this window really is.
             self.assertIsNone(gui.element_at(20, 30))
 
+    def test_element_at_on_x11_accepts_and_ignores_a_pid(self):
+        # The `Session` contract: where screen coordinates are trustworthy
+        # the pid is accepted and ignored, so a caller that resolved the
+        # window itself checks against what is really at the point. A pid
+        # that matches no process must not turn the sweep into an empty
+        # one, and a matching pid must not narrow it either.
+        self.frame._pid = 4242
+        self.button.position = (0, 0)
+        self.button.window_position = (10, 20)
+        gui = self.backend(SessionType.X11)
+        gui.set_window_geometry_source(_FakeWindowGeometrySource(4242, (200, 150)))
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertEqual(gui.element_at(220, 180, pid=9999).name, "OK")
+            self.assertEqual(gui.element_at(220, 180, pid=4242).name, "OK")
+
+    def test_element_at_on_x11_keeps_two_placed_windows_the_source_cannot_rank(self):
+        # Two GTK4-shaped toplevels of one process, both placed by the
+        # source, both covering the point, and a source with no `window_at`:
+        # the unscoped lookup answers by specificity as it always has -- the
+        # rear window's 20x20 button beats the dialog's 280x180 panel --
+        # rather than answering None because a stacking question it never
+        # used to ask went unanswered. The scoped Wayland lookup refuses the
+        # same guess; this one was never promised the window on top.
+        offsets, sizes = self._open_a_dialog_over_the_main_window()
+        gui = self.backend(SessionType.X11)
+        gui.set_window_geometry_source(
+            _FakeManyWindowsGeometrySource(4242, offsets, sizes=sizes)
+        )
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertEqual(gui.element_at(150, 150).name, "Hidden")
+
+    def test_element_at_on_x11_follows_a_source_that_can_rank_two_placed_windows(self):
+        # The same two windows with a source that can say the dialog is on
+        # top: the unscoped lookup takes that answer over specificity, as
+        # it did before, so wiring stacking in still improves on the guess
+        # where it can.
+        offsets, sizes = self._open_a_dialog_over_the_main_window()
+        source = _FakeStackingGeometrySource(4242, offsets, top=1, sizes=sizes)
+        gui = self.backend(SessionType.X11)
+        gui.set_window_geometry_source(source)
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertEqual(gui.element_at(150, 150).name, "Files")
+        self.assertEqual(source.asked_at, [(150, 150)])
+
     def test_element_at_leaves_out_a_toplevel_the_source_cannot_place(self):
         # Untrusted and unplaceable -- the source lists nothing of this
         # window's size -- so the toplevel's (0, 0) frame must not claim
@@ -3753,15 +3900,26 @@ class TestClickingAModalDialogOpener(AtspiTestCase):
         Nothing can be concluded about whether it was dispatched, so this
         stays `BackendCallTimeout` rather than being excused as a modal
         dialog.
+
+        Only the `doActionNamed` call times out; everything else `click`
+        bounds -- it reads the node's `actions` through `_run_bounded`
+        before it ever reaches the action -- runs for real. A blanket
+        timeout would have raised from that first read, before
+        `_perform_action` was reached, and proved nothing about it.
         """
         node = _ModalActionNode(RuntimeError(_NO_REPLY))
-        with mock.patch.object(
-            self.atspi,
-            "_run_bounded",
-            side_effect=self.atspi.BackendCallTimeout("doActionNamed", 20.0),
-        ):
+        real_run_bounded = self.atspi._run_bounded
+
+        def only_the_action_hangs(seconds, fn, *args, **kwargs):
+            if getattr(fn, "__name__", None) == "doActionNamed":
+                raise self.atspi.BackendCallTimeout("doActionNamed", seconds)
+            return real_run_bounded(seconds, fn, *args, **kwargs)
+
+        with mock.patch.object(self.atspi, "_run_bounded", only_the_action_hangs):
             with self.assertRaises(self.atspi.BackendCallTimeout):
                 self.atspi.Element(node).click()
+        self.assertEqual(node.action_attempts, 0)
+        self.assertEqual(node.name_reads, 0)
 
     def test_do_action_tolerates_the_same_block(self):
         """`do_action` is the route a caller uses when they know the name.
@@ -4005,26 +4163,54 @@ class _FakeGioConnecting:
         AUTHENTICATION_CLIENT = 1
         MESSAGE_BUS_CONNECTION = 2
 
+    class Cancellable:
+        """Gio's, as far as the handshake uses it: cancelled or not."""
+
+        def __init__(self):
+            self.cancelled = False
+
+        @classmethod
+        def new(cls):
+            return cls()
+
+        def cancel(self):
+            self.cancelled = True
+
+        def is_cancelled(self):
+            return self.cancelled
+
+    class Dialed:
+        """What `new_for_address_sync` hands back: open until a test closes it."""
+
+        def __init__(self, address):
+            self.address = address
+            self.closed = False
+
+        def is_closed(self):
+            return self.closed
+
     def __init__(self, error=None, stall=0):
         self.error = error
         self.stall = stall
         self.addresses = []
+        self.cancellables = []
         outer = self
 
         class DBusConnection:
             @staticmethod
-            def new_for_address_sync(address, *_rest):
-                """Gio's four-argument form; only the address is asserted on.
+            def new_for_address_sync(address, _flags, _observer, cancellable):
+                """Gio's four-argument form; the tests read address and cancellable.
 
                 `stall` seconds of sleep first stand in for a handshake that
                 never completes.
                 """
                 outer.addresses.append(address)
+                outer.cancellables.append(cancellable)
                 if outer.stall:
                     time.sleep(outer.stall)
                 if outer.error is not None:
                     raise outer.error
-                return f"connection to {address}"
+                return _FakeGioConnecting.Dialed(address)
 
         self.DBusConnection = DBusConnection
 
@@ -4081,11 +4267,71 @@ class TestTheAccessibilityBusConnection(AtspiTestCase):
         dbus, address = self.patched(gio, "unix:path=/run/user/1000/at-spi/bus")
         with dbus, address as asked:
             first = self.atspi._a11y_connection()
-            self.atspi._a11y_connection()
-            self.atspi._a11y_connection()
+            self.assertIs(self.atspi._a11y_connection(), first)
+            self.assertIs(self.atspi._a11y_connection(), first)
         asked.assert_called_once()
         self.assertEqual(len(gio.addresses), 1)
         self.assertIsNotNone(first)
+
+    def test_a_connection_that_has_closed_is_not_handed_out_again(self):
+        """The bus dropped this client; the cached connection is dead.
+
+        Every call on a closed `Gio.DBusConnection` fails with its
+        closed-connection error -- not a no-reply, not a refusal -- so a
+        cache that kept handing it out would have made every later action
+        raise, with the synchronous fallback never reached. The closed one
+        is dropped and the bus dialled again.
+        """
+        gio = _FakeGioConnecting()
+        dbus, address = self.patched(gio, "unix:path=/run/user/1000/at-spi/bus")
+        with dbus, address:
+            first = self.atspi._a11y_connection()
+            first.closed = True
+            second = self.atspi._a11y_connection()
+            self.assertIsNot(second, first)
+            self.assertFalse(second.is_closed())
+            self.assertIs(self.atspi._a11y_connection(), second)
+        self.assertEqual(len(gio.addresses), 2)
+
+    def test_a_closed_connection_that_cannot_be_redialled_is_a_cached_failure(self):
+        """The bus is gone for good: None, like any other failed attempt."""
+        gio = _FakeGioConnecting()
+        dbus, address = self.patched(gio, "unix:path=/run/user/1000/at-spi/bus")
+        with dbus, address:
+            first = self.atspi._a11y_connection()
+            first.closed = True
+            gio.error = RuntimeError("connection refused")
+            self.assertIsNone(self.atspi._a11y_connection())
+            self.assertIsNone(self.atspi._a11y_connection())
+        self.assertEqual(len(gio.addresses), 2)
+        self.assertIn("failed_at", self.atspi._A11Y_BUS_CACHE)
+
+    def test_two_threads_dial_once_and_share_the_answer(self):
+        """The cache is one process-wide thing; so is the dialling.
+
+        Two sessions on two threads finding the cache empty at the same
+        moment would both dial, and the second one home could read
+        `failed_at` before the first had written it. Under the lock one
+        dials and the other waits for its answer.
+        """
+        gio = _FakeGioConnecting(stall=0.2)
+        dbus, address = self.patched(gio, "unix:path=/run/user/1000/at-spi/bus")
+        answers = []
+        workers = [
+            threading.Thread(
+                target=lambda: answers.append(self.atspi._a11y_connection())
+            )
+            for _ in range(2)
+        ]
+        with dbus, address:
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(5)
+        self.assertEqual(len(answers), 2)
+        self.assertIsNotNone(answers[0])
+        self.assertIs(answers[0], answers[1])
+        self.assertEqual(len(gio.addresses), 1)
 
     def test_a_failed_attempt_is_cached_too(self):
         """Otherwise every click on a bus-less desktop pays for the attempt."""
@@ -4126,6 +4372,11 @@ class TestTheAccessibilityBusConnection(AtspiTestCase):
         indefinitely, before the settle clock had even started, with the
         bounded synchronous fallback never reached. Bounded, the attempt is
         a failure like any other: None now, retried later.
+
+        And the handshake itself is told to stop: `_run_bounded` can only
+        abandon its worker thread, so the cancellable it was dialled with
+        is cancelled, which is what makes the stalled `new_for_address_sync`
+        return instead of holding that thread for the life of the process.
         """
         gio = _FakeGioConnecting(stall=5)
         dbus, address = self.patched(gio, "unix:path=/run/user/1000/at-spi/bus")
@@ -4139,6 +4390,16 @@ class TestTheAccessibilityBusConnection(AtspiTestCase):
         self.assertLess(time.monotonic() - started, 2)
         self.assertEqual(gio.addresses, ["unix:path=/run/user/1000/at-spi/bus"])
         self.assertIn("failed_at", self.atspi._A11Y_BUS_CACHE)
+        (cancellable,) = gio.cancellables
+        self.assertTrue(cancellable.is_cancelled())
+
+    def test_a_handshake_that_finishes_is_not_cancelled(self):
+        gio = _FakeGioConnecting()
+        dbus, address = self.patched(gio, "unix:path=/run/user/1000/at-spi/bus")
+        with dbus, address:
+            self.assertIsNotNone(self.atspi._a11y_connection())
+        (cancellable,) = gio.cancellables
+        self.assertFalse(cancellable.is_cancelled())
 
 
 class _FakeContext:
@@ -4147,19 +4408,27 @@ class _FakeContext:
     `queued` holds callables standing in for sources attached to the
     context -- a late reply's completion, an expired call timeout -- which
     `pending()` reports and `iteration()` runs one at a time, the way GLib
-    dispatches them.
+    dispatches them. Pushing puts the context on `_FakeGLib.stack`, the
+    thread-default stack, which is where `_FakeConnection.call` finds the
+    context a call's completion belongs on. `max_depth` records how many
+    pushes were outstanding at once: GLib allows one owner per context, so
+    anything above 1 is a push the real thing would have refused.
     """
 
     def __init__(self):
         self.depth = 0
+        self.max_depth = 0
         self.iterations = 0
         self.queued = []
 
     def push_thread_default(self):
         self.depth += 1
+        self.max_depth = max(self.max_depth, self.depth)
+        _FakeGLib.stack.append(self)
 
     def pop_thread_default(self):
         self.depth -= 1
+        _FakeGLib.stack.remove(self)
 
     def pending(self):
         return bool(self.queued)
@@ -4174,6 +4443,12 @@ class _FakeGLib:
     """Just the three GLib names the dispatch touches."""
 
     contexts: list = []
+    stack: list = []
+    """The thread-default stack: the context a GDBus call made now would
+    complete on. Empty means `default_context`, the global default, which
+    the dispatcher never iterates -- a completion queued there is lost to
+    it, as it would be in GLib."""
+    default_context = _FakeContext()
 
     class MainContext:
         @staticmethod
@@ -4217,20 +4492,27 @@ class _FakeConnection:
     """A GDBus connection whose reply timing and content the test chooses.
 
     `reply` is what `call_finish` unpacks -- `(True,)` by default, the
-    `(b)` AT-SPI's `DoAction` is declared to return. A `silent` connection
-    never completes the call on its own; `deliver_late(context)` then
-    stands in for the reply (or the call's own timeout) arriving after the
-    dispatcher stopped looking, by queuing the completion on the context
-    the call was made on, where only a later iteration of that context can
-    run it.
+    `(b)` AT-SPI's `DoAction` is declared to return. A prompt reply is
+    delivered the way GDBus delivers one: queued on the context that was
+    thread-default when the call was made (`_FakeGLib.stack`), where only an
+    iteration of *that* context runs it -- so a dispatcher that polled the
+    wrong context, or none, would see nothing. A `silent` connection never
+    completes the call on its own; `deliver_late(context)` then stands in
+    for the reply (or the call's own timeout) arriving after the dispatcher
+    stopped looking. `on_call`, if given, runs as the call goes out -- a
+    hook for a test that needs to know the dispatcher is mid-settle.
     """
 
-    def __init__(self, error=None, silent=False, reply=(True,)):
+    def __init__(self, error=None, silent=False, reply=(True,), on_call=None):
         self.error = error
         self.silent = silent
         self.reply = reply
+        self.on_call = on_call
         self.calls = []
         self.outstanding = []
+
+    def is_closed(self):
+        return False
 
     def call(
         self,
@@ -4247,10 +4529,13 @@ class _FakeConnection:
         data,
     ):
         self.calls.append((bus_name, path, interface, method, args, timeout))
+        if self.on_call is not None:
+            self.on_call()
         if self.silent:
             self.outstanding.append((callback, data))
-        else:
-            callback(self, "result", data)
+            return
+        target = _FakeGLib.stack[-1] if _FakeGLib.stack else _FakeGLib.default_context
+        target.queued.append(lambda: callback(self, "result", data))
 
     def deliver_late(self, context):
         """Complete every outstanding call -- on `context`, not right now."""
@@ -4276,6 +4561,8 @@ class TestDispatchActionItself(AtspiTestCase):
     def setUp(self):
         super().setUp()
         _FakeGLib.contexts.clear()
+        _FakeGLib.stack.clear()
+        _FakeGLib.default_context = _FakeContext()
         self.atspi._A11Y_BUS_CACHE.clear()
         self.addCleanup(self.atspi._A11Y_BUS_CACHE.clear)
         patchers = [
@@ -4304,6 +4591,79 @@ class TestDispatchActionItself(AtspiTestCase):
         self.assertEqual(method, "DoAction")
         self.assertEqual(args, ("variant", "(i)", (2,)))
         self.assertGreater(timeout, 0)  # finite: see _ACTION_REPLY_TIMEOUT_MS
+
+    def test_the_reply_is_read_off_the_pushed_context_not_the_default_one(self):
+        """REPLIED means the completion ran on the context the dispatcher polls.
+
+        The fake connection delivers a reply the way GDBus does: onto the
+        context that was thread-default when the call went out. Had the
+        dispatcher not pushed its own, the completion would be sitting on
+        the global default context, which it never iterates -- and the
+        verdict would have been PENDING, not REPLIED.
+        """
+        self.assertIs(self.dispatch(_FakeConnection()), self.atspi._Dispatch.REPLIED)
+        self.assertEqual(_FakeGLib.default_context.queued, [])
+        (context,) = _FakeGLib.contexts
+        self.assertGreaterEqual(context.iterations, 1)
+
+    def test_a_reply_that_lands_during_the_last_wait_is_still_seen(self):
+        """The deadline is checked after a final drain, not before it.
+
+        A reply that arrives during the sleep that carries the clock past
+        the settle deadline is already queued on the context when the loop
+        wakes. A loop that tested the clock first reported that dispatch as
+        pending and sent the caller on to the liveness read -- a 2s detour
+        for an answer that was already there.
+        """
+        connection = _FakeConnection(silent=True)
+        clock = [100.0]
+
+        def sleeping(_seconds):
+            # The reply lands while we sleep, and the sleep outlasts the
+            # deadline.
+            connection.deliver_late(_FakeGLib.contexts[0])
+            clock[0] += 10.0
+
+        with (
+            mock.patch.object(
+                self.atspi.time, "monotonic", side_effect=lambda: clock[0]
+            ),
+            mock.patch.object(self.atspi.time, "sleep", side_effect=sleeping),
+        ):
+            verdict = self.dispatch(connection, settle=1.0)
+        self.assertIs(verdict, self.atspi._Dispatch.REPLIED)
+
+    def test_two_threads_never_own_the_context_at_once(self):
+        """One dispatch owner at a time, however many sessions there are.
+
+        GLib's `push_thread_default` acquires the context; a second thread
+        pushing while the first owns it fails without pushing, and GDBus
+        then delivers that thread's reply somewhere the dispatcher is not
+        looking -- a refusal reported as pending, then as success. The
+        second dispatch has to wait for the first to pop. The first is held
+        mid-settle (silent connection) when the second is started, so
+        without the lock both would be pushed at once.
+        """
+        mid_settle = threading.Event()
+        connection = _FakeConnection(silent=True, on_call=mid_settle.set)
+        verdicts = []
+        with mock.patch.object(self.atspi, "_a11y_connection", return_value=connection):
+            first = threading.Thread(
+                target=lambda: verdicts.append(
+                    self.atspi._dispatch_action(_AddressableNode(), 1, settle=0.3)
+                )
+            )
+            first.start()
+            self.assertTrue(mid_settle.wait(5))
+            verdicts.append(
+                self.atspi._dispatch_action(_AddressableNode(), 2, settle=0.01)
+            )
+            first.join(5)
+        self.assertEqual(verdicts, [self.atspi._Dispatch.PENDING] * 2)
+        (context,) = _FakeGLib.contexts
+        self.assertEqual(context.max_depth, 1)
+        self.assertEqual(context.depth, 0)
+        self.assertEqual(len(connection.calls), 2)
 
     def test_an_error_the_application_answered_with_is_raised(self):
         """A refusal that arrives in time still reaches the caller."""

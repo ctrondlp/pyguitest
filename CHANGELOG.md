@@ -23,6 +23,22 @@ All notable changes to pyguitest are recorded here. The format follows
   is refused. The parameter is accepted and ignored where coordinates are
   trustworthy on their own (X11, Windows, macOS).
 
+  A pid names a process, and a process with a dialog up has two toplevels.
+  Where both are placed and both cover the point, the window backend is asked
+  which is on top (`window_at`) and only that window's answer stands; where it
+  cannot say, the scoped lookup answers None rather than let a small control
+  in the rear window beat a large one in front. That check holds even a lone
+  placed hit: a dialog whose extents AT-SPI cannot read is skipped, and the
+  main window beneath would otherwise answer for a point the dialog covers.
+  Windows are told apart by the backend's own `Window`, not by rectangle, so a
+  dialog sized and placed exactly over its parent is not mistaken for it. A
+  scoped lookup also never places a toplevel by another process's same-sized,
+  same-titled window: the title fallback that keeps a sandboxed application
+  (bus pid ≠ compositor pid) placeable for `extents()` is held, under a
+  scope, to windows the backend attributes to no process at all, which is
+  what COSMIC's listing offers. Unscoped on X11, two placed GTK4 windows the
+  backend cannot rank still answer by specificity, as they always did.
+
 ### Fixed
 
 - **A modifier an enclosing `send_keys` group still holds is no longer
@@ -81,6 +97,17 @@ All notable changes to pyguitest are recorded here. The format follows
   no-reply counts as dispatched only if the application still answers. Our
   own bound on the synchronous call still raises, because a call that never
   came back says nothing about whether it was dispatched.
+
+  The route is one thread's at a time: GLib refuses a second thread's push
+  of a context another thread holds, and a reply delivered to the refusing
+  thread's *previous* context would never be seen by the dispatcher polling
+  the shared one — a prompt refusal reported as pending, that is, as
+  success. A cached connection that has since closed is redialled rather
+  than handed out (Gio refuses every call on it, and the synchronous
+  fallback was never reached), a connection attempt that times out is
+  cancelled rather than left to finish in the background, and the settle
+  loop drains the context after its final wait, so a reply that lands
+  during that last sleep is still read.
 - **macOS can press `Meta_L`, `Meta_R`, `Prior` and `Next` again.** All four
   are in this package's documented vocabulary — `GUIBackend.KEY_ALIASES`
   expands `{PGU}`/`{PGD}` to `Prior`/`Next`, and the inherited
@@ -113,16 +140,29 @@ All notable changes to pyguitest are recorded here. The format follows
   application activation when it cannot be aimed — but that activation
   brings the application's windows forward in the order they already had,
   so if the application's front window afterwards is a *sibling* of the one
-  asked for, keys would go there; that is now a `CapabilityUnsupported`
-  naming the sibling and why the raise was unavailable (no grant, a shared
-  rectangle, or AX refusing), rather than a return the caller reads as
-  success. A single-window application passes the check as it always did.
-  The read side has the same ambiguity and keeps it: `active_window()` over
-  two TextEdit documents moved onto each other answered the front one's
-  handle under the *rear* one's title, because the window list is keyed by
-  rectangle and the last AX window enumerated names both. Handles stay
-  right; the docstring now says the titles may not, since nothing in this
-  join can tell which of the two a title belongs to.
+  asked for, keys would go there; that is now a refusal naming the sibling
+  and why the raise was unavailable, rather than a return the caller reads
+  as success. Its type follows the cause: no grant, a shared rectangle or no
+  AX window behind the handle are structural, so `CapabilityUnsupported`,
+  which `Session.focus_window` treats as final; AX *refusing* a raise it was
+  aimed with (`kAXErrorCannotComplete`, the application busy or not
+  answering) is this attempt failing, so a plain `PyGUITestError` that
+  `focus_window` retries as it did before the check existed. The activation
+  drops the window caches before matching, as the other writes do: matched
+  against a quarter-second-old listing, the raise could be aimed at a
+  neighbour that had since moved onto the asked-for rectangle, and the raise
+  having "worked" then skipped the front-window check that would have caught
+  it. A single-window application passes the check as it always did.
+  The read side had the same ambiguity: `active_window()` over two TextEdit
+  documents moved onto each other answered the front one's handle under the
+  *rear* one's title, because the window list is keyed by rectangle and the
+  last AX window enumerated named both. A rectangle two or more of a
+  process's AX windows report — titled or not — now contributes no AX title
+  at all, and each entry falls back to its own `kCGWindowName`: the right
+  name per window where the Screen Recording grant supplies it, an empty
+  string otherwise, and never the neighbour's. Handles were always right;
+  a title is now either right or absent, which is what `windows()` has
+  promised all along.
 - **macOS `move_window` and `resize_window` wait for the window server to
   catch up.** An AX position or size write returns once the application has
   applied it, and AX reads the new frame back at once — CoreGraphics does
@@ -136,7 +176,12 @@ All notable changes to pyguitest are recorded here. The format follows
   fresh CoreGraphics rectangle against AX frames that had all moved on.
   A write AX accepted is now followed by a wait that ends the moment the
   two agree, bounded at half a second; the common case costs one or two
-  enumerations.
+  enumerations. Agreement is judged against the rectangle the window server
+  held *before* the write, not just against AX: the two are compared with a
+  two-point tolerance, because both report whole points and a window's
+  frame rounds, so a move of a point or two would otherwise have "agreed"
+  with the stale rectangle it was meant to leave and returned at once. A
+  write that changes nothing still returns without waiting.
 - **sway no longer reports a refused command as success.** Every command
   carries a per-command success flag, and one aimed at a window that has
   since gone answers `success: false` with `"No matching node."` — a reply
@@ -154,6 +199,15 @@ All notable changes to pyguitest are recorded here. The format follows
   callers hunting for a fresher handle. The last error is read now:
   `PermissionRequired` for access denied, `WindowNotFound` for an invalid
   handle, and `PyGUITestError` naming the code for anything else.
+- **The KWin events backend waits to *own* its bus name before touching
+  KWin.** Gio fires `bus_acquired` as soon as the session-bus connection is
+  up — before `RequestName` has been sent — and only afterwards reports the
+  outcome, as `name_acquired` or, for a name another session already holds,
+  `name_lost`. Construction returned on the first of those, so a second
+  session in another process came up believing it owned the name; with the
+  pre-load sweep below, it then unloaded the live session's script. The
+  verdict is waited for now, and a name already held raises at once instead
+  of after the five-second wait.
 - **A KWin script that loads but then fails to start is unloaded again.**
   Only the closer returned at the end of `_load_and_run_script` unloads
   one, and it is never created when that function raises — so a failure

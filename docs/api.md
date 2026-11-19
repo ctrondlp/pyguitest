@@ -1994,14 +1994,15 @@ growth, with the state read `is_window_maximized` to verify it --
 drive a layout at its largest for a responsive-UI check, then
 restore and confirm the window really left the state.
 
-Every backend's maximize leaves the keyboard focus alone, Windows
-included -- though on Windows that is measured rather than promised.
-`SW_MAXIMIZE` is documented to activate the window it maximizes, and
+This promises nothing about keyboard focus, in either direction:
+where the next step is input, check `active_window()` first, or use
+`focus_window` on the window you mean. What has been observed is that
+every backend's maximize leaves focus where it was, Windows included
+-- and on Windows that is a measurement, not a contract.
+`SW_MAXIMIZE` is documented to activate the window it maximizes and
 has no non-activating spelling, so this used to tell you to re-focus
-afterwards; driven live against another application's window it does
-not, and that is the only thing pyguitest ever does. Don't rely on
-either direction for a window you did not just focus: check
-`active_window()` if the next step is input.
+afterwards; driven live against another application's window, which
+is the only thing pyguitest ever maximizes, it did not.
 
 Needs Capability.WINDOW_MAXIMIZE, which is declared only where the
 desktop genuinely has the concept: X11, Windows, COSMIC, and GNOME
@@ -5463,11 +5464,14 @@ send_keys does with them, so text carrying Windows line endings sends
 a tab arrives as a focus change rather than as whitespace.
 
 Normalise the line endings to LF before calling this, and note that
-type_text is not the way around it: it sends `\r` and `\n` as Enter
-too -- `_CONTROL_VK` on win32, `_CONTROL_KEYSYMS` on x11 -- because a
-control character is a command there rather than text, so CRLF arrives
-as two Enters by that route as well. Nothing in this package types a
-line break as a literal character; normalising first is the fix.
+type_text is not the way around it. Where a control character is a
+command rather than text -- `_CONTROL_VK` on win32, `_CONTROL_KEYSYMS`
+on x11 and the portal -- it sends `\r` and `\n` as Enter too, so CRLF
+arrives as two Enters by that route as well; macOS posts each as the
+character it is (`CGEventKeyboardSetUnicodeString`), and what the
+target makes of a bare carriage return is then its decision rather
+than the package's. No route collapses a CRLF into one break;
+normalising first is the fix.
 
 The second, deliberately kept from upstream: `&` (AltGr) is not
 escaped, so a `&` in `text` is read as the modifier. `{&}` is the literal

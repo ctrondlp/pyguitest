@@ -5640,7 +5640,10 @@ close the Qt pickers either way — see the PR #77 entry above). What is
 missing is keyboard focus, so a `wait_window_focus()` on such a dialog can
 legitimately time out, and keystrokes meant for it will land in the main
 window. A driver that must type into an action-opened dialog on GNOME should
-`focus_window()` it first or open it with real input. The torture driver's
+`focus_window()` it first — and act on the `bool` it answers, since it never
+raises on its own: a `False` here is the compositor declining again, and the
+keys that follow would land in the main window just the same — or open the
+dialog with real input. The torture driver's
 strict focus check records each occurrence as a failure by design, and the
 two GNOME boxes carry it as a documented condition.
 

@@ -2152,18 +2152,23 @@ class MacosBackend(GUIBackend):
         `kCGWindowName`, and it was a Window Server one, while TextEdit's four
         windows answered `live_doc4.txt` and its siblings here.
 
-        The key is the rectangle, so two of one process's windows at one
-        frame collapse to one entry and the last AX window enumerated names
-        both -- measured on Sequoia 15.8 with two TextEdit documents moved
-        onto each other, where `active_window()` answered the front one's
-        handle under the rear one's title. The read-side face of the
-        ambiguity `_ax_window_match` refuses to write through: handles stay
-        right, titles do not, and nothing in this join can tell which of the
-        two a title belongs to.
+        The key is the rectangle, which is the only join there is and not an
+        identity: two of one process's windows at one frame cannot be told
+        apart here any more than `_ax_window_match` can tell them apart for a
+        write. The last AX window enumerated used to name both -- measured on
+        Sequoia 15.8 with two TextEdit documents moved onto each other, where
+        `active_window()` answered the front one's handle under the *rear*
+        one's title. A rectangle that two or more of a process's AX windows
+        report is now left out of the map altogether, titled or not, so
+        `_window_from` falls back to `kCGWindowName` for each entry: right per
+        window where the Screen Recording grant supplies it, empty otherwise,
+        and never the neighbour's. Handles were always right; a title is now
+        either right or absent, which is the promise `windows` makes.
         """
         if not self._trusted:
             return {}
-        titles = {}
+        titles: dict[tuple[int, tuple[int, int, int, int]], str] = {}
+        seen: set[tuple[int, tuple[int, int, int, int]]] = set()
         for pid in self._pids():
             err, windows = self._copy(
                 self._ax.AXUIElementCreateApplication(pid), self._ax.kAXWindowsAttribute
@@ -2172,9 +2177,16 @@ class MacosBackend(GUIBackend):
                 continue
             for window in windows:
                 frame = self._frame(window)
+                if frame is None:
+                    continue
+                key = (pid, frame)
+                if key in seen:
+                    titles.pop(key, None)
+                    continue
+                seen.add(key)
                 title = self._text(window, self._ax.kAXTitleAttribute)
-                if frame is not None and title:
-                    titles[(pid, frame)] = title
+                if title:
+                    titles[key] = title
         return titles
 
     def windows(self):
@@ -2503,21 +2515,39 @@ class MacosBackend(GUIBackend):
         the key: AppKit brings the whole set forward in the order it already
         had. If the application's front window afterwards is not the one
         asked for, the activation did not activate this window, and keys
-        would go to a sibling -- so that is a `CapabilityUnsupported` naming
-        the sibling and why the raise was unavailable, rather than a return
-        that the caller reads as success. Structural, hence that type: a
-        retry a tenth of a second later meets the same grant, the same
-        shared rectangle. An application with only one window on screen
-        passes the check trivially, which keeps the grant-free route as
-        useful as it ever was for the single-window case it serves.
+        would go to a sibling -- so that is a refusal naming the sibling and
+        why the raise was unavailable, rather than a return that the caller
+        reads as success. Its type follows the cause. No grant, a shared
+        rectangle, no AX window behind the handle: structural, so
+        `CapabilityUnsupported` -- a retry a tenth of a second later meets
+        the same grant, the same shared rectangle. AX *refusing* a raise it
+        was aimed with is this attempt failing: `kAXErrorCannotComplete` is
+        documented as the application being busy or unresponsive, which is
+        the contest the retry loop exists to out-wait, so that is a plain
+        `PyGUITestError` -- before the check existed, that case returned and
+        `focus_window` retried it on its own focus read; the check must not
+        turn the retry into a single attempt. An application with only one
+        window on screen passes the check trivially, which keeps the
+        grant-free route as useful as it ever was for the single-window case
+        it serves.
+
+        The window caches are dropped before the handle is looked up, for
+        the reason `_require_ax_window` gives: the raise is aimed through
+        the rectangle join, and a rectangle up to `_SNAPSHOT_SECONDS` old
+        can be a *sibling's* by now -- two documents that swapped places
+        since `windows()` listed them. Matched against the stale listing,
+        `AXRaise` would raise the sibling and the `raised` flag would then
+        skip the front-window check that exists to catch exactly that.
         """
         self.require(Capability.WINDOW_ACTIVATE)
+        self._forget_windows()
         entry = self._entry_for(window.handle)
         if entry is None:
             raise WindowNotFound(f"no window with id {window.handle!r}")
         pid = window.pid if window.pid is not None else entry.get("kCGWindowOwnerPID")
         raised = False
         unaimed = "raising one window of an application needs the Accessibility grant"
+        structural = True
         if self._trusted:
             node, ambiguous = self._ax_window_match(window)
             unaimed = (
@@ -2531,11 +2561,13 @@ class MacosBackend(GUIBackend):
                 try:
                     self._perform(node, "AXRaise")
                     raised = True
-                except CapabilityUnsupported:
+                except CapabilityUnsupported as refused:
                     # AX found the window but refused to raise it -- fall through
                     # to the AppKit route below rather than failing an activation
-                    # that route could still serve.
-                    unaimed = "AX refused to raise it"
+                    # that route could still serve. A refusal of an aimed raise
+                    # is this attempt's, not the handle's: see the docstring.
+                    unaimed = f"AX refused to raise it ({refused.reason})"
+                    structural = False
         activated = pid is not None and self._activate(pid)
         # Both routes reorder the window server's list, which is what `windows`
         # and `active_window` read, so both caches go -- after *both* have run,
@@ -2570,14 +2602,17 @@ class MacosBackend(GUIBackend):
             return
         front = self._front_of_application(pid)
         if front is not None and front != window.handle:
-            raise CapabilityUnsupported(
-                Capability.WINDOW_ACTIVATE,
-                self.name,
+            message = (
                 f"could not activate {window!r}: {unaimed}, and activating its "
                 f"application brought window {front!r} to the front of it "
                 "instead, which is where keyboard input now goes -- refused "
-                "rather than reported as done",
+                "rather than reported as done"
             )
+            if structural:
+                raise CapabilityUnsupported(
+                    Capability.WINDOW_ACTIVATE, self.name, message
+                )
+            raise PyGUITestError(message)
 
     def _front_of_application(self, pid):
         """The window number of `pid`'s front-most visible window, or None.
@@ -3239,6 +3274,8 @@ class MacosBackend(GUIBackend):
         followed by `_await_window_server`, which `_WRITE_SETTLE` measures.
         """
         node = self._require_ax_window(window, capability, what)
+        entry = self._entry_for(window.handle)
+        before = self._bounds(entry) if entry is not None else None
         err = self._set(node, attribute, value)
         self._forget_windows()
         if err:
@@ -3247,9 +3284,9 @@ class MacosBackend(GUIBackend):
                 self.name,
                 f"could not {what} {window!r}: AX answered {err}",
             )
-        self._await_window_server(window.handle, node)
+        self._await_window_server(window.handle, node, before)
 
-    def _await_window_server(self, handle, node):
+    def _await_window_server(self, handle, node, before):
         """Wait, briefly, until the window server reports the frame AX just took.
 
         Returns once the window's CoreGraphics rectangle and its AX frame agree
@@ -3259,6 +3296,17 @@ class MacosBackend(GUIBackend):
         simply meets the gap `_WRITE_SETTLE` describes, as every read did
         before this wait existed. An AX frame that cannot be read leaves
         nothing to compare and returns at once for the same reason.
+
+        `before` is the window server's rectangle from before the write, and
+        it is what tells agreement from coincidence. A move of a point or two
+        sits inside `_close`'s tolerance, so the *old* server rectangle
+        already "agrees" with the new AX frame and the wait would return on
+        its first look with the server still behind -- the very read
+        `_WRITE_SETTLE` exists to spare. So while the server still reports
+        what it reported before the write, the sides have not met, however
+        close they are. The one exception is a write that changed nothing:
+        AX reads back the frame the server already had, nothing is coming,
+        and that returns at once.
 
         The caches are dropped on the way out whichever way it ends, so the
         next read enumerates afresh rather than inheriting a snapshot taken
@@ -3270,7 +3318,9 @@ class MacosBackend(GUIBackend):
                 frame = self._frame(node)
                 entry = self._entry_for(handle)
                 bounds = self._bounds(entry) if entry is not None else None
-                if frame is None or (bounds is not None and _close(bounds, frame)):
+                if frame is None or frame == before:
+                    return
+                if bounds is not None and _close(bounds, frame) and bounds != before:
                     return
                 if time.monotonic() >= deadline:
                     return
