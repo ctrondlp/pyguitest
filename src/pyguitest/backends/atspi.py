@@ -927,6 +927,22 @@ class Element:
         fixture: the dialog opens, the call fails 12.3s later, and `click()`
         reported a failure for the one thing it had just successfully done.
 
+        What this cannot do is tell a handler that is *running* a modal loop
+        from one that is about to refuse: both are silence inside the settle
+        window, and an application that answers the liveness read is
+        reported as dispatched. A refusal the toolkit sends after that --
+        measured as rare, since a refusal is decided before a handler runs
+        and arrives inside the settle -- lands on a reply slot nobody is
+        waiting on, and is dropped with it. The alternative is not better:
+        waiting long enough to catch it is the 12.3s stall below, with the
+        dialog unusable throughout, and raising it later would attribute an
+        error to whichever call happened to drain the context next. So the
+        contract is the one the docstring of `_dispatch_action` states -- the
+        reply says the action was *accepted*, and what it did is read from
+        the published state (`wait_for_window`, `expect_*`) -- and a caller
+        who needs a refusal to surface asserts on the state rather than on
+        the click.
+
         Clicking a menu item that opens a file chooser is ordinary, so a
         no-reply is now a return rather than a raise -- but only once the
         application has been asked whether it is still there, so the genuine
@@ -2426,6 +2442,18 @@ class AtspiBackend(GUIBackend):
         a proxy answers the bus's pid query with the proxy's pid, while the
         compositor lists the real one -- and the title is what still pairs
         them.
+
+        On a source that knows *no* pids the floor this can promise is the
+        title and the size filter, and that is worth stating plainly: a
+        frame whose own window the compositor has not mapped yet, against
+        another process's window of the same name and a plausible size, is
+        a pairing nothing here can rule out -- the ranking separates two
+        *listed* windows that tie (`_placement` refuses them), but a lone
+        listing has nothing to tie with. The alternative is to refuse every
+        scoped lookup on COSMIC and on kdotool's KDE, which is to withdraw
+        `element_at(pid=)` from the two desktops it was added for; the
+        tradeoff is taken deliberately, and `window_at` is what a caller
+        checks an answer against when it must be certain.
 
         And a window whose size differs from `size` in *opposite directions*
         on the two axes -- wider but shorter, or narrower but taller -- is

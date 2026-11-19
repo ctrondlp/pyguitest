@@ -41,6 +41,76 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ### Fixed
 
+- **KWin window events are read on the context the service was hosted on.**
+  Gio dispatches an exported object's method calls on whatever context was
+  thread-default when the bus name was owned, and `window_events()` ran its
+  loop and its wake timeout on the *global default* one — so where a caller
+  had pushed its own context (this package pushes one around every
+  asynchronous AT-SPI action), nothing dispatched the queued `Notify` calls
+  at all: a bounded wait returned no events and an unbounded one never
+  returned. The context is kept at hosting time and both the loop and the
+  timeout run on it. A backend hosting nothing uses the default context, as
+  it always did.
+- **A sweep that cannot confirm clearance refuses instead of loading.** The
+  pre-load sweep asks KWin whether a copy of the script is still resident,
+  and a query that *fails* answers "cannot say". Taken as "nothing left"
+  after a copy had already been seen, it let the load proceed on top of a
+  producer that may still be there — the duplicate events the sweep exists
+  to prevent. Only a query that was never answerable at all keeps the
+  old single best-effort unload. The sweep's calls are also bounded by its
+  own budget rather than by the proxy's 25-second default, so a KWin whose
+  scripting has stopped answering costs a construction two seconds.
+- **A failed `kAXWindowsAttribute` read is only retryable when the failure
+  is the attempt's.** `-25204` (`kAXErrorCannotComplete`) and `-25200` are
+  this attempt failing; `-25205` (the attribute is not published at all),
+  `-25212` and `-25202` (a stale element) are facts about the element that
+  no retry changes. Reported alike, an unsupported window list sent
+  `Session.focus_window` round its retry loop for a refusal it should give
+  up on at once.
+- **A minimized sibling on the same rectangle is counted as a twin.** The
+  window server's half of the AX join's ambiguity check read only the
+  *visible* entries, and a minimized window keeps its entry, its bounds and
+  its place in `kAXWindowsAttribute`. Where the minimized one's AX frame was
+  the only readable one of the pair, it was the candidate the join handed
+  back for the visible window's handle — so `close_window` on the visible
+  window pressed the minimized one's close button. The count now reads the
+  full server list at a window's own layers; helper surfaces and other
+  processes stay out of it as before.
+- **One window-server snapshot serves both halves of the macOS join.** The
+  enumerations are cached for a quarter of a second and the AX title reads
+  can outlast that, so the title map could be built against a listing where
+  two windows were still on their own rectangles and the windows then built
+  from one where they shared it: two handles, one title, which is the
+  wrong-document lookup the shared-rectangle count exists to prevent. The
+  caller's snapshot is passed in now, so a rectangle counted once cannot
+  name two entries in the result.
+- **A window write waits for progress on the field it changed.** The
+  convergence wait returned as soon as the window server published
+  *something* new that agreed with AX within tolerance — and the two halves
+  of a frame are published separately, so a resize AX had already taken
+  could satisfy a one-point move's wait, leaving the move itself
+  unpublished and the next `geometry()` answering the old position.
+  Progress is judged on the position for a move and on the size for a
+  resize. A write that changes nothing still returns at once.
+- **An activation that leaves its application with no visible window is
+  refused.** Where the window asked for is minimized or hidden, making its
+  application frontmost focuses nothing: the application takes the front
+  with nothing on screen and keys reach no window of it.
+  `_front_of_application` answers None for that, which fell off the end of
+  the method as success — so `focus_window` returned True for a window the
+  user cannot see. It now refuses, naming the window and saying to restore
+  it first, with the same structural-or-transient type the sibling case
+  uses. The grant-ful path had the same hole from the other side, found by
+  driving it: `AXRaise` on a minimized window **answers success and leaves
+  it minimized** (measured on Sequoia 15.8.1), and an accepted raise
+  returned without any further check — so the window's own on-screen field
+  is now what settles it, rather than its application's front window, which
+  a sibling would satisfy.
+- **The KWin bus-name refusal says which failure it was.** A name another
+  session holds is answered in about 70ms; a bus that never answers takes
+  the whole five-second deadline. Both read "another instance may already
+  be running", which sent a caller hunting for a session that was not
+  there.
 - **An element is no longer placed by a window the ranking cannot tell from
   its neighbour.** Where AT-SPI's own coordinates have to be placed by a
   sibling backend's window list — a native Wayland session, GTK4 anywhere —

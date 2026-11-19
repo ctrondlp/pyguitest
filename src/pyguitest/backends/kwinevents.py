@@ -86,6 +86,13 @@ schedules each removal on its own loop, so this is several rounds of a
 round-trip and a `deleteLater` -- and short enough that a KWin whose
 scripting is wedged refuses the session rather than hanging it."""
 _SWEEP_POLL = 0.05
+_SWEEP_MIN_CALL_MS = 100
+"""The least a sweep call is given, once its budget is spent.
+
+A D-Bus call asked for 0ms is refused before it goes out, which would turn
+the last question of a sweep -- the one that decides whether to refuse the
+session -- into a guaranteed "cannot say". A tenth of a second is enough for
+a KWin that is answering at all."""
 
 
 def _gio():
@@ -142,6 +149,10 @@ class KWinEventsBackend(GUIBackend):
         self._registration_id = None
         self._own_name_id = None
         self._scripting = None
+        self._context = None
+        """The main context Gio delivers this service's calls on, set by
+        `_host_service`; None until then, and for a `connect=False` backend
+        that hosts nothing, where the global default context is used."""
         self._wake = None
         """The active window_events() call's loop.quit, while it is waiting
         on an empty queue -- None otherwise. Sole reason _handle_method_call
@@ -237,6 +248,13 @@ class KWinEventsBackend(GUIBackend):
             self._GLib.MainContext.get_thread_default()
             or self._GLib.MainContext.default()
         )
+        # Kept, not just used: this is the context the exported object's
+        # `Notify` calls will be dispatched on, so `window_events` has to
+        # run its loop on the same one. Running it on the global default
+        # while a caller had pushed its own meant nothing dispatched the
+        # queued calls at all -- a bounded wait returned no events, an
+        # unbounded one never returned.
+        self._context = context
         expired = []
 
         def expire(*_args):
@@ -253,9 +271,19 @@ class KWinEventsBackend(GUIBackend):
         finally:
             deadline.destroy()
         if not acquired or acquired[-1] is False:
+            # The two ways this fails are different news, and the second is
+            # the one a caller can act on. Measured: a name another session
+            # holds is answered `name_lost` in about 70ms, so a refusal that
+            # took the whole deadline is a bus that said nothing at all.
+            why = (
+                f"another instance may already be running (it answered that "
+                f"{_BUS_NAME} is taken)"
+                if acquired
+                else f"the session bus did not answer the request within "
+                f"{_OWN_NAME_TIMEOUT}s"
+            )
             raise BackendUnavailable(
-                f"could not own {_BUS_NAME} on the session bus -- another "
-                "instance may already be running"
+                f"could not own {_BUS_NAME} on the session bus -- {why}"
             )
 
     def _handle_method_call(
@@ -283,26 +311,47 @@ class KWinEventsBackend(GUIBackend):
         twice, and a refusal naming the leftover is something a caller can
         act on (restart KWin's scripting, or the session).
 
-        `still_loaded` answering None -- a KWin that will not take
-        `isScriptLoaded` -- is not "nothing left": one unload is issued and
-        the load proceeds, which is exactly what this did before the loop
-        existed.
+        `still_loaded` answering None on the *first* question -- a KWin
+        that will not take `isScriptLoaded` at all -- is not "nothing
+        left": one unload is issued and the load proceeds, which is
+        exactly what this did before the loop existed. A None *after* a
+        copy has been seen is a different answer and refuses: the question
+        that mattered went unanswered, so clearance was never established,
+        and loading on top of what may still be there is the duplication
+        this exists to prevent.
+
+        Both calls are bounded by the sweep's own budget rather than by the
+        proxy's default (25s): the deadline is taken before the first
+        question, and each call gets what is left of it, so a KWin whose
+        scripting has stopped answering costs the construction two seconds
+        rather than a minute.
         """
-        loaded = still_loaded()
-        if loaded is None:
-            unload()
-            return
         deadline = time.monotonic() + _SWEEP_TIMEOUT
+
+        def budget():
+            """Milliseconds left of the sweep, for the next call."""
+            return max(_SWEEP_MIN_CALL_MS, int((deadline - time.monotonic()) * 1000))
+
+        loaded = still_loaded(budget())
+        if loaded is None:
+            unload(budget())
+            return
         while loaded and time.monotonic() < deadline:
-            unload()
+            unload(budget())
             # Asked after a pause, not straight away: the removal KWin
             # schedules only takes effect once its own loop runs, so an
             # immediate re-read answers True about a script already going.
             time.sleep(_SWEEP_POLL)
-            loaded = still_loaded()
-        if loaded:
+            loaded = still_loaded(budget())
+        if loaded or loaded is None:
+            why = (
+                "is still loaded"
+                if loaded
+                else "may still be loaded -- KWin stopped answering "
+                "isScriptLoaded partway through"
+            )
             raise BackendUnavailable(
-                "a copy of the window-events KWin script is still loaded "
+                f"a copy of the window-events KWin script {why} "
                 f"after {_SWEEP_TIMEOUT}s of unloading it -- a previous "
                 "session's, left behind when it was killed. Loading another "
                 "would duplicate every window event, so this is refused; "
@@ -370,35 +419,38 @@ class KWinEventsBackend(GUIBackend):
             None,
         )
 
-        def unload():
+        def unload(timeout_ms=-1):
             """Unload the script by plugin name, best-effort.
 
             Best-effort in every use: before a load it clears a predecessor
             that may not exist, after a failure it clears a load that may
             not have taken, and on close the session is going away anyway.
+            `timeout_ms` is the sweep's remaining budget where the sweep is
+            the caller; -1, the proxy's own default, everywhere else, since
+            a rollback or a close has no budget to keep to.
             """
             with contextlib.suppress(Exception):
                 kwin.call_sync(
                     "unloadScript",
                     self._GLib.Variant("(s)", (script_path,)),
                     self._Gio.DBusCallFlags.NONE,
-                    -1,
+                    timeout_ms,
                     None,
                 )
 
-        def still_loaded():
+        def still_loaded(timeout_ms=-1):
             """Whether KWin still has a script under this plugin name.
 
             None where it will not say: the method is missing, the call
-            failed. That is not False, and the sweep treats it as "cannot
-            check" rather than as "nothing left".
+            failed, the budget ran out. That is not False, and the sweep
+            treats it as "cannot check" rather than as "nothing left".
             """
             try:
                 answer = kwin.call_sync(
                     "isScriptLoaded",
                     self._GLib.Variant("(s)", (script_path,)),
                     self._Gio.DBusCallFlags.NONE,
-                    -1,
+                    timeout_ms,
                     None,
                 )
             except Exception:  # noqa: BLE001 - a KWin that will not say
@@ -482,20 +534,29 @@ class KWinEventsBackend(GUIBackend):
         the loop at all, so appending straight to `self._events` and
         calling this is enough to exercise the yield/ordering logic with
         no GLib mainloop iteration involved.
+
+        The loop and its timeout both run on the context `_host_service`
+        hosted the service on (`self._context`), not on the global default
+        one. Gio dispatches an exported object's method calls on the
+        context that was thread-default when the name was owned, so where a
+        caller had pushed its own -- this package pushes one around every
+        asynchronous AT-SPI action -- a loop on the default context
+        dispatched none of them: a bounded wait returned no events and an
+        unbounded one blocked for good. A backend hosting nothing
+        (`connect=False`) has no context of its own and uses the default,
+        which is where its test-injected events are waited on.
         """
         self.require(Capability.WINDOW_EVENTS)
         deadline = None if timeout is None else time.monotonic() + timeout
-        loop = self._GLib.MainLoop()
+        context = self._context or self._GLib.MainContext.default()
+        loop = self._GLib.MainLoop.new(context, False)
         try:
             while True:
                 if not self._events:
-                    timeout_id = None
-                    timed_out = False
+                    waker = None
 
-                    def on_timeout():
-                        """Stop the loop and record that it timed out."""
-                        nonlocal timed_out
-                        timed_out = True
+                    def on_timeout(*_args):
+                        """Stop the loop; one shot, so GLib drops the source."""
                         loop.quit()
                         return False
 
@@ -503,14 +564,22 @@ class KWinEventsBackend(GUIBackend):
                         remaining = deadline - time.monotonic()
                         if remaining <= 0:
                             return
-                        timeout_id = self._GLib.timeout_add(
-                            max(0, int(remaining * 1000)), on_timeout
+                        # Attached to the service's own context rather than
+                        # added to the default one, for the reason the
+                        # docstring gives: a timeout on a context nothing
+                        # iterates never fires.
+                        waker = self._GLib.timeout_source_new(
+                            max(0, int(remaining * 1000))
                         )
+                        waker.set_callback(on_timeout)
+                        waker.attach(context)
                     self._wake = loop.quit
                     loop.run()
                     self._wake = None
-                    if timeout_id is not None and not timed_out:
-                        self._GLib.source_remove(timeout_id)
+                    if waker is not None:
+                        # Safe whether or not it fired: destroying an
+                        # already-dispatched one-shot source is a no-op.
+                        waker.destroy()
                     if not self._events:
                         return
                 change, window_id, title = self._events.pop(0)

@@ -635,6 +635,22 @@ is deeper than any live tree measured here (Terminal's window came out four
 levels deep).
 """
 
+_AX_TRANSIENT = frozenset({-25200, -25204})
+"""The AX error codes that describe this *attempt*, not the element.
+
+`-25204` is `kAXErrorCannotComplete` -- "the messaging failed", which is what
+an application busy inside its own handler answers, measured on the live
+machine from `kAXFocusedApplicationAttribute` on consecutive runs -- and
+`-25200` is `kAXErrorFailure`, the general one. Both are worth trying again.
+
+Everything else AX can answer is about the element or the attribute and no
+retry changes it: `-25205` (`kAXErrorAttributeUnsupported`, the attribute is
+not published at all -- Finder's malformed window list is read this way),
+`-25212` (`kAXErrorNoValue`), `-25202` (`kAXErrorInvalidUIElement`, the
+element is gone), and the string a refusing binding produces in `_copy`. Told
+apart because the type of the refusal decides whether `Session.focus_window`
+tries again or gives up: see `_ax_window_match`."""
+
 _MAX_NODES = 20000
 """How many elements one search will visit before it gives up and answers.
 
@@ -2046,15 +2062,16 @@ class MacosBackend(GUIBackend):
     def _pids(self, everything=False):
         """Every process with a window, in the list's order, deduplicated.
 
-        On-screen by default, because the pids are asked for so `_titles` can
-        enrich the windows `windows()` is about to return, and reading AX trees
-        for processes with nothing visible is work whose answer is discarded.
+        `everything=True` for `_applications`, which asks "which processes
+        have an AX tree to search" rather than "what can be seen":
+        answering it from the on-screen list would leave an application
+        whose windows are all closed or minimized unsearchable, which is
+        not a Mac's behaviour.
 
-        `everything=True` for `_applications`, which is a different question --
-        "which processes have an AX tree to search", not "what can be seen" --
-        and answering it from the on-screen list would leave an application whose
-        windows are all closed or minimized unsearchable, which is not a Mac's
-        behaviour.
+        The on-screen form is the default and is deliberately *not* what
+        `_titles` uses: the title map reads the pids out of the very
+        snapshot it will be joined against, so that the applications read
+        and the rectangles counted cannot come from two different listings.
         """
         seen = []
         for entry in self._all() if everything else self._onscreen():
@@ -2116,6 +2133,22 @@ class MacosBackend(GUIBackend):
         """
         if not bool(entry.get("kCGWindowIsOnscreen")):
             return False
+        return MacosBackend._window_like(entry)
+
+    @staticmethod
+    def _window_like(entry):
+        """Whether an entry is at a window's layer, on screen or not.
+
+        `_visible_entry` without the on-screen half, for the one question
+        that is not about what a person can see: whether a *minimized*
+        window of the same process sits on the rectangle a write is about
+        to be aimed at (`_twinned`). A minimized window keeps its entry and
+        its bounds and stays in `kAXWindowsAttribute`, so it is a genuine
+        candidate for the join even though nothing is showing. The layer
+        pair is what keeps the menu-bar strips and cursor views -- the
+        layer-0 helper surfaces `_visible_entry` measures -- out of that
+        count.
+        """
         return entry.get("kCGWindowLayer") in (0, 8)
 
     def _window_from(self, entry, titles):
@@ -2135,8 +2168,18 @@ class MacosBackend(GUIBackend):
             pid=pid,
         )
 
-    def _titles(self):
+    def _titles(self, entries):
         """`{(pid, (x, y, w, h)): title}` from Accessibility, or empty ungranted.
+
+        `entries` is the window-server listing this map will be joined
+        against -- the caller's own snapshot, passed in rather than taken
+        again here. The two have to be the same listing: the enumerations
+        are cached for `_SNAPSHOT_SECONDS` and the AX reads below can
+        outlast that, so a map built against a fresher snapshot than the
+        one `windows()` goes on to build from could count a rectangle once
+        while the result holds two entries at it -- and the title would
+        name the wrong one of them, which is the whole thing the count
+        prevents.
 
         The enrichment half of the join, and the half that costs: one
         `kAXWindowsAttribute` read per process the window server names. Computed
@@ -2179,9 +2222,17 @@ class MacosBackend(GUIBackend):
         if not self._trusted:
             return {}
         titles: dict[tuple[int, tuple[int, int, int, int]], str] = {}
-        shared = self._shared_keys()
+        shared = self._shared_keys(entries)
         seen: set[tuple[int, tuple[int, int, int, int]]] = set()
-        for pid in self._pids():
+        # The pids come from the snapshot too, not from a fresh listing:
+        # one listing decides which applications are read *and* which
+        # rectangles are shared, so the two cannot disagree.
+        asked: list[int] = []
+        for entry in entries:
+            pid = entry.get("kCGWindowOwnerPID")
+            if pid is not None and pid not in asked:
+                asked.append(pid)
+        for pid in asked:
             err, windows = self._copy(
                 self._ax.AXUIElementCreateApplication(pid), self._ax.kAXWindowsAttribute
             )
@@ -2201,7 +2252,7 @@ class MacosBackend(GUIBackend):
                     titles[key] = title
         return titles
 
-    def _shared_keys(self):
+    def _shared_keys(self, entries):
         """The `(pid, rectangle)` keys more than one visible entry carries.
 
         The window server's half of the join's uniqueness check: a key here
@@ -2211,7 +2262,7 @@ class MacosBackend(GUIBackend):
         write at one.
         """
         counted: dict[tuple[int, tuple[int, int, int, int]], int] = {}
-        for entry in self._onscreen():
+        for entry in entries:
             if not self._visible_entry(entry):
                 continue
             pid = entry.get("kCGWindowOwnerPID")
@@ -2254,12 +2305,13 @@ class MacosBackend(GUIBackend):
         keeps working from the handle it took before doing so.
         """
         self.require(Capability.WINDOW_LIST)
-        titles = self._titles()
-        return [
-            self._window_from(entry, titles)
-            for entry in reversed(self._onscreen())
-            if self._visible_entry(entry)
-        ]
+        # One snapshot for both halves of the join: the titles are matched
+        # against the same listing the windows are built from, so a
+        # rectangle counted once here cannot name two entries there. See
+        # `_titles`.
+        entries = [entry for entry in self._onscreen() if self._visible_entry(entry)]
+        titles = self._titles(entries)
+        return [self._window_from(entry, titles) for entry in reversed(entries)]
 
     def active_window(self):
         """The front-most window, from the window server's own ordering.
@@ -2292,15 +2344,15 @@ class MacosBackend(GUIBackend):
         `_visible_entry` are what rule them out.
         """
         self.require(Capability.WINDOW_AT_POINT)
-        for entry in self._onscreen():
-            if not self._visible_entry(entry):
-                continue
+        entries = [entry for entry in self._onscreen() if self._visible_entry(entry)]
+        for entry in entries:
             frame = self._bounds(entry)
             if frame is None:
                 continue
             left, top, width, height = frame
             if left <= x < left + width and top <= y < top + height:
-                return self._window_from(entry, self._titles())
+                # The same snapshot for the title map, as `windows` does.
+                return self._window_from(entry, self._titles(entries))
         return None
 
     def geometry(self, window):
@@ -2414,6 +2466,7 @@ class MacosBackend(GUIBackend):
             ),
             Capability.WINDOW_PLACEMENT,
             "move",
+            field="position",
         )
 
     def resize_window(self, window, width, height):
@@ -2427,6 +2480,7 @@ class MacosBackend(GUIBackend):
             ),
             Capability.WINDOW_RESIZE,
             "resize",
+            field="size",
         )
 
     def minimize_window(self, window, minimized=True):
@@ -2641,20 +2695,60 @@ class MacosBackend(GUIBackend):
                 )
             raise PyGUITestError(message)
         if raised:
-            return
+            entry = self._entry_for(window.handle)
+            showing = entry is not None and self._visible_entry(entry)
+            # That read refilled the caches the activation had just dropped;
+            # dropped again so a caller's next read is its own enumeration,
+            # which is the invariant the `_forget_windows` above establishes.
+            self._forget_windows()
+            if showing:
+                return
+            # AX accepted the raise and the window is still not showing.
+            # Measured on Sequoia 15.8.1: `AXRaise` on a *minimized* window
+            # answers success and leaves it minimized -- so the raise that
+            # "worked" moved nothing, keys reach no window of it, and
+            # returning here was `focus_window` answering True for a window
+            # the user cannot see. The one check that catches it is the
+            # window's own on-screen field, not its application's front
+            # window, which a sibling would satisfy.
+            raise CapabilityUnsupported(
+                Capability.WINDOW_ACTIVATE,
+                self.name,
+                f"could not activate {window!r}: the AX raise was accepted "
+                "but the window server still does not show the window, so "
+                "it has not come forward and keyboard input reaches no "
+                "window of its application -- a minimized or hidden window "
+                "answers a raise without taking one. Restore it first "
+                "(minimize_window(window, False))",
+            )
         front = self._front_of_application(pid)
-        if front is not None and front != window.handle:
+        if front is None:
+            # The application is frontmost and has nothing on screen: the
+            # window asked for is minimized or hidden, and making its
+            # application frontmost does not focus it -- keys go to an
+            # application with no window to take them. Reported as done,
+            # this was `focus_window` answering True for a window the user
+            # cannot see, which is the same wrong answer the sibling case
+            # below refuses.
+            message = (
+                f"could not activate {window!r}: {unaimed}, and after "
+                "activating its application the window server lists no "
+                "visible window of it at all -- a minimized or hidden "
+                "window is not focused by bringing its application "
+                "forward. Restore it first (minimize_window(window, False))"
+            )
+        elif front != window.handle:
             message = (
                 f"could not activate {window!r}: {unaimed}, and activating its "
                 f"application brought window {front!r} to the front of it "
                 "instead, which is where keyboard input now goes -- refused "
                 "rather than reported as done"
             )
-            if structural:
-                raise CapabilityUnsupported(
-                    Capability.WINDOW_ACTIVATE, self.name, message
-                )
-            raise PyGUITestError(message)
+        else:
+            return
+        if structural:
+            raise CapabilityUnsupported(Capability.WINDOW_ACTIVATE, self.name, message)
+        raise PyGUITestError(message)
 
     def _front_of_application(self, pid):
         """The window number of `pid`'s front-most visible window, or None.
@@ -3277,7 +3371,12 @@ class MacosBackend(GUIBackend):
             self._ax.AXUIElementCreateApplication(pid), self._ax.kAXWindowsAttribute
         )
         if err:
-            return None, False, True
+            # Only a failure of the *attempt* is retryable. An application
+            # that does not publish `kAXWindowsAttribute` at all answers
+            # -25205, and a stale element -25202: no number of retries
+            # changes either, and reporting them as transient had
+            # `focus_window` retrying a refusal it should give up on.
+            return None, False, err in _AX_TRANSIENT
         if not windows:
             return None, False, False
         plausible = [
@@ -3295,7 +3394,7 @@ class MacosBackend(GUIBackend):
         return node, False, False
 
     def _twinned(self, pid, handle, frame):
-        """Whether another visible window of `pid` is as plausible for `frame`.
+        """Whether another window of `pid` is as plausible for `frame`.
 
         The window server's side of `_ax_window_match`'s ambiguity check:
         one of the process's *other* windows whose rectangle `_close`
@@ -3303,9 +3402,20 @@ class MacosBackend(GUIBackend):
         two handles and the join cannot say which. The handle asked about
         is skipped by window number rather than by rectangle, which is the
         one identity the server does supply.
+
+        Counted over the *full* server list, not the on-screen one, and
+        filtered to `_window_like` rather than to what a person can see. A
+        minimized window keeps its entry, its bounds and its place in
+        `kAXWindowsAttribute`, so it is as plausible an AX candidate as any
+        other -- and when its own AX frame is the only readable one of the
+        pair, it is the candidate the match would hand back for the
+        *visible* window's handle. Scanning only the visible entries made
+        exactly that twin invisible to this check, so `close_window` on the
+        visible window could press the minimized one's close button. Other
+        processes and helper surfaces stay out, as before.
         """
-        for entry in self._onscreen():
-            if entry.get("kCGWindowOwnerPID") != pid or not self._visible_entry(entry):
+        for entry in self._all():
+            if entry.get("kCGWindowOwnerPID") != pid or not self._window_like(entry):
                 continue
             if entry.get("kCGWindowNumber") == handle:
                 continue
@@ -3362,7 +3472,7 @@ class MacosBackend(GUIBackend):
             )
         return node
 
-    def _write_frame(self, window, attribute, value, capability, what):
+    def _write_frame(self, window, attribute, value, capability, what, field):
         """Write one AX `AXValue` onto a window, or refuse naming why.
 
         The value is built by the caller, which is where the type belongs: a
@@ -3392,9 +3502,9 @@ class MacosBackend(GUIBackend):
                 self.name,
                 f"could not {what} {window!r}: AX answered {err}",
             )
-        self._await_window_server(window.handle, node, before)
+        self._await_window_server(window.handle, node, before, field)
 
-    def _await_window_server(self, handle, node, before):
+    def _await_window_server(self, handle, node, before, field):
         """Wait, briefly, until the window server reports the frame AX just took.
 
         Returns once the window's CoreGraphics rectangle and its AX frame agree
@@ -3416,11 +3526,23 @@ class MacosBackend(GUIBackend):
         AX reads back the frame the server already had, nothing is coming,
         and that returns at once.
 
+        Progress is judged on `field` -- the half of the frame this write
+        changed, "position" for a move and "size" for a resize -- rather
+        than on the rectangle as a whole, because the two halves can be
+        published separately. A resize that AX had already taken but the
+        server had not can land *during* a one-point move: the server's
+        rectangle then differs from `before` (the height is new) and sits
+        within tolerance of the AX frame (the move is a point), so the wait
+        returned with the move itself still unpublished and the next
+        `geometry()` answered the old x. The other half moving is not this
+        write's news.
+
         The caches are dropped on the way out whichever way it ends, so the
         next read enumerates afresh rather than inheriting a snapshot taken
         mid-wait.
         """
         deadline = time.monotonic() + self._WRITE_SETTLE
+        changed = slice(0, 2) if field == "position" else slice(2, 4)
         try:
             while True:
                 frame = self._frame(node)
@@ -3428,7 +3550,11 @@ class MacosBackend(GUIBackend):
                 bounds = self._bounds(entry) if entry is not None else None
                 if frame is None or frame == before:
                     return
-                if bounds is not None and _close(bounds, frame) and bounds != before:
+                if (
+                    bounds is not None
+                    and _close(bounds, frame)
+                    and (before is None or bounds[changed] != before[changed])
+                ):
                     return
                 if time.monotonic() >= deadline:
                     return

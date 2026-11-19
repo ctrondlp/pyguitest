@@ -211,8 +211,9 @@ class TestKWinEventsBackend(unittest.TestCase):
 
         gui = self._backend()
         self._ownership_harness(gui, verdicts=[False])
-        with self.assertRaises(BackendUnavailable):
+        with self.assertRaises(BackendUnavailable) as refusal:
             gui._host_service()
+        self.assertIn("another instance", str(refusal.exception))
         # The object was still exported on the connection first in hand;
         # close() is what releases it, as the constructor's cleanup does.
         self.assertEqual(gui._registration_id, 3)
@@ -234,8 +235,12 @@ class TestKWinEventsBackend(unittest.TestCase):
 
         gui = self._backend()
         sources = self._ownership_harness(gui, verdicts=[])
-        with self.assertRaises(BackendUnavailable):
+        with self.assertRaises(BackendUnavailable) as refusal:
             gui._host_service()
+        # And it says which of the two failures this was: a bus that said
+        # nothing is not a name somebody else holds, and only one of those
+        # is worth hunting for another session over.
+        self.assertIn("did not answer", str(refusal.exception))
         (deadline,) = sources
         self.assertEqual(deadline.interval, int(kwinevents._OWN_NAME_TIMEOUT * 1000))
         self.assertIs(
@@ -257,7 +262,7 @@ class TestKWinEventsBackend(unittest.TestCase):
             sources[0].destroyed, "the deadline outlived the wait it was bounding"
         )
 
-    def _script_harness(self, gui, fail_on, copies=0, unloadable=True):
+    def _script_harness(self, gui, fail_on, copies=0, unloadable=True, mute_after=None):
         """Drive the real `_load_and_run_script` with faked D-Bus.
 
         The test above replaces the whole helper, so it cannot see what
@@ -271,17 +276,33 @@ class TestKWinEventsBackend(unittest.TestCase):
         answers whether any is left, which is what the sweep is written
         against. `unloadable=False` is a KWin whose removals do not take,
         the case the sweep has to refuse rather than load on top of.
+        `mute_after` is a KWin that answers `isScriptLoaded` that many
+        times and then stops -- the case where clearance is never
+        established rather than denied.
+
+        Every call's `timeout_msec` is recorded alongside the method, so a
+        test can see that the sweep bounded its own calls rather than
+        taking the proxy's default.
         """
         methods = []
+        timeouts = []
         kwin = mock.Mock()
         resident = [copies]
+        asked = [0]
 
-        def call_sync(method, *args, **kwargs):
+        def call_sync(
+            method, _params=None, _flags=None, timeout_ms=-1, _cancellable=None
+        ):
             methods.append(method)
+            timeouts.append(timeout_ms)
             # The refusal is checked first, so `fail_on="loadScript"` really
             # fails the load rather than being answered by the branch below.
             if method == fail_on:
                 raise RuntimeError(f"KWin refused {method}")
+            if method == "isScriptLoaded":
+                asked[0] += 1
+                if mute_after is not None and asked[0] > mute_after:
+                    raise RuntimeError("KWin stopped answering isScriptLoaded")
             if method == "loadScript":
                 variant = mock.Mock()
                 variant.unpack.return_value = (42,)
@@ -309,6 +330,7 @@ class TestKWinEventsBackend(unittest.TestCase):
             gio.DBusProxy.new_for_bus_sync.side_effect = [kwin, script]
         gui._Gio = gio
         gui._GLib = mock.Mock()
+        self.sweep_timeouts = timeouts
         return methods
 
     @staticmethod
@@ -437,6 +459,50 @@ class TestKWinEventsBackend(unittest.TestCase):
         self.assertIn("still loaded", str(refusal.exception))
         self.assertNotIn("loadScript", methods)
 
+    def test_a_recheck_that_goes_unanswered_refuses_rather_than_loading(self):
+        """A "cannot say" after a copy was seen is not "nothing left".
+
+        The first question is answered -- a copy is resident -- and the
+        recheck after the unload is not: KWin stopped answering. A sweep
+        that read that as clearance loaded another producer on top of
+        whatever is still there, which is the duplication it exists to
+        prevent. A query that was never answerable at all keeps its own
+        fallback (the test below).
+        """
+        from pyguitest.errors import BackendUnavailable
+
+        gui = self._backend()
+        methods = self._script_harness(gui, fail_on=None, copies=1, mute_after=1)
+        with self.assertRaises(BackendUnavailable) as refusal:
+            gui._load_and_run_script()
+        self.assertIn("may still be loaded", str(refusal.exception))
+        self.assertNotIn("loadScript", methods)
+
+    def test_the_sweep_bounds_its_own_dbus_calls(self):
+        """Every sweep call carries the sweep's budget, not the proxy's.
+
+        `-1` is the proxy default, around 25 seconds: a KWin whose
+        scripting has wedged would hold construction for that on the first
+        question alone, however short `_SWEEP_TIMEOUT` is. The deadline is
+        taken before the first call, so each call gets what is left of it.
+        """
+        from pyguitest.backends import kwinevents
+
+        gui = self._backend()
+        methods = self._script_harness(gui, fail_on=None, copies=1)
+        gui._load_and_run_script()
+        budget = int(kwinevents._SWEEP_TIMEOUT * 1000)
+        swept = [
+            timeout
+            for method, timeout in zip(methods, self.sweep_timeouts, strict=True)
+            if method in ("isScriptLoaded", "unloadScript")
+            and methods.index(method) < methods.index("loadScript")
+        ]
+        self.assertTrue(swept, "no sweep calls were made")
+        for timeout in swept:
+            self.assertLessEqual(timeout, budget)
+            self.assertGreaterEqual(timeout, kwinevents._SWEEP_MIN_CALL_MS)
+
     def test_a_kwin_that_will_not_say_gets_the_single_best_effort_unload(self):
         """`isScriptLoaded` missing is not a reason to refuse a session.
 
@@ -456,6 +522,41 @@ class TestKWinEventsBackend(unittest.TestCase):
         methods = self._script_harness(gui, fail_on=None)
         gui._load_and_run_script().close()
         self.assertEqual(methods[-2:], ["run", "unloadScript"])
+
+    def test_window_events_runs_on_the_context_the_service_was_hosted_on(self):
+        """A Notify arrives on the context the name was owned on, not the default.
+
+        Gio dispatches an exported object's calls on whatever context was
+        thread-default when `bus_own_name` was called, so a `window_events`
+        loop running on the *global default* context dispatched none of
+        them where a caller had pushed its own -- a bounded call returned
+        no events and an unbounded one blocked for good. Modelled with a
+        real source on a real private context: it can only run if the loop
+        is iterating that context.
+        """
+        import gi
+
+        gi.require_version("Gio", "2.0")
+        from gi.repository import GLib
+
+        gui = self._backend()
+        context = GLib.MainContext.new()
+        gui._context = context
+        arrived = GLib.timeout_source_new(10)
+
+        def deliver(*_args):
+            """What `_handle_method_call` does when a Notify lands."""
+            gui._events.append(("new", "{uuid-ctx}", "Hosted"))
+            if gui._wake is not None:
+                gui._wake()
+            return False
+
+        arrived.set_callback(deliver)
+        arrived.attach(context)
+        self.addCleanup(arrived.destroy)
+        events = list(gui.window_events(timeout=2.0))
+        self.assertEqual([e.change for e in events], ["new"])
+        self.assertEqual(events[0].window.title, "Hosted")
 
     def test_window_events_drains_already_queued_events_in_order(self):
         gui = self._backend()

@@ -1780,7 +1780,12 @@ class TestWaylandElementGeometry(AtspiTestCase):
         self.frame.children.append(hidden)
         phantom = FakeNode("Phantom", "push button", position=(145, 145), size=(10, 10))
         twin = FakeNode(
-            "Document - Editor", "frame", [phantom], (0, 0), _FIXTURE_FRAME_SIZE, 4242
+            "Document - Editor",
+            "frame",
+            [phantom],
+            (0, 0),
+            _FIXTURE_FRAME_SIZE,
+            pid=4242,
         )
         phantom.parent = twin
         twin.parent = self.frame.parent
@@ -4272,10 +4277,19 @@ class _FakeGioConnecting:
         def is_closed(self):
             return self.closed
 
-    def __init__(self, error=None, stall=0, on_dial=None):
+    def __init__(self, error=None, stall=0, on_dial=None, until_cancelled=False):
         self.error = error
         self.stall = stall
         self.on_dial = on_dial
+        self.until_cancelled = until_cancelled
+        """Stall until the cancellable is cancelled, with no stall of its own.
+
+        A handshake that cannot finish any other way, which is what makes
+        "the dial exited" evidence that the *cancellation* reached it: a
+        timed stall can run out on its own while the test is still waiting,
+        and the test then passes for a dial that ignored the cancel. `release`
+        is the test's own way out if its assertions fail first."""
+        self.release = threading.Event()
         self.addresses = []
         self.cancellables = []
         self.exited = threading.Event()
@@ -4303,7 +4317,9 @@ class _FakeGioConnecting:
                     if outer.on_dial is not None:
                         outer.on_dial()
                     waited = 0.0
-                    while waited < outer.stall:
+                    while waited < outer.stall or (
+                        outer.until_cancelled and not outer.release.is_set()
+                    ):
                         if cancellable is not None and cancellable.is_cancelled():
                             raise RuntimeError("the handshake was cancelled")
                         time.sleep(0.01)
@@ -4442,16 +4458,24 @@ class TestTheAccessibilityBusConnection(AtspiTestCase):
             for _ in range(2)
         ]
         with dbus, address, mock.patch.object(self.atspi, "_A11Y_BUS_LOCK", watched):
-            workers[0].start()
-            self.assertTrue(dialing.wait(5), "the first thread never dialled")
-            workers[1].start()
-            self.assertTrue(
-                watched.contended.wait(5),
-                "the second thread dialled instead of waiting for the answer",
-            )
-            held.set()
-            for worker in workers:
-                worker.join(5)
+            # The release and the joins are in the `finally`, not after the
+            # assertions: a failed assertion would otherwise leave the
+            # workers running while the patches came off, so a thread still
+            # inside `_a11y_connection` would meet the real module state
+            # mid-call -- a failure reported somewhere else, or a hang.
+            try:
+                workers[0].start()
+                self.assertTrue(dialing.wait(5), "the first thread never dialled")
+                workers[1].start()
+                self.assertTrue(
+                    watched.contended.wait(5),
+                    "the second thread dialled instead of waiting for the answer",
+                )
+            finally:
+                held.set()
+                for worker in workers:
+                    if worker.ident is not None:
+                        worker.join(5)
         self.assertEqual(len(answers), 2)
         self.assertIsNotNone(answers[0])
         self.assertIs(answers[0], answers[1])
@@ -4505,7 +4529,11 @@ class TestTheAccessibilityBusConnection(AtspiTestCase):
         the dial to be *gone* rather than only for `cancel()` to have been
         called -- which it would have passed while the worker slept on.
         """
-        gio = _FakeGioConnecting(stall=5)
+        # Cancellation is the *only* way this dial can finish, so the
+        # `exited` wait below is evidence that the cancel reached it rather
+        # than that a timed stall ran out while the test watched.
+        gio = _FakeGioConnecting(until_cancelled=True)
+        self.addCleanup(gio.release.set)
         dbus, address = self.patched(gio, "unix:path=/run/user/1000/at-spi/bus")
         with (
             dbus,
@@ -4829,21 +4857,29 @@ class TestDispatchActionItself(AtspiTestCase):
                     self.atspi._dispatch_action(_AddressableNode(), 1, settle=0.01)
                 )
             )
-            first.start()
-            self.assertTrue(mid_settle.wait(5), "the first dispatch never got going")
             second = threading.Thread(
                 target=lambda: verdicts.append(
                     self.atspi._dispatch_action(_AddressableNode(), 2, settle=0.01)
                 )
             )
-            second.start()
-            self.assertTrue(
-                watched.contended.wait(5),
-                "the second dispatch never reached the lock the first holds",
-            )
-            held.set()
-            first.join(5)
-            second.join(5)
+            # As in the dial-once test: released and joined in the
+            # `finally`, inside the patches, so a failed assertion cannot
+            # leave a dispatch running against the real module state.
+            try:
+                first.start()
+                self.assertTrue(
+                    mid_settle.wait(5), "the first dispatch never got going"
+                )
+                second.start()
+                self.assertTrue(
+                    watched.contended.wait(5),
+                    "the second dispatch never reached the lock the first holds",
+                )
+            finally:
+                held.set()
+                for worker in (first, second):
+                    if worker.ident is not None:
+                        worker.join(5)
         self.assertEqual(verdicts, [self.atspi._Dispatch.PENDING] * 2)
         (context,) = _FakeGLib.contexts
         self.assertEqual(context.max_depth, 1)

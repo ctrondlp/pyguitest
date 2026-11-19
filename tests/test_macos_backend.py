@@ -949,6 +949,59 @@ class TestTheWindowJoin(BackendTestCase):
         self.assertEqual(titles[265], "")
         self.assertEqual(titles[263], "live_doc2.txt", "the others keep theirs")
 
+    def test_the_title_map_is_joined_against_the_listing_it_is_returned_with(self):
+        """One snapshot for both halves, however long the AX reads take.
+
+        The enumerations are cached for a quarter of a second and the AX
+        reads that build the title map can outlast that. Taken separately,
+        the map could be built against a listing where doc3 was still on
+        its own rectangle -- a unique key, so it keeps its title -- and the
+        windows then built from a listing where doc4 had moved onto it: two
+        handles at one rectangle, both handed doc3's title, which is the
+        wrong-document lookup the count exists to prevent. The snapshot is
+        passed in now, so the count and the result are the same listing.
+        """
+        # The server answers the old arrangement once, then the new one.
+        before = self.onscreen_windows()
+        after = [
+            window(48, 690, "Terminal", (153, 79, 877, 499)),
+            window(268, 2829, "TextEdit", (205, 145, 673, 439)),
+            window(265, 2829, "TextEdit", (205, 145, 673, 439)),
+        ]
+        applications = self.applications()
+        # doc3's AX frame will not read, so AX sees one window there.
+        applications[2829].windows[1].attrs["kAXPositionAttribute"] = None
+        backend = self.make(onscreen=before, applications=applications)
+        backend._SNAPSHOT_SECONDS = 0.0  # every read re-enumerates
+        answers = [before, after]
+
+        def enumerate_(_options, _window):
+            return answers.pop(0) if len(answers) > 1 else answers[0]
+
+        self.quartz.CGWindowListCopyWindowInfo = enumerate_
+        titles = {w.handle: w.title for w in backend.windows()}
+        shared = [h for h, t in titles.items() if t == "live_doc4.txt"]
+        self.assertLessEqual(
+            len(shared),
+            1,
+            f"one AX title named two handles across two snapshots: {titles}",
+        )
+
+    def test_an_on_screen_helper_surface_does_not_cost_a_window_its_title(self):
+        """The filter is applied to what the count reads, not just to the result.
+
+        A helper surface *on screen* at a window's own pid and bounds -- the
+        Dock's layer, say -- is not a second window, and counting it as one
+        would take the real window's title away. The all-windows control
+        below covers the off-screen half.
+        """
+        onscreen = self.onscreen_windows() + [
+            window(44, 690, "Terminal", (153, 79, 877, 499), layer=20)
+        ]
+        backend = self.make(onscreen=onscreen, applications=self.applications())
+        titles = {w.handle: w.title for w in backend.windows()}
+        self.assertEqual(titles[48], "pyguitest - caffeinate")
+
     def test_a_helper_surface_behind_a_window_does_not_cost_it_its_title(self):
         """Counted over `windows`'s own filter, not every server entry.
 
@@ -1234,6 +1287,40 @@ class TestWindowWrites(BackendTestCase):
         self.assertGreaterEqual(clock.now, 0.03)
         self.assertLess(clock.now, 0.05)
 
+    def test_a_move_waits_for_the_move_and_not_for_an_earlier_resize(self):
+        # The two halves of a frame are published separately, so "the server
+        # reported something new" is not "the server reported *this*". A
+        # resize AX had already taken and the server had not lands during a
+        # one-point move: the server's rectangle then differs from the one
+        # before the write (the height is new) and sits within `_close`'s
+        # tolerance of the AX frame (the move is a point), so the wait
+        # returned with the move still unpublished and `geometry()` answered
+        # the old x. Progress is judged on the half this write changed.
+        self.backend._WRITE_SETTLE = 1.0
+        self.backend._WRITE_POLL = 0.001
+        # AX is already a resize ahead of the server, which still has 499.
+        self.node.attrs["kAXSizeAttribute"] = size(877, 500)
+        clock = self._window_server_lags(48, (154, 79, 877, 500), by=0.03)
+        # The server publishes the resize alone first, 10ms in.
+        real_enumerate = self.quartz.CGWindowListCopyWindowInfo
+
+        def enumerate_(options, window):
+            answered = real_enumerate(options, window)
+            if 0.01 <= clock.now < 0.03:
+                for entry in answered:
+                    if entry["kCGWindowNumber"] == 48:
+                        entry["kCGWindowBounds"].update({"Height": 500.0})
+            return answered
+
+        self.quartz.CGWindowListCopyWindowInfo = enumerate_
+        self.backend.move_window(self.terminal, 154, 79)
+        self.assertEqual(
+            self.backend.geometry(self.terminal)[:2],
+            (154, 79),
+            "returned on the resize's news and left the move unpublished",
+        )
+        self.assertGreaterEqual(clock.now, 0.03)
+
     def test_a_write_that_changes_nothing_does_not_wait(self):
         # The exception the rule above needs: a move to where the window
         # already is leaves the server nothing to report, and waiting the
@@ -1414,7 +1501,12 @@ class TestWindowWrites(BackendTestCase):
             },
         )
         self.ax.applications[690].windows.append(twin)
-        self.quartz.onscreen.insert(1, window(49, 690, "Terminal", (153, 79, 877, 499)))
+        # Into both server lists, the way a real window appears: the twin
+        # count reads the *full* one, so that a minimized sibling on the
+        # rectangle is counted too.
+        entry = window(49, 690, "Terminal", (153, 79, 877, 499))
+        self.quartz.onscreen.insert(1, entry)
+        self.quartz.everything.insert(1, entry)
         self.backend._forget_windows()
         with self.assertRaises(CapabilityUnsupported) as caught:
             self.backend.close_window(self.terminal)
@@ -1430,10 +1522,69 @@ class TestWindowWrites(BackendTestCase):
         """
         button = FakeElement(role="AXButton")
         self.node.attrs["kAXCloseButtonAttribute"] = button
-        self.quartz.onscreen.insert(1, window(77, 999, "SomeApp", (153, 79, 877, 499)))
+        other = window(77, 999, "SomeApp", (153, 79, 877, 499))
+        self.quartz.onscreen.insert(1, other)
+        self.quartz.everything.insert(1, other)
         self.backend._forget_windows()
         self.backend.close_window(self.terminal)
         self.assertEqual(button.performed, ["AXPress"])
+
+    def test_a_minimized_sibling_on_the_rectangle_is_a_twin_too(self):
+        """The twin a visible-only count could not see.
+
+        A minimized window keeps its server entry, its bounds and its place
+        in `kAXWindowsAttribute`, so it is as plausible an AX candidate as
+        any other -- and when its frame is the only readable one of the
+        pair, it is what the match hands back for the *visible* window's
+        handle. Counted only over the on-screen entries, it was invisible
+        here and `close_window` pressed its button instead.
+        """
+        mine = FakeElement(role="AXButton")
+        self.node.attrs["kAXCloseButtonAttribute"] = mine
+        theirs = FakeElement(role="AXButton")
+        minimized = FakeElement(
+            role="AXWindow",
+            attrs={
+                "kAXTitleAttribute": "minimized, same place",
+                "kAXPositionAttribute": point(153, 79),
+                "kAXSizeAttribute": size(877, 499),
+                "kAXCloseButtonAttribute": theirs,
+                "kAXMinimizedAttribute": True,
+            },
+        )
+        # Only the minimized window's AX frame reads, so it is the lone
+        # candidate; its server entry is in the all-windows list with the
+        # on-screen field false, which is what a minimized window looks like.
+        self.node.attrs["kAXPositionAttribute"] = None
+        self.ax.applications[690].windows.append(minimized)
+        self.quartz.everything.append(
+            window(49, 690, "Terminal", (153, 79, 877, 499), onscreen=None)
+        )
+        self.backend._forget_windows()
+        with self.assertRaises(CapabilityUnsupported) as caught:
+            self.backend.close_window(self.terminal)
+        self.assertIn("same rectangle", str(caught.exception))
+        self.assertEqual(theirs.performed, [], "pressed the minimized window's button")
+        self.assertEqual(mine.performed, [])
+
+    def test_an_unsupported_ax_window_list_stays_final(self):
+        """-25205 is not -25204: one is the attribute, the other the attempt.
+
+        An application that publishes no `kAXWindowsAttribute` at all
+        answers `kAXErrorAttributeUnsupported`, and no retry changes that.
+        Reported as transient, it had `Session.focus_window` retrying a
+        refusal it should give up on.
+        """
+        self.ax.applications[690].error = -25205
+        with self.assertRaises(CapabilityUnsupported) as caught:
+            self.backend.close_window(self.terminal)
+        self.assertIn("no AX window matches its handle", str(caught.exception))
+
+    def test_a_stale_ax_element_stays_final_too(self):
+        """-25202 (`kAXErrorInvalidUIElement`): the element is gone."""
+        self.ax.applications[690].error = -25202
+        with self.assertRaises(CapabilityUnsupported):
+            self.backend.close_window(self.terminal)
 
     def test_an_ax_window_list_that_will_not_read_is_retryable(self):
         """A busy application is not a windowless one.
@@ -1709,6 +1860,7 @@ class TestWindowWrites(BackendTestCase):
         self.ax.applications[690].windows.append(twin)
         entry = window(49, 690, "Terminal", (153, 79, 877, 499))
         self.quartz.onscreen.insert(0 if in_front else 1, entry)
+        self.quartz.everything.insert(0 if in_front else 1, entry)
         self.backend._forget_windows()
         return twin
 
@@ -1750,6 +1902,58 @@ class TestWindowWrites(BackendTestCase):
             self.backend.activate_window(self.terminal)  # must not raise
         self.assertEqual(self.node.performed, [])
         self.assertEqual(twin.performed, [])
+
+    def test_a_raise_the_window_server_does_not_show_is_refused(self):
+        """An accepted `AXRaise` is not proof the window came forward.
+
+        Measured live on Sequoia 15.8.1: `AXRaise` on a *minimized* window
+        answers success and leaves it minimized. The raise shortcut
+        trusted that answer and returned, so `focus_window` reported True
+        for a window that is not on screen and takes no keys. The window's
+        own on-screen field is what settles it -- not its application's
+        front window, which a sibling would satisfy.
+        """
+        onscreen = [w for w in self.onscreen_windows() if w["kCGWindowNumber"] != 48]
+        minimized = window(48, 690, "Terminal", (153, 79, 877, 499), onscreen=None)
+        backend = self.make(
+            onscreen=onscreen,
+            everything=onscreen + [minimized],
+            applications=self.applications(),
+        )
+        handle = macos.Window(48, backend, pid=690)
+        node = self.ax.applications[690].windows[0]
+        with (
+            mock.patch.dict(sys.modules, {"AppKit": self._appkit_that_activates()}),
+            self.assertRaises(CapabilityUnsupported) as refusal,
+        ):
+            backend.activate_window(handle)
+        self.assertEqual(node.performed, ["AXRaise"], "the raise was not even tried")
+        self.assertIn("does not show the window", str(refusal.exception))
+
+    def test_activating_a_window_whose_application_shows_nothing_is_refused(self):
+        """Frontmost with no window is not focused.
+
+        A minimized or hidden window cannot be focused by bringing its
+        application forward: the application takes the front with nothing
+        on screen, and keys reach no window of it. `_front_of_application`
+        answers None for that, which used to fall off the end of the method
+        as success -- so `focus_window` returned True about a window the
+        user cannot even see.
+        """
+        backend = self.make(
+            trusted=False,
+            onscreen=[],
+            everything=[
+                window(255, 2829, "TextEdit", (0, 300, 500, 500), onscreen=None)
+            ],
+        )
+        with (
+            mock.patch.dict(sys.modules, {"AppKit": self._appkit_that_activates()}),
+            self.assertRaises(CapabilityUnsupported) as refusal,
+        ):
+            backend.activate_window(macos.Window(255, backend, pid=2829))
+        self.assertIn("no visible window of it", str(refusal.exception))
+        self.assertIn("minimize_window", str(refusal.exception))
 
     def test_a_sibling_coming_forward_after_an_unreadable_list_is_retryable(self):
         """A read that failed says nothing about the application's windows.

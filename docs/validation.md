@@ -5679,6 +5679,16 @@ Then `_host_service` itself, three ways:
 | a private context pushed as thread-default | **hung** — killed at 120s | owns the name, 0.00s |
 | a second process while the first holds the name | refused | refused, 0.00s, "another instance may already be running" |
 
+A fourth case, the deadline's own, measured the same way with only
+`bus_own_name` faked -- it hands back a subscription id and never calls a
+single callback, which is a wedged bus daemon as seen from here. The wait
+ended at **5.00s and 5.02s** (no context pushed, and with one pushed) on the
+development box and at **5.01s and 5.05s** on the KDE box, each with the
+`BackendUnavailable` the five-second deadline is for. That refusal now says
+which of the two failures it was: a name another session holds is answered in
+about 70ms, so a refusal that took the whole deadline is a bus that said
+nothing at all, not an instance to go looking for.
+
 The middle row is both halves of the finding in one run. Gio delivers
 `bus_acquired`/`name_acquired` on the context that was thread-default when
 `bus_own_name` was called, so a wait that iterates the *global default* one
@@ -5778,3 +5788,48 @@ recognises no stop press, which is what a Ctrl-C leaves behind) the same run
 reports "the run ended without capture seeing it" and fails, where the old
 check printed "the recorder stopped on the two Escapes" and could still
 answer OK on a recording that validated clean.
+
+## The third review round, driven on the fleet (2026-11-19)
+
+**Window events read from inside a pushed context (Fedora 44 KDE).** The
+backend constructed with a private `GMainContext` pushed as thread-default,
+and a dialog opened and closed while `window_events` was asked for events:
+`new` and `close` both arrive. On the code this replaces the loop ran on the
+global default context, where Gio delivers none of this service's calls.
+
+**A copy of the script loaded from another path is invisible to the sweep,
+and the measurement that proves it.** KWin keys a loaded script by the
+*path* it was loaded from, so the probe deployments of one afternoon --
+`/tmp/pgt-r2/src`, `/tmp/pgt-r2/old/src`, `/tmp/pgt-r2/oldatspi/src` -- each
+registered their own plugin name, and a sweep of one cannot see the others.
+Two of those copies were still resident (their files long deleted; KWin had
+already compiled them) and every window event was arriving **twice** for
+both the old code and the new. Cleared by unloading each name explicitly,
+after which one copy answers once and a second copy doubles it again, as the
+earlier measurement had it. Worth knowing twice over: it is the duplication
+the sweep exists to prevent, reproduced by accident, and it is a trap for
+any deployment that unloads by path.
+
+**macOS (Sequoia 15.8.1), the join and the activation.** One TextEdit run,
+twenty-three checks, and two of them are the round's own:
+
+- **A minimized sibling on one rectangle is counted as a twin.** The
+  visible window's handle, the minimized one's rectangle: the count that
+  reads the full server list answers yes where the visible-only count
+  answered no, which is what keeps `close_window` off the wrong window.
+- **`AXRaise` on a minimized window answers success and leaves it
+  minimized.** So an accepted raise is not proof the window came forward --
+  `activate_window` returned normally for a window that is not on screen and
+  takes no keys, and `focus_window` reported True. Refused now; restoring
+  the window and activating it again works in the same run.
+
+The rest of that run is the round-2 story again, unchanged by the full-list
+twin scan: a lone window moves, resizes and closes and keeps its own title;
+two documents on one rectangle lose their titles and refuse every write; the
+pointer and keyboard separate them; and everything lifts for the survivor.
+Two traps the run turned up, both the probe's rather than the library's: a
+killed TextEdit **restores its documents** on the next launch, stacked on one
+rectangle, so a probe that counts windows at startup must close the extras
+first (the pointer-and-keyboard way, since no write can aim at them); and the
+Cmd-W that does that only lands if the click really made TextEdit frontmost,
+which is worth verifying rather than assuming.
