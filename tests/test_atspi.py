@@ -12,6 +12,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 import types
 import unittest
 from unittest import mock
@@ -769,6 +770,40 @@ class TestTheAccessibilityBusProbe(unittest.TestCase):
         )
 
 
+def _against_canned_tools(atspi, fn, env, replies):
+    """Run `fn()` under `env` against canned replies, one per tool it may spawn.
+
+    `which` reports exactly the tools given a reply, so leaving one out is
+    how a test says a tool is not installed; `run` refuses anything nothing
+    was arranged for, so a tool the function should not have asked fails
+    the test rather than getting a Mock. Returns `fn`'s answer and the
+    commands actually run.
+    """
+    commands = []
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        for tool, reply in replies.items():
+            if os.path.basename(command[0]) == tool:
+                # An exception is a reply too: subprocess.run raises for a
+                # timeout rather than returning one, and how each half of
+                # the probe treats that is its own rule worth testing.
+                if isinstance(reply, BaseException):
+                    raise reply
+                return reply
+        raise AssertionError(f"nothing arranged for {command}")
+
+    def fake_which(tool):
+        return f"/usr/bin/{tool}" if tool in replies else None
+
+    with (
+        _environment(**env),
+        mock.patch.object(atspi.shutil, "which", side_effect=fake_which),
+        mock.patch.object(atspi.subprocess, "run", side_effect=fake_run),
+    ):
+        return fn(), commands
+
+
 class TestTheAddressLibatspiWouldConnectTo(unittest.TestCase):
     """Which of libatspi's three sources the probe asks, and in what order.
 
@@ -797,37 +832,10 @@ class TestTheAddressLibatspiWouldConnectTo(unittest.TestCase):
         _connectability(self, live={_LIVE_BUS})
 
     def _probe(self, env, **replies):
-        """Run the probe against canned replies, one per tool it may spawn.
-
-        `which` reports exactly the tools given a reply, so leaving one out
-        is how a test says a tool is not installed; `run` refuses anything
-        nothing was arranged for, so a tool this should not have asked fails
-        the test rather than getting a Mock. Returns the answer and the
-        commands actually run.
-        """
-        commands = []
-
-        def fake_run(command, **_kwargs):
-            commands.append(command)
-            for tool, reply in replies.items():
-                if os.path.basename(command[0]) == tool:
-                    # An exception is a reply too: subprocess.run raises for a
-                    # timeout rather than returning one, and how each half of
-                    # the probe treats that is its own rule worth testing.
-                    if isinstance(reply, BaseException):
-                        raise reply
-                    return reply
-            raise AssertionError(f"nothing arranged for {command}")
-
-        def fake_which(tool):
-            return f"/usr/bin/{tool}" if tool in replies else None
-
-        with (
-            _environment(**env),
-            mock.patch.object(self.atspi.shutil, "which", side_effect=fake_which),
-            mock.patch.object(self.atspi.subprocess, "run", side_effect=fake_run),
-        ):
-            return self.atspi.a11y_bus_probe(), commands
+        """Run the probe against canned replies; see `_against_canned_tools`."""
+        return _against_canned_tools(
+            self.atspi, self.atspi.a11y_bus_probe, env, replies
+        )
 
     def _asked(self, commands):
         """The tools a probe run consulted, by name."""
@@ -989,6 +997,70 @@ class TestTheAddressLibatspiWouldConnectTo(unittest.TestCase):
         answer, commands = self._probe({"DISPLAY": ":0"})
         self.assertIsNone(answer)
         self.assertEqual(commands, [])
+
+
+class TestTheAddressTheDispatcherDials(unittest.TestCase):
+    """`_a11y_bus_address` walks the same sources, for a string to dial.
+
+    It is not the probe -- it answers an address or None, never a verdict --
+    but it shares the probe's one rule about a timed-out `xprop`: the
+    property was not *absent*, libatspi connected to whatever it names, and
+    the session bus might name a different bus. A node's unique name and
+    object path are only meaningful on the bus its application is on, so
+    the asynchronous route must dial that bus or none.
+    """
+
+    def setUp(self):
+        from pyguitest.backends import atspi
+
+        self.atspi = atspi
+
+    def _address(self, env, **replies):
+        return _against_canned_tools(
+            self.atspi, self.atspi._a11y_bus_address, env, replies
+        )
+
+    def _asked(self, commands):
+        return [os.path.basename(command[0]) for command in commands]
+
+    def test_the_environment_address_comes_first(self):
+        address, commands = self._address(
+            {"DISPLAY": ":0", "AT_SPI_BUS_ADDRESS": _LIVE_BUS},
+            xprop=_xprop_answering(_DEAD_BUS),
+        )
+        self.assertEqual(address, _LIVE_BUS)
+        self.assertEqual(commands, [])
+
+    def test_the_x11_property_is_read_where_libatspi_reads_it(self):
+        address, commands = self._address(
+            {"DISPLAY": ":0"},
+            xprop=_xprop_answering(_LIVE_BUS),
+            gdbus=_gdbus_answering(_DEAD_BUS),  # arranged for, must not be asked
+        )
+        self.assertEqual(address, _LIVE_BUS)
+        self.assertEqual(self._asked(commands), ["xprop"])
+
+    def test_a_property_nobody_set_goes_on_to_the_session_bus(self):
+        address, commands = self._address(
+            {"DISPLAY": ":0"},
+            xprop=_XPROP_NOTHING_SET,
+            gdbus=_gdbus_answering(_LIVE_BUS),
+        )
+        self.assertEqual(address, _LIVE_BUS)
+        self.assertEqual(self._asked(commands), ["xprop", "gdbus"])
+
+    def test_a_property_that_could_not_be_read_dials_nothing(self):
+        # The rule this class exists for. A timed-out xprop is not an absent
+        # property; falling through to GetAddress could dial a bus other
+        # than the one libatspi is on, and dispatch the node's bus-local
+        # name there. None keeps the action on libatspi's own connection.
+        address, commands = self._address(
+            {"DISPLAY": ":0"},
+            xprop=subprocess.TimeoutExpired("xprop", 5),
+            gdbus=_gdbus_answering(_LIVE_BUS),  # arranged for, must not be asked
+        )
+        self.assertIsNone(address)
+        self.assertEqual(self._asked(commands), ["xprop"])
 
 
 class TestWaylandCoordinateHonesty(AtspiTestCase):
@@ -1437,6 +1509,27 @@ class _FakeManyWindowsGeometrySource:
         return next(rect for w, rect in self._listed if w is window)
 
 
+class _FakeStackingGeometrySource(_FakeManyWindowsGeometrySource):
+    """`_FakeManyWindowsGeometrySource` that can also say which window is on top.
+
+    What `gnomeshell` answers through `WindowAtPoint`: `top` is the index of
+    the listing a pointer at any point would reach. The base class, with no
+    `window_at` at all, models a source that cannot resolve stacking.
+    """
+
+    def __init__(self, pid, offsets, top, **kwargs):
+        super().__init__(pid, offsets, **kwargs)
+        self._top = top
+        self.asked_at = []
+
+    def supports(self, capability):
+        return capability == Capability.WINDOW_AT_POINT
+
+    def window_at(self, x, y, screen=0):
+        self.asked_at.append((x, y))
+        return self._listed[self._top][0]
+
+
 class _FakeTitleOnlyGeometrySource:
     """A sibling backend standing in for `cosmic`.
 
@@ -1489,6 +1582,162 @@ class TestWaylandElementGeometry(AtspiTestCase):
         button = gui.find_element(name="OK")
         with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
             self.assertEqual(gui.extents(button), (10, 52, 80, 30))
+
+    def test_unscoped_element_at_stays_refused_on_wayland_with_a_source(self):
+        # extents() places one element at a time and answers; element_at
+        # unscoped would have to place every toplevel on the desktop and still
+        # could not resolve stacking, so it stays refused even once a geometry
+        # source is wired -- the scoped form below is the way in.
+        self.frame._pid = 4242
+        gui = self.backend(SessionType.WAYLAND)
+        gui.set_window_geometry_source(_FakeWindowGeometrySource(4242, (0, 32)))
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            with self.assertRaises(CapabilityUnsupported):
+                gui.element_at(50, 67)
+
+    def test_element_at_scoped_to_a_pid_answers_on_wayland(self):
+        # Scoped to one already-placed window's process, the sweep is that one
+        # application's toplevels and the stacking was resolved by whoever
+        # chose the pid, so the refusal lifts. The button is window-relative
+        # (10, 20, 80, 30); the source puts its window at (0, 32), so it sits
+        # at screen (10, 52)-(90, 82) and its centre resolves to it.
+        self.frame._pid = 4242
+        self.frame.parent._pid = 4242
+        gui = self.backend(SessionType.WAYLAND)
+        gui.set_window_geometry_source(_FakeWindowGeometrySource(4242, (0, 32)))
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertEqual(gui.element_at(50, 67, pid=4242).name, "OK")
+
+    def _open_a_dialog_over_the_main_window(self):
+        """One process, two placed toplevels overlapping at (150, 150).
+
+        The fixture's main frame (800x600, listed at the screen origin) gets a
+        20x20 button at (140, 140); a 300x200 "Save As" frame, listed at
+        (100, 100), carries a 280x180 panel from (10, 10). Screen (150, 150)
+        is inside both: the main window's tiny button and the dialog's big
+        panel. The size filter in `_source_rects` pairs each frame with its
+        own listing (each is hundreds of pixels from the other's), so the
+        stacking question is the only one left open. Returns the offsets the
+        source lists, main window first.
+        """
+        self.frame._pid = 4242
+        self.frame.parent._pid = 4242
+        hidden = FakeNode("Hidden", "push button", position=(140, 140), size=(20, 20))
+        hidden.parent = self.frame
+        self.frame.children.append(hidden)
+        panel = FakeNode("Files", "panel", position=(10, 10), size=(280, 180))
+        dialog = FakeNode("Save As", "frame", [panel], (0, 0), (300, 200), pid=4242)
+        dialog.parent = self.frame.parent
+        self.frame.parent.children.append(dialog)
+        return [(0, 0), (100, 100)], [(800, 600), (300, 200)]
+
+    def test_scoped_element_at_follows_the_source_to_the_window_on_top(self):
+        # Specificity alone would answer the rear window's 20x20 button, the
+        # smaller of the two covering nodes -- a locator from a window the
+        # pointer cannot reach. The source says the dialog is on top there,
+        # so only the dialog's answer stands.
+        offsets, sizes = self._open_a_dialog_over_the_main_window()
+        source = _FakeStackingGeometrySource(4242, offsets, top=1, sizes=sizes)
+        gui = self.backend(SessionType.WAYLAND)
+        gui.set_window_geometry_source(source)
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertEqual(gui.element_at(150, 150, pid=4242).name, "Files")
+        self.assertEqual(source.asked_at, [(150, 150)])
+
+    def test_scoped_element_at_keeps_the_rear_window_when_it_is_on_top(self):
+        # The same two windows with the main one raised: the source's answer
+        # is followed, not the dialog assumed on top because it is smaller
+        # or listed later.
+        offsets, sizes = self._open_a_dialog_over_the_main_window()
+        source = _FakeStackingGeometrySource(4242, offsets, top=0, sizes=sizes)
+        gui = self.backend(SessionType.WAYLAND)
+        gui.set_window_geometry_source(source)
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertEqual(gui.element_at(150, 150, pid=4242).name, "Hidden")
+
+    def test_scoped_element_at_refuses_to_guess_between_two_placed_windows(self):
+        # A source that lists and places both windows but cannot say which is
+        # on top: the answer is None, not the smaller node, since the smaller
+        # node is the wrong one exactly when a dialog is up over a busy main
+        # window -- the common case this exists for.
+        offsets, sizes = self._open_a_dialog_over_the_main_window()
+        gui = self.backend(SessionType.WAYLAND)
+        gui.set_window_geometry_source(
+            _FakeManyWindowsGeometrySource(4242, offsets, sizes=sizes)
+        )
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertIsNone(gui.element_at(150, 150, pid=4242))
+
+    def test_scoped_element_at_answers_none_when_a_third_window_is_on_top(self):
+        # The source names a window neither hit was placed by -- another
+        # toplevel of the same process covering the point, say, one AT-SPI
+        # never showed. Neither hit is the one a pointer would reach, so
+        # neither is answered.
+        offsets, sizes = self._open_a_dialog_over_the_main_window()
+        source = _FakeStackingGeometrySource(
+            4242, [*offsets, (120, 120)], top=2, sizes=[*sizes, (64, 64)]
+        )
+        gui = self.backend(SessionType.WAYLAND)
+        gui.set_window_geometry_source(source)
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertIsNone(gui.element_at(150, 150, pid=4242))
+
+    def test_scoped_element_at_does_not_ask_about_stacking_for_one_window(self):
+        # With only the fixture's one toplevel covering the point there is
+        # nothing to choose between, so the source is never asked -- the
+        # stacking query is an extra round trip only the overlap case pays.
+        self.frame._pid = 4242
+        self.frame.parent._pid = 4242
+        source = _FakeStackingGeometrySource(4242, [(0, 32)], top=0)
+        gui = self.backend(SessionType.WAYLAND)
+        gui.set_window_geometry_source(source)
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertEqual(gui.element_at(50, 67, pid=4242).name, "OK")
+        self.assertEqual(source.asked_at, [])
+
+    def test_scoped_element_at_on_wayland_places_without_trusting_the_frame(self):
+        # A frame whose SCREEN and WINDOW rectangles differ is what
+        # `_verify_app_coords` reads as a toolkit that knows where it is -- and
+        # on X11 it would be right. On a pure Wayland session that verdict is
+        # never consulted: the session-wide fact wins, as it does in
+        # `_extents`, and the point is moved into WINDOW space through the
+        # source. The frame's WINDOW rectangle starts at y=-37 and the source
+        # puts that edge at screen y=32, so the WINDOW origin is at screen
+        # y=69 and the button's window-relative (10, 20) is at screen (10, 89)
+        # -- where extents() places it too. Hit-tested in screen space
+        # instead, (50, 104) misses every child's window-relative rectangle
+        # and the frame itself answers.
+        self.frame._pid = 4242
+        self.frame.parent._pid = 4242
+        self.frame.window_position = (0, -37)
+        gui = self.backend(SessionType.WAYLAND)
+        gui.set_window_geometry_source(_FakeWindowGeometrySource(4242, (0, 32)))
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            button = gui.find_element(name="OK")
+            self.assertEqual(gui.extents(button), (10, 89, 80, 30))
+            self.assertEqual(gui.element_at(50, 104, pid=4242).name, "OK")
+
+    def test_element_at_scoped_to_another_pid_skips_the_application(self):
+        # The one application present runs as 4242; scoped to a different
+        # process it is passed over, and the point stays unanswered rather
+        # than being placed and named out of a window the scope excluded.
+        self.frame._pid = 4242
+        self.frame.parent._pid = 4242
+        gui = self.backend(SessionType.WAYLAND)
+        gui.set_window_geometry_source(_FakeWindowGeometrySource(4242, (0, 32)))
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertIsNone(gui.element_at(50, 67, pid=9999))
+
+    def test_scoped_element_at_still_needs_a_geometry_source(self):
+        # A pid narrows the sweep but places nothing: a window-relative
+        # rectangle needs the window's screen offset added, and with no source
+        # to give it even a scoped answer cannot be trusted, so it is refused.
+        self.frame._pid = 4242
+        self.frame.parent._pid = 4242
+        gui = self.backend(SessionType.WAYLAND)
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            with self.assertRaises(CapabilityUnsupported):
+                gui.element_at(50, 67, pid=4242)
 
     def test_no_matching_window_raises_capability_unsupported(self):
         # The source exists, but no window of its own has this pid. The
@@ -3391,3 +3640,765 @@ class TestElementValue(unittest.TestCase):
         """Reading a property should not be the thing that raises."""
         node = FakeNode(name="Odd", role="slider", value=object())
         self.assertIsNone(self.atspi.Element(node).value)
+
+
+class _ModalActionNode(FakeNode):
+    """A node whose action is dispatched and never replies.
+
+    Models the application-modal dialog case: `doActionNamed` raises the
+    no-reply error libatspi produces when its own timeout fires, because
+    the handler is sitting in the dialog's event loop. `name` is the
+    liveness read `_application_answers` makes, so this controls it
+    separately -- answering, raising, or hanging.
+    """
+
+    def __init__(self, action_error, name_error=None, name_hangs=False, **kwargs):
+        self.name_reads = 0
+        self.action_attempts = 0
+        self._name_error = name_error
+        self._name_hangs = name_hangs
+        kwargs.setdefault("role", "menu item")
+        kwargs.setdefault("actions", {"click": {}})
+        super().__init__(name="Save As…", **kwargs)
+        self._action_error = action_error
+
+    @property
+    def name(self):
+        self.name_reads += 1
+        if self._name_hangs:
+            time.sleep(5)
+        if self._name_error is not None:
+            raise self._name_error
+        return self._name
+
+    @name.setter
+    def name(self, value):
+        self._name = value
+
+    def doActionNamed(self, action):
+        self.action_attempts += 1
+        raise self._action_error
+
+
+_NO_REPLY = (
+    "Exception when executing a named action: 'atspi_error: Did not receive "
+    "a reply. Possible causes include: the remote application did not send "
+    "a reply, the message bus security policy blocked the reply, the reply "
+    "timeout expired, or the network connection was broken. (1)'"
+)
+"""The real message, from the live sway run that found this."""
+
+
+class TestClickingAModalDialogOpener(AtspiTestCase):
+    """An action whose handler opens a modal dialog is not a failed action.
+
+    `QFileDialog.getSaveFileName` and friends run their own event loop
+    *inside* the action handler, so the `DoAction` reply cannot arrive until
+    the dialog closes. libatspi's timeout fires first and dogtail raises
+    "Did not receive a reply" -- about an action that worked, with the
+    dialog open on screen. Measured on sway against the Qt torture fixture:
+    the dialog opened, the call failed 12.3s later, and `click()` reported a
+    failure for the one thing it had just done.
+
+    What separates that from the hang `BackendCallTimeout` is for: the modal
+    application is still running an event loop and still answers AT-SPI
+    (measured: five reads, including a lookup of elements inside the dialog
+    itself). A wedged one answers nothing.
+    """
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(self.atspi, "_LIVENESS_TIMEOUT", 0.3)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_no_reply_from_a_live_application_is_not_an_error(self):
+        """The fix: the dialog is open, so the click did what was asked."""
+        node = _ModalActionNode(RuntimeError(_NO_REPLY))
+        self.atspi.Element(node).click()
+        self.assertEqual(node.action_attempts, 1)
+        self.assertGreaterEqual(node.name_reads, 1)
+
+    def test_a_no_reply_from_an_application_that_has_gone_still_raises(self):
+        """The half that must keep failing, or the fix hides a dead client."""
+        node = _ModalActionNode(
+            RuntimeError(_NO_REPLY),
+            name_error=RuntimeError("the application is gone"),
+        )
+        with self.assertRaises(RuntimeError) as caught:
+            self.atspi.Element(node).click()
+        self.assertIn("Did not receive a reply", str(caught.exception))
+
+    def test_a_no_reply_from_an_application_that_hangs_still_raises(self):
+        """A wedged application answers nothing, including this read."""
+        node = _ModalActionNode(RuntimeError(_NO_REPLY), name_hangs=True)
+        with self.assertRaises(RuntimeError) as caught:
+            self.atspi.Element(node).click()
+        self.assertIn("Did not receive a reply", str(caught.exception))
+
+    def test_an_action_the_application_refused_still_raises(self):
+        """A refusal is an answer, so it is not the no-reply case at all.
+
+        The liveness read is not even reached: an application that said no
+        is plainly alive, and asking again would only risk excusing it.
+        """
+        node = _ModalActionNode(RuntimeError("that action is not supported"))
+        with self.assertRaises(RuntimeError):
+            self.atspi.Element(node).click()
+        self.assertEqual(node.name_reads, 0)
+
+    def test_the_backend_timeout_is_still_the_hang_signal(self):
+        """Our own bound means the call never even came back.
+
+        Nothing can be concluded about whether it was dispatched, so this
+        stays `BackendCallTimeout` rather than being excused as a modal
+        dialog.
+        """
+        node = _ModalActionNode(RuntimeError(_NO_REPLY))
+        with mock.patch.object(
+            self.atspi,
+            "_run_bounded",
+            side_effect=self.atspi.BackendCallTimeout("doActionNamed", 20.0),
+        ):
+            with self.assertRaises(self.atspi.BackendCallTimeout):
+                self.atspi.Element(node).click()
+
+    def test_do_action_tolerates_the_same_block(self):
+        """`do_action` is the route a caller uses when they know the name.
+
+        It is aimed at menu items at least as often as `click` is, so it
+        must not be the one place a file chooser still reads as a failure.
+        """
+        node = _ModalActionNode(RuntimeError(_NO_REPLY))
+        self.atspi.Element(node).do_action("click")
+        self.assertEqual(node.action_attempts, 1)
+
+    def test_do_action_still_raises_when_the_application_has_gone(self):
+        """The same guard, through the same helper."""
+        node = _ModalActionNode(
+            RuntimeError(_NO_REPLY),
+            name_error=RuntimeError("the application is gone"),
+        )
+        with self.assertRaises(RuntimeError):
+            self.atspi.Element(node).do_action("click")
+
+    def test_the_no_reply_signatures_are_matched_case_insensitively(self):
+        """The texts come from libdbus/GLib, whose casing is not ours."""
+        for text in (
+            "Did not receive a reply",
+            "DID NOT RECEIVE A REPLY",
+            "Message recipient disconnected from message bus",
+            "Timeout was reached",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(self.atspi._is_no_reply(RuntimeError(text)))
+        self.assertFalse(
+            self.atspi._is_no_reply(RuntimeError("that action is not supported"))
+        )
+
+
+class TestTheActionIsDispatchedAsynchronously(AtspiTestCase):
+    """The route that keeps a modal dialog usable.
+
+    A synchronous `DoAction` holds the AT-SPI connection until it replies,
+    and a handler that opens an application-modal dialog cannot reply until
+    the dialog closes. Measured on sway: after that abandoned call nothing
+    reached the dialog -- not Escape, not typing into its own filename
+    field, not its own Cancel button -- while reads inside it kept working.
+    Dispatched asynchronously, in the same place: typing reached the
+    filename field (`untitled.txt` -> `z`) and its own Cancel closed it.
+
+    So `click` must take the asynchronous route whenever it can, and the
+    index it dispatches has to be the one dogtail's `actions` dict carries
+    for the action actually chosen.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.dispatched = []
+        self.REPLIED = self.atspi._Dispatch.REPLIED
+        self.PENDING = self.atspi._Dispatch.PENDING
+        self.UNUSABLE = self.atspi._Dispatch.UNUSABLE
+        patcher = mock.patch.object(self.atspi, "_LIVENESS_TIMEOUT", 0.3)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def dispatcher(self, result):
+        """Stands in for `_dispatch_action`, recording what it was handed."""
+
+        def dispatch(node, index, settle=None):
+            self.dispatched.append((node, index))
+            if isinstance(result, BaseException):
+                raise result
+            return result
+
+        return dispatch
+
+    def test_click_dispatches_the_index_for_the_action_it_chose(self):
+        """`press` is chosen over `toggle`, so index 2 must be the one sent."""
+        node = FakeNode(
+            name="Save As…",
+            role="menu item",
+            actions={"toggle": 7, "press": 2},
+            click_raises=Exception("coordinates were used"),
+        )
+        with mock.patch.object(
+            self.atspi, "_dispatch_action", side_effect=self.dispatcher(self.REPLIED)
+        ):
+            self.atspi.Element(node).click()
+        self.assertEqual([index for _node, index in self.dispatched], [2])
+        # The synchronous call must not also have run: that is the one that
+        # holds the connection.
+        self.assertEqual(node.actions_performed, [])
+
+    def test_the_synchronous_route_is_the_fallback_not_the_default(self):
+        """A route that cannot be built falls back, and still acts."""
+        node = FakeNode(name="OK", role="push button", actions={"click": 0})
+        with mock.patch.object(
+            self.atspi, "_dispatch_action", side_effect=self.dispatcher(self.UNUSABLE)
+        ):
+            self.atspi.Element(node).click()
+        self.assertEqual([index for _node, index in self.dispatched], [0])
+        self.assertEqual(node.actions_performed, ["click"])
+
+    def test_an_error_the_application_answered_with_still_raises(self):
+        """A refusal that arrives inside the settle window is a real failure."""
+        node = FakeNode(name="OK", role="push button", actions={"click": 0})
+        with mock.patch.object(
+            self.atspi,
+            "_dispatch_action",
+            side_effect=self.dispatcher(RuntimeError("that action is not supported")),
+        ):
+            with self.assertRaises(RuntimeError):
+                self.atspi.Element(node).click()
+        self.assertEqual(node.actions_performed, [])
+
+    def test_a_no_reply_on_the_async_route_is_still_checked_for_liveness(self):
+        """Belt and braces: the no-reply guard covers this route too."""
+        # An int index, so the asynchronous route is the one taken -- the
+        # default fake carries a non-index on purpose, to pin the fallback.
+        node = _ModalActionNode(
+            RuntimeError("the synchronous route must not be reached"),
+            name_error=RuntimeError("the application is gone"),
+            actions={"click": 0},
+        )
+        with mock.patch.object(
+            self.atspi,
+            "_dispatch_action",
+            side_effect=self.dispatcher(RuntimeError(_NO_REPLY)),
+        ):
+            with self.assertRaises(RuntimeError) as caught:
+                self.atspi.Element(node).click()
+        self.assertIn("Did not receive a reply", str(caught.exception))
+
+    def test_a_pending_action_on_a_live_application_is_done(self):
+        """The modal-dialog case on this route: dispatched, dialog up, done.
+
+        The handler has not returned by the settle time, the application
+        still answers, and the synchronous route -- the one that holds the
+        connection -- must not also run.
+        """
+        node = _ModalActionNode(
+            RuntimeError("the synchronous route must not be reached"),
+            actions={"click": 0},
+        )
+        with mock.patch.object(
+            self.atspi, "_dispatch_action", side_effect=self.dispatcher(self.PENDING)
+        ):
+            self.atspi.Element(node).click()
+        self.assertEqual(node.action_attempts, 0)
+        self.assertGreaterEqual(node.name_reads, 1)
+
+    def test_a_pending_action_on_an_application_that_hangs_is_a_timeout(self):
+        """Pending is not success: an application that answers nothing raises.
+
+        Before this, an application that stopped serving AT-SPI after its
+        actions were enumerated was reported as clicked once the settle time
+        ran out -- the one outcome the synchronous route never produced,
+        since there the same stall surfaced as `BackendCallTimeout` or as a
+        no-reply from an application that then failed the liveness read.
+        """
+        node = _ModalActionNode(
+            RuntimeError("the synchronous route must not be reached"),
+            name_hangs=True,
+            actions={"click": 0},
+        )
+        with mock.patch.object(
+            self.atspi, "_dispatch_action", side_effect=self.dispatcher(self.PENDING)
+        ):
+            with self.assertRaises(self.atspi.BackendCallTimeout) as caught:
+                self.atspi.Element(node).click()
+        self.assertIn("DoAction 'click'", str(caught.exception))
+        self.assertEqual(node.action_attempts, 0)
+
+    def test_a_pending_action_on_an_application_that_has_gone_is_a_timeout(self):
+        """The same for one whose liveness read fails outright."""
+        node = _ModalActionNode(
+            RuntimeError("the synchronous route must not be reached"),
+            name_error=RuntimeError("the application is gone"),
+            actions={"click": 0},
+        )
+        with mock.patch.object(
+            self.atspi, "_dispatch_action", side_effect=self.dispatcher(self.PENDING)
+        ):
+            with self.assertRaises(self.atspi.BackendCallTimeout):
+                self.atspi.Element(node).click()
+
+    def test_a_reply_within_the_settle_time_skips_the_liveness_read(self):
+        """An application that answered is plainly alive; no second round trip."""
+        node = _ModalActionNode(
+            RuntimeError("the synchronous route must not be reached"),
+            actions={"click": 0},
+        )
+        with mock.patch.object(
+            self.atspi, "_dispatch_action", side_effect=self.dispatcher(self.REPLIED)
+        ):
+            self.atspi.Element(node).click()
+        self.assertEqual(node.name_reads, 0)
+
+    def test_an_actions_dict_without_an_index_uses_the_synchronous_route(self):
+        """An older dogtail whose dict holds something else must still work."""
+        node = FakeNode(name="OK", role="push button", actions={"click": {}})
+        with mock.patch.object(
+            self.atspi, "_dispatch_action", side_effect=self.dispatcher(self.REPLIED)
+        ) as dispatch:
+            self.atspi.Element(node).click()
+        dispatch.assert_not_called()
+        self.assertEqual(node.actions_performed, ["click"])
+
+    def test_true_is_not_mistaken_for_action_index_one(self):
+        """`isinstance(True, int)` is true in Python, so bools are excluded.
+
+        A dict that answered `True` for an action would otherwise dispatch
+        index 1 -- some other action entirely, silently.
+        """
+        node = FakeNode(name="OK", role="push button", actions={"click": True})
+        with mock.patch.object(
+            self.atspi, "_dispatch_action", side_effect=self.dispatcher(self.REPLIED)
+        ) as dispatch:
+            self.atspi.Element(node).click()
+        dispatch.assert_not_called()
+        self.assertEqual(node.actions_performed, ["click"])
+
+    def test_do_action_dispatches_asynchronously_too(self):
+        """The public named-action route gets the same treatment."""
+        node = FakeNode(name="Save As…", role="menu item", actions={"Press": 0})
+        with mock.patch.object(
+            self.atspi, "_dispatch_action", side_effect=self.dispatcher(self.REPLIED)
+        ):
+            self.atspi.Element(node).do_action("Press")
+        self.assertEqual([index for _node, index in self.dispatched], [0])
+        self.assertEqual(node.actions_performed, [])
+
+
+class _FakeGioConnecting:
+    """Gio's connection-opening half, with the outcome the test chooses.
+
+    `_gi_dbus` has to be faked for these: PyGObject is absent from the
+    version-matrix environments, so without it `_a11y_connection` returns
+    before it ever reaches the address -- which made the caching test fail
+    on 3.10-3.14 while passing on the dev box, and made the other two pass
+    without exercising anything.
+    """
+
+    class DBusConnectionFlags:
+        AUTHENTICATION_CLIENT = 1
+        MESSAGE_BUS_CONNECTION = 2
+
+    def __init__(self, error=None, stall=0):
+        self.error = error
+        self.stall = stall
+        self.addresses = []
+        outer = self
+
+        class DBusConnection:
+            @staticmethod
+            def new_for_address_sync(address, *_rest):
+                """Gio's four-argument form; only the address is asserted on.
+
+                `stall` seconds of sleep first stand in for a handshake that
+                never completes.
+                """
+                outer.addresses.append(address)
+                if outer.stall:
+                    time.sleep(outer.stall)
+                if outer.error is not None:
+                    raise outer.error
+                return f"connection to {address}"
+
+        self.DBusConnection = DBusConnection
+
+
+class TestTheAccessibilityBusConnection(AtspiTestCase):
+    """`_a11y_connection` answers None rather than raising, and only asks once."""
+
+    def setUp(self):
+        super().setUp()
+        self.atspi._A11Y_BUS_CACHE.clear()
+        self.addCleanup(self.atspi._A11Y_BUS_CACHE.clear)
+
+    def patched(self, gio, address):
+        """`_gi_dbus` and the address, both faked, as a context manager."""
+        return (
+            mock.patch.object(self.atspi, "_gi_dbus", return_value=(gio, _FakeGLib)),
+            mock.patch.object(self.atspi, "_a11y_bus_address", return_value=address),
+        )
+
+    def test_an_address_opens_a_connection(self):
+        """The case that has to work, or the asynchronous route never runs."""
+        gio = _FakeGioConnecting()
+        dbus, address = self.patched(gio, "unix:path=/run/user/1000/at-spi/bus")
+        with dbus, address:
+            self.assertIsNotNone(self.atspi._a11y_connection())
+        self.assertEqual(gio.addresses, ["unix:path=/run/user/1000/at-spi/bus"])
+
+    def test_no_address_means_no_connection_rather_than_an_error(self):
+        """Every failure here means "use the synchronous route instead"."""
+        gio = _FakeGioConnecting()
+        dbus, address = self.patched(gio, None)
+        with dbus, address as asked:
+            self.assertIsNone(self.atspi._a11y_connection())
+        asked.assert_called_once()
+        self.assertEqual(gio.addresses, [])
+
+    def test_a_bus_that_refuses_is_not_an_error_either(self):
+        gio = _FakeGioConnecting(error=RuntimeError("connection refused"))
+        dbus, address = self.patched(gio, "unix:path=/nope")
+        with dbus, address:
+            self.assertIsNone(self.atspi._a11y_connection())
+        self.assertEqual(gio.addresses, ["unix:path=/nope"])
+
+    def test_pygobject_being_absent_is_not_an_error_either(self):
+        """The matrix environments, and any desktop without PyGObject."""
+        with mock.patch.object(
+            self.atspi, "_gi_dbus", side_effect=RuntimeError("no PyGObject")
+        ):
+            self.assertIsNone(self.atspi._a11y_connection())
+
+    def test_the_answer_is_cached_so_click_does_not_redial(self):
+        """`click` is this module's hottest path; one round trip, not many."""
+        gio = _FakeGioConnecting()
+        dbus, address = self.patched(gio, "unix:path=/run/user/1000/at-spi/bus")
+        with dbus, address as asked:
+            first = self.atspi._a11y_connection()
+            self.atspi._a11y_connection()
+            self.atspi._a11y_connection()
+        asked.assert_called_once()
+        self.assertEqual(len(gio.addresses), 1)
+        self.assertIsNotNone(first)
+
+    def test_a_failed_attempt_is_cached_too(self):
+        """Otherwise every click on a bus-less desktop pays for the attempt."""
+        gio = _FakeGioConnecting()
+        dbus, address = self.patched(gio, None)
+        with dbus, address as asked:
+            self.atspi._a11y_connection()
+            self.atspi._a11y_connection()
+        asked.assert_called_once()
+
+    def test_a_failed_attempt_is_retried_once_the_interval_has_passed(self):
+        """But not forever: a bus that was not up yet comes up.
+
+        One `GetAddress` timeout under load, cached permanently, would keep
+        every later action on the synchronous route for the life of the
+        process -- the file-chooser actions the asynchronous route exists
+        for included. The first attempt fails; the clock is moved past
+        `_A11Y_RETRY_AFTER`; the next call asks again, and the address that
+        is there now yields a connection, which is then kept for good.
+        """
+        gio = _FakeGioConnecting()
+        dbus, address = self.patched(gio, None)
+        with dbus, address as asked:
+            self.assertIsNone(self.atspi._a11y_connection())
+            asked.return_value = "unix:path=/run/user/1000/at-spi/bus"
+            self.assertIsNone(self.atspi._a11y_connection())
+            self.atspi._A11Y_BUS_CACHE["failed_at"] -= self.atspi._A11Y_RETRY_AFTER
+            self.assertIsNotNone(self.atspi._a11y_connection())
+            self.assertIsNotNone(self.atspi._a11y_connection())
+        self.assertEqual(asked.call_count, 2)
+        self.assertEqual(len(gio.addresses), 1)
+
+    def test_a_handshake_that_does_not_finish_is_abandoned(self):
+        """`new_for_address_sync` has no timeout of its own; it gets ours.
+
+        An endpoint that accepts the socket and then stalls in
+        authentication would otherwise hold the session's first `click`
+        indefinitely, before the settle clock had even started, with the
+        bounded synchronous fallback never reached. Bounded, the attempt is
+        a failure like any other: None now, retried later.
+        """
+        gio = _FakeGioConnecting(stall=5)
+        dbus, address = self.patched(gio, "unix:path=/run/user/1000/at-spi/bus")
+        with (
+            dbus,
+            address,
+            mock.patch.object(self.atspi, "_A11Y_BUS_TIMEOUT", 0.05),
+        ):
+            started = time.monotonic()
+            self.assertIsNone(self.atspi._a11y_connection())
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertEqual(gio.addresses, ["unix:path=/run/user/1000/at-spi/bus"])
+        self.assertIn("failed_at", self.atspi._A11Y_BUS_CACHE)
+
+
+class _FakeContext:
+    """GLib's main context, as `_dispatch_action` uses it.
+
+    `queued` holds callables standing in for sources attached to the
+    context -- a late reply's completion, an expired call timeout -- which
+    `pending()` reports and `iteration()` runs one at a time, the way GLib
+    dispatches them.
+    """
+
+    def __init__(self):
+        self.depth = 0
+        self.iterations = 0
+        self.queued = []
+
+    def push_thread_default(self):
+        self.depth += 1
+
+    def pop_thread_default(self):
+        self.depth -= 1
+
+    def pending(self):
+        return bool(self.queued)
+
+    def iteration(self, may_block):
+        self.iterations += 1
+        if self.queued:
+            self.queued.pop(0)()
+
+
+class _FakeGLib:
+    """Just the three GLib names the dispatch touches."""
+
+    contexts: list = []
+
+    class MainContext:
+        @staticmethod
+        def new():
+            context = _FakeContext()
+            _FakeGLib.contexts.append(context)
+            return context
+
+    @staticmethod
+    def Variant(signature, values):  # noqa: N802 - GLib's own spelling
+        return ("variant", signature, values)
+
+    @staticmethod
+    def VariantType(signature):  # noqa: N802 - GLib's own spelling
+        return ("type", signature)
+
+
+class _FakeGio:
+    class DBusCallFlags:
+        NONE = 0
+
+
+class _FakeAtspiModule:
+    DBUS_INTERFACE_ACTION = "org.a11y.atspi.Action"
+
+
+class _FakeApp:
+    def __init__(self, bus_name=":1.64"):
+        self.bus_name = bus_name
+
+
+class _AddressableNode:
+    """A node that can say where it lives, which is all the dispatch needs."""
+
+    def __init__(self, bus_name=":1.64", path="/org/a11y/atspi/accessible/42"):
+        self.app = _FakeApp(bus_name)
+        self.path = path
+
+
+class _FakeConnection:
+    """A GDBus connection whose reply timing and content the test chooses.
+
+    `reply` is what `call_finish` unpacks -- `(True,)` by default, the
+    `(b)` AT-SPI's `DoAction` is declared to return. A `silent` connection
+    never completes the call on its own; `deliver_late(context)` then
+    stands in for the reply (or the call's own timeout) arriving after the
+    dispatcher stopped looking, by queuing the completion on the context
+    the call was made on, where only a later iteration of that context can
+    run it.
+    """
+
+    def __init__(self, error=None, silent=False, reply=(True,)):
+        self.error = error
+        self.silent = silent
+        self.reply = reply
+        self.calls = []
+        self.outstanding = []
+
+    def call(
+        self,
+        bus_name,
+        path,
+        interface,
+        method,
+        args,
+        reply_type,
+        flags,
+        timeout,
+        cancellable,
+        callback,
+        data,
+    ):
+        self.calls.append((bus_name, path, interface, method, args, timeout))
+        if self.silent:
+            self.outstanding.append((callback, data))
+        else:
+            callback(self, "result", data)
+
+    def deliver_late(self, context):
+        """Complete every outstanding call -- on `context`, not right now."""
+        for callback, data in self.outstanding:
+            context.queued.append(lambda cb=callback, d=data: cb(self, "result", d))
+        self.outstanding = []
+
+    def call_finish(self, result):
+        if self.error is not None:
+            raise self.error
+        return self.reply
+
+
+class TestDispatchActionItself(AtspiTestCase):
+    """The body of `_dispatch_action`, actually run.
+
+    Every other test of this route patches `_dispatch_action` out, which
+    means none of them execute it -- and a missing `import time` in it
+    therefore reached a live box before the suite had anything to say. These
+    drive the real function against a fake bus.
+    """
+
+    def setUp(self):
+        super().setUp()
+        _FakeGLib.contexts.clear()
+        self.atspi._A11Y_BUS_CACHE.clear()
+        self.addCleanup(self.atspi._A11Y_BUS_CACHE.clear)
+        patchers = [
+            mock.patch.object(
+                self.atspi, "_gi_dbus", return_value=(_FakeGio, _FakeGLib)
+            ),
+            mock.patch.object(self.atspi, "_gi_atspi", return_value=_FakeAtspiModule),
+        ]
+        for patcher in patchers:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def dispatch(self, connection, **kwargs):
+        with mock.patch.object(self.atspi, "_a11y_connection", return_value=connection):
+            return self.atspi._dispatch_action(
+                _AddressableNode(), kwargs.pop("index", 2), **kwargs
+            )
+
+    def test_it_addresses_the_action_interface_on_the_nodes_own_path(self):
+        connection = _FakeConnection()
+        self.assertIs(self.dispatch(connection), self.atspi._Dispatch.REPLIED)
+        bus_name, path, interface, method, args, timeout = connection.calls[0]
+        self.assertEqual(bus_name, ":1.64")
+        self.assertEqual(path, "/org/a11y/atspi/accessible/42")
+        self.assertEqual(interface, "org.a11y.atspi.Action")
+        self.assertEqual(method, "DoAction")
+        self.assertEqual(args, ("variant", "(i)", (2,)))
+        self.assertGreater(timeout, 0)  # finite: see _ACTION_REPLY_TIMEOUT_MS
+
+    def test_an_error_the_application_answered_with_is_raised(self):
+        """A refusal that arrives in time still reaches the caller."""
+        connection = _FakeConnection(error=RuntimeError("no such action"))
+        with self.assertRaises(RuntimeError):
+            self.dispatch(connection)
+
+    def test_a_false_reply_is_an_answer_not_a_refusal(self):
+        """`DoAction` returns `(b)`, and the boolean is not consulted.
+
+        Parity with the synchronous route, which has always discarded the
+        value dogtail's `do_action_named` hands back -- and the right call
+        anyway, since Qt answers a button's `DoAction` before its handler
+        has run, so the value cannot describe the outcome. The application
+        *answered*, which is what matters here: no liveness read follows a
+        reply, and what the action did is read from the published state.
+        """
+        connection = _FakeConnection(reply=(False,))
+        self.assertIs(self.dispatch(connection), self.atspi._Dispatch.REPLIED)
+
+    def test_a_handler_that_never_replies_is_reported_as_pending(self):
+        """The modal-dialog case -- or a wedged application.
+
+        Dispatched and left running, but *not* reported as a reply: the
+        caller has to ask the application which of the two it is, and a
+        True here would have let an application that stopped answering
+        after its actions were enumerated pass as a successful click.
+        """
+        connection = _FakeConnection(silent=True)
+        self.assertIs(
+            self.dispatch(connection, settle=0.05), self.atspi._Dispatch.PENDING
+        )
+        self.assertEqual(len(connection.calls), 1)
+
+    def test_no_connection_means_fall_back_rather_than_fail(self):
+        self.assertIs(self.dispatch(None), self.atspi._Dispatch.UNUSABLE)
+
+    def test_a_node_that_cannot_say_where_it_lives_falls_back(self):
+        with mock.patch.object(
+            self.atspi, "_a11y_connection", return_value=_FakeConnection()
+        ):
+            node = _AddressableNode(bus_name="", path="")
+            self.assertIs(
+                self.atspi._dispatch_action(node, 0), self.atspi._Dispatch.UNUSABLE
+            )
+
+    def test_the_thread_default_context_is_always_popped(self):
+        """A context left pushed would redirect every later GLib callback."""
+        connection = _FakeConnection(error=RuntimeError("no such action"))
+        with self.assertRaises(RuntimeError):
+            self.dispatch(connection)
+        self.assertTrue(_FakeGLib.contexts)
+        for context in _FakeGLib.contexts:
+            self.assertEqual(context.depth, 0)
+
+    def test_every_dispatch_shares_one_context(self):
+        """One context for the session, not one per click.
+
+        GDBus attaches a call's reply and its timeout to the context that
+        was thread-default when the call was made; a fresh context per
+        dispatch, dropped after the settle time, was a context nobody would
+        ever iterate again, so a handler that never returned kept its
+        pending entry past the 30s timeout and a late reply its queued
+        completion.
+        """
+        self.dispatch(_FakeConnection(silent=True), settle=0.01)
+        self.dispatch(_FakeConnection(), settle=0.01)
+        self.dispatch(_FakeConnection(silent=True), settle=0.01)
+        self.assertEqual(len(_FakeGLib.contexts), 1)
+
+    def test_the_next_dispatch_drains_what_the_last_one_left(self):
+        """A late reply is processed by the next click, and only then.
+
+        The first action's reply lands after its dispatcher stopped looking;
+        it sits on the shared context until the second dispatch iterates
+        it. Running it there must release it -- and must not be mistaken
+        for the second action's own reply.
+        """
+        first = _FakeConnection(silent=True)
+        self.assertIs(self.dispatch(first, settle=0.01), self.atspi._Dispatch.PENDING)
+        (context,) = _FakeGLib.contexts
+        first.deliver_late(context)
+        self.assertTrue(context.pending())
+        second = _FakeConnection(silent=True)
+        self.assertIs(self.dispatch(second, settle=0.01), self.atspi._Dispatch.PENDING)
+        self.assertFalse(context.pending())
+
+    def test_a_late_refusal_does_not_surface_on_the_next_dispatch(self):
+        """An error that arrived too late for its own call stays with it.
+
+        The first call's refusal is drained by the second dispatch, into the
+        first call's outcome -- which nobody reads any more. The second
+        call's own answer is what the second dispatch reports.
+        """
+        first = _FakeConnection(silent=True, error=RuntimeError("no such action"))
+        self.dispatch(first, settle=0.01)
+        first.deliver_late(_FakeGLib.contexts[0])
+        self.assertIs(self.dispatch(_FakeConnection()), self.atspi._Dispatch.REPLIED)

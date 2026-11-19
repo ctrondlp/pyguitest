@@ -1842,8 +1842,13 @@ class UiaBackend(GUIBackend):
             return None
         return (left, top, width, height)
 
-    def element_at(self, x, y):
+    def element_at(self, x, y, *, pid=None):
         """The deepest element at a screen point, or None.
+
+        `pid` is accepted for signature parity with the AT-SPI backend, which
+        needs it to answer on pure Wayland; UIA hit-tests in real screen
+        coordinates and resolves stacking itself, so it has no use for the
+        scope and ignores it.
 
         `ElementFromPoint` answers with the element at the point -- the topmost
         one, as the provider sees it -- and the point is then followed down

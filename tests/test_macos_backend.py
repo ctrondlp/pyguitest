@@ -19,6 +19,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 import types
 import unittest
 from unittest import mock
@@ -401,7 +402,12 @@ class BackendTestCase(unittest.TestCase):
         )
         granted.start()
         self.addCleanup(granted.stop)
-        return macos.MacosBackend(darwin_environment(), request=request)
+        backend = macos.MacosBackend(darwin_environment(), request=request)
+        # The fakes' window server reports nothing on its own, so the settle
+        # `_WRITE_SETTLE` measures would run to its deadline on every write
+        # here. The tests that model the lag set their own bound.
+        backend._WRITE_SETTLE = 0.0
+        return backend
 
     @staticmethod
     def onscreen_windows():
@@ -1023,6 +1029,80 @@ class TestWindowWrites(BackendTestCase):
         self.backend.resize_window(self.terminal, 800, 600)
         self.assertEqual(self.node.written[-1][0], "kAXSizeAttribute")
 
+    def _window_server_lags(self, handle, bounds, by=0.03):
+        """Report `bounds` for `handle` only `by` seconds from now.
+
+        The way the live window server trails an AX write. Measured on
+        Sequoia 15.8: AX reads a written frame back at once, and
+        CoreGraphics agrees 10-49ms later -- the lag here sits inside that
+        band. Enumerations before then answer the old rectangle, exactly as
+        they did live.
+        """
+        real = self.quartz.CGWindowListCopyWindowInfo
+        reports_at = time.monotonic() + by
+
+        def enumerate_(options, window):
+            if time.monotonic() >= reports_at:
+                for entry in self.quartz.onscreen + self.quartz.everything:
+                    if entry["kCGWindowNumber"] == handle:
+                        x, y, w, h = bounds
+                        entry["kCGWindowBounds"].update(
+                            {
+                                "X": float(x),
+                                "Y": float(y),
+                                "Width": float(w),
+                                "Height": float(h),
+                            }
+                        )
+            return real(options, window)
+
+        self.quartz.CGWindowListCopyWindowInfo = enumerate_
+
+    def test_a_write_waits_for_the_window_server_to_report_it(self):
+        # Measured on Sequoia 15.8, ten alternating moves of a TextEdit window:
+        # right after `move_window` returned, the window server still held
+        # the old position in eight rounds of ten. So a write is not done
+        # when AX answers; it is done when the window server agrees -- which
+        # is what makes `geometry()` straight after a move answer the move.
+        self.backend._WRITE_SETTLE = 1.0
+        self.backend._WRITE_POLL = 0.001
+        self._window_server_lags(48, (200, 120, 877, 499))
+        started = time.monotonic()
+        self.backend.move_window(self.terminal, 200, 120)
+        elapsed = time.monotonic() - started
+        self.assertEqual(self.backend.geometry(self.terminal)[:2], (200, 120))
+        # It waited for the report, and stopped there rather than at the bound.
+        self.assertGreaterEqual(elapsed, 0.03)
+        self.assertLess(elapsed, 0.5)
+
+    def test_a_resize_straight_after_a_move_finds_the_window(self):
+        # The live failure that found the gap: `move_window` then
+        # `resize_window` on TextEdit, the second refused with "no AX window
+        # matches its handle" -- a fresh enumeration, and still the old
+        # rectangle, so the join had nothing to match the moved AX frame to.
+        self.backend._WRITE_SETTLE = 1.0
+        self.backend._WRITE_POLL = 0.001
+        self._window_server_lags(48, (200, 120, 877, 499))
+        self.backend.move_window(self.terminal, 200, 120)
+        self.backend.resize_window(self.terminal, 800, 600)
+        self.assertEqual(self.node.written[-1][0], "kAXSizeAttribute")
+
+    def test_a_write_the_window_server_never_reports_still_returns(self):
+        # The bound is a bound, not a verdict: the application took the write,
+        # and a report that never comes does not undo it. The caller gets
+        # control back, and the caches are dropped so the next read is fresh.
+        self.backend._WRITE_SETTLE = 0.05
+        self.backend._WRITE_POLL = 0.001
+        self.backend.windows()
+        started = time.monotonic()
+        self.backend.move_window(self.terminal, 200, 120)
+        elapsed = time.monotonic() - started
+        self.assertGreaterEqual(elapsed, 0.05)
+        self.assertLess(elapsed, 1.0)
+        self.assertEqual(self.node.written[-1][0], "kAXPositionAttribute")
+        self.assertIsNone(self.backend._cache_onscreen)
+        self.assertIsNone(self.backend._cache_all)
+
     def test_a_write_to_a_window_whose_ax_element_is_missing_is_refused(self):
         # A handle the AX side cannot match -- stale, or an application whose window
         # list
@@ -1088,6 +1168,128 @@ class TestWindowWrites(BackendTestCase):
             self.backend.close_window(self.terminal)
         self.assertIs(caught.exception.capability, Capability.WINDOW_CLOSE)
         self.assertIn("close button", str(caught.exception))
+
+    def test_two_ax_windows_at_one_rectangle_are_refused_not_guessed(self):
+        """The rectangle is the only join, and it is not an identity.
+
+        A window number can only be matched to an AX element by frame, so
+        two windows of one application occupying the same rectangle -- two
+        documents opened at the same position, a panel sized to its parent
+        -- are indistinguishable. The first match used to win, which for
+        `close_window` means pressing *a* close button and possibly closing
+        the other window. Nothing is pressed now.
+        """
+        mine = FakeElement(role="AXButton")
+        self.node.attrs["kAXCloseButtonAttribute"] = mine
+        theirs = FakeElement(role="AXButton")
+        twin = FakeElement(
+            role="AXWindow",
+            attrs={
+                "kAXTitleAttribute": "a different document, same place",
+                "kAXPositionAttribute": self.node.attrs["kAXPositionAttribute"],
+                "kAXSizeAttribute": self.node.attrs["kAXSizeAttribute"],
+                "kAXCloseButtonAttribute": theirs,
+            },
+        )
+        self.ax.applications[690].windows.append(twin)
+
+        with self.assertRaises(CapabilityUnsupported) as caught:
+            self.backend.close_window(self.terminal)
+        self.assertIs(caught.exception.capability, Capability.WINDOW_CLOSE)
+        self.assertIn("same rectangle", str(caught.exception))
+        self.assertEqual(mine.performed, [], "pressed a button on an ambiguous match")
+        self.assertEqual(theirs.performed, [], "pressed the *other* window's button")
+
+    def test_an_ambiguous_rectangle_refuses_a_minimize_too(self):
+        """Not only the destructive one: the lookup cannot tell them apart."""
+        twin = FakeElement(
+            role="AXWindow",
+            attrs={
+                "kAXTitleAttribute": "same place again",
+                "kAXPositionAttribute": self.node.attrs["kAXPositionAttribute"],
+                "kAXSizeAttribute": self.node.attrs["kAXSizeAttribute"],
+            },
+        )
+        self.ax.applications[690].windows.append(twin)
+        with self.assertRaises(CapabilityUnsupported) as caught:
+            self.backend.minimize_window(self.terminal)
+        self.assertIn("same rectangle", str(caught.exception))
+        self.assertEqual(self.node.written, [], "wrote to a window it had guessed")
+
+    def test_one_matching_rectangle_still_resolves(self):
+        """The guard must not refuse the ordinary case it was added around."""
+        button = FakeElement(role="AXButton")
+        self.node.attrs["kAXCloseButtonAttribute"] = button
+        self.backend.close_window(self.terminal)
+        self.assertEqual(button.performed, ["AXPress"])
+
+    def test_an_exact_match_does_not_hide_a_twin_a_point_away(self):
+        """Ambiguity is measured with the join's own tolerance, on both sides.
+
+        The tolerance exists because AX and the window server can disagree
+        by a rounding step mid-settle, so a window one point off the
+        handle's rectangle is as plausible a match as one dead on it. The
+        lookup used to take the exact match and never look at the near one
+        -- which resolved a handle it could not actually tell from its
+        neighbour, and let `close_window` press a button the ambiguity
+        guard exists to keep it off.
+        """
+        mine = FakeElement(role="AXButton")
+        self.node.attrs["kAXCloseButtonAttribute"] = mine
+        theirs = FakeElement(role="AXButton")
+        twin = FakeElement(
+            role="AXWindow",
+            attrs={
+                "kAXTitleAttribute": "one point over",
+                "kAXPositionAttribute": point(154, 80),
+                "kAXSizeAttribute": size(877, 499),
+                "kAXCloseButtonAttribute": theirs,
+            },
+        )
+        self.ax.applications[690].windows.append(twin)
+        with self.assertRaises(CapabilityUnsupported) as caught:
+            self.backend.close_window(self.terminal)
+        self.assertIn("same rectangle", str(caught.exception))
+        self.assertEqual(mine.performed, [])
+        self.assertEqual(theirs.performed, [])
+
+    def test_a_write_matches_against_a_fresh_rectangle_not_a_cached_one(self):
+        """The join is re-read before a write, not only after one.
+
+        A listing taken just before the user moved the window leaves a
+        cached rectangle describing where it *was*; matched against that,
+        the AX window that has moved with it is "no AX window matches its
+        handle" for a window that is plainly there. The entry is replaced
+        rather than mutated, because the fixture's cached list shares the
+        entry dicts and an in-place edit would be visible through the stale
+        cache too -- which is not how a real re-enumeration behaves.
+        """
+        self.backend.windows()
+        self.assertIsNotNone(self.backend._cache_onscreen)
+        self.quartz.onscreen[0] = window(48, 690, "Terminal", (400, 300, 877, 499))
+        self.node.attrs["kAXPositionAttribute"] = point(400, 300)
+        self.backend.minimize_window(self.terminal)
+        self.assertEqual(self.node.written[-1], ("kAXMinimizedAttribute", True))
+
+    def test_a_stale_rectangle_cannot_aim_a_write_at_a_neighbour(self):
+        """The worse half of the same staleness: a sibling now at the old place.
+
+        TextEdit's doc4 is listed at (205, 145); then doc4 moves away and
+        doc3 moves onto that very rectangle. Matched against the cached
+        listing, the handle for doc4 resolves to whichever AX window is now
+        at (205, 145) -- doc3 -- and the minimize lands on the wrong
+        document. Re-reading first, the handle's rectangle is doc4's new one
+        and the write reaches doc4.
+        """
+        doc4 = [w for w in self.backend.windows() if w.handle == 268][0]
+        doc4_node, doc3_node = self.ax.applications[2829].windows[:2]
+        self.quartz.onscreen[1] = window(268, 2829, "TextEdit", (600, 400, 673, 439))
+        self.quartz.onscreen[2] = window(265, 2829, "TextEdit", (205, 145, 673, 439))
+        doc4_node.attrs["kAXPositionAttribute"] = point(600, 400)
+        doc3_node.attrs["kAXPositionAttribute"] = point(205, 145)
+        self.backend.minimize_window(doc4)
+        self.assertEqual(doc4_node.written, [("kAXMinimizedAttribute", True)])
+        self.assertEqual(doc3_node.written, [], "minimized the neighbour")
 
     def test_every_write_needs_the_grant(self):
         # The capability set and the code agreeing: without Accessibility these refuse
@@ -1240,6 +1442,129 @@ class TestWindowWrites(BackendTestCase):
             backend.activate_window(window)
         running.activateWithOptions_.assert_called_once_with(1 << 9)
         self.assertEqual(self.ax.applications[690].written, [])
+
+    @staticmethod
+    def _appkit_that_activates():
+        """An `AppKit` whose activation succeeds, for the tests below.
+
+        Patched in rather than left to the machine for the reason
+        `test_activation_without_appkit_writes_the_frontmost_attribute` gives:
+        on a Mac the real one answers for a live pid, so the route under
+        test would not be the one that ran.
+        """
+        running = mock.Mock()
+        running.activateWithOptions_.return_value = True
+        return types.SimpleNamespace(
+            NSApplicationActivateAllWindows=1 << 9,
+            NSRunningApplication=mock.Mock(
+                runningApplicationWithProcessIdentifier_=mock.Mock(return_value=running)
+            ),
+        )
+
+    def _give_terminal_a_twin(self, in_front):
+        """A second Terminal window on the Terminal window's own rectangle.
+
+        Both halves of the join: the AX list gains a window the tolerance
+        cannot tell from the first, and the window server lists number 49 at
+        the same bounds -- in front of 48 or behind it, which is the
+        difference the activation has to notice.
+        """
+        twin = FakeElement(
+            role="AXWindow",
+            attrs={
+                "kAXTitleAttribute": "another shell, same place",
+                "kAXPositionAttribute": self.node.attrs["kAXPositionAttribute"],
+                "kAXSizeAttribute": self.node.attrs["kAXSizeAttribute"],
+            },
+            actions=("AXRaise",),
+        )
+        self.ax.applications[690].windows.append(twin)
+        entry = window(49, 690, "Terminal", (153, 79, 877, 499))
+        self.quartz.onscreen.insert(0 if in_front else 1, entry)
+        self.backend._forget_windows()
+        return twin
+
+    def test_activating_a_window_behind_its_indistinguishable_twin_is_refused(self):
+        """The question CodeRabbit asked, answered by refusing.
+
+        Two Terminal windows share one rectangle and the other one is in
+        front. The raise cannot be aimed -- the join reports the pair as
+        ambiguous -- and AppKit brings the application forward in the order
+        it already had, so the twin takes the key window and the keystrokes.
+        That used to return normally: the caller was told window 48 was
+        activated and then typed into 49. Now it is a `CapabilityUnsupported`
+        -- structural, since a retry meets the same shared rectangle -- that
+        names the window that did come forward and why the raise was
+        unavailable, and no raise is attempted on a guess.
+        """
+        twin = self._give_terminal_a_twin(in_front=True)
+        with (
+            mock.patch.dict(sys.modules, {"AppKit": self._appkit_that_activates()}),
+            self.assertRaises(CapabilityUnsupported) as refusal,
+        ):
+            self.backend.activate_window(self.terminal)
+        self.assertIs(refusal.exception.capability, Capability.WINDOW_ACTIVATE)
+        self.assertIn("same rectangle", str(refusal.exception))
+        self.assertIn("49", str(refusal.exception))
+        self.assertEqual(self.node.performed, [], "raised on a guess")
+        self.assertEqual(twin.performed, [], "raised the *other* window")
+
+    def test_activating_an_ambiguous_window_that_is_already_in_front_succeeds(self):
+        """The same pair, the other way round: the activation did activate it.
+
+        Window 48 is the front of its application, so bringing the
+        application forward is enough -- keys reach 48 -- and refusing
+        would turn a working activation into a failure over a raise that
+        had nothing to do.
+        """
+        twin = self._give_terminal_a_twin(in_front=False)
+        with mock.patch.dict(sys.modules, {"AppKit": self._appkit_that_activates()}):
+            self.backend.activate_window(self.terminal)  # must not raise
+        self.assertEqual(self.node.performed, [])
+        self.assertEqual(twin.performed, [])
+
+    def test_an_ungranted_activation_of_a_rear_window_is_refused(self):
+        """Without the grant there is no raise at all, and the same check applies.
+
+        TextEdit has four windows up and 265 is second from the front;
+        activating it grant-free brings TextEdit forward with 268 still on
+        top, so 268 gets the keys. The refusal says the grant is what was
+        missing, which is what a caller can act on.
+        """
+        backend = self.make(trusted=False, onscreen=self.onscreen_windows())
+        with (
+            mock.patch.dict(sys.modules, {"AppKit": self._appkit_that_activates()}),
+            self.assertRaises(CapabilityUnsupported) as refusal,
+        ):
+            backend.activate_window(macos.Window(265, backend, pid=2829))
+        self.assertIn("Accessibility grant", str(refusal.exception))
+        self.assertIn("268", str(refusal.exception))
+
+    def test_an_ungranted_activation_of_the_front_window_succeeds(self):
+        """The grant-free route keeps serving the case it can serve.
+
+        268 *is* TextEdit's front window, so activating the application is
+        activating it, several siblings or not.
+        """
+        backend = self.make(trusted=False, onscreen=self.onscreen_windows())
+        with mock.patch.dict(sys.modules, {"AppKit": self._appkit_that_activates()}):
+            backend.activate_window(macos.Window(268, backend, pid=2829))
+
+    def test_a_successful_raise_is_trusted_over_the_window_servers_order(self):
+        """When `AXRaise` was aimed and answered, the order is not re-read.
+
+        The server's list can lag an activation; the raise is the
+        measurement that the right window moved, and second-guessing it
+        from a list read in the same instant would refuse working
+        activations. Here the server still lists 265 behind 268 after the
+        raise, and the activation is nonetheless reported as done.
+        """
+        doc3 = [w for w in self.backend.windows() if w.handle == 265][0]
+        doc3_node = self.ax.applications[2829].windows[1]
+        doc3_node.actions.append("AXRaise")
+        with mock.patch.dict(sys.modules, {"AppKit": self._appkit_that_activates()}):
+            self.backend.activate_window(doc3)  # must not raise
+        self.assertEqual(doc3_node.performed, ["AXRaise"])
 
 
 class TestScreensAndThePointer(BackendTestCase):

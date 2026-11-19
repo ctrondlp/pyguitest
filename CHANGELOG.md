@@ -5,7 +5,215 @@ All notable changes to pyguitest are recorded here. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html) — with the usual
 0.x caveat that the API may still change between minor versions.
 
-## [Unreleased]
+## [0.26.1] — 2026-11-17
+
+### Added
+
+- **`element_at(x, y, pid=…)` answers on a pure Wayland session.** Unscoped,
+  a coordinate→element lookup is refused there — a client is never told where
+  its windows sit on screen, so the sweep would have to place every toplevel
+  and still could not resolve stacking. Scoped to one process, both objections
+  go: only that process's toplevels are placed, through the window backend that
+  knows their positions (the GNOME Shell extension's geometry, already used for
+  `extents()`), and the caller that chose the pid — having placed the window
+  with `window_at`, which resolves stacking — has answered the ordering. This
+  is what lets a native-Wayland click be named by coordinate at all; the
+  recorder uses it to name clicks on GNOME the way it already does on X11. With
+  no geometry source to place window-relative rectangles, even a scoped lookup
+  is refused. The parameter is accepted and ignored where coordinates are
+  trustworthy on their own (X11, Windows, macOS).
+
+### Fixed
+
+- **A modifier an enclosing `send_keys` group still holds is no longer
+  released by an inner `)`.** `^(^(a)b)` pressed Control twice and let go
+  of it at the inner `)`, so `b` was tapped with nothing held while the
+  outer group was still open — the one shape where "release what this
+  group added" and "release what is no longer wanted" differ. The same
+  modifier nested is now pressed once and held throughout, which also
+  stops a second key-down for a key already down, the shape autorepeat has
+  to anything watching the stream.
+- **A uinput `type_text` whose character key-*up* fails no longer leaves
+  that key held.** The unwind released Shift alone, so a write that died
+  between the character's press and its release left the character down on
+  a device held open for the rest of the session — every later keystroke
+  repeating into it. Both are released now, each suppressed on its own:
+  sharing one `suppress` let the character's own failing release abort the
+  block before Shift was reached, which is the stuck Shift the handler
+  exists to prevent. A key whose press never landed is deliberately not
+  released, so no client is handed a key-up for a key that was never down.
+- **A control that opens a modal dialog is now clickable, and the dialog it
+  opens is usable.** `QFileDialog.getSaveFileName` and friends run their own
+  event loop *inside* the AT-SPI action handler, and a **synchronous**
+  `DoAction` holds the accessibility connection until it replies — which
+  that handler cannot do until the dialog closes. Measured on sway against
+  the Qt torture fixture, and it was worse than slow: `click()` raised
+  dogtail's `ActionNotSupported` ("Did not receive a reply") 12.3s later
+  about an action that had just worked, an unrelated read issued meanwhile
+  took 11.7s, and once that abandoned call was in place **nothing reached
+  the dialog** — not Escape, not typing into its own filename field, not its
+  own Cancel button — while reads inside it kept working. The dialog the
+  caller had just opened could not be driven or dismissed.
+
+  The action is now dispatched **asynchronously** over the accessibility
+  bus (`org.a11y.atspi.Action.DoAction`, addressed from the node's own
+  `path` and its application's `bus_name`), so nothing holds the connection.
+  Same box, same fixture, after: `click()` returns in 1.5s, an enumeration
+  issued while the handler is still running takes 2.6s rather than 11.7s,
+  typing reaches the filename field (`untitled.txt` → `z`), the dialog's own
+  Cancel closes it, and Escape closes it. The Escape failure that had been
+  taken for a compositor flake was this, downstream — which is why it came
+  and went with the timing of the abandoned call.
+
+  An error the application answers with inside the settle window still
+  raises, so an action a toolkit refuses is reported as before. A reply that
+  does not come is the shape of a modal-dialog opener — but also of an
+  application that stopped serving AT-SPI after its actions were read — so
+  it is left running only once the application answers a bounded liveness
+  read over libatspi's own connection; one that will not answer raises
+  `BackendCallTimeout`, the hang signal it has always been. `do_action`
+  takes the same route as `click`, since a caller naming an action is at
+  least as likely to be aiming at a file-chooser menu item. The synchronous
+  route remains as a fallback wherever the asynchronous one cannot be built
+  (no PyGObject, no reachable bus — a failed attempt is retried after half a
+  minute rather than cached for the process — or a node that cannot say
+  where it lives), and there it keeps the same no-reply tolerance: a
+  no-reply counts as dispatched only if the application still answers. Our
+  own bound on the synchronous call still raises, because a call that never
+  came back says nothing about whether it was dispatched.
+- **macOS can press `Meta_L`, `Meta_R`, `Prior` and `Next` again.** All four
+  are in this package's documented vocabulary — `GUIBackend.KEY_ALIASES`
+  expands `{PGU}`/`{PGD}` to `Prior`/`Next`, and the inherited
+  `MODIFIER_KEYS` names `Meta_L` for `#` — and all four resolve on X11,
+  uinput and Windows. On macOS they were refused, while the keys themselves
+  were reachable all along under the backend's own legend names (`pageup`,
+  `pagedown`, `command`, `rightcommand`), so `press_key("Prior")` worked on
+  three platforms and raised on the fourth. Found by resolving all 45
+  documented names against all four backends' translation tables: these were
+  the only names a backend refused while already supporting the key. The
+  seven that remain refused on macOS — `Break`, `Cancel`, `Insert`, `Menu`,
+  `Num_Lock`, `Print`, `Scroll_Lock` — are keys a Mac keyboard does not
+  have, where that backend declines rather than aliasing them onto something
+  else, and `tests/test_key_vocabulary.py` now pins the whole vocabulary
+  against every backend so the next name added cannot quietly skip one.
+- **macOS refuses an ambiguous AX window rather than acting on a guess.** A
+  window number can only be joined to an AX element by frame, and that is
+  not an identity: two windows of one application can share a rectangle
+  (two documents opened at the same position, a panel sized to its
+  parent). The first match won, so `close_window` could press *a* close
+  button and take the neighbour with it. A rectangle shared by two or more
+  AX windows is now a typed refusal naming that reason — shared within the
+  join's own rounding tolerance, not exactly, since a twin one point off is
+  a twin the join cannot tell from the window asked for. The join also
+  enumerates afresh before every write instead of trusting a rectangle up to
+  a quarter-second old: a window the user or the application had just moved
+  was refused with "no AX window matches its handle", or matched a
+  neighbour that had since moved onto the stale rectangle.
+  `activate_window`'s opportunistic `AXRaise` still falls through to the
+  application activation when it cannot be aimed — but that activation
+  brings the application's windows forward in the order they already had,
+  so if the application's front window afterwards is a *sibling* of the one
+  asked for, keys would go there; that is now a `CapabilityUnsupported`
+  naming the sibling and why the raise was unavailable (no grant, a shared
+  rectangle, or AX refusing), rather than a return the caller reads as
+  success. A single-window application passes the check as it always did.
+  The read side has the same ambiguity and keeps it: `active_window()` over
+  two TextEdit documents moved onto each other answered the front one's
+  handle under the *rear* one's title, because the window list is keyed by
+  rectangle and the last AX window enumerated names both. Handles stay
+  right; the docstring now says the titles may not, since nothing in this
+  join can tell which of the two a title belongs to.
+- **macOS `move_window` and `resize_window` wait for the window server to
+  catch up.** An AX position or size write returns once the application has
+  applied it, and AX reads the new frame back at once — CoreGraphics does
+  not. Measured on Sequoia 15.8 over ten alternating moves of a TextEdit
+  window: right after the write returned, the window server still held the
+  *old* rectangle in eight rounds of ten, agreeing with AX 10–49ms later.
+  In that gap `geometry()` read straight after `move_window()` answered the
+  rectangle the move was meant to leave behind, and `resize_window()` right
+  after `move_window()` — the ordinary way to place a window — was refused
+  with "no AX window matches its handle", because the join matched the
+  fresh CoreGraphics rectangle against AX frames that had all moved on.
+  A write AX accepted is now followed by a wait that ends the moment the
+  two agree, bounded at half a second; the common case costs one or two
+  enumerations.
+- **sway no longer reports a refused command as success.** Every command
+  carries a per-command success flag, and one aimed at a window that has
+  since gone answers `success: false` with `"No matching node."` — a reply
+  the socket transport handed back and every caller discarded. A
+  `close_window` on a vanished window looked exactly like a close. A
+  refusal now raises: `WindowNotFound` for the stale handle that spelling
+  always means here, `PyGUITestError` otherwise. The check covers all six
+  operations that go through `_command`, and the CLI transport is left
+  alone because `swaymsg` exits non-zero and already raises.
+- **Windows tells a refused post from a dead window.** `PostMessageW`
+  answering zero does not say why, and the reasons are opposite: an
+  unelevated process posting `WM_CLOSE` to a window at a higher integrity
+  level is refused by UIPI with `ERROR_ACCESS_DENIED` — a live window and
+  a permission problem, reported until now as `WindowNotFound`, which sent
+  callers hunting for a fresher handle. The last error is read now:
+  `PermissionRequired` for access denied, `WindowNotFound` for an invalid
+  handle, and `PyGUITestError` naming the code for anything else.
+- **A KWin script that loads but then fails to start is unloaded again.**
+  Only the closer returned at the end of `_load_and_run_script` unloads
+  one, and it is never created when that function raises — so a failure
+  *after* `loadScript` (the script proxy refused, `run` refused) left the
+  script resident in the compositor for the life of the session with
+  nothing holding a handle to it. The original failure still surfaces.
+- `tests/test_docs.py`'s tag check skipped a git that fails but not a git
+  that cannot be launched: `check=False` does not suppress a
+  launch error, so an archived source tree with no git installed failed
+  the run instead of skipping an optional check.
+
+### Documentation
+
+- **`Session`'s documented constructor no longer lists `self`.** The
+  signature was taken off the unbound `__init__`, which lists it as a
+  required argument and contradicted the parameter table right below it.
+- **`quote_for_type` no longer offers `type_text` as the exact-text
+  escape.** `type_text` sends `\r` and `\n` as Enter too — `_CONTROL_VK`
+  on win32, `_CONTROL_KEYSYMS` on x11, because a control character is a
+  command there rather than text — so CRLF arrives as two Enters by that
+  route as well. Nothing here types a line break as a literal character;
+  the docstring now says to normalise to LF and why there is no way round
+  it. (The review that found this scoped it to Windows; it is both.)
+- `docs/getting-started.md` said the `atspi` extra adds "elements, and
+  input". It is `dogtail`: the element tree only, which is what the very
+  next paragraph and the README both already said. Input comes from a CLI
+  tool, `uinput` or `eiinput`.
+- `docs/getting-started.md` used "tier-6" on its install line, four pages
+  before anything defines a tier — the only definition being a generated
+  table in `api.md`. It now glosses the scale where a newcomer first meets
+  it: a tier says how portable a capability is, and tier 6 means
+  deliberately prevented rather than merely missing.
+- `docs/getting-started.md` now **shows** the `pyguitest` and
+  `pyguitest doctor` outputs it was only describing — abridged from one
+  real GNOME/Xwayland session and labeled as such, so a newcomer can tell
+  whether what they are seeing is the expected shape.
+- `docs/getting-started.md` gained first-script walkthroughs for
+  **Windows** (Notepad: launch, type, `close_window`, answer the
+  *Save changes?* prompt through its own button) and **macOS** (TextEdit:
+  launch by bundle name, find the window by pid because a document-based
+  app titles it after the document). Both were run live exactly as printed
+  before being printed — the Windows one from the interactive session via a
+  Scheduled Task, the macOS one on Sequoia — closing the review note that
+  the onboarding was Linux-only.
+- `docs/getting-started.md`'s "Drive something" script needs a window to
+  drive and said so nowhere, so pasting it verbatim waited ten seconds and
+  raised `WindowNotFound`. It now points at `examples/04_drive_an_editor.py`,
+  which launches one.
+- **`maximize_window` no longer tells callers that Windows moves the
+  keyboard focus.** `SW_MAXIMIZE` is documented to activate the window it
+  maximizes, with no non-activating spelling, and three docstrings recorded
+  that as a Windows-only side effect to work around — one of them advising
+  a re-focus afterwards. Driven on a live interactive desktop it does not
+  happen: three trials maximizing one window while another held the
+  foreground, sampled at 0.1s, 1s and 3s, left the foreground unchanged in
+  all nine samples with `IsZoomed` true in all three. Another application's
+  window is the only kind pyguitest maximizes, and cross-process activation
+  is what Windows' foreground rules refuse. The docstrings now record the
+  measurement and say to depend on neither direction. No behaviour change —
+  nothing in the code or the suite relied on the claim.
 
 ## [0.26.0] — 2026-11-13
 
@@ -6666,7 +6874,8 @@ First public release.
 - A `pyguitest` command-line entry point.
 - PEP 561 type information (`py.typed`); no hard runtime dependencies.
 
-[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.26.0...HEAD
+[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.26.1...HEAD
+[0.26.1]: https://github.com/ctrondlp/pyguitest/compare/v0.26.0...v0.26.1
 [0.26.0]: https://github.com/ctrondlp/pyguitest/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/ctrondlp/pyguitest/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/ctrondlp/pyguitest/compare/v0.23.0...v0.24.0

@@ -136,6 +136,35 @@ class TestModifiers(unittest.TestCase):
             + [("release", "Control_L")],
         )
 
+    def test_the_same_modifier_nested_is_pressed_once_and_held_throughout(self):
+        """`^(^(a)b)` -- the case where both groups want the same modifier.
+
+        The inner `)` used to release Control while the outer group was
+        still open, so `b` was tapped with nothing held: the one shape
+        where "release what this group added" and "release what is no
+        longer wanted" differ. Control is also pressed once rather than
+        twice -- a second key-down for a key already held is what
+        autorepeat looks like to anything watching the stream.
+        """
+        gui = session()
+        gui.send_keys("^(^(a)b)")
+        self.assertEqual(
+            gui.backend.events,
+            [("press", "Control_L")] + tap("a") + tap("b") + [("release", "Control_L")],
+        )
+
+    def test_the_same_modifier_nested_three_deep_is_still_pressed_once(self):
+        gui = session()
+        gui.send_keys("+(+(+(a)b)c)")
+        self.assertEqual(
+            gui.backend.events,
+            [("press", "Shift_L")]
+            + tap("a")
+            + tap("b")
+            + tap("c")
+            + [("release", "Shift_L")],
+        )
+
     def test_three_deep_groups_unwind_one_at_a_time(self):
         gui = session()
         gui.send_keys("^(%(+(a)b)c)")

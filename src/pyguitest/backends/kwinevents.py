@@ -217,6 +217,33 @@ class KWinEventsBackend(GUIBackend):
 
         Returns a small object exposing `.close()`, which unloads it --
         matching the shape an injected fake needs for tests.
+
+        The script is addressed by its *plugin name* throughout, and the
+        one-argument `loadScript(path)` gives it one: KWin's
+        `AbstractScript` constructor fills a null plugin name in with the
+        file path (`scripting.cpp`, `if (m_pluginName.isNull())
+        m_pluginName = scriptName;`), so `unloadScript(path)` names exactly
+        the script `loadScript(path)` registered, and names nothing -- it
+        returns False -- when none is loaded under it. That makes the unload
+        safe to issue without knowing whether a load took, which both uses
+        below depend on.
+
+        KWin registers the script *before* replying with its id
+        (`scripts.append(script); return id;`), so a `loadScript` that
+        fails on this side -- the reply timed out, the connection dropped
+        mid-call -- can still have loaded it. An unload gated on having
+        *seen* the id would skip exactly that case and leave the script
+        resident, calling `Notify` on this bus name for the life of the
+        compositor. So every failure unloads, not only the ones after a
+        reply. The same leak has a second route: a session killed outright
+        (`SIGKILL`, a crashed harness) never runs the closer, and the next
+        session's `loadScript` does not notice -- KWin's duplicate check
+        compares the plugin name *as passed*, null here, which no
+        registered script carries -- so two copies of the script run and
+        every window event arrives twice. A sweep of the plugin name before
+        loading clears a predecessor's copy; it is ours to clear, since the
+        bus name this backend owns first keeps two live sessions from
+        coexisting.
         """
         script_path = str(
             resources.files("pyguitest.backends") / "_kwin_window_events.js"
@@ -230,6 +257,24 @@ class KWinEventsBackend(GUIBackend):
             _SCRIPTING_INTERFACE,
             None,
         )
+
+        def unload():
+            """Unload the script by plugin name, best-effort.
+
+            Best-effort in every use: before a load it clears a predecessor
+            that may not exist, after a failure it clears a load that may
+            not have taken, and on close the session is going away anyway.
+            """
+            with contextlib.suppress(Exception):
+                kwin.call_sync(
+                    "unloadScript",
+                    self._GLib.Variant("(s)", (script_path,)),
+                    self._Gio.DBusCallFlags.NONE,
+                    -1,
+                    None,
+                )
+
+        unload()
         try:
             script_id = kwin.call_sync(
                 "loadScript",
@@ -249,21 +294,17 @@ class KWinEventsBackend(GUIBackend):
             )
             script.call_sync("run", None, self._Gio.DBusCallFlags.NONE, -1, None)
         except Exception as exc:
+            # KWin keeps a loaded script whether or not this object survives
+            # to unload it, and only the closer returned below unloads one --
+            # never created when this raises. So any failure past the point
+            # KWin may have registered the script (which is *every* failure
+            # here, the docstring says why a load that raised counts) left
+            # it resident with nothing holding a handle. Unloaded instead,
+            # and the original failure is still what surfaces.
+            unload()
             raise BackendUnavailable(
                 f"could not load/run the window-events KWin script: {exc}"
             ) from exc
-
-        def unload():
-            """Unload the KWin script, best-effort: the session is going anyway."""
-            # Best-effort: the session is going away either way.
-            with contextlib.suppress(Exception):
-                kwin.call_sync(
-                    "unloadScript",
-                    self._GLib.Variant("(s)", (script_path,)),
-                    self._Gio.DBusCallFlags.NONE,
-                    -1,
-                    None,
-                )
 
         return _Closer(unload)
 

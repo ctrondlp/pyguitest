@@ -2195,6 +2195,57 @@ class TestClickElement(unittest.TestCase):
         self.assertEqual(backend.events, [])
 
 
+class TestElementAt(unittest.TestCase):
+    """`Session.element_at` and the `pid` keyword added in 0.26.1.
+
+    `Session(backend=...)` is public, so a backend written against the older
+    two-argument `element_at(x, y)` is a real caller. An unscoped lookup has to
+    keep working on it; only a scoped one may forward the keyword.
+    """
+
+    class _TwoArgumentBackend(FakeBackend):
+        name = "fake-two-argument-element-at"
+
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+
+        def element_at(self, x, y):  # the pre-0.26.1 signature, deliberately
+            self.calls.append((x, y))
+            return self.elements[0]
+
+    class _ScopedBackend(FakeBackend):
+        name = "fake-scoped-element-at"
+
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+
+        def element_at(self, x, y, *, pid=None):
+            self.calls.append((x, y, pid))
+
+    def test_an_unscoped_lookup_does_not_pass_the_keyword(self):
+        backend = self._TwoArgumentBackend()
+        gui = pyguitest.Session(backend, pyguitest.detect())
+        found = gui.element_at(10, 20)
+        self.assertEqual(backend.calls, [(10, 20)])
+        self.assertIs(found, backend.elements[0])
+        self.assertIs(found._session, gui, "the element is bound to the session")
+
+    def test_a_scoped_lookup_forwards_the_pid(self):
+        backend = self._ScopedBackend()
+        gui = pyguitest.Session(backend, pyguitest.detect())
+        self.assertIsNone(gui.element_at(10, 20, pid=4242))
+        self.assertEqual(backend.calls, [(10, 20, 4242)])
+
+    def test_a_scoped_lookup_on_a_two_argument_backend_is_a_type_error(self):
+        """The failure is loud and the caller's, not a silently unscoped answer."""
+        backend = self._TwoArgumentBackend()
+        gui = pyguitest.Session(backend, pyguitest.detect())
+        with self.assertRaises(TypeError):
+            gui.element_at(10, 20, pid=4242)
+
+
 class TestDragElement(unittest.TestCase):
     """`drag_element`: the element form of `drag`, both ends locators.
 

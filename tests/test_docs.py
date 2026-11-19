@@ -465,18 +465,25 @@ class TestChangelogVersionLinksResolve(unittest.TestCase):
         of them". It runs where releases are prepared, which is where a
         heading can be written for a tag that never follows.
         """
-        tags = subprocess.run(
-            ["git", "-C", str(ROOT), "tag", "--list", "v*"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        shallow = subprocess.run(
-            ["git", "-C", str(ROOT), "rev-parse", "--is-shallow-repository"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        # OSError, not just a non-zero exit: `check=False` suppresses a
+        # failing git, not a git that could not be launched at all. An
+        # archived source tree with no git installed raised FileNotFoundError
+        # here and failed the run instead of skipping an optional check.
+        try:
+            tags = subprocess.run(
+                ["git", "-C", str(ROOT), "tag", "--list", "v*"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            shallow = subprocess.run(
+                ["git", "-C", str(ROOT), "rev-parse", "--is-shallow-repository"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError as exc:
+            self.skipTest(f"git is not runnable here ({exc})")
         if (
             tags.returncode != 0
             or not tags.stdout.strip()

@@ -1421,7 +1421,11 @@ def render_session_object(out: list[str]) -> None:
     """
     session = pyguitest.Session
     out += ["## The Session object", "", first_line(session), ""]
-    out += signature_fence(f"Session{function_signature(session.__init__)}")
+    # `session`, not `session.__init__`: the signature of the class is the
+    # constructor's without `self`, which is what a caller writes. Taking
+    # it off the unbound function listed `self` as a required argument,
+    # contradicting the parameter table right below it.
+    out += signature_fence(f"Session{function_signature(session)}")
     out += parameter_table(session.__init__)
     out += body(session.__init__)
     out += [

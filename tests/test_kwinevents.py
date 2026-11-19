@@ -93,6 +93,121 @@ class TestKWinEventsBackend(unittest.TestCase):
         claimed["gio"].bus_unown_name.assert_called_once_with(7)
         claimed["connection"].unregister_object.assert_called_once_with(3)
 
+    def _script_harness(self, gui, fail_on):
+        """Drive the real `_load_and_run_script` with faked D-Bus.
+
+        The test above replaces the whole helper, so it cannot see what
+        happens *inside* it -- which is where the script gets loaded. This
+        one lets `loadScript` succeed and fails a later step, which is the
+        ordering that used to leave a script resident in KWin.
+        """
+        methods = []
+        kwin = mock.Mock()
+
+        def call_sync(method, *args, **kwargs):
+            methods.append(method)
+            # The refusal is checked first, so `fail_on="loadScript"` really
+            # fails the load rather than being answered by the branch below.
+            if method == fail_on:
+                raise RuntimeError(f"KWin refused {method}")
+            if method == "loadScript":
+                variant = mock.Mock()
+                variant.unpack.return_value = (42,)
+                return variant
+            return mock.Mock()
+
+        kwin.call_sync.side_effect = call_sync
+        script = mock.Mock()
+        script.call_sync.side_effect = call_sync
+
+        gio = mock.Mock()
+        if fail_on == "__proxy__":
+            gio.DBusProxy.new_for_bus_sync.side_effect = [
+                kwin,
+                RuntimeError("no object at that path"),
+            ]
+        else:
+            gio.DBusProxy.new_for_bus_sync.side_effect = [kwin, script]
+        gui._Gio = gio
+        gui._GLib = mock.Mock()
+        return methods
+
+    @staticmethod
+    def _after_the_load(methods):
+        """The calls made once `loadScript` had been issued.
+
+        The sweep before the load is an `unloadScript` too, so "an unload
+        happened" is no longer evidence of a rollback; what the rollback
+        tests need is an unload *after* the load.
+        """
+        return methods[methods.index("loadScript") + 1 :]
+
+    def test_a_script_whose_proxy_cannot_be_built_is_unloaded_again(self):
+        from pyguitest.errors import BackendUnavailable
+
+        gui = self._backend()
+        methods = self._script_harness(gui, fail_on="__proxy__")
+        with self.assertRaises(BackendUnavailable):
+            gui._load_and_run_script()
+        self.assertIn(
+            "unloadScript",
+            self._after_the_load(methods),
+            "the script was left loaded in KWin with nothing holding a handle",
+        )
+
+    def test_a_script_that_loads_but_will_not_run_is_unloaded_again(self):
+        from pyguitest.errors import BackendUnavailable
+
+        gui = self._backend()
+        methods = self._script_harness(gui, fail_on="run")
+        with self.assertRaises(BackendUnavailable):
+            gui._load_and_run_script()
+        self.assertIn("unloadScript", self._after_the_load(methods))
+
+    def test_a_load_that_itself_fails_is_unloaded_too(self):
+        """A load that raised here may still have taken in KWin.
+
+        KWin registers the script before it replies with the id
+        (`scripts.append(script); return id;`), so a reply that timed out
+        or a connection that dropped mid-call leaves the script resident
+        with this side believing nothing was loaded. This used to assert
+        the opposite -- "nothing was loaded, so an unload would be a second
+        false step" -- which is wrong on both counts: it may have been, and
+        `unloadScript` on a plugin name nothing is loaded under returns
+        False and does nothing. So the rollback runs unconditionally.
+        """
+        from pyguitest.errors import BackendUnavailable
+
+        gui = self._backend()
+        methods = self._script_harness(gui, fail_on="loadScript")
+        with self.assertRaises(BackendUnavailable):
+            gui._load_and_run_script()
+        self.assertIn("unloadScript", self._after_the_load(methods))
+
+    def test_a_predecessors_copy_is_swept_before_loading(self):
+        """A session killed outright never unloads its script; the next one does.
+
+        The closer runs only on `close()`, so a `SIGKILL`ed session leaves
+        its copy in KWin, and KWin's own duplicate check does not catch the
+        reload -- it compares the plugin name *as passed* (null, through the
+        one-argument `loadScript`), which no registered script carries. Two
+        copies then call `Notify` for every window event. The unload by
+        plugin name before the load clears a predecessor's copy and is a
+        no-op when there is none; the bus name owned before this runs is
+        what guarantees the copy it clears is not a live session's.
+        """
+        gui = self._backend()
+        methods = self._script_harness(gui, fail_on=None)
+        gui._load_and_run_script()
+        self.assertEqual(methods[:2], ["unloadScript", "loadScript"])
+        self.assertEqual(methods[2:], ["run"])
+
+    def test_closing_unloads_the_script_it_ran(self):
+        gui = self._backend()
+        methods = self._script_harness(gui, fail_on=None)
+        gui._load_and_run_script().close()
+        self.assertEqual(methods[-2:], ["run", "unloadScript"])
+
     def test_window_events_drains_already_queued_events_in_order(self):
         gui = self._backend()
         gui._events.append(("new", "{uuid-1}", "First"))
