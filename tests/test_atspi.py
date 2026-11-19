@@ -1763,6 +1763,39 @@ class TestWaylandElementGeometry(AtspiTestCase):
         with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
             self.assertEqual(gui.element_at(150, 150, pid=4242).name, "Files")
 
+    def test_scoped_element_at_refuses_two_windows_it_cannot_tell_apart(self):
+        # The other half of that pair: two windows of one process with the
+        # same title *and* the same size, listed at different positions --
+        # two documents of one editor. The ranking has nothing left to
+        # separate them with, so each frame took the first listing, and the
+        # twin -- really 500px to the right, nowhere near the point -- was
+        # placed over the main window, where its 10x10 button beat the main
+        # window's own 20x20 one on specificity. A locator from a window
+        # the pointer is not even over. Neither frame is placed now, so the
+        # lookup answers None.
+        self.frame._pid = 4242
+        self.frame.parent._pid = 4242
+        hidden = FakeNode("Hidden", "push button", position=(140, 140), size=(20, 20))
+        hidden.parent = self.frame
+        self.frame.children.append(hidden)
+        phantom = FakeNode("Phantom", "push button", position=(145, 145), size=(10, 10))
+        twin = FakeNode(
+            "Document - Editor", "frame", [phantom], (0, 0), _FIXTURE_FRAME_SIZE, 4242
+        )
+        phantom.parent = twin
+        twin.parent = self.frame.parent
+        self.frame.parent.children.append(twin)
+        source = _FakeStackingGeometrySource(
+            4242,
+            [(0, 0), (500, 0)],
+            top=0,
+            titles=["Document - Editor", "Document - Editor"],
+        )
+        gui = self.backend(SessionType.WAYLAND)
+        gui.set_window_geometry_source(source)
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertIsNone(gui.element_at(150, 150, pid=4242))
+
     def test_scoped_element_at_does_not_borrow_another_processs_window(self):
         # The scoped process has no listing of its own -- the compositor
         # has not mapped its window yet, say -- but another process has a
@@ -2946,9 +2979,38 @@ class TestAppCoordsTrustworthy(AtspiTestCase):
         # the same rectangle for both coordinate types, off the origin and
         # near none of its application's listed windows, is not believed,
         # and its WINDOW rectangle (good: the toolkit's own) is placed by
-        # the best listing. With no title to go on and every listing the
-        # frame's size, best is the first; the frame's own (5, 5) is where
-        # its content starts inside that listing.
+        # the best listing. Best has to *be* best: the second listing is
+        # the frame's own size and the first is a decoration off it, so the
+        # ranking separates them and the frame's own (5, 5) is where its
+        # content starts inside the window it picked.
+        self.frame._pid = 4242
+        self.frame.position = (5, 5)
+        self.frame.window_position = (5, 5)
+        gui = self.backend(SessionType.X11)
+        gui.set_window_geometry_source(
+            _FakeManyWindowsGeometrySource(
+                4242,
+                [(300, 300), (120, 640)],
+                sizes=[
+                    (_FIXTURE_FRAME_SIZE[0] - 20, _FIXTURE_FRAME_SIZE[1] - 20),
+                    _FIXTURE_FRAME_SIZE,
+                ],
+            )
+        )
+        button = gui.find_element(name="OK")
+        with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
+            self.assertEqual(gui.extents(button), (125, 655, 80, 30))
+        self.assertEqual(gui._app_coords_verified, {4242: False})
+
+    def test_two_listings_the_ranking_cannot_separate_place_nothing(self):
+        # The same frame against two windows the ranking has nothing left
+        # to choose between: both exactly its size, neither carrying its
+        # name, at different positions. Taking the first is a coin flip
+        # between two windows -- and worse than a coin flip for a scoped
+        # hit test, where both of the application's frames then claim to
+        # have been placed by that one window and `_on_top` reads two hits
+        # as one. The element has a good window-relative rectangle and
+        # nothing to add to it, which is what the refusal says.
         self.frame._pid = 4242
         self.frame.position = (5, 5)
         self.frame.window_position = (5, 5)
@@ -2957,9 +3019,30 @@ class TestAppCoordsTrustworthy(AtspiTestCase):
             _FakeManyWindowsGeometrySource(4242, [(300, 300), (120, 640)])
         )
         button = gui.find_element(name="OK")
+        with (
+            mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}),
+            self.assertRaises(CapabilityUnsupported) as refusal,
+        ):
+            gui.extents(button)
+        self.assertIn("cannot tell apart", str(refusal.exception))
+        self.assertEqual(gui._app_coords_verified, {4242: False})
+
+    def test_a_tie_at_one_rectangle_places_the_frame_as_before(self):
+        # Two listings at the *same* rectangle -- a dialog sized and placed
+        # exactly over its parent -- are a tie the ranking cannot break
+        # either, and there is nothing to refuse: both place the frame
+        # identically. Which of the two the hit test is really in is
+        # `_on_top`'s question, held against the source's own stacking.
+        self.frame._pid = 4242
+        self.frame.position = (5, 5)
+        self.frame.window_position = (5, 5)
+        gui = self.backend(SessionType.X11)
+        gui.set_window_geometry_source(
+            _FakeManyWindowsGeometrySource(4242, [(300, 300), (300, 300)])
+        )
+        button = gui.find_element(name="OK")
         with mock.patch.dict(sys.modules, {"pyatspi": fake_pyatspi()}):
             self.assertEqual(gui.extents(button), (305, 315, 80, 30))
-        self.assertEqual(gui._app_coords_verified, {4242: False})
 
     def test_a_toolkit_that_tells_the_two_coordinate_types_apart_is_believed(self):
         # GhostBSD, marco, GTK3: an untitled GtkAssistant's frame at
@@ -4189,11 +4272,13 @@ class _FakeGioConnecting:
         def is_closed(self):
             return self.closed
 
-    def __init__(self, error=None, stall=0):
+    def __init__(self, error=None, stall=0, on_dial=None):
         self.error = error
         self.stall = stall
+        self.on_dial = on_dial
         self.addresses = []
         self.cancellables = []
+        self.exited = threading.Event()
         outer = self
 
         class DBusConnection:
@@ -4202,15 +4287,32 @@ class _FakeGioConnecting:
                 """Gio's four-argument form; the tests read address and cancellable.
 
                 `stall` seconds of sleep first stand in for a handshake that
-                never completes.
+                never completes -- and it is **interruptible**, the way the
+                real one is: Gio's documented answer to a cancelled
+                `GCancellable` is to abandon the operation and return with
+                an error, which is the whole reason the dial is handed one.
+                A fake that slept through its cancellation let the
+                abandonment test pass while the worker thread was still
+                sleeping, so it proved only that `cancel()` had been
+                called. `exited` is set however the dial leaves, so a test
+                can wait for the thread to actually be gone.
                 """
                 outer.addresses.append(address)
                 outer.cancellables.append(cancellable)
-                if outer.stall:
-                    time.sleep(outer.stall)
-                if outer.error is not None:
-                    raise outer.error
-                return _FakeGioConnecting.Dialed(address)
+                try:
+                    if outer.on_dial is not None:
+                        outer.on_dial()
+                    waited = 0.0
+                    while waited < outer.stall:
+                        if cancellable is not None and cancellable.is_cancelled():
+                            raise RuntimeError("the handshake was cancelled")
+                        time.sleep(0.01)
+                        waited += 0.01
+                    if outer.error is not None:
+                        raise outer.error
+                    return _FakeGioConnecting.Dialed(address)
+                finally:
+                    outer.exited.set()
 
         self.DBusConnection = DBusConnection
 
@@ -4313,9 +4415,25 @@ class TestTheAccessibilityBusConnection(AtspiTestCase):
         moment would both dial, and the second one home could read
         `failed_at` before the first had written it. Under the lock one
         dials and the other waits for its answer.
+
+        Held by gates rather than by a stall, for the reason the dispatch
+        overlap test gives: a timed hold passes without any lock whenever
+        the runner happens to serialize the two threads anyway. The first
+        thread stops *inside* the dial and is released only once the
+        instrumented lock has seen the second thread wait on it.
         """
-        gio = _FakeGioConnecting(stall=0.2)
+        dialing = threading.Event()
+        held = threading.Event()
+        self.addCleanup(held.set)
+
+        def stop_in_the_dial():
+            """Hold the first thread inside the handshake, lock and all."""
+            dialing.set()
+            held.wait(5)
+
+        gio = _FakeGioConnecting(on_dial=stop_in_the_dial)
         dbus, address = self.patched(gio, "unix:path=/run/user/1000/at-spi/bus")
+        watched = _WatchedLock()
         answers = []
         workers = [
             threading.Thread(
@@ -4323,9 +4441,15 @@ class TestTheAccessibilityBusConnection(AtspiTestCase):
             )
             for _ in range(2)
         ]
-        with dbus, address:
-            for worker in workers:
-                worker.start()
+        with dbus, address, mock.patch.object(self.atspi, "_A11Y_BUS_LOCK", watched):
+            workers[0].start()
+            self.assertTrue(dialing.wait(5), "the first thread never dialled")
+            workers[1].start()
+            self.assertTrue(
+                watched.contended.wait(5),
+                "the second thread dialled instead of waiting for the answer",
+            )
+            held.set()
             for worker in workers:
                 worker.join(5)
         self.assertEqual(len(answers), 2)
@@ -4377,6 +4501,9 @@ class TestTheAccessibilityBusConnection(AtspiTestCase):
         abandon its worker thread, so the cancellable it was dialled with
         is cancelled, which is what makes the stalled `new_for_address_sync`
         return instead of holding that thread for the life of the process.
+        The fake's stall watches that cancellable, so the test can wait for
+        the dial to be *gone* rather than only for `cancel()` to have been
+        called -- which it would have passed while the worker slept on.
         """
         gio = _FakeGioConnecting(stall=5)
         dbus, address = self.patched(gio, "unix:path=/run/user/1000/at-spi/bus")
@@ -4392,6 +4519,10 @@ class TestTheAccessibilityBusConnection(AtspiTestCase):
         self.assertIn("failed_at", self.atspi._A11Y_BUS_CACHE)
         (cancellable,) = gio.cancellables
         self.assertTrue(cancellable.is_cancelled())
+        self.assertTrue(
+            gio.exited.wait(5),
+            "the abandoned handshake is still running: nothing reached it",
+        )
 
     def test_a_handshake_that_finishes_is_not_cancelled(self):
         gio = _FakeGioConnecting()
@@ -4400,6 +4531,32 @@ class TestTheAccessibilityBusConnection(AtspiTestCase):
             self.assertIsNotNone(self.atspi._a11y_connection())
         (cancellable,) = gio.cancellables
         self.assertFalse(cancellable.is_cancelled())
+
+
+class _WatchedLock:
+    """`_A11Y_BUS_LOCK`'s shape, with a signal when a thread has to wait.
+
+    Reentrant like the real one -- the dispatch takes it and then
+    `_a11y_connection` takes it again -- so a non-blocking acquire by the
+    thread that already holds it succeeds and reports no contention.
+    `contended` is set the moment some *other* thread finds it held, which
+    is what lets a test release the holder knowing the waiter is really
+    waiting rather than guessing with a sleep.
+    """
+
+    def __init__(self):
+        self._lock = threading.RLock()
+        self.contended = threading.Event()
+
+    def __enter__(self):
+        if not self._lock.acquire(blocking=False):
+            self.contended.set()
+            self._lock.acquire()
+        return self
+
+    def __exit__(self, *_exc):
+        self._lock.release()
+        return False
 
 
 class _FakeContext:
@@ -4640,25 +4797,53 @@ class TestDispatchActionItself(AtspiTestCase):
         pushing while the first owns it fails without pushing, and GDBus
         then delivers that thread's reply somewhere the dispatcher is not
         looking -- a refusal reported as pending, then as success. The
-        second dispatch has to wait for the first to pop. The first is held
-        mid-settle (silent connection) when the second is started, so
-        without the lock both would be pushed at once.
+        second dispatch has to wait for the first to pop.
+
+        Both threads are held by gates rather than by settle times: the
+        first stops inside its call, where it still owns the context, and
+        is only released once the instrumented lock has *seen* the second
+        thread wait for it. Timed instead -- a 0.3s settle, the second
+        dispatch started after it -- the overlap was whatever the runner's
+        scheduling made it, and a pause longer than the settle let the
+        first pop before the second pushed, which passes with no lock at
+        all.
         """
+        held = threading.Event()
         mid_settle = threading.Event()
-        connection = _FakeConnection(silent=True, on_call=mid_settle.set)
+        self.addCleanup(held.set)
+
+        def stop_mid_call():
+            """Hold the first dispatch inside the context it has pushed."""
+            mid_settle.set()
+            held.wait(5)
+
+        connection = _FakeConnection(silent=True, on_call=stop_mid_call)
+        watched = _WatchedLock()
         verdicts = []
-        with mock.patch.object(self.atspi, "_a11y_connection", return_value=connection):
+        with (
+            mock.patch.object(self.atspi, "_a11y_connection", return_value=connection),
+            mock.patch.object(self.atspi, "_A11Y_BUS_LOCK", watched),
+        ):
             first = threading.Thread(
                 target=lambda: verdicts.append(
-                    self.atspi._dispatch_action(_AddressableNode(), 1, settle=0.3)
+                    self.atspi._dispatch_action(_AddressableNode(), 1, settle=0.01)
                 )
             )
             first.start()
-            self.assertTrue(mid_settle.wait(5))
-            verdicts.append(
-                self.atspi._dispatch_action(_AddressableNode(), 2, settle=0.01)
+            self.assertTrue(mid_settle.wait(5), "the first dispatch never got going")
+            second = threading.Thread(
+                target=lambda: verdicts.append(
+                    self.atspi._dispatch_action(_AddressableNode(), 2, settle=0.01)
+                )
             )
+            second.start()
+            self.assertTrue(
+                watched.contended.wait(5),
+                "the second dispatch never reached the lock the first holds",
+            )
+            held.set()
             first.join(5)
+            second.join(5)
         self.assertEqual(verdicts, [self.atspi._Dispatch.PENDING] * 2)
         (context,) = _FakeGLib.contexts
         self.assertEqual(context.max_depth, 1)

@@ -929,6 +929,44 @@ class TestTheWindowJoin(BackendTestCase):
         self.assertEqual(titles[268], "doc4")
         self.assertEqual(titles[265], "doc3")
 
+    def test_a_rectangle_two_server_entries_share_takes_no_ax_title_either(self):
+        """The uniqueness check the AX side cannot make on its own.
+
+        doc3 is moved onto doc4 and AX will not read doc3's position, so
+        the AX half sees one window on that rectangle and calls the key
+        unique -- while the window server lists both handles there, and the
+        join then handed doc4's title to doc3 as well. A title lookup for
+        "live_doc4.txt" could pick either document. Counted on the server's
+        side too, neither gets it.
+        """
+        onscreen = self.onscreen_windows()
+        onscreen[2] = window(265, 2829, "TextEdit", (205, 145, 673, 439))
+        applications = self.applications()
+        applications[2829].windows[1].attrs["kAXPositionAttribute"] = None
+        backend = self.make(onscreen=onscreen, applications=applications)
+        titles = {w.handle: w.title for w in backend.windows()}
+        self.assertEqual(titles[268], "")
+        self.assertEqual(titles[265], "")
+        self.assertEqual(titles[263], "live_doc2.txt", "the others keep theirs")
+
+    def test_a_helper_surface_behind_a_window_does_not_cost_it_its_title(self):
+        """Counted over `windows`'s own filter, not every server entry.
+
+        The all-windows list carries a layer-0 menu-bar strip of Terminal's
+        that is not on screen; if the shared-key count included entries
+        like that, a window could lose its title to something a person
+        cannot see. Here the strip is given Terminal's own rectangle.
+        """
+        onscreen = self.onscreen_windows()
+        everything = onscreen + [
+            window(44, 690, "Terminal", (153, 79, 877, 499), onscreen=None)
+        ]
+        backend = self.make(
+            onscreen=onscreen, everything=everything, applications=self.applications()
+        )
+        titles = {w.handle: w.title for w in backend.windows()}
+        self.assertEqual(titles[48], "pyguitest - caffeinate")
+
     def test_an_untitled_window_on_the_rectangle_is_still_a_second_window(self):
         # A panel sized to its parent is the other shape the write side names, and
         # it has no title to clash with -- but it is still a second AX window the
@@ -1354,6 +1392,65 @@ class TestWindowWrites(BackendTestCase):
         self.backend.close_window(self.terminal)
         self.assertEqual(button.performed, ["AXPress"])
 
+    def test_a_lone_ax_candidate_that_fits_two_handles_is_refused_too(self):
+        """The ambiguity the AX side alone cannot see.
+
+        Two Terminal windows on one rectangle, and AX will not read the
+        twin's position -- a window reaped mid-walk, an application busy
+        between the two reads. One readable candidate is left, and it is as
+        plausible for handle 49 as for handle 48, so taking it would have
+        pressed one window's close button for either handle. The window
+        server still lists both at that rectangle, which is what the
+        refusal is read from.
+        """
+        mine = FakeElement(role="AXButton")
+        self.node.attrs["kAXCloseButtonAttribute"] = mine
+        twin = FakeElement(
+            role="AXWindow",
+            attrs={
+                "kAXTitleAttribute": "unreadable, same place",
+                "kAXPositionAttribute": None,
+                "kAXSizeAttribute": size(877, 499),
+            },
+        )
+        self.ax.applications[690].windows.append(twin)
+        self.quartz.onscreen.insert(1, window(49, 690, "Terminal", (153, 79, 877, 499)))
+        self.backend._forget_windows()
+        with self.assertRaises(CapabilityUnsupported) as caught:
+            self.backend.close_window(self.terminal)
+        self.assertIn("same rectangle", str(caught.exception))
+        self.assertEqual(mine.performed, [], "pressed a button that fits two handles")
+
+    def test_another_process_on_the_same_rectangle_is_not_a_twin(self):
+        """The check is per application, like the join itself.
+
+        A window of some other process at Terminal's rectangle says
+        nothing about which Terminal window a handle names, and refusing
+        over it would make every write fail on a tiling desktop.
+        """
+        button = FakeElement(role="AXButton")
+        self.node.attrs["kAXCloseButtonAttribute"] = button
+        self.quartz.onscreen.insert(1, window(77, 999, "SomeApp", (153, 79, 877, 499)))
+        self.backend._forget_windows()
+        self.backend.close_window(self.terminal)
+        self.assertEqual(button.performed, ["AXPress"])
+
+    def test_an_ax_window_list_that_will_not_read_is_retryable(self):
+        """A busy application is not a windowless one.
+
+        `kAXWindowsAttribute` answering `-25204` (`kAXErrorCannotComplete`,
+        measured on the live machine from a process busy in its own
+        handler) used to read as "no AX window matches its handle" -- a
+        `CapabilityUnsupported`, which the session's retrying helpers treat
+        as final. The read failure is its own answer now, and the caller
+        gets the error type that means "try again".
+        """
+        self.ax.applications[690].error = -25204
+        with self.assertRaises(PyGUITestError) as caught:
+            self.backend.close_window(self.terminal)
+        self.assertNotIsInstance(caught.exception, CapabilityUnsupported)
+        self.assertIn("AX window list", str(caught.exception))
+
     def test_an_exact_match_does_not_hide_a_twin_a_point_away(self):
         """Ambiguity is measured with the join's own tolerance, on both sides.
 
@@ -1653,6 +1750,27 @@ class TestWindowWrites(BackendTestCase):
             self.backend.activate_window(self.terminal)  # must not raise
         self.assertEqual(self.node.performed, [])
         self.assertEqual(twin.performed, [])
+
+    def test_a_sibling_coming_forward_after_an_unreadable_list_is_retryable(self):
+        """A read that failed says nothing about the application's windows.
+
+        The same shape as the ambiguity refusal above -- a sibling takes
+        the front after AppKit brings the application forward -- but the
+        reason the raise could not be aimed is a `kAXWindowsAttribute` read
+        that failed, which a moment later may well succeed. Reported as
+        `CapabilityUnsupported` it made `Session.focus_window` give up at
+        once; as a `PyGUITestError` the same call tries again.
+        """
+        self._give_terminal_a_twin(in_front=True)
+        self.ax.applications[690].error = -25204
+        with (
+            mock.patch.dict(sys.modules, {"AppKit": self._appkit_that_activates()}),
+            self.assertRaises(PyGUITestError) as refusal,
+        ):
+            self.backend.activate_window(self.terminal)
+        self.assertNotIsInstance(refusal.exception, CapabilityUnsupported)
+        self.assertIn("AX window list", str(refusal.exception))
+        self.assertEqual(self.node.performed, [], "raised on a guess")
 
     def test_an_ungranted_activation_of_a_rear_window_is_refused(self):
         """Without the grant there is no raise at all, and the same check applies.

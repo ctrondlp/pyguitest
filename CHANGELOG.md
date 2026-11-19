@@ -41,6 +41,23 @@ All notable changes to pyguitest are recorded here. The format follows
 
 ### Fixed
 
+- **An element is no longer placed by a window the ranking cannot tell from
+  its neighbour.** Where AT-SPI's own coordinates have to be placed by a
+  sibling backend's window list — a native Wayland session, GTK4 anywhere —
+  each of an application's frames is paired with the listing that ranks best
+  for it: the window carrying the frame's own name first, then the closest
+  size. Two windows can rank *equally*, though — same title, same size, two
+  documents of one editor — and the first listed then won for both of that
+  application's frames, placing one of them by the other's window. For
+  `extents()` that is a rectangle hundreds of pixels from the element; for a
+  scoped `element_at` it is worse, since both hits then claim the same
+  listing and the stacking check reads two windows as one, letting a control
+  in the rear window answer for a point in the front one. A tie between
+  listings at *different* rectangles is now no placement at all: the element
+  keeps its own good window-relative rectangle, and the caller is told the
+  window could not be placed rather than handed another window's position. A
+  tie whose listings sit at one rectangle still places the frame, since
+  either choice places it identically.
 - **A modifier an enclosing `send_keys` group still holds is no longer
   released by an inner `)`.** `^(^(a)b)` pressed Control twice and let go
   of it at the inner `)`, so `b` was tapped with nothing held while the
@@ -147,7 +164,25 @@ All notable changes to pyguitest are recorded here. The format follows
   which `Session.focus_window` treats as final; AX *refusing* a raise it was
   aimed with (`kAXErrorCannotComplete`, the application busy or not
   answering) is this attempt failing, so a plain `PyGUITestError` that
-  `focus_window` retries as it did before the check existed. The activation
+  `focus_window` retries as it did before the check existed. A
+  `kAXWindowsAttribute` read that *fails* — the same `kAXErrorCannotComplete`
+  from an application busy in its own handler — is now that second kind too:
+  it had been collapsed into "no AX window matches its handle", which made a
+  transient read failure a permanent refusal and so returned `focus_window`
+  False at once for a focus that would have worked a moment later. Only a
+  read that succeeded and named no matching window still refuses for good,
+  and `move_window`, `resize_window`, `minimize_window` and `close_window`
+  draw the same line.
+  The ambiguity is also counted on the window server's side, which is the
+  half AX cannot answer for: a lone AX candidate is only unambiguous if it
+  is plausible for *one* of the process's windows. Two documents on one
+  rectangle where AX will not read one of their frames leave a single
+  readable candidate — the other document's — and it was handed back for
+  either handle, so `close_window` pressed the wrong document's close button
+  and `move_window` moved the wrong window. Re-enumerating cannot help there,
+  since both handles really are at that one rectangle; a candidate as close
+  to another visible window of the same process as it is to this handle's is
+  refused the same way a pair of AX twins is. The activation
   drops the window caches before matching, as the other writes do: matched
   against a quarter-second-old listing, the raise could be aimed at a
   neighbour that had since moved onto the asked-for rectangle, and the raise
@@ -162,7 +197,12 @@ All notable changes to pyguitest are recorded here. The format follows
   name per window where the Screen Recording grant supplies it, an empty
   string otherwise, and never the neighbour's. Handles were always right;
   a title is now either right or absent, which is what `windows()` has
-  promised all along.
+  promised all along. That count is taken on the window server's side as
+  well: a rectangle AX saw one window at because the other's frame would
+  not read is a rectangle the server still lists two handles at, and the
+  readable window's title was then given to both. Keys two visible entries
+  share take no AX title either, counted over the same filter `windows()`
+  lists by, so a helper surface behind a window does not cost it its name.
 - **macOS `move_window` and `resize_window` wait for the window server to
   catch up.** An AX position or size write returns once the application has
   applied it, and AX reads the new frame back at once — CoreGraphics does
@@ -207,13 +247,30 @@ All notable changes to pyguitest are recorded here. The format follows
   session in another process came up believing it owned the name; with the
   pre-load sweep below, it then unloaded the live session's script. The
   verdict is waited for now, and a name already held raises at once instead
-  of after the five-second wait.
+  of after the five-second wait. The wait is bounded by a GLib timeout
+  source attached to the context it iterates, not by a clock read between
+  iterations: a blocking iteration cannot be interrupted by one, so a
+  `RequestName` whose answer never came — a wedged bus daemon — blocked
+  construction for as long as the bus stayed quiet. And it iterates the
+  *thread-default* context, which is where Gio delivers these callbacks and
+  which is not the global default one when a caller has pushed its own (this
+  package pushes one around every asynchronous AT-SPI action).
 - **A KWin script that loads but then fails to start is unloaded again.**
   Only the closer returned at the end of `_load_and_run_script` unloads
   one, and it is never created when that function raises — so a failure
   *after* `loadScript` (the script proxy refused, `run` refused) left the
   script resident in the compositor for the life of the session with
   nothing holding a handle to it. The original failure still surfaces.
+- **Every copy of a predecessor's KWin script is swept, not just the
+  first.** `unloadScript` removes *one* script matching the plugin name per
+  call, so two sessions killed outright left two copies and the sweep
+  before the load cleared one of them — the new script then ran on top of a
+  survivor and every window event arrived twice, which is the bug the sweep
+  exists to prevent. The sweep now unloads and re-asks `isScriptLoaded`
+  until KWin says none is left, bounded at two seconds, and refuses the
+  session naming the leftover rather than adding another producer to a pile
+  it could not clear. A KWin that will not answer `isScriptLoaded` gets the
+  single best-effort unload it always did.
 - `tests/test_docs.py`'s tag check skipped a git that fails but not a git
   that cannot be launched: `check=False` does not suppress a
   launch error, so an archived source tree with no git installed failed

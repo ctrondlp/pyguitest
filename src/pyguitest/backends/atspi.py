@@ -2127,7 +2127,18 @@ leaves the call outstanding, so this only bounds how long the connection
 holds the pending entry for a reply nobody is waiting for. Finite rather
 than -1 so a handler that never returns -- an application that exits with
 its dialog still up -- does not leave one behind for the life of the
-session."""
+session.
+
+Measured in the *context's* time, not the clock's: GDBus arms this as a
+timeout source on whichever context the call was made on, which is
+`_action_context`, and nothing iterates that context between dispatches.
+So an un-replied action's entry lives until the next `_dispatch_action`
+drains the context on its way in -- which is exactly why that drain is
+there -- and on a session that clicks once and then only reads, it outlives
+the thirty seconds. One pending entry on the accessibility connection costs
+a slot and the completion's own closure; the alternative is a thread of our
+own driving that context for the life of the session, which is a larger
+thing to own than the entry is to leak."""
 
 
 def _run_bounded(seconds, fn, *args, **kwargs):
@@ -2427,6 +2438,26 @@ class AtspiBackend(GUIBackend):
         (41 narrower, 52 taller) with a smaller misfit than the assistant's
         own listing, 52 off on both axes for Mutter's shadow.
         """
+        return [
+            listing for _rank, listing in self._ranked_listings(frame, size, scoped)
+        ]
+
+    def _ranked_listings(self, frame, size=None, scoped=False):
+        """`_source_listings` with each listing's rank, best first.
+
+        `(rank, (window, rect))` pairs, where the rank is the
+        `(title-mismatch, misfit)` tuple the ordering is by -- see
+        `_source_listings`, which is this without the ranks and is what
+        every caller comparing rectangles wants.
+
+        The ranks are kept for the one caller that has to pick a *single*
+        window and not merely a best-first order: two of an application's
+        toplevels can rank equally -- same title, same size -- and the
+        stable sort then hands both of that application's frames the same
+        first listing, which places one of them by the other's window.
+        `_placement` compares the first two ranks to tell that apart from a
+        clear best.
+        """
         if self._window_geometry_source is None:
             return []
         try:
@@ -2467,7 +2498,7 @@ class AtspiBackend(GUIBackend):
         # A stable sort: windows the ranking cannot separate keep the
         # source's own order, which is all the old first-listed rule was.
         ranked.sort(key=lambda item: item[0])
-        return [listing for _, listing in ranked]
+        return ranked
 
     def _source_rect(self, window):
         """`(x, y, width, height)` the geometry source reports for `window`, or None."""
@@ -2595,8 +2626,9 @@ class AtspiBackend(GUIBackend):
         screen one by addition: the geometry source's best rectangle for
         the frame (`_source_rects`), corrected for the decorations the two
         sides count differently (`_client_inset`). None where the source
-        lists nothing plausibly this window, or the frame has no rectangle
-        of its own to compare against.
+        lists nothing plausibly this window, lists two at different
+        rectangles that it cannot tell apart (`_placement`), or the frame
+        has no rectangle of its own to compare against.
         """
         placement = self._placement(frame)
         return None if placement is None else placement[0]
@@ -2611,17 +2643,34 @@ class AtspiBackend(GUIBackend):
         caller can tell two of an application's toplevels apart by which
         listing each one landed on, and hold that listing against the
         source's `window_at` (`_hits_in` and `_on_top` do). `scoped` is
-        `_source_listings`'. None exactly where `_window_origin` is.
+        `_source_listings`'. None exactly where `_window_origin` is, plus
+        one case that list cannot express: two of the application's windows
+        that rank *equally* for this frame and sit at different rectangles.
+        Same title, same size -- two documents of one editor, a dialog
+        shaped like the window it sits over -- and the ranking has nothing
+        left to separate them with, so the stable sort gives each of the
+        application's frames the same first listing: one frame is then
+        placed by the other frame's window, hundreds of pixels out, and
+        `_on_top` is handed two hits claiming the same listing, which it
+        reads as one window and cannot arbitrate. Both the misplacement and
+        the false agreement are a guess; None says so, and a caller gets no
+        rectangle rather than another window's. A tie whose listings share
+        one rectangle is not ambiguous *here* -- either choice places the
+        frame identically -- and goes through as before, left for `_on_top`
+        to hold against `window_at` as it always was.
         """
         own = self._raw_extents(frame, window=True)
         if own is None:
             return None
-        listings = self._source_listings(frame, size=own[2:], scoped=scoped)
-        if not listings:
+        ranked = self._ranked_listings(frame, size=own[2:], scoped=scoped)
+        if not ranked:
             return None
-        _window, rect = listings[0]
+        tied = [listing for rank, listing in ranked if rank == ranked[0][0]]
+        if len({rect for _window, rect in tied}) > 1:
+            return None
+        _window, rect = ranked[0][1]
         inset = self._client_inset(frame, own, rect)
-        return (rect[0] - inset[0], rect[1] - inset[1]), listings[0]
+        return (rect[0] - inset[0], rect[1] - inset[1]), ranked[0][1]
 
     def _placed_extents(self, node):
         """`node`'s screen rectangle, placed by its window rather than reported.
@@ -2659,7 +2708,9 @@ class AtspiBackend(GUIBackend):
                     self.name,
                     "this element's AT-SPI rectangle is window-relative on "
                     "a native Wayland session and the compositor reports no "
-                    "position for its window, so it cannot be made "
+                    "position this window can be placed by -- none at all, "
+                    "or two of the application's windows it cannot tell "
+                    "apart -- so it cannot be made "
                     "screen-absolute. The element itself is fine: its size "
                     f"is {size}. Ask "
                     "is_window_viewable whether the window is on screen, and "
@@ -2674,8 +2725,9 @@ class AtspiBackend(GUIBackend):
                 "from a sibling backend -- a toolkit that is never told "
                 "where its window is (GTK4 answers (0, 0) for every element "
                 "it owns, on X11 as on Wayland) -- and that backend lists no "
-                "window of a plausible size to place the element's own, "
-                "window-relative rectangle against. The element itself is "
+                "window the element's own, window-relative rectangle can be "
+                "placed against: none of a plausible size, or two the "
+                "ranking cannot tell apart. The element itself is "
                 f"fine: its size is {size}. Wait for the window to be "
                 "mapped, or drive the element through its accessible action "
                 "or keyboard focus instead of a coordinate",

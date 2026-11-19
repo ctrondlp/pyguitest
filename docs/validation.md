@@ -5652,3 +5652,129 @@ it, the synchronous call on these leaves raised after libatspi's timeout, the
 walk passed over them without a word, and every earlier "clean" Qt run on
 Mutter had never reached a modal dialog. A pass that is read as evidence
 needs to name what it drove.
+
+## The second PR-review round: a bus-name wait with no way to wake it (2026-11-19)
+
+The review's KWin finding is about a wait, and a wait is a thing a mock
+cannot judge: the harness that covered it returned from
+`iteration(True)` the moment it ran out of callbacks, which is exactly what
+a real main context does not do. Driven against real Gio and GLib on the
+development box's own session bus instead — no KWin and no window, since
+`connect=False` builds only the bus half of the backend, which is the half
+the finding is about.
+
+The mechanism first, on its own: a private `GMainContext` pushed as
+thread-default, a `GLib.timeout_source_new(120)` attached to it, and a
+`while not fired: ctx.iteration(True)` loop. The blocking iteration woke on
+the timeout after 0.122s and `is_destroyed()` answered true after
+`destroy()`. `MainContext.get_thread_default()` answers None with nothing
+pushed, which is what makes the fallback to the global default context the
+ordinary path.
+
+Then `_host_service` itself, three ways:
+
+| case | before | after |
+|---|---|---|
+| nothing pushed as thread-default | owns the name | owns the name, 0.00s |
+| a private context pushed as thread-default | **hung** — killed at 120s | owns the name, 0.00s |
+| a second process while the first holds the name | refused | refused, 0.00s, "another instance may already be running" |
+
+The middle row is both halves of the finding in one run. Gio delivers
+`bus_acquired`/`name_acquired` on the context that was thread-default when
+`bus_own_name` was called, so a wait that iterates the *global default* one
+is handed nothing to dispatch — and because `iteration(True)` blocks until
+some source is ready, and the only source that could have woken it was on
+the other context, the five-second deadline checked between iterations never
+got a look in. Not "times out after five seconds": hangs, for as long as the
+session bus stays quiet. With the deadline attached to the context the
+callbacks arrive on, the same case owns the name immediately, and a bus that
+never answers reaches the `BackendUnavailable` the deadline was always meant
+to produce.
+
+## The second review round, driven on the fleet (2026-11-19)
+
+Four of that round's fixes change what a *desktop* does rather than what the
+code says, so each was driven on a box with its opposite arranged in the same
+run, and two of them were measured against the code they replace.
+
+**Two windows one ranking cannot tell apart (KWin and COSMIC).** A fixture of
+one process with two toplevels, same title, same size, at different positions
+— two documents of one editor. Both compositors list them exactly so: KWin at
+(440, 213) and (467, 229), both 400x328; COSMIC at (440, 118) and (488, 166),
+both 400x336. The frames themselves report (0, 0, 400, 300) for SCREEN and
+WINDOW alike, the Qt-on-Wayland shape, so each is placed by a listing — and
+the ranking scores both listings identically for *both* frames, `(0, 28)`
+each, a tie between two different rectangles.
+
+| | KWin | COSMIC |
+|---|---|---|
+| before | both widgets placed at **(451, 252, 378, 247)** | both at **(451, 165, 378, 247)** |
+| | — the same rectangle, inside the *first* window, for widgets that are in two different windows | — likewise |
+| after | both refused, naming two windows it cannot tell apart | both refused |
+| with the sizes made distinct | each widget placed in its own window: (451, 252) and (478, 268) | (451, 165) and (459, 213), differing by exactly the windows' own offset (8, 48) |
+
+The last row is what says the refusal is not placement switched off: a tie the
+ranking *can* break still places both frames, each by its own window.
+
+**The join's two sides, on a Mac (Sequoia 15.8.1).** Driven over one TextEdit
+run: a lone window took a move and a resize and read them back (120, 120,
+420, 320), its AX match resolved unambiguously, no twin was counted on the
+window server's side, and its title was its own. A second document was opened
+and the two placed apart — each kept its own title — and then moved onto one
+rectangle, where both titles went empty, a twin was counted for each handle,
+and `close_window` on either was refused naming the shared rectangle. No
+*write* can separate them, which is the refusal working, so the pointer and
+keyboard did: a click inside the rectangle and Cmd-W closed the front one, and
+the survivor's title came back, its twin count went to zero, its AX match
+resolved again, a move was accepted again, and `close_window` closed exactly
+it. The case the new server-side count exists for — a shared rectangle where
+AX reads only one of the two frames — cannot be arranged on a live Mac; what
+is live here is that the count itself answers correctly both ways, which is
+what decides whether a write is aimed.
+
+**The KWin script sweep (Fedora 44 KDE, Plasma 6).** Three questions, each
+measured against KWin rather than reasoned about:
+
+- *Can two copies coexist?* Three `loadScript` calls with the same path
+  returned three distinct ids, and `unloadScript` removed one per call:
+  `(removed, still loaded)` across four rounds was (True, True), (True,
+  True), (True, False), (False, False). So one unload is not a sweep.
+- *Does a second copy do harm?* With the service hosted and one extra copy
+  planted, a single dialog's open and close arrived as **four** events —
+  `new, new, close, close` — against two with one copy. And a copy that
+  outlived its session still delivers to the next session that owns the
+  name, which is the predecessor case.
+- *Does the loop clear what one unload did not?* Two copies planted, the
+  backend brought up over them, and `isScriptLoaded` asked after the
+  session closed its own: with the loop, nothing left loaded; with the
+  single unload this replaces, **a copy survived**. Each window change in
+  both runs still arrived once, because a copy planted while no service was
+  ever up stays quiet — the duplication needs the predecessor state above,
+  which is exactly the one the loop guards.
+
+**Overlapping buttons, captured live (KWin, evdev capture of uinput input).**
+R8's premise is that releases arrive out of press order, which only a capture
+can say. Left down, right down, right up, left up, injected at the kernel seat
+and captured by the recorder's own Wayland backend: `press 1 @2202.018, press
+3 @2202.218, release 3 @2202.419, release 1 @2202.720` — and the normalizer
+emitted the **right** button's click first, which is the queueing order that
+used to hand the first click a bound earlier than its own press.
+
+**No new failure class where placement is used hardest (Debian 13, GNOME).**
+The Qt torture fixture, 104 controls declared, driven on the branch: the same
+four toolkit-unreachable names, 41 menu leaves, no un-dispatched leaf, no
+dialog opened-but-not-reported, and three action-opened dialogs that never
+took keyboard focus — the documented Mutter condition, a subset of the four
+that round recorded, which is the per-dialog intermittency already written
+down. The recorder's full X11 pipeline is green too: on GhostBSD, against its
+own private Xvfb, 89 raw events captured, the generated script named its
+controls, `validate: clean`, the recording re-rendered identically, and the
+replay ran clean against fresh windows.
+
+**The macOS capture check's stop-chord verdict.** The real run reports the
+chord and answers OK, with the replay passing — so reading capture's own stop
+recognition raises no false alarm. With that one fact removed (capture
+recognises no stop press, which is what a Ctrl-C leaves behind) the same run
+reports "the run ended without capture seeing it" and fails, where the old
+check printed "the recorder stopped on the two Escapes" and could still
+answer OK on a recording that validated clean.

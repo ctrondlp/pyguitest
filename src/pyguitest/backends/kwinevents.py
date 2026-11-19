@@ -78,6 +78,14 @@ _IFACE_XML = f"""
 
 _OWN_NAME_TIMEOUT = 5.0
 _SUBPROCESS_TIMEOUT = 5.0
+_SWEEP_TIMEOUT = 2.0
+"""How long `_sweep` keeps unloading predecessors' copies of the script.
+
+Generous for the case it is there for -- KWin removes one copy per call and
+schedules each removal on its own loop, so this is several rounds of a
+round-trip and a `deleteLater` -- and short enough that a KWin whose
+scripting is wedged refuses the session rather than hanging it."""
+_SWEEP_POLL = 0.05
 
 
 def _gio():
@@ -179,6 +187,24 @@ class KWinEventsBackend(GUIBackend):
         because the name is owned first, then unloaded the live session's
         script. The object is still exported on `bus_acquired`, where the
         connection is first in hand; it is only the verdict that waits.
+
+        Waited on the context the callbacks will arrive on, with the
+        deadline *attached to that context* rather than read between
+        iterations. Two reasons, both about `iteration(True)`, which blocks
+        until some source is ready:
+
+        - A clock tested between iterations cannot interrupt one. A
+          `RequestName` whose answer never came -- a wedged bus daemon --
+          left `_OWN_NAME_TIMEOUT` describing nothing, and construction
+          blocked for as long as the bus stayed quiet. A timeout source on
+          the same context is what wakes the wait, so the refusal below is
+          reachable rather than aspirational.
+        - Gio delivers these callbacks on whatever context was
+          thread-default when `bus_own_name` was called, which is not the
+          global default one where a caller has pushed its own (this
+          package pushes one around every asynchronous AT-SPI action).
+          Iterating the default context there dispatches nothing and times
+          out owning a name the bus had already granted.
         """
         node_info = self._Gio.DBusNodeInfo.new_for_xml(_IFACE_XML)
         interface_info = node_info.interfaces[0]
@@ -207,10 +233,25 @@ class KWinEventsBackend(GUIBackend):
             on_name_acquired,
             on_name_lost,
         )
-        context = self._GLib.MainContext.default()
-        deadline = time.monotonic() + _OWN_NAME_TIMEOUT
-        while not acquired and time.monotonic() < deadline:
-            context.iteration(True)
+        context = (
+            self._GLib.MainContext.get_thread_default()
+            or self._GLib.MainContext.default()
+        )
+        expired = []
+
+        def expire(*_args):
+            """Record the deadline, and say so once: GLib drops a False source."""
+            expired.append(True)
+            return False
+
+        deadline = self._GLib.timeout_source_new(int(_OWN_NAME_TIMEOUT * 1000))
+        deadline.set_callback(expire)
+        deadline.attach(context)
+        try:
+            while not acquired and not expired:
+                context.iteration(True)
+        finally:
+            deadline.destroy()
         if not acquired or acquired[-1] is False:
             raise BackendUnavailable(
                 f"could not own {_BUS_NAME} on the session bus -- another "
@@ -227,6 +268,46 @@ class KWinEventsBackend(GUIBackend):
             invocation.return_value(None)
             if self._wake is not None:
                 self._wake()
+
+    @staticmethod
+    def _sweep(unload, still_loaded):
+        """Unload every resident copy of the script, or refuse.
+
+        One `unload` per round, because that is what KWin's own
+        `unloadScript` does -- the first script matching the name -- and
+        then `still_loaded` again, because the removal it schedules is a
+        `deleteLater` that only takes effect once KWin's loop runs. Rounds
+        until nothing is left, bounded by `_SWEEP_TIMEOUT`, and
+        `BackendUnavailable` if a copy survives it: adding another producer
+        to one that would not go is how every window event came to arrive
+        twice, and a refusal naming the leftover is something a caller can
+        act on (restart KWin's scripting, or the session).
+
+        `still_loaded` answering None -- a KWin that will not take
+        `isScriptLoaded` -- is not "nothing left": one unload is issued and
+        the load proceeds, which is exactly what this did before the loop
+        existed.
+        """
+        loaded = still_loaded()
+        if loaded is None:
+            unload()
+            return
+        deadline = time.monotonic() + _SWEEP_TIMEOUT
+        while loaded and time.monotonic() < deadline:
+            unload()
+            # Asked after a pause, not straight away: the removal KWin
+            # schedules only takes effect once its own loop runs, so an
+            # immediate re-read answers True about a script already going.
+            time.sleep(_SWEEP_POLL)
+            loaded = still_loaded()
+        if loaded:
+            raise BackendUnavailable(
+                "a copy of the window-events KWin script is still loaded "
+                f"after {_SWEEP_TIMEOUT}s of unloading it -- a previous "
+                "session's, left behind when it was killed. Loading another "
+                "would duplicate every window event, so this is refused; "
+                "restarting the Plasma session clears it"
+            )
 
     def _load_and_run_script(self):
         """Load `_kwin_window_events.js` into KWin and start it running.
@@ -260,6 +341,21 @@ class KWinEventsBackend(GUIBackend):
         loading clears a predecessor's copy; it is ours to clear, since the
         bus name this backend owns first keeps two live sessions from
         coexisting.
+
+        *Copies*, plural, and that is why the sweep is a loop: two sessions
+        killed outright leave two, and one `unloadScript` removes one of
+        them -- KWin's own takes the first script matching the name
+        (`scripting.cpp`, `unloadScript` -> `findScript` -> a single
+        `deleteLater`) and answers True. Swept once, a third copy was then
+        added on top of a survivor and every event still arrived twice. So
+        the sweep asks `isScriptLoaded` between unloads and stops when KWin
+        says none is left, bounded by `_SWEEP_TIMEOUT` -- the removal is a
+        `deleteLater`, so the answer only turns False once KWin's own loop
+        runs -- and refuses rather than adding to a pile it could not
+        clear. A KWin that will not answer `isScriptLoaded` at all (an
+        older one, a refused call) is left the single best-effort unload
+        this always did: no worse than before, and still not a reason to
+        refuse the session.
         """
         script_path = str(
             resources.files("pyguitest.backends") / "_kwin_window_events.js"
@@ -290,7 +386,29 @@ class KWinEventsBackend(GUIBackend):
                     None,
                 )
 
-        unload()
+        def still_loaded():
+            """Whether KWin still has a script under this plugin name.
+
+            None where it will not say: the method is missing, the call
+            failed. That is not False, and the sweep treats it as "cannot
+            check" rather than as "nothing left".
+            """
+            try:
+                answer = kwin.call_sync(
+                    "isScriptLoaded",
+                    self._GLib.Variant("(s)", (script_path,)),
+                    self._Gio.DBusCallFlags.NONE,
+                    -1,
+                    None,
+                )
+            except Exception:  # noqa: BLE001 - a KWin that will not say
+                return None
+            try:
+                return bool(answer.unpack()[0])
+            except Exception:  # noqa: BLE001 - an answer in another shape
+                return None
+
+        self._sweep(unload, still_loaded)
         try:
             script_id = kwin.call_sync(
                 "loadScript",
