@@ -89,7 +89,7 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T")
 
-__version__ = "0.26.0"
+__version__ = "0.26.1"
 
 __all__ = [
     "connect",
@@ -159,10 +159,17 @@ def quote_for_type(text: str | None) -> str | None:
     `\r` each send Enter and `\t` sends Tab, because that is what
     send_keys does with them, so text carrying Windows line endings sends
     *two* Returns per break (`"a\r\nb"` arrives as a, Enter, Enter, b) and
-    a tab arrives as a focus change rather than as whitespace. Normalise
-    the line endings first, or use type_text for text that has to arrive
-    exactly as written -- it is the keymap-aware path and reads no syntax
-    at all.
+    a tab arrives as a focus change rather than as whitespace.
+
+    Normalise the line endings to LF before calling this, and note that
+    type_text is not the way around it. Where a control character is a
+    command rather than text -- `_CONTROL_VK` on win32, `_CONTROL_KEYSYMS`
+    on x11 and the portal -- it sends `\r` and `\n` as Enter too, so CRLF
+    arrives as two Enters by that route as well; macOS posts each as the
+    character it is (`CGEventKeyboardSetUnicodeString`), and what the
+    target makes of a bare carriage return is then its decision rather
+    than the package's. No route collapses a CRLF into one break;
+    normalising first is the fix.
 
     The second, deliberately kept from upstream: `&` (AltGr) is not
     escaped, so a `&` in `text` is read as the modifier. `{&}` is the literal
@@ -4407,10 +4414,15 @@ class Session:
         drive a layout at its largest for a responsive-UI check, then
         restore and confirm the window really left the state.
 
-        On Windows -- and only there -- maximizing also *activates* the
-        window: `SW_MAXIMIZE` is documented to, and no non-activating
-        spelling exists, where every other backend's maximize leaves focus
-        alone. Re-focus the window your next input is for.
+        This promises nothing about keyboard focus, in either direction:
+        where the next step is input, check `active_window()` first, or use
+        `focus_window` on the window you mean. What has been observed is that
+        every backend's maximize leaves focus where it was, Windows included
+        -- and on Windows that is a measurement, not a contract.
+        `SW_MAXIMIZE` is documented to activate the window it maximizes and
+        has no non-activating spelling, so this used to tell you to re-focus
+        afterwards; driven live against another application's window, which
+        is the only thing pyguitest ever maximizes, it did not.
 
         Needs Capability.WINDOW_MAXIMIZE, which is declared only where the
         desktop genuinely has the concept: X11, Windows, COSMIC, and GNOME
@@ -4503,7 +4515,7 @@ class Session:
         """
         return self.backend.extents(element)
 
-    def element_at(self, x: int, y: int) -> Element | None:
+    def element_at(self, x: int, y: int, *, pid: int | None = None) -> Element | None:
         """The deepest accessible element at a screen coordinate, or None.
 
         What window_at is for windows, with no `screen` argument: the
@@ -4515,8 +4527,22 @@ class Session:
         tell that apart from a correct answer, so a caller turning a
         coordinate into a locator should check that the element it got back
         really covers the point (extents() says).
+
+        `pid` scopes the search to one process's windows. On a pure Wayland
+        session, where an unscoped coordinate lookup is refused (a client is
+        never told where its windows sit on screen), naming the process of a
+        window already placed -- by `window_at`, which resolves stacking --
+        is what lets this answer at all: only that process's toplevels are
+        placed, through the window backend that knows their positions. Ignored
+        where coordinates are trustworthy on their own (X11, Windows, macOS).
         """
-        found = self.backend.element_at(x, y)
+        # `pid` is new in 0.26.1; a backend written against the older
+        # two-argument signature still answers an unscoped lookup, so only
+        # forward the keyword when the caller actually asked to scope.
+        if pid is None:
+            found = self.backend.element_at(x, y)
+        else:
+            found = self.backend.element_at(x, y, pid=pid)
         return None if found is None else self._bind(found)
 
     def locate(

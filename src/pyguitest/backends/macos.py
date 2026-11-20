@@ -635,6 +635,22 @@ is deeper than any live tree measured here (Terminal's window came out four
 levels deep).
 """
 
+_AX_TRANSIENT = frozenset({-25200, -25204})
+"""The AX error codes that describe this *attempt*, not the element.
+
+`-25204` is `kAXErrorCannotComplete` -- "the messaging failed", which is what
+an application busy inside its own handler answers, measured on the live
+machine from `kAXFocusedApplicationAttribute` on consecutive runs -- and
+`-25200` is `kAXErrorFailure`, the general one. Both are worth trying again.
+
+Everything else AX can answer is about the element or the attribute and no
+retry changes it: `-25205` (`kAXErrorAttributeUnsupported`, the attribute is
+not published at all -- Finder's malformed window list is read this way),
+`-25212` (`kAXErrorNoValue`), `-25202` (`kAXErrorInvalidUIElement`, the
+element is gone), and the string a refusing binding produces in `_copy`. Told
+apart because the type of the refusal decides whether `Session.focus_window`
+tries again or gives up: see `_ax_window_match`."""
+
 _MAX_NODES = 20000
 """How many elements one search will visit before it gives up and answers.
 
@@ -1783,6 +1799,27 @@ class MacosBackend(GUIBackend):
     window has moved far, and long enough that one search is one round trip.
     """
 
+    _WRITE_SETTLE = 0.5
+    """How long `_write_frame` waits for the window server to report a write.
+
+    An AX position or size write returns once the application has applied it,
+    and AX reads the new frame back at once -- CoreGraphics does not. Measured
+    on Sequoia 15.8 over ten alternating moves of a TextEdit window: right
+    after the write returned, the window server's rectangle still held the
+    *old* position in eight rounds of ten, and agreed with AX 10-49ms later.
+    Two things go wrong in that gap. `geometry()` read straight after
+    `move_window()` answers the rectangle the move was meant to leave behind;
+    and a second write -- `resize_window()` right after `move_window()`, the
+    ordinary way to place a window -- is refused with "no AX window matches
+    its handle", because the join matches the fresh CoreGraphics rectangle
+    against AX frames that have all moved on. Ten times the worst measurement,
+    and a wait that ends the moment the two agree, so the common case costs one
+    or two enumerations.
+    """
+
+    _WRITE_POLL = 0.01
+    """How often `_await_window_server` re-reads while the two sides disagree."""
+
     def __init__(self, environment=None, request=False):
         """Reach the frameworks, note the grant, and offer to ask for it.
 
@@ -2025,15 +2062,16 @@ class MacosBackend(GUIBackend):
     def _pids(self, everything=False):
         """Every process with a window, in the list's order, deduplicated.
 
-        On-screen by default, because the pids are asked for so `_titles` can
-        enrich the windows `windows()` is about to return, and reading AX trees
-        for processes with nothing visible is work whose answer is discarded.
+        `everything=True` for `_applications`, which asks "which processes
+        have an AX tree to search" rather than "what can be seen":
+        answering it from the on-screen list would leave an application
+        whose windows are all closed or minimized unsearchable, which is
+        not a Mac's behaviour.
 
-        `everything=True` for `_applications`, which is a different question --
-        "which processes have an AX tree to search", not "what can be seen" --
-        and answering it from the on-screen list would leave an application whose
-        windows are all closed or minimized unsearchable, which is not a Mac's
-        behaviour.
+        The on-screen form is the default and is deliberately *not* what
+        `_titles` uses: the title map reads the pids out of the very
+        snapshot it will be joined against, so that the applications read
+        and the rectangles counted cannot come from two different listings.
         """
         seen = []
         for entry in self._all() if everything else self._onscreen():
@@ -2095,6 +2133,22 @@ class MacosBackend(GUIBackend):
         """
         if not bool(entry.get("kCGWindowIsOnscreen")):
             return False
+        return MacosBackend._window_like(entry)
+
+    @staticmethod
+    def _window_like(entry):
+        """Whether an entry is at a window's layer, on screen or not.
+
+        `_visible_entry` without the on-screen half, for the one question
+        that is not about what a person can see: whether a *minimized*
+        window of the same process sits on the rectangle a write is about
+        to be aimed at (`_twinned`). A minimized window keeps its entry and
+        its bounds and stays in `kAXWindowsAttribute`, so it is a genuine
+        candidate for the join even though nothing is showing. The layer
+        pair is what keeps the menu-bar strips and cursor views -- the
+        layer-0 helper surfaces `_visible_entry` measures -- out of that
+        count.
+        """
         return entry.get("kCGWindowLayer") in (0, 8)
 
     def _window_from(self, entry, titles):
@@ -2114,8 +2168,18 @@ class MacosBackend(GUIBackend):
             pid=pid,
         )
 
-    def _titles(self):
+    def _titles(self, entries):
         """`{(pid, (x, y, w, h)): title}` from Accessibility, or empty ungranted.
+
+        `entries` is the window-server listing this map will be joined
+        against -- the caller's own snapshot, passed in rather than taken
+        again here. The two have to be the same listing: the enumerations
+        are cached for `_SNAPSHOT_SECONDS` and the AX reads below can
+        outlast that, so a map built against a fresher snapshot than the
+        one `windows()` goes on to build from could count a rectangle once
+        while the result holds two entries at it -- and the title would
+        name the wrong one of them, which is the whole thing the count
+        prevents.
 
         The enrichment half of the join, and the half that costs: one
         `kAXWindowsAttribute` read per process the window server names. Computed
@@ -2130,11 +2194,45 @@ class MacosBackend(GUIBackend):
         measured, one of fifteen on-screen entries had a non-empty
         `kCGWindowName`, and it was a Window Server one, while TextEdit's four
         windows answered `live_doc4.txt` and its siblings here.
+
+        The key is the rectangle, which is the only join there is and not an
+        identity: two of one process's windows at one frame cannot be told
+        apart here any more than `_ax_window_match` can tell them apart for a
+        write. The last AX window enumerated used to name both -- measured on
+        Sequoia 15.8 with two TextEdit documents moved onto each other, where
+        `active_window()` answered the front one's handle under the *rear*
+        one's title. A rectangle that two or more of a process's AX windows
+        report is now left out of the map altogether, titled or not, so
+        `_window_from` falls back to `kCGWindowName` for each entry: right per
+        window where the Screen Recording grant supplies it, empty otherwise,
+        and never the neighbour's. Handles were always right; a title is now
+        either right or absent, which is the promise `windows` makes.
+
+        Dropped on the *window server's* side too, and for the same reason
+        read the other way round: a key two visible entries share is one
+        `_window_from` would hand the same title to twice, whatever AX said
+        about it. The AX check above cannot stand in for this one, because
+        it only sees the windows AX could place -- a process with two
+        windows at one rectangle, one of whose AX frames will not read,
+        leaves a key AX thinks is unique and the server knows is not, and
+        the readable window's title then named them both. Counted over the
+        same filter `windows` lists by, so a helper surface or a menu-bar
+        strip behind a window does not cost it its title.
         """
         if not self._trusted:
             return {}
-        titles = {}
-        for pid in self._pids():
+        titles: dict[tuple[int, tuple[int, int, int, int]], str] = {}
+        shared = self._shared_keys(entries)
+        seen: set[tuple[int, tuple[int, int, int, int]]] = set()
+        # The pids come from the snapshot too, not from a fresh listing:
+        # one listing decides which applications are read *and* which
+        # rectangles are shared, so the two cannot disagree.
+        asked: list[int] = []
+        for entry in entries:
+            pid = entry.get("kCGWindowOwnerPID")
+            if pid is not None and pid not in asked:
+                asked.append(pid)
+        for pid in asked:
             err, windows = self._copy(
                 self._ax.AXUIElementCreateApplication(pid), self._ax.kAXWindowsAttribute
             )
@@ -2142,10 +2240,38 @@ class MacosBackend(GUIBackend):
                 continue
             for window in windows:
                 frame = self._frame(window)
+                if frame is None:
+                    continue
+                key = (pid, frame)
+                if key in shared or key in seen:
+                    titles.pop(key, None)
+                    continue
+                seen.add(key)
                 title = self._text(window, self._ax.kAXTitleAttribute)
-                if frame is not None and title:
-                    titles[(pid, frame)] = title
+                if title:
+                    titles[key] = title
         return titles
+
+    def _shared_keys(self, entries):
+        """The `(pid, rectangle)` keys more than one visible entry carries.
+
+        The window server's half of the join's uniqueness check: a key here
+        describes two or more windows a person can see, so no title can be
+        attached to it without naming the wrong one of them. See `_titles`,
+        which drops them, and `_ax_window_match`, which refuses to aim a
+        write at one.
+        """
+        counted: dict[tuple[int, tuple[int, int, int, int]], int] = {}
+        for entry in entries:
+            if not self._visible_entry(entry):
+                continue
+            pid = entry.get("kCGWindowOwnerPID")
+            frame = self._bounds(entry)
+            if pid is None or frame is None:
+                continue
+            key = (pid, frame)
+            counted[key] = counted.get(key, 0) + 1
+        return {key for key, count in counted.items() if count > 1}
 
     def windows(self):
         """The windows a person can see, **bottommost first**.
@@ -2179,12 +2305,13 @@ class MacosBackend(GUIBackend):
         keeps working from the handle it took before doing so.
         """
         self.require(Capability.WINDOW_LIST)
-        titles = self._titles()
-        return [
-            self._window_from(entry, titles)
-            for entry in reversed(self._onscreen())
-            if self._visible_entry(entry)
-        ]
+        # One snapshot for both halves of the join: the titles are matched
+        # against the same listing the windows are built from, so a
+        # rectangle counted once here cannot name two entries there. See
+        # `_titles`.
+        entries = [entry for entry in self._onscreen() if self._visible_entry(entry)]
+        titles = self._titles(entries)
+        return [self._window_from(entry, titles) for entry in reversed(entries)]
 
     def active_window(self):
         """The front-most window, from the window server's own ordering.
@@ -2217,15 +2344,15 @@ class MacosBackend(GUIBackend):
         `_visible_entry` are what rule them out.
         """
         self.require(Capability.WINDOW_AT_POINT)
-        for entry in self._onscreen():
-            if not self._visible_entry(entry):
-                continue
+        entries = [entry for entry in self._onscreen() if self._visible_entry(entry)]
+        for entry in entries:
             frame = self._bounds(entry)
             if frame is None:
                 continue
             left, top, width, height = frame
             if left <= x < left + width and top <= y < top + height:
-                return self._window_from(entry, self._titles())
+                # The same snapshot for the title map, as `windows` does.
+                return self._window_from(entry, self._titles(entries))
         return None
 
     def geometry(self, window):
@@ -2326,7 +2453,9 @@ class MacosBackend(GUIBackend):
         Which is what makes this work on a window that is not front-most, and why
         ADR 004 §6 withdraws `WINDOW_PLACEMENT` when the grant is missing. Measured:
         the AX rectangle and the CoreGraphics one agree exactly, both in points, so
-        a `geometry()` read after a move reports what was asked for.
+        a `geometry()` read after a move reports what was asked for -- once the
+        window server has caught up with the write, which `_write_frame` waits
+        for rather than leaving to the caller (`_WRITE_SETTLE` has the numbers).
         """
         self.require(Capability.WINDOW_PLACEMENT)
         self._write_frame(
@@ -2337,6 +2466,7 @@ class MacosBackend(GUIBackend):
             ),
             Capability.WINDOW_PLACEMENT,
             "move",
+            field="position",
         )
 
     def resize_window(self, window, width, height):
@@ -2350,6 +2480,7 @@ class MacosBackend(GUIBackend):
             ),
             Capability.WINDOW_RESIZE,
             "resize",
+            field="size",
         )
 
     def minimize_window(self, window, minimized=True):
@@ -2463,24 +2594,76 @@ class MacosBackend(GUIBackend):
         answer.
 
         A handle the window server no longer lists is a `WindowNotFound`.
+
+        When the raise could not be aimed -- no grant, so no `AXRaise`; or
+        the AX join finds two of the application's windows on one rectangle
+        and cannot say which is this one; or AX refused the raise -- the
+        application activation alone decides *which* of its windows takes
+        the key: AppKit brings the whole set forward in the order it already
+        had. If the application's front window afterwards is not the one
+        asked for, the activation did not activate this window, and keys
+        would go to a sibling -- so that is a refusal naming the sibling and
+        why the raise was unavailable, rather than a return that the caller
+        reads as success. Its type follows the cause. No grant, a shared
+        rectangle, no AX window behind the handle: structural, so
+        `CapabilityUnsupported` -- a retry a tenth of a second later meets
+        the same grant, the same shared rectangle. AX *refusing* a raise it
+        was aimed with is this attempt failing: `kAXErrorCannotComplete` is
+        documented as the application being busy or unresponsive, which is
+        the contest the retry loop exists to out-wait, so that is a plain
+        `PyGUITestError` -- before the check existed, that case returned and
+        `focus_window` retried it on its own focus read; the check must not
+        turn the retry into a single attempt. An application with only one
+        window on screen passes the check trivially, which keeps the
+        grant-free route as useful as it ever was for the single-window case
+        it serves.
+
+        The window caches are dropped before the handle is looked up, for
+        the reason `_require_ax_window` gives: the raise is aimed through
+        the rectangle join, and a rectangle up to `_SNAPSHOT_SECONDS` old
+        can be a *sibling's* by now -- two documents that swapped places
+        since `windows()` listed them. Matched against the stale listing,
+        `AXRaise` would raise the sibling and the `raised` flag would then
+        skip the front-window check that exists to catch exactly that.
         """
         self.require(Capability.WINDOW_ACTIVATE)
+        self._forget_windows()
         entry = self._entry_for(window.handle)
         if entry is None:
             raise WindowNotFound(f"no window with id {window.handle!r}")
         pid = window.pid if window.pid is not None else entry.get("kCGWindowOwnerPID")
         raised = False
+        unaimed = "raising one window of an application needs the Accessibility grant"
+        structural = True
         if self._trusted:
-            node = self._ax_window(window)
+            node, ambiguous, unreadable = self._ax_window_match(window)
+            if unreadable:
+                # Nothing structural was learned: the application's own
+                # window list would not read, so a sibling coming forward
+                # instead is a reason to try again rather than a refusal
+                # `focus_window` should give up on. See `_ax_window_match`.
+                structural = False
+            unaimed = (
+                "reading that application's AX window list failed, so the "
+                "raise could not be aimed at this window"
+                if unreadable
+                else "two or more of that application's AX windows report the same "
+                "rectangle, which is the only thing a window number can be "
+                "matched on here, so the raise could not be aimed at this one"
+                if ambiguous
+                else "no AX window matches its handle, so there was nothing to raise"
+            )
             if node is not None:
                 try:
                     self._perform(node, "AXRaise")
                     raised = True
-                except CapabilityUnsupported:
+                except CapabilityUnsupported as refused:
                     # AX found the window but refused to raise it -- fall through
                     # to the AppKit route below rather than failing an activation
-                    # that route could still serve.
-                    pass
+                    # that route could still serve. A refusal of an aimed raise
+                    # is this attempt's, not the handle's: see the docstring.
+                    unaimed = f"AX refused to raise it ({refused.reason})"
+                    structural = False
         activated = pid is not None and self._activate(pid)
         # Both routes reorder the window server's list, which is what `windows`
         # and `active_window` read, so both caches go -- after *both* have run,
@@ -2511,6 +2694,78 @@ class MacosBackend(GUIBackend):
                     Capability.WINDOW_ACTIVATE, self.name, message
                 )
             raise PyGUITestError(message)
+        if raised:
+            entry = self._entry_for(window.handle)
+            showing = entry is not None and self._visible_entry(entry)
+            # That read refilled the caches the activation had just dropped;
+            # dropped again so a caller's next read is its own enumeration,
+            # which is the invariant the `_forget_windows` above establishes.
+            self._forget_windows()
+            if showing:
+                return
+            # AX accepted the raise and the window is still not showing.
+            # Measured on Sequoia 15.8.1: `AXRaise` on a *minimized* window
+            # answers success and leaves it minimized -- so the raise that
+            # "worked" moved nothing, keys reach no window of it, and
+            # returning here was `focus_window` answering True for a window
+            # the user cannot see. The one check that catches it is the
+            # window's own on-screen field, not its application's front
+            # window, which a sibling would satisfy.
+            raise CapabilityUnsupported(
+                Capability.WINDOW_ACTIVATE,
+                self.name,
+                f"could not activate {window!r}: the AX raise was accepted "
+                "but the window server still does not show the window, so "
+                "it has not come forward and keyboard input reaches no "
+                "window of its application -- a minimized or hidden window "
+                "answers a raise without taking one. Restore it first "
+                "(minimize_window(window, False))",
+            )
+        front = self._front_of_application(pid)
+        if front is None:
+            # The application is frontmost and has nothing on screen: the
+            # window asked for is minimized or hidden, and making its
+            # application frontmost does not focus it -- keys go to an
+            # application with no window to take them. Reported as done,
+            # this was `focus_window` answering True for a window the user
+            # cannot see, which is the same wrong answer the sibling case
+            # below refuses.
+            message = (
+                f"could not activate {window!r}: {unaimed}, and after "
+                "activating its application the window server lists no "
+                "visible window of it at all -- a minimized or hidden "
+                "window is not focused by bringing its application "
+                "forward. Restore it first (minimize_window(window, False))"
+            )
+        elif front != window.handle:
+            message = (
+                f"could not activate {window!r}: {unaimed}, and activating its "
+                f"application brought window {front!r} to the front of it "
+                "instead, which is where keyboard input now goes -- refused "
+                "rather than reported as done"
+            )
+        else:
+            return
+        if structural:
+            raise CapabilityUnsupported(Capability.WINDOW_ACTIVATE, self.name, message)
+        raise PyGUITestError(message)
+
+    def _front_of_application(self, pid):
+        """The window number of `pid`'s front-most visible window, or None.
+
+        From the on-screen list, which is front to back, with `windows()`'s
+        own filter -- so a helper surface or a menu-bar strip of the same
+        process does not stand in for its front window. None where the
+        process has nothing visible, which is not an answer about ordering.
+        Read after an activation to tell whether the window asked for is the
+        one that came forward; activation preserves the application's own
+        ordering, so the within-process order read here is settled even
+        while the server is still moving the application as a whole.
+        """
+        for entry in self._onscreen():
+            if entry.get("kCGWindowOwnerPID") == pid and self._visible_entry(entry):
+                return entry.get("kCGWindowNumber")
+        return None
 
     def root_element(self):
         """The desktop: a synthetic root over every searchable application.
@@ -2680,8 +2935,12 @@ class MacosBackend(GUIBackend):
             return None
         return None if frame[2] <= 0 or frame[3] <= 0 else frame
 
-    def element_at(self, x, y):
+    def element_at(self, x, y, *, pid=None):
         """The deepest accessible element at a screen coordinate, or None.
+
+        `pid` is accepted for signature parity with the AT-SPI backend (which
+        needs it on pure Wayland) and ignored here: the Accessibility API
+        hit-tests in real screen coordinates, so no process scope is needed.
 
         Hit-tested within the front-most window when there is one, because the
         system-wide `AXUIElementCopyElementAtPosition` carries no stacking order
@@ -3043,8 +3302,22 @@ class MacosBackend(GUIBackend):
                 return bool(entry.get("kCGWindowIsOnscreen"))
         return None
 
-    def _ax_window(self, window):
-        """The AX element behind a `Window` handle, or None.
+    def _ax_window_match(self, window):
+        """`(node, ambiguous, unreadable)` for a `Window` handle.
+
+        Three answers behind "no match", because they are not the same news.
+        `ambiguous` is the structural one below. `unreadable` is the
+        *transient* one: the application's `kAXWindowsAttribute` read itself
+        failed -- `kAXErrorCannotComplete` from a process busy in its own
+        handler, measured on the live machine -- which says nothing about
+        which windows it has. Collapsed into "no match" it became a
+        permanent refusal: `activate_window` raised `CapabilityUnsupported`
+        for it, and `Session.focus_window` gives up on that type at once
+        rather than retrying, so a focus that would have worked a tenth of
+        a second later returned False. Reported separately, the same
+        failure takes the retryable `PyGUITestError` path, and only a read
+        that *succeeded* and named no matching window still refuses for
+        good.
 
         Resolved through the join in the other direction: the handle is a window
         number, so the AX element is the one in that process whose frame matches the
@@ -3053,31 +3326,143 @@ class MacosBackend(GUIBackend):
         application's own window list is malformed (measured: Finder answers
         `kAXWindowsAttribute` with an `AXScrollArea`) there is simply no match, so a
         write is refused rather than aimed at the wrong element.
+
+        The rectangle is the only join available, and it is not an identity:
+        two windows of one application can occupy the same frame -- two
+        documents opened at the same position, a window and a panel sized to
+        it. The first match used to win, which for `close_window` means
+        pressing *a* close button and possibly closing the other window. A
+        rectangle shared by two or more AX windows is therefore reported as
+        ambiguous rather than resolved, which is what `_require_ax_window`
+        turns into a refusal naming that reason.
+
+        "Shared" is measured with `_close`'s tolerance on both sides, not
+        exactly. The tolerance exists because AX and the window server can
+        disagree by a rounding step while a write settles, and a window that
+        is one point off the handle's rectangle is as much a candidate as
+        one that matches it exactly -- so an exact match and a near one are
+        two plausible windows, and preferring the exact one would resolve a
+        handle the lookup cannot actually tell from its neighbour. A twin
+        the tolerance *cannot* distinguish from the window a caller holds is
+        a twin a `close_window` could press the wrong button on; the
+        refusal has to cover it.
+
+        Counted on the window server's side as well, which is the half AX
+        cannot answer for: a lone AX candidate is only unambiguous if it is
+        plausible for *one* of the process's windows. Two documents at one
+        rectangle where AX will not read one of their frames leave a single
+        readable candidate -- the other document's -- and the first match
+        rule would have handed it back for either handle, which for
+        `close_window` means pressing the wrong document's close button and
+        for `_write_frame` means moving the wrong window. Refreshing the
+        server's list cannot help: both handles are still at that one
+        rectangle. So a candidate that is as close to another visible
+        window of the same process as it is to this handle's is ambiguous
+        too, and refused the same way.
         """
         entry = self._entry_for(window.handle)
         if entry is None:
-            return None
+            return None, False, False
         pid = window.pid if window.pid is not None else entry.get("kCGWindowOwnerPID")
         frame = self._bounds(entry)
         if pid is None or frame is None:
-            return None
+            return None, False, False
         err, windows = self._copy(
             self._ax.AXUIElementCreateApplication(pid), self._ax.kAXWindowsAttribute
         )
-        if err or not windows:
-            return None
-        near = None
-        for node in windows:
-            candidate = self._frame(node)
-            if candidate == frame:
-                return node
-            if candidate is not None and _close(candidate, frame) and near is None:
-                near = node
-        return near
+        if err:
+            # Only a failure of the *attempt* is retryable. An application
+            # that does not publish `kAXWindowsAttribute` at all answers
+            # -25205, and a stale element -25202: no number of retries
+            # changes either, and reporting them as transient had
+            # `focus_window` retrying a refusal it should give up on.
+            return None, False, err in _AX_TRANSIENT
+        if not windows:
+            return None, False, False
+        plausible = [
+            (node, candidate)
+            for node in windows
+            if (candidate := self._frame(node)) is not None and _close(candidate, frame)
+        ]
+        if len(plausible) > 1:
+            return None, True, False
+        if not plausible:
+            return None, False, False
+        node, candidate = plausible[0]
+        if self._twinned(pid, window.handle, candidate):
+            return None, True, False
+        return node, False, False
+
+    def _twinned(self, pid, handle, frame):
+        """Whether another window of `pid` is as plausible for `frame`.
+
+        The window server's side of `_ax_window_match`'s ambiguity check:
+        one of the process's *other* windows whose rectangle `_close`
+        cannot tell from the AX candidate's, so the candidate answers for
+        two handles and the join cannot say which. The handle asked about
+        is skipped by window number rather than by rectangle, which is the
+        one identity the server does supply.
+
+        Counted over the *full* server list, not the on-screen one, and
+        filtered to `_window_like` rather than to what a person can see. A
+        minimized window keeps its entry, its bounds and its place in
+        `kAXWindowsAttribute`, so it is as plausible an AX candidate as any
+        other -- and when its own AX frame is the only readable one of the
+        pair, it is the candidate the match would hand back for the
+        *visible* window's handle. Scanning only the visible entries made
+        exactly that twin invisible to this check, so `close_window` on the
+        visible window could press the minimized one's close button. Other
+        processes and helper surfaces stay out, as before.
+        """
+        for entry in self._all():
+            if entry.get("kCGWindowOwnerPID") != pid or not self._window_like(entry):
+                continue
+            if entry.get("kCGWindowNumber") == handle:
+                continue
+            other = self._bounds(entry)
+            if other is not None and _close(other, frame):
+                return True
+        return False
 
     def _require_ax_window(self, window, capability, what):
-        """The AX element for `window`, or a typed refusal naming what was asked."""
-        node = self._ax_window(window)
+        """The AX element for `window`, or a typed refusal naming what was asked.
+
+        The cached enumerations are dropped *before* the match, not only after
+        the write (`_write_frame` does that too). The join matches the AX
+        window against the window server's rectangle, and a rectangle read
+        up to `_SNAPSHOT_SECONDS` ago describes where the window was then:
+        a `windows()` listing taken just before the user -- or the
+        application itself -- moved the window leaves a cached frame that
+        matches nothing, so the write is refused with "no AX window matches
+        its handle" for a window that is plainly there, or matches a
+        *neighbour* that has since moved onto the stale rectangle. A write
+        is the one place a wrong answer acts on the desktop, so it pays for
+        a fresh enumeration rather than trusting a quarter-second-old one.
+
+        A `kAXWindowsAttribute` read that *failed* raises the retryable
+        `PyGUITestError` rather than a `CapabilityUnsupported`, which is
+        the distinction `_ax_window_match` reports it for: a process busy
+        in its own handler is not a process without windows, and a caller
+        that tries the move or the close again a moment later is right to.
+        """
+        self._forget_windows()
+        node, ambiguous, unreadable = self._ax_window_match(window)
+        if unreadable:
+            raise PyGUITestError(
+                f"could not {what} {window!r}: reading its application's AX "
+                "window list failed, so the window behind this handle could "
+                "not be found -- transient, and worth trying again"
+            )
+        if ambiguous:
+            raise CapabilityUnsupported(
+                capability,
+                self.name,
+                f"could not {what} {window!r}: two or more of that "
+                "application's AX windows report the same rectangle, which is "
+                "the only thing a window number can be matched on here, so "
+                "the one behind this handle cannot be told from its "
+                "neighbour -- refused rather than aimed at a guess",
+            )
         if node is None:
             raise CapabilityUnsupported(
                 capability,
@@ -3087,7 +3472,7 @@ class MacosBackend(GUIBackend):
             )
         return node
 
-    def _write_frame(self, window, attribute, value, capability, what):
+    def _write_frame(self, window, attribute, value, capability, what, field):
         """Write one AX `AXValue` onto a window, or refuse naming why.
 
         The value is built by the caller, which is where the type belongs: a
@@ -3101,9 +3486,14 @@ class MacosBackend(GUIBackend):
 
         The window caches are dropped on the way out, because a caller that has
         just moved a window is about to ask where it is: `_forget_windows`
-        carries the measurement that made this necessary.
+        carries the measurement that made this necessary. Dropping them is not
+        enough on its own, though -- a fresh enumeration can still predate the
+        write by a few tens of milliseconds -- so a write that AX accepted is
+        followed by `_await_window_server`, which `_WRITE_SETTLE` measures.
         """
         node = self._require_ax_window(window, capability, what)
+        entry = self._entry_for(window.handle)
+        before = self._bounds(entry) if entry is not None else None
         err = self._set(node, attribute, value)
         self._forget_windows()
         if err:
@@ -3112,6 +3502,66 @@ class MacosBackend(GUIBackend):
                 self.name,
                 f"could not {what} {window!r}: AX answered {err}",
             )
+        self._await_window_server(window.handle, node, before, field)
+
+    def _await_window_server(self, handle, node, before, field):
+        """Wait, briefly, until the window server reports the frame AX just took.
+
+        Returns once the window's CoreGraphics rectangle and its AX frame agree
+        within `_close`'s tolerance, or when `_WRITE_SETTLE` runs out. The
+        timeout is a return and not a refusal: the application accepted the
+        write, and a report that is late does not undo it -- what follows
+        simply meets the gap `_WRITE_SETTLE` describes, as every read did
+        before this wait existed. An AX frame that cannot be read leaves
+        nothing to compare and returns at once for the same reason.
+
+        `before` is the window server's rectangle from before the write, and
+        it is what tells agreement from coincidence. A move of a point or two
+        sits inside `_close`'s tolerance, so the *old* server rectangle
+        already "agrees" with the new AX frame and the wait would return on
+        its first look with the server still behind -- the very read
+        `_WRITE_SETTLE` exists to spare. So while the server still reports
+        what it reported before the write, the sides have not met, however
+        close they are. The one exception is a write that changed nothing:
+        AX reads back the frame the server already had, nothing is coming,
+        and that returns at once.
+
+        Progress is judged on `field` -- the half of the frame this write
+        changed, "position" for a move and "size" for a resize -- rather
+        than on the rectangle as a whole, because the two halves can be
+        published separately. A resize that AX had already taken but the
+        server had not can land *during* a one-point move: the server's
+        rectangle then differs from `before` (the height is new) and sits
+        within tolerance of the AX frame (the move is a point), so the wait
+        returned with the move itself still unpublished and the next
+        `geometry()` answered the old x. The other half moving is not this
+        write's news.
+
+        The caches are dropped on the way out whichever way it ends, so the
+        next read enumerates afresh rather than inheriting a snapshot taken
+        mid-wait.
+        """
+        deadline = time.monotonic() + self._WRITE_SETTLE
+        changed = slice(0, 2) if field == "position" else slice(2, 4)
+        try:
+            while True:
+                frame = self._frame(node)
+                entry = self._entry_for(handle)
+                bounds = self._bounds(entry) if entry is not None else None
+                if frame is None or frame == before:
+                    return
+                if (
+                    bounds is not None
+                    and _close(bounds, frame)
+                    and (before is None or bounds[changed] != before[changed])
+                ):
+                    return
+                if time.monotonic() >= deadline:
+                    return
+                time.sleep(self._WRITE_POLL)
+                self._forget_windows()
+        finally:
+            self._forget_windows()
 
 
 def _close(first, second, tolerance: int = 2) -> bool:

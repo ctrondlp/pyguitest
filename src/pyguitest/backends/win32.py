@@ -792,6 +792,25 @@ def available():
     return _winapi.available()
 
 
+def _clear_last_error():
+    """Reset ctypes' saved last error, where the platform keeps one.
+
+    `set_last_error`/`get_last_error` are Windows-only. This module is
+    imported off Windows -- and its calls are driven against a fake lib by
+    the test suite there -- so both are reached through `getattr` rather
+    than assumed, the same shape `_lib` already uses for `WinDLL`.
+    """
+    setter = getattr(ctypes, "set_last_error", None)
+    if setter is not None:
+        setter(0)
+
+
+def _last_error() -> int:
+    """The saved ctypes last error, or 0 where the platform has none."""
+    getter = getattr(ctypes, "get_last_error", None)
+    return int(getter()) if getter is not None else 0
+
+
 class Win32Backend(GUIBackend):
     """Window control, input, capture and the clipboard on Windows."""
 
@@ -1772,12 +1791,19 @@ class Win32Backend(GUIBackend):
         call's own return answers a different question, and a platform
         quietly declining must not read as success.
 
-        One Windows-only side effect, documented because no spelling avoids
-        it: `SW_MAXIMIZE` *activates* the window ("Activates the window and
-        displays it maximized" -- and `SW_SHOWMAXIMIZED` is the same value),
-        where X11's `_NET_WM_STATE`, COSMIC's `set_maximized` and Mutter's
-        `maximize()` all leave focus alone. A test that maximizes a
-        background window here has moved the keyboard focus with it.
+        `SW_MAXIMIZE` is documented to activate the window it maximizes
+        ("Activates the window and displays it maximized" -- and
+        `SW_SHOWMAXIMIZED` is the same value 3), which would make this the
+        one backend whose maximize moves the keyboard focus. Measured on a
+        live interactive desktop, it does not: three trials maximizing one
+        Notepad while another held the foreground, each sampled at 0.1s, 1s
+        and 3s, found `IsZoomed` true every time and the foreground window
+        unchanged every time. Cross-process activation is what Windows'
+        foreground-change restrictions exist to refuse, and another
+        application's window is the only kind pyguitest maximizes -- so the
+        activation an SDK page promises does not arrive here. Neither
+        direction is worth depending on: the documented behaviour is not
+        what happens, and what happens is not contractual.
         """
         self.require(Capability.WINDOW_MAXIMIZE)
         lib = self._lib()
@@ -1809,8 +1835,30 @@ class Win32Backend(GUIBackend):
         self.require(Capability.WINDOW_CLOSE)
         lib = self._lib()
         handle = self._hwnd(window)
+        # The last error, not just the zero: `_hwnd` can pass and the post
+        # still fail, and the reasons are not interchangeable. An
+        # unelevated process posting to an elevated window's queue is
+        # refused by UIPI with ERROR_ACCESS_DENIED -- a live window, a
+        # permission problem, and nothing a caller fixes by looking for a
+        # fresher handle. Reporting that as WindowNotFound sent them after
+        # the wrong thing.
+        _clear_last_error()
         if not lib.PostMessageW(handle, _winapi.WM_CLOSE, 0, 0):
-            raise WindowNotFound(f"no window with handle {handle!r} to close")
+            code = _last_error()
+            if code == _winapi.ERROR_ACCESS_DENIED:
+                raise PermissionRequired(
+                    Capability.WINDOW_CLOSE,
+                    self.name,
+                    f"Windows refused to post WM_CLOSE to {window!r}: access "
+                    "denied. A process may not post to a window running at a "
+                    "higher integrity level -- run the suite elevated, or "
+                    "drive an application at the same level",
+                )
+            if code in (0, _winapi.ERROR_INVALID_WINDOW_HANDLE):
+                raise WindowNotFound(f"no window with handle {handle!r} to close")
+            raise PyGUITestError(
+                f"could not post WM_CLOSE to {window!r}: Windows error {code}"
+            )
 
     def set_window_title(self, window, title):
         """Replace `window`'s title, verifying that it took.

@@ -24,6 +24,8 @@ import shutil
 import socket
 import subprocess
 import threading
+import time
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from ..capabilities import Capability, CapabilitySet
@@ -178,6 +180,38 @@ def _gi_coord_types():
     from gi.repository import Atspi
 
     return Atspi.CoordType
+
+
+def _gi_atspi():
+    """The `Atspi` module itself, for `DBUS_INTERFACE_ACTION`.
+
+    Same `require_version`-before-import rule as the helpers above; see
+    `_gi_component` for what breaks without it.
+    """
+    import gi  # noqa: PLC0415 - optional dep, see _pyatspi
+
+    gi.require_version("Atspi", "2.0")
+    from gi.repository import Atspi
+
+    return Atspi
+
+
+def _gi_dbus():
+    """`(Gio, GLib)`, for dispatching an accessible action asynchronously.
+
+    Same rule again, and it matters most here: this is the one helper that
+    imports `Gio`, which is exactly the import `_gi_component`'s comment
+    records dying with "metaclass conflict" when an unversioned `Atspi`
+    got loaded first.
+    """
+    import gi  # noqa: PLC0415 - optional dep, see _pyatspi
+
+    gi.require_version("Atspi", "2.0")
+    gi.require_version("Gio", "2.0")
+    gi.require_version("GLib", "2.0")
+    from gi.repository import Gio, GLib
+
+    return Gio, GLib
 
 
 def _gi_screen_coords():
@@ -843,6 +877,155 @@ class Element:
         """
         return _run_bounded(_DEFAULT_CALL_TIMEOUT, _node_state_names, self.node)
 
+    def _perform_action(self, name, index=None):
+        """Run the named accessible action, tolerating a handler that blocks.
+
+        `index` is the action's own index, which dogtail's `actions` dict
+        already carries (it maps name -> index), so the asynchronous route
+        below costs no extra round trip on the hot path. Without one -- an
+        older dogtail whose dict holds something else -- only the
+        synchronous route is available.
+
+        **The asynchronous route is the fix for a handler that does not
+        return**; `_dispatch_action` carries the measurements. It is tried
+        first and, when usable, is the whole story: nothing is left holding
+        the connection, so the dialog the action opened is usable
+        afterwards. Everything below is the fallback for a desktop where
+        that route cannot be built at all.
+
+        An action still unanswered when the settle time runs out is not
+        taken as done on its own say-so. It is the expected shape of a
+        modal-dialog opener -- but also of an application that stopped
+        serving AT-SPI after its actions were enumerated, whose `DoAction`
+        the synchronous route would have reported as a hang or a no-reply
+        and this route would otherwise have reported as success. So the
+        pending case asks `_application_answers` the same question the
+        no-reply case asks, and an application that will not answer raises
+        `BackendCallTimeout`, the hang signal it has always been. The read
+        goes over libatspi's connection, not the one the action is pending
+        on, so unlike the synchronous route's aftermath it does not queue
+        behind the action; measured 2.0-2.6s against a live modal dialog,
+        inside `_LIVENESS_TIMEOUT`.
+
+        Bounded the same way every other Element property/backend call in
+        this module is -- confirmed live (Pop!_OS/COSMIC) that
+        `doActionNamed` can genuinely hang the same class of way
+        `find_elements`/`extents`/etc. already could: a torture-test driver
+        run blocked here for minutes, surviving even a plain `timeout`-sent
+        SIGTERM (the call is stuck in a native GI/D-Bus call that never
+        hands control back to the interpreter, same root cause
+        `_run_bounded`'s own docstring describes), and only died to SIGKILL.
+        `BackendCallTimeout` lets a caller treat that like any other
+        bounded-but-failed AT-SPI call instead of hanging the whole process.
+
+        The *other* way this call does not come back is not a hang at all,
+        and used to be reported as a failure: a handler that opens an
+        application-modal dialog runs its own event loop before returning,
+        so libatspi's own timeout fires first and dogtail raises -- "Did not
+        receive a reply", about an action that worked, with the dialog
+        sitting open on screen. Measured on sway against the Qt torture
+        fixture: the dialog opens, the call fails 12.3s later, and `click()`
+        reported a failure for the one thing it had just successfully done.
+
+        What this cannot do is tell a handler that is *running* a modal loop
+        from one that is about to refuse: both are silence inside the settle
+        window, and an application that answers the liveness read is
+        reported as dispatched. A refusal the toolkit sends after that --
+        measured as rare, since a refusal is decided before a handler runs
+        and arrives inside the settle -- lands on a reply slot nobody is
+        waiting on, and is dropped with it. The alternative is not better:
+        waiting long enough to catch it is the 12.3s stall below, with the
+        dialog unusable throughout, and raising it later would attribute an
+        error to whichever call happened to drain the context next. So the
+        contract is the one the docstring of `_dispatch_action` states -- the
+        reply says the action was *accepted*, and what it did is read from
+        the published state (`wait_for_window`, `expect_*`) -- and a caller
+        who needs a refusal to surface asserts on the state rather than on
+        the click.
+
+        Clicking a menu item that opens a file chooser is ordinary, so a
+        no-reply is now a return rather than a raise -- but only once the
+        application has been asked whether it is still there, so the genuine
+        hang above still surfaces. The caller still waits out libatspi's
+        method timeout: `Atspi.set_timeout` is process-wide with no getter
+        to restore the previous value from, and a shorter bound of our own
+        would not help either, because calls on the connection queue behind
+        the pending action (see `_LIVENESS_TIMEOUT`) -- so nothing can be
+        asked about the application until that timeout releases it.
+        """
+        if isinstance(index, int) and not isinstance(index, bool):
+            try:
+                dispatched = _dispatch_action(self.node, index)
+            except Exception as exc:
+                # The same guard the synchronous route below gets, and for
+                # the same reason: GDBus reports an application that has
+                # gone as a no-reply too ("message recipient
+                # disconnected"), and that one must still raise.
+                if not _is_no_reply(exc) or not self._application_answers():
+                    raise
+                return
+            if dispatched is _Dispatch.REPLIED:
+                return
+            if dispatched is _Dispatch.PENDING:
+                if not self._application_answers():
+                    raise BackendCallTimeout(
+                        f"DoAction {name!r}", _ACTION_SETTLE + _LIVENESS_TIMEOUT
+                    )
+                return
+        try:
+            _run_bounded(_DEFAULT_CALL_TIMEOUT, self.node.doActionNamed, name)
+        except BackendCallTimeout:
+            # Our own bound: the call is still pending, so nothing can be
+            # concluded about whether it was even dispatched. Left as the
+            # hang signal it has always been.
+            raise
+        except Exception as exc:
+            if not _is_no_reply(exc) or not self._application_answers():
+                raise
+            # The action ran; its handler simply has not returned.
+
+    def _application_answers(self):
+        """Whether this element's application is still serving AT-SPI.
+
+        The question that separates the two reasons a `DoAction` gets no
+        reply. One is a handler that opened an application-modal dialog:
+        `QFileDialog.getSaveFileName` and friends run their own event loop
+        *inside* the handler, so the reply cannot arrive until the dialog
+        closes -- but the application is running that loop and still
+        answering everything else. The other is the hang
+        `BackendCallTimeout` exists for, where it answers nothing.
+
+        Measured on sway against the Qt torture fixture, with the modal
+        dialog confirmed open and the action call confirmed still blocked:
+        five ordinary AT-SPI reads all answered, including a lookup of
+        elements *inside* the dialog. So "still serving" is a real
+        distinction and not a hopeful one.
+
+        `name` is the read, and the choice matters in both directions.
+        `role` is answered from dogtail's cache -- 0.0s in that
+        measurement, against 11.7s for the `name` read beside it, which had
+        already been read once and still went to the bus -- so it would call
+        a wedged application healthy. And `_node_state_names` cannot be used
+        however convenient it looks: it deliberately answers a reaped node
+        with an empty set rather than raising, so an application that has
+        *gone* would read as one that is fine.
+
+        That the name read goes to the bus is structural, not luck of the
+        measurement. libatspi does keep a name cache, but
+        `_atspi_accessible_test_cache` only serves from it once
+        `atspi_event_main` has run or `atspi_accessible_set_cache_mask` has
+        been called (at-spi2-core, `atspi-accessible.c`), and neither
+        dogtail nor this module does either -- pyatspi's `event_main` runs
+        only from `Registry.start`, which nothing here calls. So a primed
+        name does not let a stopped application pass: the read is a fresh
+        round trip every time, and bounded.
+        """
+        try:
+            _run_bounded(_LIVENESS_TIMEOUT, lambda: self.node.name)
+        except Exception:
+            return False
+        return True
+
     @property
     def focused(self):
         """Whether the element currently has keyboard focus."""
@@ -1013,18 +1196,12 @@ class Element:
                 None,
             )
         if name is not None:
-            # Bounded the same way every other Element property/backend
-            # call in this module is -- confirmed live (Pop!_OS/COSMIC)
-            # that `doActionNamed` can genuinely hang the same class of way
-            # `find_elements`/`extents`/etc. already could: a torture-test
-            # driver run blocked here for minutes, surviving even a plain
-            # `timeout`-sent SIGTERM (the call is stuck in a native GI/D-Bus
-            # call that never hands control back to the interpreter, same
-            # root cause `_run_bounded`'s own docstring describes), and only
-            # died to SIGKILL. `BackendCallTimeout` lets a caller treat this
-            # the same as any other bounded-but-failed AT-SPI call instead
-            # of hanging the whole process.
-            _run_bounded(_DEFAULT_CALL_TIMEOUT, self.node.doActionNamed, name)
+            # Dispatched so that a handler which opens a modal dialog does
+            # not leave the connection held -- see `_perform_action` and
+            # `_dispatch_action`, which is where that lives and why. The
+            # index comes from the `actions` dict already read above, which
+            # maps name -> index, so this costs no extra round trip.
+            self._perform_action(name, actions.get(name))
             return
         if route == "action":
             raise ElementNotActionable(
@@ -1176,8 +1353,16 @@ class Element:
         _run_bounded(_DEFAULT_CALL_TIMEOUT, setattr, self.node, "text", text)
 
     def do_action(self, name):
-        """Perform a named accessible action, such as "click" or "activate"."""
-        _run_bounded(_DEFAULT_CALL_TIMEOUT, self.node.doActionNamed, name)
+        """Perform a named accessible action, such as "click" or "activate".
+
+        An action whose handler opens a modal dialog leaves that dialog
+        usable here, the same way `click` does and for the same measured
+        reason -- see `_perform_action`. This is the route a caller reaches
+        for when they know the action's name, so it is at least as likely to
+        be aimed at a menu item that opens a file chooser.
+        """
+        actions = _run_bounded(_DEFAULT_CALL_TIMEOUT, lambda: self.node.actions) or {}
+        self._perform_action(name, actions.get(name))
 
     def select(self):
         """Select this element, for a list item, tab, or menu entry."""
@@ -1579,6 +1764,399 @@ for how to override it per session.
 """
 
 
+_NO_REPLY_SIGNATURES = (
+    "did not receive a reply",
+    "message recipient disconnected",
+    "timeout was reached",
+)
+"""Message fragments that mean the AT-SPI call was *dispatched* and no reply
+came back -- as opposed to the application answering with a refusal.
+
+Matched on the message rather than the exception type on purpose. The type
+that arrives here is dogtail's, from a module path that is not part of its
+public API (`dogtail.accessibles.accessible_actions.ActionNotSupported` on
+the version measured), and dogtail is an optional extra: importing it at
+module scope to name the class would make this file require it. The D-Bus
+error texts, by contrast, come from libdbus/GLib and are stable.
+"""
+
+_LIVENESS_TIMEOUT = 5.0
+"""Seconds an application gets to answer the liveness read below.
+
+Measured (sway, Qt): while a `DoAction` is pending, reads on the same
+connection *queue behind it* -- one took 11.7s, finishing only when the
+action's own D-Bus timeout released it. Afterwards, which is when this read
+happens, the same reads took 2.0-2.6s. Five seconds is comfortably above
+that and still well short of `_DEFAULT_CALL_TIMEOUT`, so a genuinely wedged
+application is reported promptly rather than after another full budget.
+"""
+
+
+def _is_no_reply(exc):
+    """Whether `exc` says an AT-SPI call got no reply, rather than a refusal."""
+    text = str(exc).lower()
+    return any(signature in text for signature in _NO_REPLY_SIGNATURES)
+
+
+_ACTION_SETTLE = 1.5
+"""Seconds an asynchronous action gets to reply before it is left running.
+
+A handler that returns promptly replies in milliseconds, so an error it
+reports -- an action the toolkit refuses outright -- still surfaces to the
+caller. One that opens an application-modal dialog cannot reply until the
+dialog closes, and waiting any longer for it would only reproduce the stall
+this route exists to avoid.
+"""
+
+_A11Y_BUS_CACHE: dict = {}
+"""Holds the one accessibility-bus connection, or None if none could be
+opened, plus the main context its replies land on and when the last attempt
+failed. Keyed so that "not tried yet" and "tried, no connection" stay
+distinguishable; opening one costs a round trip and `click` is this module's
+hottest path."""
+
+_A11Y_BUS_LOCK = threading.RLock()
+"""Makes the asynchronous action route one thread's at a time.
+
+Two things in it are not safe to share. The cache: two threads finding it
+empty would both dial, and the second to finish could read `failed_at`
+before the first had written it. And the main context: GLib's
+`push_thread_default` *acquires* the context, so a second thread pushing
+while the first still owns it fails -- loudly, with a critical, and without
+pushing -- and GDBus then delivers that thread's reply on whatever context
+it was left with, while `_dispatch_action` polls the shared one and finds
+nothing. That is an application's prompt refusal reported as "pending", and
+then, after a liveness read that succeeds, as a click that worked.
+
+Held across the whole dispatch -- dial, push, call, settle, pop -- so that a
+second session on another thread waits for the first one's settle time
+rather than racing it. Re-entrant because `_dispatch_action` takes it and
+then calls `_a11y_connection`, which takes it too, and the latter is also
+called on its own."""
+
+_A11Y_RETRY_AFTER = 30.0
+"""Seconds before a failed attempt to open the accessibility-bus connection
+is made again.
+
+A failure is cached, since a desktop with no bus must not pay for the
+attempt on every click -- but not forever. The attempt can fail for reasons
+that pass: a `GetAddress` that timed out under load, a bus launcher not yet
+up when the session started. Cached permanently, one such failure would keep
+every later action on the synchronous route for the life of the process,
+including the file-chooser actions the asynchronous route exists to make
+usable. So a failure is retried after this long; a success replaces it and
+is never retried. Long enough that a desktop where the route genuinely does
+not exist pays one fast-failing attempt every half minute at most, not one
+per click."""
+
+
+def _a11y_bus_address():
+    """The accessibility bus's address, by libatspi's own source order.
+
+    Deliberately *not* folded in with `a11y_bus_probe` and
+    `_session_bus_verdict`, which walk the same sources: their job is a
+    three-way verdict about whether to let dogtail load at all, with
+    "could not ask" kept carefully distinct from "no", and nothing here
+    should be able to perturb that. This only wants a string to dial.
+
+    One distinction it does share with them: an X11 property that *could
+    not be read* (`xprop` timed out) is not a property that is absent.
+    libatspi read it, or will, and connected to whatever it names; falling
+    through to the session bus here could dial a different bus -- a stale
+    property beside a relaunched bus -- and the node's unique name and
+    object path are only meaningful on the one its application is on. So a
+    timeout answers None, which keeps the action on libatspi's own
+    connection, and only a property that is genuinely absent goes on to
+    `GetAddress`, as it does in `_bus_verdict`.
+    """
+    address = os.environ.get("AT_SPI_BUS_ADDRESS") or None
+    if address is None and _x11_bus_applies():
+        try:
+            address = _x11_address()
+        except _ProbeTimedOut:
+            return None
+    if address is not None:
+        return address
+    gdbus = shutil.which("gdbus")
+    if gdbus is None:
+        return None
+    try:
+        reply = subprocess.run(
+            [
+                gdbus,
+                "call",
+                "--session",
+                "--dest",
+                "org.a11y.Bus",
+                "--object-path",
+                "/org/a11y/bus",
+                "--method",
+                "org.a11y.Bus.GetAddress",
+            ],
+            capture_output=True,
+            timeout=_A11Y_BUS_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if reply.returncode != 0:
+        return None
+    return _address_from(reply.stdout)
+
+
+def _a11y_connection():
+    """A `Gio.DBusConnection` to the accessibility bus, or None.
+
+    Why a connection of our own, when every node already belongs to one:
+    `node.app.bus` is a `gi.repository.DBus.Connection` -- the libdbus
+    binding -- and it exposes no way to make a call from Python at all
+    (`dir()` on it offers nothing matching call or send). It is the same
+    bus, though, so the unique name `node.app.bus_name` is dialable from
+    here.
+
+    None for every reason this might not work -- PyGObject absent, no
+    address to be had, the bus refusing the connection, or a handshake that
+    does not finish -- because the only caller treats that as "use the
+    synchronous route instead". A success is kept for the process; a
+    failure is kept for `_A11Y_RETRY_AFTER` and then tried again, since the
+    reasons it fails are not all permanent.
+
+    The handshake is bounded (`_run_bounded`, `_A11Y_BUS_TIMEOUT`) rather
+    than trusted to return: `new_for_address_sync` takes no timeout of its
+    own, and an endpoint that accepts the socket and then stalls in
+    authentication would otherwise hold the first `click` of the session
+    indefinitely, before the settle clock in `_dispatch_action` had even
+    started -- with the bounded synchronous route, the one that *can* bail
+    out, never reached. The handshake gets a `Gio.Cancellable` that is
+    cancelled when the bound fires, so the worker thread `_run_bounded`
+    leaves behind is released rather than parked in authentication for the
+    life of the process.
+
+    A cached connection that has since closed -- the bus went away, or
+    dropped this client -- is not handed out: every call on it would fail
+    with Gio's closed-connection error, which is neither a no-reply nor a
+    refusal the caller can act on, and the synchronous route would never be
+    reached. It is dropped and the bus dialled again, which either yields a
+    live connection or becomes an ordinary cached failure.
+    """
+    with _A11Y_BUS_LOCK:
+        if "connection" in _A11Y_BUS_CACHE:
+            connection = _A11Y_BUS_CACHE["connection"]
+            if connection is not None:
+                if not connection.is_closed():
+                    return connection
+            elif time.monotonic() - _A11Y_BUS_CACHE["failed_at"] < _A11Y_RETRY_AFTER:
+                return None
+        connection = None
+        try:
+            gio, _glib = _gi_dbus()
+            address = _a11y_bus_address()
+            if address:
+                cancellable = gio.Cancellable.new()
+                try:
+                    connection = _run_bounded(
+                        _A11Y_BUS_TIMEOUT,
+                        gio.DBusConnection.new_for_address_sync,
+                        address,
+                        gio.DBusConnectionFlags.AUTHENTICATION_CLIENT
+                        | gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,
+                        None,
+                        cancellable,
+                    )
+                except BackendCallTimeout:
+                    cancellable.cancel()
+                    raise
+        except Exception:  # noqa: BLE001 - every failure means "fall back"
+            connection = None
+        # The failure clock goes in before the verdict is published, so a
+        # reader that sees None always finds the timestamp beside it.
+        if connection is None:
+            _A11Y_BUS_CACHE["failed_at"] = time.monotonic()
+        _A11Y_BUS_CACHE["connection"] = connection
+        return connection
+
+
+def _action_context(glib):
+    """The one `GLib.MainContext` every dispatched action's reply lands on.
+
+    Created on first use and kept in `_A11Y_BUS_CACHE` beside the
+    connection, so that it lives as long as the route does -- across a
+    connection that closed and was redialled too, since the closed
+    connection's outstanding calls complete onto it with errors that the
+    next dispatch drains like any other late reply.
+    One context rather than one per dispatch because GDBus attaches both the
+    reply and the reply *timeout* to whichever context was thread-default
+    when the call was made, and a context nobody iterates again never
+    processes either: an action whose handler never returned kept its
+    pending entry on the connection past `_ACTION_REPLY_TIMEOUT_MS`, and a
+    reply that arrived after the settle time kept its completion queued, one
+    small leak per modal dialog opened. Shared, the next dispatch drains
+    what the previous ones left (`_dispatch_action`) -- late replies
+    complete into the outcome list of the call they belong to, which nobody
+    reads any more, and expired timeouts release their entries.
+    """
+    context = _A11Y_BUS_CACHE.get("context")
+    if context is None:
+        context = glib.MainContext.new()
+        _A11Y_BUS_CACHE["context"] = context
+    return context
+
+
+class _Dispatch(Enum):
+    """What `_dispatch_action` managed to do with one action.
+
+    Three answers, because the caller does three different things with
+    them: a reply within the settle time is the whole story; an action
+    still running when the settle time ran out needs the application asked
+    whether it is still there; and a route that cannot be built at all
+    needs the synchronous fallback. An enum rather than True/None/False so
+    that "pending" can never be mistaken for either of the other two.
+    """
+
+    REPLIED = "replied"
+    """The application answered within the settle time, without error."""
+
+    PENDING = "pending"
+    """Dispatched, and still unanswered when the settle time ran out."""
+
+    UNUSABLE = "unusable"
+    """This route cannot be built here; the synchronous one is the only one."""
+
+
+def _dispatch_action(node, index, settle=_ACTION_SETTLE):
+    """Fire `org.a11y.atspi.Action.DoAction` without holding the connection.
+
+    The fix for a handler that does not return. A *synchronous* `DoAction`
+    holds the AT-SPI connection until it replies, and a handler that opens
+    an application-modal dialog cannot reply until the dialog closes --
+    measured on sway: an uncached read issued meanwhile took 11.7s, landing
+    only when the action's own timeout released the connection, and after
+    that abandoned call *nothing* reached the dialog. Not Escape, not typing
+    into its own filename field, not its own Cancel button's accessible
+    action, while reads inside it kept working. The dialog the caller had
+    just opened was unusable.
+
+    Dispatched asynchronously it is a different picture, measured the same
+    way and in the same place: the call returns in the settle time rather
+    than ~12s, an enumeration issued while the handler is still running
+    takes 2.6s rather than 11.7s, typing reaches the dialog's filename field
+    (`untitled.txt` -> `z`), and its own Cancel button closes it. So the
+    abandoned synchronous call was the thing wedging it, not the dialog and
+    not the compositor.
+
+    Returns `_Dispatch.REPLIED` when the application answered within
+    `settle` without error, `_Dispatch.PENDING` when it had not answered by
+    then -- the modal-dialog case, or a wedged application; the caller
+    tells them apart -- and `_Dispatch.UNUSABLE` when this route cannot be
+    built at all (no PyGObject, no bus, a node that cannot say where it
+    lives) so the caller can fall back. Raises whatever the application
+    answered, if it answered with an error within `settle` -- which is how
+    an action the toolkit refuses still reaches the caller.
+
+    The boolean in a successful reply is not consulted. That is parity
+    rather than an omission: dogtail's `do_action_named` returns it and the
+    synchronous route has always discarded it, and it cannot say what the
+    handler did anyway -- measured live, Qt answers a button's `DoAction`
+    *before* its handler runs, so the value is about the index being a
+    known action, not about the outcome. What actually happened is read
+    from the published state afterwards -- `wait_for_window`, `expect_*` --
+    on either route.
+
+    The reply is awaited on a main context pushed as thread-default for the
+    duration rather than on the default one: GDBus dispatches the callback
+    on whichever context was thread-default when the call was made, and
+    iterating the *default* context here would also run whatever else is
+    attached to it -- dogtail's own event listeners among them -- from
+    inside a `click`. It is the one shared context `_action_context` keeps,
+    drained before the call goes out, so that earlier dispatches' late
+    replies and expired timeouts are processed rather than left behind.
+    The whole of that -- push, call, settle, pop -- runs under
+    `_A11Y_BUS_LOCK`, since a context has one owner at a time (see there).
+
+    The settle loop drains the context *after* its last sleep and only then
+    consults the clock: a reply that lands during the sleep that carries the
+    clock past the deadline is already queued when the loop wakes, and
+    testing the clock first would have reported it as pending -- a liveness
+    read, and a 2s wait, for an answer that was already there.
+    """
+    outcome = []
+
+    def replied(source, result, _data):
+        try:
+            outcome.append((True, source.call_finish(result)))
+        except Exception as exc:  # noqa: BLE001 - re-raised below, not swallowed
+            outcome.append((False, exc))
+
+    with _A11Y_BUS_LOCK:
+        connection = _a11y_connection()
+        if connection is None:
+            return _Dispatch.UNUSABLE
+        try:
+            gio, glib = _gi_dbus()
+            atspi = _gi_atspi()
+            bus_name = node.app.bus_name
+            path = node.path
+        except Exception:  # noqa: BLE001 - an unusable route, not a failed action
+            return _Dispatch.UNUSABLE
+        if not bus_name or not path:
+            return _Dispatch.UNUSABLE
+
+        context = _action_context(glib)
+        context.push_thread_default()
+        try:
+            while context.pending():
+                context.iteration(False)
+            connection.call(
+                bus_name,
+                path,
+                atspi.DBUS_INTERFACE_ACTION,
+                "DoAction",
+                glib.Variant("(i)", (index,)),
+                glib.VariantType("(b)"),
+                gio.DBusCallFlags.NONE,
+                _ACTION_REPLY_TIMEOUT_MS,
+                None,
+                replied,
+                None,
+            )
+            deadline = time.monotonic() + settle
+            while True:
+                while context.pending():
+                    context.iteration(False)
+                if outcome or time.monotonic() >= deadline:
+                    break
+                time.sleep(0.01)
+        finally:
+            context.pop_thread_default()
+    if not outcome:
+        return _Dispatch.PENDING
+    if not outcome[0][0]:
+        raise outcome[0][1]
+    return _Dispatch.REPLIED
+
+
+_ACTION_REPLY_TIMEOUT_MS = 30_000
+"""How long GDBus itself keeps the dispatched action's reply slot open.
+
+Not a wait anyone does: `_dispatch_action` stops looking after `settle` and
+leaves the call outstanding, so this only bounds how long the connection
+holds the pending entry for a reply nobody is waiting for. Finite rather
+than -1 so a handler that never returns -- an application that exits with
+its dialog still up -- does not leave one behind for the life of the
+session.
+
+Measured in the *context's* time, not the clock's: GDBus arms this as a
+timeout source on whichever context the call was made on, which is
+`_action_context`, and nothing iterates that context between dispatches.
+So an un-replied action's entry lives until the next `_dispatch_action`
+drains the context on its way in -- which is exactly why that drain is
+there -- and on a session that clicks once and then only reads, it outlives
+the thirty seconds. One pending entry on the accessibility connection costs
+a slot and the completion's own closure; the alternative is a thread of our
+own driving that context for the life of the session, which is a larger
+thing to own than the entry is to leak."""
+
+
 def _run_bounded(seconds, fn, *args, **kwargs):
     """Run `fn(*args, **kwargs)` bounded to `seconds`, or raise `BackendCallTimeout`.
 
@@ -1616,6 +2194,11 @@ def _run_bounded(seconds, fn, *args, **kwargs):
         return value
     raise value
 
+
+_UNRESOLVED = object()
+"""`_top_window_at`'s answer when the geometry source cannot say which window
+is on top at a point -- distinct from None, which is its answer when the
+source can say and says none is."""
 
 _UNPLACED = -1_000_000
 """Below this, an x or y is a "no position" marker rather than a coordinate.
@@ -1789,11 +2372,25 @@ class AtspiBackend(GUIBackend):
     def _source_rects(self, frame, size=None):
         """Every rectangle the geometry source has for `frame`, best first.
 
+        `_source_listings` without the windows: the `(x, y, width, height)`
+        of each, for a caller that only compares positions
+        (`_verify_app_coords`).
+        """
+        return [rect for _window, rect in self._source_listings(frame, size)]
+
+    def _source_listings(self, frame, size=None, scoped=False):
+        """Every listing the geometry source has for `frame`, best first.
+
         The windows carrying `frame`'s pid, or -- only when no window
-        carries it at all -- the ones sharing its title; each as the
-        `(x, y, width, height)` the source reports, with any whose
-        geometry cannot be read left out, so an application with one
-        unreadable toplevel is still placed by its others.
+        carries it at all -- the ones sharing its title; each as
+        `(window, rect)`, the source's own `Window` and the
+        `(x, y, width, height)` it reports for it, with any whose geometry
+        cannot be read left out, so an application with one unreadable
+        toplevel is still placed by its others. The window is kept beside
+        the rectangle because it is the identity `_on_top` compares against
+        the source's `window_at` answer: two listings can share a rectangle
+        -- a dialog sized and placed exactly over its parent -- and only the
+        window itself tells them apart.
 
         Pid is normally the only identity the two backends share -- their
         Window objects are never the same object -- and the title fallback
@@ -1832,6 +2429,32 @@ class AtspiBackend(GUIBackend):
         no pid at all still needs a non-empty title, since there an empty
         one would match every untitled window on the desktop.
 
+        With `scoped` set -- a lookup the caller has narrowed to one process,
+        `element_at(pid=)` -- the title fallback admits only windows whose
+        pid the source does *not* know. The scope is a promise that the
+        answer comes from that process, and a window the source positively
+        attributes to another one, however its title reads, would place the
+        process's widgets at another process's coordinates: process 42's
+        untitled-by-the-compositor `Editor` placed by process 99's `Editor`.
+        Unscoped the fallback stays as wide as it was, because there the
+        differing pid can be the *same* process seen through two lenses --
+        a sandboxed application whose accessibility connection goes through
+        a proxy answers the bus's pid query with the proxy's pid, while the
+        compositor lists the real one -- and the title is what still pairs
+        them.
+
+        On a source that knows *no* pids the floor this can promise is the
+        title and the size filter, and that is worth stating plainly: a
+        frame whose own window the compositor has not mapped yet, against
+        another process's window of the same name and a plausible size, is
+        a pairing nothing here can rule out -- the ranking separates two
+        *listed* windows that tie (`_placement` refuses them), but a lone
+        listing has nothing to tie with. The alternative is to refuse every
+        scoped lookup on COSMIC and on kdotool's KDE, which is to withdraw
+        `element_at(pid=)` from the two desktops it was added for; the
+        tradeoff is taken deliberately, and `window_at` is what a caller
+        checks an answer against when it must be certain.
+
         And a window whose size differs from `size` in *opposite directions*
         on the two axes -- wider but shorter, or narrower but taller -- is
         not a candidate either, whatever the magnitudes. Decoration can only
@@ -1842,6 +2465,26 @@ class AtspiBackend(GUIBackend):
         fall within `_MAX_DECORATION`, which the assistant's main window did
         (41 narrower, 52 taller) with a smaller misfit than the assistant's
         own listing, 52 off on both axes for Mutter's shadow.
+        """
+        return [
+            listing for _rank, listing in self._ranked_listings(frame, size, scoped)
+        ]
+
+    def _ranked_listings(self, frame, size=None, scoped=False):
+        """`_source_listings` with each listing's rank, best first.
+
+        `(rank, (window, rect))` pairs, where the rank is the
+        `(title-mismatch, misfit)` tuple the ordering is by -- see
+        `_source_listings`, which is this without the ranks and is what
+        every caller comparing rectangles wants.
+
+        The ranks are kept for the one caller that has to pick a *single*
+        window and not merely a best-first order: two of an application's
+        toplevels can rank equally -- same title, same size -- and the
+        stable sort then hands both of that application's frames the same
+        first listing, which places one of them by the other's window.
+        `_placement` compares the first two ranks to tell that apart from a
+        clear best.
         """
         if self._window_geometry_source is None:
             return []
@@ -1858,7 +2501,12 @@ class AtspiBackend(GUIBackend):
         if pid is not None:
             matched = [w for w in windows if getattr(w, "pid", None) == pid]
         if not matched and title:
-            matched = [w for w in windows if getattr(w, "title", None) == title]
+            matched = [
+                w
+                for w in windows
+                if getattr(w, "title", None) == title
+                and (not scoped or getattr(w, "pid", None) is None)
+            ]
         ranked = []
         for window in matched:
             rect = self._source_rect(window)
@@ -1874,11 +2522,11 @@ class AtspiBackend(GUIBackend):
                     continue
                 misfit = abs(dw) + abs(dh)
             same_title = (getattr(window, "title", None) or "") == title
-            ranked.append(((0 if same_title else 1, misfit), rect))
+            ranked.append(((0 if same_title else 1, misfit), (window, rect)))
         # A stable sort: windows the ranking cannot separate keep the
         # source's own order, which is all the old first-listed rule was.
         ranked.sort(key=lambda item: item[0])
-        return [rect for _, rect in ranked]
+        return ranked
 
     def _source_rect(self, window):
         """`(x, y, width, height)` the geometry source reports for `window`, or None."""
@@ -2006,17 +2654,51 @@ class AtspiBackend(GUIBackend):
         screen one by addition: the geometry source's best rectangle for
         the frame (`_source_rects`), corrected for the decorations the two
         sides count differently (`_client_inset`). None where the source
-        lists nothing plausibly this window, or the frame has no rectangle
-        of its own to compare against.
+        lists nothing plausibly this window, lists two at different
+        rectangles that it cannot tell apart (`_placement`), or the frame
+        has no rectangle of its own to compare against.
+        """
+        placement = self._placement(frame)
+        return None if placement is None else placement[0]
+
+    def _placement(self, frame, scoped=False):
+        """`_window_origin`'s answer paired with the listing it came from.
+
+        `(origin, listing)`: the screen position of `frame`'s
+        WINDOW-coordinate origin, and the `(window, rect)` the geometry
+        source lists for the window the frame was placed by -- the source's
+        own `Window` and the rectangle `_source_rect` reports for it -- so a
+        caller can tell two of an application's toplevels apart by which
+        listing each one landed on, and hold that listing against the
+        source's `window_at` (`_hits_in` and `_on_top` do). `scoped` is
+        `_source_listings`'. None exactly where `_window_origin` is, plus
+        one case that list cannot express: two of the application's windows
+        that rank *equally* for this frame and sit at different rectangles.
+        Same title, same size -- two documents of one editor, a dialog
+        shaped like the window it sits over -- and the ranking has nothing
+        left to separate them with, so the stable sort gives each of the
+        application's frames the same first listing: one frame is then
+        placed by the other frame's window, hundreds of pixels out, and
+        `_on_top` is handed two hits claiming the same listing, which it
+        reads as one window and cannot arbitrate. Both the misplacement and
+        the false agreement are a guess; None says so, and a caller gets no
+        rectangle rather than another window's. A tie whose listings share
+        one rectangle is not ambiguous *here* -- either choice places the
+        frame identically -- and goes through as before, left for `_on_top`
+        to hold against `window_at` as it always was.
         """
         own = self._raw_extents(frame, window=True)
         if own is None:
             return None
-        rects = self._source_rects(frame, size=own[2:])
-        if not rects:
+        ranked = self._ranked_listings(frame, size=own[2:], scoped=scoped)
+        if not ranked:
             return None
-        inset = self._client_inset(frame, own, rects[0])
-        return (rects[0][0] - inset[0], rects[0][1] - inset[1])
+        tied = [listing for rank, listing in ranked if rank == ranked[0][0]]
+        if len({rect for _window, rect in tied}) > 1:
+            return None
+        _window, rect = ranked[0][1]
+        inset = self._client_inset(frame, own, rect)
+        return (rect[0] - inset[0], rect[1] - inset[1]), ranked[0][1]
 
     def _placed_extents(self, node):
         """`node`'s screen rectangle, placed by its window rather than reported.
@@ -2054,7 +2736,9 @@ class AtspiBackend(GUIBackend):
                     self.name,
                     "this element's AT-SPI rectangle is window-relative on "
                     "a native Wayland session and the compositor reports no "
-                    "position for its window, so it cannot be made "
+                    "position this window can be placed by -- none at all, "
+                    "or two of the application's windows it cannot tell "
+                    "apart -- so it cannot be made "
                     "screen-absolute. The element itself is fine: its size "
                     f"is {size}. Ask "
                     "is_window_viewable whether the window is on screen, and "
@@ -2069,8 +2753,9 @@ class AtspiBackend(GUIBackend):
                 "from a sibling backend -- a toolkit that is never told "
                 "where its window is (GTK4 answers (0, 0) for every element "
                 "it owns, on X11 as on Wayland) -- and that backend lists no "
-                "window of a plausible size to place the element's own, "
-                "window-relative rectangle against. The element itself is "
+                "window the element's own, window-relative rectangle can be "
+                "placed against: none of a plausible size, or two the "
+                "ranking cannot tell apart. The element itself is "
                 f"fine: its size is {size}. Wait for the window to be "
                 "mapped, or drive the element through its accessible action "
                 "or keyboard focus instead of a coordinate",
@@ -2159,8 +2844,17 @@ class AtspiBackend(GUIBackend):
         self.require(Capability.ELEMENT_GEOMETRY, _WAYLAND_COORDS)
         return self._extents(element.node)
 
-    def element_at(self, x, y):
+    def element_at(self, x, y, *, pid=None):
         """The most specific element at a screen point, or None.
+
+        `pid` scopes the hit-test to one process's applications. It is the one
+        way this answers on a pure Wayland session (see the closing paragraph):
+        a caller that has already placed the window a point landed in -- the
+        recorder does, through a window backend that resolves stacking -- names
+        its process here, and only that process's toplevels are placed and
+        asked. The sweep that is refused unscoped is affordable scoped to one
+        application, and the stacking the unscoped sweep could not resolve was
+        resolved by whatever chose the pid.
 
         Every application is asked, because the accessible tree has no root
         that hit-tests: `get_accessible_at_point` answers about one
@@ -2203,14 +2897,44 @@ class AtspiBackend(GUIBackend):
         test down with it would make this fail for reasons having nothing
         to do with the point asked about.
 
-        Still refused on a pure Wayland session, where every toplevel on
-        the desktop would need placing before any could be asked and the
-        answer would be the compositor's to give -- the sweep costs a
-        geometry-source round trip per window across every application,
-        for a result that still carries no stacking order. `extents()`
-        places one element at a time there, which is what the drivers use.
+        Refused on a pure Wayland session **unless scoped by `pid`**: unscoped,
+        every toplevel on the desktop would need placing before any could be
+        asked, the answer would be the compositor's to give, and the result
+        would still carry no stacking order -- so `extents()` places one
+        element at a time there instead, which is what the drivers use. A `pid`
+        removes both objections at once: only that process's toplevels are
+        placed (and a process with a geometry source to place them), and the
+        caller that chose the pid already resolved which window was on top. With
+        no geometry source to place window-relative rectangles onto the screen,
+        even a scoped answer cannot be trusted, so that too is refused.
+
+        Where screen coordinates are trustworthy on their own -- X11 -- the
+        pid is accepted and ignored, as the `Session` contract says: every
+        application is asked and the answer is whatever is really at the
+        point, which is what a caller that resolved the window itself wants
+        to check against, not a sweep that excludes everything but its own
+        guess. The scope earns its keep on Wayland, where it is what makes the
+        lookup possible at all.
+
+        A pid names a process, though, and a process with a dialog up has two
+        toplevels, both admitted by the scope. Where two *placed* toplevels
+        both claim the point, the smallest-answer rule above would let a
+        small control in the rear window beat a large one in the front, so
+        the geometry source is asked which window is on top there
+        (`_on_top`) and only that window's answer stands; if it cannot say,
+        the lookup answers None rather than guess. A scoped lookup holds even
+        a lone placed hit against that answer: the one toplevel that could be
+        hit-tested is not thereby the one on top -- a dialog whose extents
+        AT-SPI cannot read is skipped, and the main window beneath it would
+        otherwise answer for a point the dialog covers. A toplevel
+        hit-tested in screen coordinates has no listing to compare, so
+        overlapping same-process windows there are still settled by
+        specificity alone, as they always were unscoped.
         """
-        if not self._screen_coords_trustworthy:
+        scoped = pid is not None and not self._screen_coords_trustworthy
+        if not self._screen_coords_trustworthy and not (
+            scoped and self._window_geometry_source is not None
+        ):
             raise CapabilityUnsupported(
                 Capability.ELEMENT_GEOMETRY, self.name, _WAYLAND_COORDS
             )
@@ -2219,21 +2943,117 @@ class AtspiBackend(GUIBackend):
         applications = _run_bounded(
             self._call_timeout, lambda: list(self._tree.root.applications())
         )
+        hits: list[tuple[Any, bool, tuple | None]] = []
         for app in applications:
-            for node, window in self._hits_in(app, x, y):
-                area = self._area(node, window)
-                if best is None or area < best_area:
-                    best, best_area = node, area
+            if scoped and self._app_pid(app) != pid:
+                continue
+            hits.extend(self._hits_in(app, x, y, scoped=scoped))
+        for node, window, _placed_by in self._on_top(hits, x, y, scoped=scoped):
+            area = self._area(node, window)
+            if best is None or area < best_area:
+                best, best_area = node, area
         return Element(best) if best is not None else None
 
-    def _hits_in(self, app, x, y):
+    def _on_top(self, hits, x, y, scoped=False):
+        """`hits` narrowed to the toplevel the geometry source puts on top.
+
+        Where there is something to hold against the source: hits placed by
+        two or more *different* listings both cover the point -- one
+        process's overlapping windows, a dialog over its main window most
+        often -- or, `scoped`, any placed hit at all, since a scoped caller
+        was promised the window on top and the one toplevel that could be
+        hit-tested is not thereby it. The source's `window_at` resolves
+        stacking the way `windows()` is ordered, and the hit whose listing
+        *is* that window -- the same `Window`, still at the same rectangle,
+        so a dialog sized and placed exactly over its parent is told from it
+        and a window that moved since it was placed is not mistaken for
+        itself -- is the one a pointer there would reach. Hits with no
+        listing (a toplevel hit-tested in screen coordinates) are not
+        comparable and pass through untouched.
+
+        Empty when the source names a window on top that none of the hits
+        was placed by -- the window the caller placed has been covered by
+        another process's since, say -- or names none at all there. Either
+        way the hits are wrong about the point, and a wrong answer records a
+        locator from the rear window, so none is the better answer.
+
+        A source that *cannot* say (`_UNRESOLVED`) leaves a scoped lookup
+        with a guess between windows, which it refuses: empty. Unscoped, the
+        hits stand as they are -- that is the specificity rule the unscoped
+        lookup has always applied, and a source that cannot resolve stacking
+        is no reason to answer less than before it was wired in. One placed
+        listing with nothing to hold it against stands on either path.
+        """
+        listings = {placed_by for _node, _window, placed_by in hits if placed_by}
+        if not listings or (len(listings) < 2 and not scoped):
+            return hits
+        top = self._top_window_at(x, y)
+        if top is _UNRESOLVED:
+            return hits if len(listings) < 2 or not scoped else []
+        top_listing = None if top is None else (top, self._source_rect(top))
+        return [hit for hit in hits if hit[2] is None or hit[2] == top_listing]
+
+    def _top_window_at(self, x, y):
+        """The geometry source's topmost window at a point.
+
+        The source's own `Window`, which compares equal to the one its
+        `windows()` listed -- backends define window equality by handle --
+        so it can be held against the listing a frame was placed by. None
+        where the source lists no window there. `_UNRESOLVED` where it
+        cannot say: no `window_at`, or one that fails -- a sibling backend's
+        own failure is not ours, same as `_source_listings`.
+        """
+        source = self._window_geometry_source
+        if source is None:
+            return _UNRESOLVED
+        try:
+            if not source.supports(Capability.WINDOW_AT_POINT):
+                return _UNRESOLVED
+            return source.window_at(x, y)
+        except Exception:  # noqa: BLE001 - a sibling backend's own failure is not ours
+            return _UNRESOLVED
+
+    def _app_pid(self, app):
+        """The process id of one AT-SPI application, or None if it will not say.
+
+        Read the way `windows()` and `Element.pid` read it -- bounded, since
+        nothing read off the bus goes unbounded in this module -- so an
+        application that cannot answer is simply not the one scoped for,
+        rather than an error. The bound is belt and braces here rather than
+        the thing that keeps a scan moving: libatspi answers
+        `get_process_id` by asking the *bus daemon*
+        (`GetConnectionUnixProcessID` for the application's unique name) and
+        caches the result on the application, so a stalled application
+        cannot stall its own pid read, and a scan past several stalled ones
+        does not pay a timeout each.
+        """
+        try:
+            return int(_run_bounded(self._call_timeout, app.get_process_id))
+        except Exception:  # noqa: BLE001 - an app that will not answer is not it
+            return None
+
+    def _hits_in(self, app, x, y, scoped=False):
         """The deepest believable node under each of one app's toplevels.
 
         Each paired with whether it was found in WINDOW coordinates, which
-        `_area` needs to read its rectangle in the same space. The point
-        is moved into that space once per toplevel, up front, and every
-        step below -- `_descend`, `_past_a_container`, `_covers` -- then
-        compares like with like without knowing which space it is in.
+        `_area` needs to read its rectangle in the same space, and with the
+        geometry source's listing the toplevel was placed by (None for one
+        hit-tested in screen coordinates), which `_on_top` needs to tell
+        two placed toplevels of one process apart. `scoped` is
+        `_source_listings`': a lookup narrowed to one process does not let
+        a toplevel be placed by another process's window. The point is
+        moved into that space once per toplevel, up front, and every step
+        below -- `_descend`, `_past_a_container`, `_covers` -- then compares
+        like with like without knowing which space it is in.
+
+        Which space is decided the way `_extents` decides it, in the same
+        order: a pure Wayland session is placed without asking
+        `_app_coords_trustworthy` at all -- its contract is that it is only
+        consulted where screen coordinates are already trustworthy, and a
+        toolkit whose frame answers SCREEN and WINDOW extents differently
+        would otherwise be *trusted* there and hit-tested in a screen space
+        it was never told about. Reached on Wayland only through a `pid`
+        scope, so a geometry source is wired by the time this runs.
 
         A toplevel that raises is skipped on its own rather than taking its
         application's others with it: a dead application fails at the
@@ -2241,7 +3061,7 @@ class AtspiBackend(GUIBackend):
         geometry source does not list, or a frame reaped mid-walk, must not
         cost the main window beside it its answer.
         """
-        found: list[tuple[Any, bool]] = []
+        found: list[tuple[Any, bool, tuple | None]] = []
         try:
             frames = _run_bounded(self._call_timeout, lambda: list(app.children))
         except BackendCallTimeout:
@@ -2250,15 +3070,21 @@ class AtspiBackend(GUIBackend):
             return found
         for frame in frames:
             try:
-                if self._app_coords_trustworthy(frame):
+                placed_by = None
+                if self._screen_coords_trustworthy and self._app_coords_trustworthy(
+                    frame
+                ):
                     window, px, py = False, x, y
                 else:
-                    origin = self._window_origin(frame)
-                    if origin is None:
+                    placement = self._placement(frame, scoped=scoped)
+                    if placement is None:
                         continue
-                    window, px, py = True, x - origin[0], y - origin[1]
+                    (ox, oy), placed_by = placement
+                    window, px, py = True, x - ox, y - oy
                 if self._covers(frame, px, py, window):
-                    found.append((self._descend(frame, px, py, window), window))
+                    found.append(
+                        (self._descend(frame, px, py, window), window, placed_by)
+                    )
             except BackendCallTimeout:
                 raise
             except Exception:  # noqa: BLE001 - a frame gone mid-walk is not an error

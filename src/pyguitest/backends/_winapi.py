@@ -64,6 +64,12 @@ top-level windows. Both work cross-process; the difference is which one a
 given window class responds to."""
 
 WM_CLOSE = 0x0010
+# System error codes `PostMessageW` reports through GetLastError. A zero
+# return does not say which happened, and the two mean opposite things: one
+# is a handle that is gone, the other a live window this process is not
+# allowed to post to (UIPI, across an integrity level).
+ERROR_ACCESS_DENIED = 5
+ERROR_INVALID_WINDOW_HANDLE = 1400
 """Ask a window to close itself -- the graceful route. The application's own
 window procedure decides what that means (`DefWindowProc` destroys; an editor
 with unsaved work shows its "Save changes?" prompt instead), which is exactly
@@ -102,10 +108,12 @@ SW_MINIMIZE = 6
 
 SW_MAXIMIZE = 3
 """`ShowWindow`'s maximize verb; `IsZoomed` is the read that verifies it.
-Unlike every call `_winapi.py`'s SWP_NOACTIVATE rule covers, this one
-*activates* the window as a documented side effect -- there is no
-non-activating spelling (`SW_SHOWMAXIMIZED` is the same value 3) -- which
-is why `maximize_window`'s docstring warns about focus."""
+Documented to *activate* the window as well, with no non-activating
+spelling (`SW_SHOWMAXIMIZED` is the same value 3) -- but measured on a live
+interactive desktop it leaves the foreground window alone when the target
+belongs to another process, which is the only case this backend has. See
+`Win32Backend.maximize_window` for the measurement; the SWP_NOACTIVATE rule
+below is still what keeps moves and resizes from stealing focus."""
 
 SW_RESTORE = 9
 """`ShowWindow`'s restore verb: back to whatever the window was before it

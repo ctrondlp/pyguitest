@@ -265,8 +265,16 @@ class KeySender:
             name = self.modifiers[char]
             if i + 1 < n and keys[i + 1] == "(":
                 self.groups.append(len(self.held))
-                self.session.press_key(name)
-                self.held.append(name)
+                # Not pressed again when an enclosing group already holds
+                # it, and so not recorded again either -- which is what
+                # stops the inner `)` from releasing it. `^(^(a)b)` used to
+                # press Control twice and let go of it at the inner `)`,
+                # sending `b` with nothing held while the outer group was
+                # still open; the depth pushed above is what the inner `)`
+                # pops, and with nothing appended it releases nothing.
+                if name not in self.held:
+                    self.session.press_key(name)
+                    self.held.append(name)
                 return i + 2
             self.session.tap_key(name)
             return None

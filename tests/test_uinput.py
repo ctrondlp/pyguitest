@@ -403,6 +403,75 @@ class TestKeyboard(UinputTestCase):
         self.assertIn((1, 42, 1), device.events)  # Shift pressed
         self.assertIn((1, 42, 0), device.events)  # and released on the way out
 
+    def test_a_failing_key_up_does_not_leave_the_character_held(self):
+        """The other half of mid-character: the press landed, the release did not.
+
+        Only Shift was unwound before, so KEY_B stayed down on a device
+        held open for the rest of the session -- a stuck character key
+        repeats into everything typed afterwards, which is worse than a
+        stuck Shift and was not covered by the test above (that one fails
+        on the key-*down*, when there is nothing of the character to
+        release).
+        """
+
+        class DyingOnRelease(FakeDevice):
+            # `events` records writes that landed; `attempted` records every
+            # call, which is the only way to see a cleanup write whose own
+            # failure is suppressed.
+            def __init__(self):
+                super().__init__()
+                self.attempted = []
+
+            def write(self, etype, code, value):
+                self.attempted.append((etype, code, value))
+                if code == 48 and value == 0:  # KEY_B's own key-up
+                    raise OSError(19, "No such device")
+                super().write(etype, code, value)
+
+        from pyguitest.backends import uinput
+
+        device = DyingOnRelease()
+        gui = uinput.UinputBackend(screen_size=(1920, 1080), device=device)
+        with self.assertWarns(Warning), self.assertRaises(OSError):
+            gui.type_text("B")
+        self.assertIn((1, 48, 1), device.events)  # the character went down
+        self.assertIn((1, 42, 0), device.events)  # Shift came back up
+        # And the cleanup tried the character's release again rather than
+        # leaving it down -- its failure is suppressed, so what is asserted
+        # is that it was attempted after the press.
+        self.assertGreaterEqual(
+            len([e for e in device.attempted if e == (1, 48, 0)]),
+            2,
+            "the character's key-up was not retried during cleanup",
+        )
+
+    def test_a_key_never_pressed_is_not_released_during_cleanup(self):
+        """A key-up no client asked for is its own defect.
+
+        When the character's key-*down* is the write that fails, there is
+        nothing of it to release, and emitting one anyway would hand every
+        client a release for a key that was never pressed.
+        """
+
+        class DyingOnPress(FakeDevice):
+            def __init__(self):
+                super().__init__()
+                self.attempted = []
+
+            def write(self, etype, code, value):
+                self.attempted.append((etype, code, value))
+                if code == 48 and value == 1:
+                    raise OSError(19, "No such device")
+                super().write(etype, code, value)
+
+        from pyguitest.backends import uinput
+
+        device = DyingOnPress()
+        gui = uinput.UinputBackend(screen_size=(1920, 1080), device=device)
+        with self.assertWarns(Warning), self.assertRaises(OSError):
+            gui.type_text("B")
+        self.assertNotIn((1, 48, 0), device.attempted)
+
     def test_the_original_error_survives_a_failing_shift_release(self):
         # Not a plain `finally`, for Session.drag's reason: when the device
         # is gone, the unwinding release fails too, and the caller must

@@ -264,6 +264,20 @@ _X11_KEYSYMS = {
     "Delete": "forwarddelete",
     "Super_L": "command",
     "Super_R": "rightcommand",
+    # Same physical key as Super, under the other name X11 gives it, and
+    # the one the *inherited* `MODIFIER_KEYS` maps `#` to -- so a caller who
+    # pressed that key by name rather than through `send_keys("#(...)")` got
+    # a refusal here while every other backend pressed it. Measured by
+    # resolving all 45 documented names against all four backends' tables:
+    # these two were the only names a backend refused while already
+    # supporting the key under another spelling.
+    "Meta_L": "command",
+    "Meta_R": "rightcommand",
+    # Page Up/Down, which a Mac does have -- `{PGU}`/`{PGD}` already reach
+    # them. Only the X11 spellings were missing, so `press_key("Prior")`
+    # worked on X11, uinput and Windows and refused here.
+    "Prior": "pageup",
+    "Next": "pagedown",
     "Shift_L": "shift",
     "Shift_R": "rightshift",
     "Alt_L": "option",

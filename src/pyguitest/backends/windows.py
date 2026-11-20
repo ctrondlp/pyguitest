@@ -178,8 +178,43 @@ class SwayBackend(_WindowBackend):
         return None
 
     def _command(self, window, command):
-        """Run a sway command scoped to one window."""
-        return self.transport.run_command(f"[con_id={self._handle(window)}] {command}")
+        """Run a sway command scoped to one window, refusing a rejected reply.
+
+        sway answers every command with a per-command success flag, and a
+        command aimed at a window that has since gone answers
+        `success: false` with `"No matching node."` -- a reply the socket
+        transport hands back unexamined. Discarded, every operation here
+        reported normal completion while nothing had happened: a
+        `close_window` on a vanished window looked like a close, which is
+        the one outcome a caller cannot afford to misread.
+
+        Only the socket transport needs this. The CLI transport runs
+        `swaymsg`, which exits non-zero on a refusal, and `SwayCLI._run`
+        already raises for that -- so its reply is text, not a list, and is
+        left alone here.
+        """
+        reply = self.transport.run_command(f"[con_id={self._handle(window)}] {command}")
+        refusal = self._refusal(reply)
+        if refusal is not None:
+            # A stale handle is the common case and the one every other
+            # lookup in this module spells WindowNotFound; anything else is
+            # the compositor refusing a command it understood.
+            if "no matching node" in refusal.lower():
+                raise WindowNotFound(
+                    f"no window with id {self._handle(window)!r} to {command}"
+                )
+            raise PyGUITestError(f"sway refused {command!r}: {refusal}")
+        return reply
+
+    @staticmethod
+    def _refusal(reply):
+        """The error sway reported for a refused command, or None."""
+        if not isinstance(reply, list):
+            return None
+        for item in reply:
+            if isinstance(item, dict) and not item.get("success", True):
+                return str(item.get("error") or "sway refused the command")
+        return None
 
     def activate_window(self, window):
         """Raise and focus a window."""

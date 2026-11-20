@@ -468,23 +468,39 @@ class UinputBackend(GUIBackend):
             code = self._keycode(name)
             if shift:
                 self._device.write(e.EV_KEY, e.KEY_LEFTSHIFT, 1)
+            down = False
             try:
                 self._device.write(e.EV_KEY, code, 1)
+                down = True
                 self._device.write(e.EV_KEY, code, 0)
+                down = False
             except BaseException:
-                # The Shift is already down in the kernel, and this device
-                # outlives the call -- it is held open for the session -- so
-                # a write that dies between the press and the release leaves
-                # Shift logically held for every later keystroke, turning the
-                # rest of the run into capitals and symbols with nothing
-                # raised to say so. Not a plain `finally`, for Session.drag's
+                # Whatever is still down in the kernel is unwound here, in
+                # reverse order. This device outlives the call -- it is held
+                # open for the session -- so a write that dies mid-character
+                # leaves those keys logically held for every later
+                # keystroke: a stuck Shift turns the rest of the run into
+                # capitals and symbols, and a stuck character key repeats
+                # into everything that follows, with nothing raised to say
+                # so. `down` is tracked rather than assumed because the
+                # write that failed may be the press itself, and releasing a
+                # key that was never pressed would emit a key-up no client
+                # asked for. Not a plain `finally`, for Session.drag's
                 # reason: the release is likely to fail the same way the
                 # character did, and in a `finally` that second error would
                 # replace the one that actually explains the failure.
+                # Each release is suppressed on its own, not the group:
+                # sharing one `suppress` let the character's own failing
+                # key-up abort the block before Shift was released, which
+                # is the stuck Shift this handler exists to prevent.
+                if down:
+                    with contextlib.suppress(Exception):
+                        self._device.write(e.EV_KEY, code, 0)
                 if shift:
                     with contextlib.suppress(Exception):
                         self._device.write(e.EV_KEY, e.KEY_LEFTSHIFT, 0)
-                        self._device.syn()
+                with contextlib.suppress(Exception):
+                    self._device.syn()
                 raise
             if shift:
                 self._device.write(e.EV_KEY, e.KEY_LEFTSHIFT, 0)

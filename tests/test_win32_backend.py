@@ -24,6 +24,7 @@ import zlib
 from unittest import mock
 
 from pyguitest.backends import _winapi
+from pyguitest.backends import win32 as win32_module
 from pyguitest.backends.base import Window
 from pyguitest.backends.win32 import (
     _CURSOR_SHAPES,
@@ -1056,6 +1057,48 @@ class TestWindowOperations(Win32TestCase):
         with self.assertRaises(WindowNotFound):
             self.gui.close_window(window)
         self.assertEqual(self.posted, [(window.handle, _winapi.WM_CLOSE, 0, 0)])
+
+    def test_an_invalid_handle_error_code_is_window_not_found_too(self):
+        # The same race, reported the way Windows actually reports it: a
+        # zero return with ERROR_INVALID_WINDOW_HANDLE (1400) saved as the
+        # last error, rather than the bare zero the fake lib leaves behind.
+        window = self.only_window()
+        self.post_message_honoured = False
+        with mock.patch.object(
+            win32_module,
+            "_last_error",
+            return_value=_winapi.ERROR_INVALID_WINDOW_HANDLE,
+        ):
+            with self.assertRaises(WindowNotFound):
+                self.gui.close_window(window)
+        self.assertEqual(_winapi.ERROR_INVALID_WINDOW_HANDLE, 1400)
+
+    def test_a_uipi_refusal_is_a_permission_problem_not_a_missing_window(self):
+        """A live window this process may not post to is not a stale handle.
+
+        An unelevated process posting WM_CLOSE to an elevated window's
+        queue is refused by UIPI with ERROR_ACCESS_DENIED. Reported as
+        WindowNotFound -- which is what a bare zero return gave -- it sent
+        the caller looking for a fresher handle for a window that is
+        perfectly alive.
+        """
+        window = self.only_window()
+        self.post_message_honoured = False
+        with mock.patch.object(
+            win32_module, "_last_error", return_value=_winapi.ERROR_ACCESS_DENIED
+        ):
+            with self.assertRaises(PermissionRequired) as raised:
+                self.gui.close_window(window)
+        self.assertIn("access", str(raised.exception).lower())
+
+    def test_an_unrecognised_post_failure_is_surfaced_as_itself(self):
+        """Neither a dead handle nor a permission problem: say the code."""
+        window = self.only_window()
+        self.post_message_honoured = False
+        with mock.patch.object(win32_module, "_last_error", return_value=1460):
+            with self.assertRaises(PyGUITestError) as raised:
+                self.gui.close_window(window)
+        self.assertIn("1460", str(raised.exception))
 
     def test_the_title_is_set_through_set_window_text(self):
         window = self.only_window()

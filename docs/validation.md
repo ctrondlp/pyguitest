@@ -5,6 +5,31 @@ only against its own tests. This file records which parts, on what, and —
 more usefully — which parts have not, so nothing in the README has to be
 read as a claim you cannot check.
 
+## The states a claim can be in
+
+"Tested" is not one thing, and this file is careful about which it means.
+The ladder, weakest to strongest:
+
+- **Implemented** — the code exists and type-checks. Says nothing about
+  whether it runs.
+- **Unit-tested** — covered by the suite, which uses fakes for every
+  desktop. Proves the logic, not the platform: a wrong native constant or
+  an OS quirk sails through, because the fake was written to the same
+  understanding as the code.
+- **Live-session tested** — run against a real desktop of that kind and
+  observed to do the thing. The first state that can catch a wrong constant.
+- **Non-vacuously proven** — run live *and* shown to fail when the fix is
+  removed or the fault injected, so the pass is known to be load-bearing
+  rather than incidental. Where an entry below arranges a control condition
+  (neutralize the fix, kill the window out from under the handle, inject the
+  no-reply), this is why.
+- **Known limitation** / **Not yet verified** — stated as such, named, and
+  not dressed as anything stronger. The honest end of the ladder, and a
+  large part of what this file is for.
+
+Entries below use these words deliberately. A green checkmark would collapse
+all five into one, which is exactly the confusion this file exists to avoid.
+
 ## At a glance
 
 What follows is in the order it happened, which is the right order for
@@ -113,6 +138,13 @@ been tried at all". The same record sorted that way instead:
   the AUMID launch that replaces it verified end to end on the real
   Calculator — real pid, real exit codes off the process handle, both
   spellings, and the ApplicationFrameHost window-pid fact measured.
+- **GNOME Shell / Mutter 48, Qt 6.12** — [what an accessible action opens
+  arrives without an input
+  serial](#gnomemutter-what-an-accessible-action-opens-arrives-without-an-input-serial-2026-11-18):
+  a menu opened through `Show Menu` right after a chord is dismissed by the
+  compositor, and a dialog opened through an action is left without
+  keyboard focus while the same dialog opened by a key takes it four of four
+  — compositor policy, measured, and what to do about it from a script.
 - **[Not run live](#not-run-live)** is the half worth reading first: it is
   what stops anything above being a promise about your desktop.
 
@@ -5268,10 +5300,39 @@ by design -- zoom is not maximize -- and the suite pins that.
 
 **Windows 10 (native).** The full win32 test file passed on the real
 platform, and `IsZoomed`/`PostMessageW` resolve against the real user32 with
-`SW_MAXIMIZE` = 3. Not yet driven against a live interactive window there
-(SSH is Session 0): the `WM_CLOSE` post and the `SW_MAXIMIZE`-activates
-side effect are documented from the SDK and await the next Scheduled-Task
-round.
+`SW_MAXIMIZE` = 3. Both calls have since been driven against live
+interactive windows — a Scheduled Task with `/IT`, because an SSH shell is
+Session 0 and has no desktop — on two Notepads holding differently named
+documents, so "which window is in front" has an answer:
+
+- `close_window` posted `WM_CLOSE` to a window with unsaved text and
+  Notepad put up its own *Save changes?* prompt instead of exiting, which
+  is what distinguishes the graceful route from a kill: the post reached
+  the application's window procedure and the application decided. Declining
+  the save let the client exit of its own accord (code 0) and the window
+  went; the same post to a window with nothing unsaved exited straight
+  away, with no prompt. Posting to that handle again raised
+  `WindowNotFound`.
+- `maximize_window` zoomed the target (`IsZoomed` true, 864x597 → 1168x840)
+  and `maximize_window(maximized=False)` cleared it.
+- **The `SW_MAXIMIZE`-activates side effect does not happen.** It was
+  recorded here, and in three docstrings, as a documented Windows-only
+  behaviour callers had to work around. Three trials, alternating which
+  Notepad was maximized while the other held the foreground, sampling
+  `active_window()` at 0.1s, 1s and 3s after the call: nine samples,
+  `IsZoomed` true in all three trials, and the foreground window unchanged
+  in all nine. Cross-process activation is what Windows' foreground-change
+  restrictions refuse, and another application's window is the only kind
+  pyguitest maximizes. The docstrings now record the measurement and tell
+  callers to depend on neither direction.
+
+Still unit-only there, and now for a known reason: `close_window`'s split
+between `ERROR_ACCESS_DENIED` and `ERROR_INVALID_WINDOW_HANDLE`. The live
+run above never reached it — `_hwnd` resolves the handle first and raises
+`WindowNotFound` for a window that has gone, so the only way into the error
+branch is a post that fails on a window `_hwnd` accepts, i.e. the UIPI
+refusal from an elevated window. That needs an elevated target this suite
+does not create.
 
 ~~Not yet run live: sway and Hyprland close (no box up; the Hyprland Lua
 spelling `hl.dsp.window.close` is from the daemon's own enumeration recorded
@@ -5300,6 +5361,524 @@ client never exiting. The headless sway was private to the run — the script
 refuses to start without `wtype`, because a uinput device created against a
 seat-less sway would type into the live desktop instead.
 
-Still not run live: the Windows `WM_CLOSE` post and the
+~~Still not run live: the Windows `WM_CLOSE` post and the
 `SW_MAXIMIZE`-activates side effect against a live interactive window, which
-is the paragraph above this one.
+is the paragraph above this one.~~ — **both run 2026-11-17**; the `WM_CLOSE`
+post behaves as documented and the activation does not happen at all. See
+the Windows 10 paragraph above.
+
+## The PR #77 review round, live (2026-11-17)
+
+Three of that round's fixes are about what a desktop does rather than what
+the code says, so each was driven on a box, and each with its opposite
+arranged on the same running application — a fix that only ever sees the
+case it repairs has not been tested.
+
+**macOS (Sequoia 15.8.1): two AX windows on one rectangle.** A window
+handle here is a CoreGraphics window number, and the AX element behind it is
+found by matching the frame rectangle — the only join the two APIs offer,
+and not an identity. Three TextEdit documents were placed on three distinct
+rectangles: `close_window` resolved one and closed it. Two of the remaining
+windows were then moved onto a single rectangle (both already 360x280, so
+one move collapsed them) and the same `close_window` refused with
+`CapabilityUnsupported`, naming the shared rectangle as the reason — and
+left **both** windows open, which is the point: the old code pressed
+whichever close button it found first, so the neighbour's document could go
+instead. The unambiguous close in the same run is what makes the refusal
+mean something other than a resolver that never works.
+
+**Ubuntu 26.10 (private headless sway): clicking a modal-dialog opener.**
+The Qt fixture's `Save As…` menu item runs `QFileDialog.getSaveFileName` in
+its action handler, which spins its own event loop, so a **synchronous**
+AT-SPI `DoAction` cannot get its reply until the dialog closes — and holds
+the accessibility connection while it waits. Three things were measured
+before anything was changed, each with the dialog confirmed open and the
+action call confirmed still blocked:
+
+- `click()` raised dogtail's `ActionNotSupported` ("Did not receive a
+  reply") 12.3s later, about an action that had already opened the dialog;
+- an uncached read issued meanwhile took **11.7s**, landing only when the
+  action's own timeout released the connection (reads afterwards: 2.0–2.6s)
+  — so calls serialize behind a pending action;
+- and once that abandoned call was in place, **nothing reached the dialog**.
+  Scoped inside the dialog's own frame — the fixture has five `Cancel`
+  buttons and 325 text fields of its own, so an unscoped lookup proves
+  nothing — its filename field stayed `untitled.txt` when typed into, its
+  own `Cancel` button's accessible click did not close it, and Escape did
+  not either, in four runs of five. Reads inside it worked throughout.
+
+That last one was first taken for a compositor flake and nearly recorded as
+one. It was not: dispatching the *same* action asynchronously, with no
+pyguitest change at all, made the same dialog fully usable — which is what
+identified the abandoned synchronous call as the cause rather than the
+dialog, the toolkit or sway.
+
+After the fix, same box and fixture, repeated across several runs:
+`click()` returns in **1.5s** instead of raising at 12.3s, an enumeration
+issued while the handler is still running takes **2.6s** instead of 11.7s,
+the dialog is in the accessible tree, **it can be driven and dismissed** —
+its own `Cancel` button closes it every time — and an ordinary non-blocking
+push-button click behaves exactly as before, which is the negative control:
+a fix that had merely stopped reporting action failures would show up here.
+
+One correction to an earlier draft of this entry, which claimed typing into
+the filename field and Escape as settled after-results because they both
+worked in the run it was written from. They are not settled: across later
+runs typing reached that field sometimes and not others, and Escape closed
+the dialog sometimes and not others. **Keyboard delivery to this particular
+Qt file dialog is unreliable on this compositor independently of the fix** —
+measured separately, three trials, where one Escape did not close it in 15s
+and nor did a second, while its own Cancel closed it immediately. What the
+fix settles is the part that was never intermittent: before it, *nothing*
+reached the dialog at all, its own Cancel included; after it, the dialog is
+reachable and dismissable. That is also why the torture driver now presses a
+dialog's own cancel control rather than trusting Escape.
+
+**The asynchronous dispatch, swept across the fleet.** The change is in the
+shared AT-SPI backend, so one compositor proves nothing about the rest. Two
+questions per desktop, and the first matters most: the route is *optional* —
+if the accessibility bus cannot be dialled, `_perform_action` falls back to
+the synchronous call and the fix silently does nothing there. A sweep is the
+only way to know it engages.
+
+Driven against a purpose-built app rather than a fixture, so the same probe
+runs everywhere regardless of which toolkits a box has: one button whose
+handler calls `QDialog.exec()` — a nested event loop *inside* the handler,
+the same shape as `QFileDialog.getSaveFileName` — one whose handler returns
+at once as the negative control, and a label read through AT-SPI to confirm
+a click landed rather than trusting what the automation says about itself.
+
+| Desktop | Session | Address source | Blocking click | Enumeration while blocked |
+|---|---|---|---|---|
+| Ubuntu 26.10 (GNOME/Mutter) | wayland | `org.a11y.Bus.GetAddress` | 0.1s | 132 buttons, 0.9s |
+| Fedora 44 (KDE/KWin) | wayland | `org.a11y.Bus.GetAddress` | 0.0s | 116 buttons, 0.9s |
+| Pop!_OS 24.04 (COSMIC) | wayland | `org.a11y.Bus.GetAddress` | 0.0s | 3 buttons, 0.0s |
+| Omarchy (Hyprland) | wayland | `org.a11y.Bus.GetAddress` | 0.0s | 3 buttons, 0.0s |
+| KaOS (niri) | wayland | `org.a11y.Bus.GetAddress` | 0.0s | 3 buttons, 0.0s |
+| Linux Mint 22.3 (Cinnamon) | **x11** | **X11 root-window property** | 0.7s | 91 buttons, 1.4s |
+| GhostBSD 26.2 | **x11** | **X11 root-window property** | 0.0s | 11 buttons, 0.8s |
+| Debian 13 | wayland | `org.a11y.Bus.GetAddress` | route only — see below | |
+
+Seven of the eight ran the full behavioural check and every assertion passed
+on every one: the route opened, an ordinary click still landed, the click on
+a modal-opening handler returned **without raising**, the dialog opened, an
+enumeration issued meanwhile answered in at most 1.4s, and the dialog was
+reachable and dismissed through its own button with the handler then
+completing. Against the synchronous route the same call raised after 12.3s
+and the same enumeration took 11.7s.
+
+**What that sweep did *not* exercise, found by instrumenting the dispatcher
+rather than trusting the green results.** The first version of this probe
+drove a push button whose handler opens the dialog, and reported the click
+returning in 0.0s — which cannot be a reply from a handler that has not
+returned. Wrapping `_dispatch_action` to record, per call, whether a reply
+landed settled it: **Qt answers a button's `DoAction` before running its
+handler.** Ten ordinary clicks replied in 21–35ms, and so did the blocking
+one. So no button can reach the no-reply path whatever its handler does, and
+that path — the one this fix is *for* — had been exercised only by the
+original sway measurement.
+
+Closed by giving the probe app a **menu item** wired to the same handler,
+which is the control Qt invokes synchronously. That asymmetry is also why
+the defect first appeared on `Save As…` and never on a button. Re-swept:
+
+| Desktop | 10 ordinary clicks | Menu-item dispatch | Reply | Raised |
+|---|---|---|---|---|
+| Fedora 44 (KDE) | 21–31ms | 1.504s | none | nothing |
+| GhostBSD 26.2 | 21–39ms | 1.502s | none | nothing |
+| Linux Mint 22.3 | 22–144ms | 1.516s | none | nothing |
+| KaOS (niri) | 21–46ms | 1.501s | none | nothing |
+| Omarchy (Hyprland) | 21–104ms | 1.501s | none | nothing |
+| Pop!_OS (COSMIC) | 21–35ms | 1.514s | none | nothing |
+
+Six desktops, both X11 boxes and the BSD among them, each showing the
+dispatch running the full settle window with no reply and `click()`
+**returning rather than raising** — which is the behaviour the fix adds
+where dogtail's `ActionNotSupported` used to surface. The ordinary-click
+column is the other half of the answer: the reply does reach the private
+main context, in tens of milliseconds, so the settle window costs nothing on
+an action that replies. An earlier worry that every click might pay 1.5s —
+if the connection read its messages on a context nothing here iterates —
+is measured false.
+
+Two things the sweep settled that no single box could. **The X11
+root-window-property branch of `_a11y_bus_address` is now exercised** — on
+Mint and on GhostBSD, the only sessions where `WAYLAND_DISPLAY` is unset and
+libatspi reads the property rather than asking the session bus; every
+Wayland box takes the `gdbus` branch and can never reach it. And
+**GhostBSD's runtime path has a different shape**
+(`/var/run/xdg/<user>/at-spi/bus_0` against Linux's `/run/user/1000/...`),
+which is the non-Linux case the address parsing had never seen.
+
+Debian 13 is route-only: its one PyGObject-capable interpreter has no
+PySide6, so it can drive but cannot host the probe's own app. The route
+check there opened a connection like the rest.
+
+**macOS (Sequoia 15.8.1): the same question, answered the other way.**
+`macos.py` calls `AXUIElementPerformAction` directly — synchronous, and with
+no bound of its own — so the obvious worry was that a modal handler blocks
+it the way the AT-SPI call was blocked, and that the fix above was only half
+a fix. Measured rather than inferred, with TextEdit's `Open…` (a modal
+panel) driven through its accessible action: `click()` returned in **0.0s**
+and did not raise, the panel appeared, all three AX reads afterwards
+answered, and Escape dismissed it on the first attempt. AppKit does not keep
+the AX call waiting on the menu action, so there is nothing to fix here and
+the asynchronous dispatch belongs in the AT-SPI backend alone. Windows is
+not measured here: UI Automation specifies `Invoke` as returning without
+waiting for the action to complete, which is the same shape as this result.
+
+While that fixture was open, two findings about the torture-test contract
+rather than pyguitest. The second of them was first written up here as a
+contract error on the strength of a measurement that was real but aimed at
+the wrong element, so it is recorded with the correction rather than
+quietly amended:
+
+- The File menu's `Open…` and `Save As…` were in **neither**
+  `MENUS.dialog_items` nor `skip_items`, so the menu walk clicked them as
+  ordinary leaves and left a modal `QFileDialog` standing over every later
+  leaf. A real gap, and the cascade those sets exist to prevent. Fixed, with
+  a test that walks the real menu bar and asserts every declared name is an
+  item the app has.
+- `FIXTURE.dialog_buttons` naming `Save As` looked like a phantom: a
+  `gui.element(role="push button", name="Save As")` lookup opened no window
+  in 9s. **That was the wrong button.** The toolbar publishes its `Save As…`
+  action as a push button named `Save As` — Qt strips the ellipsis — and
+  that one is wired to `getSaveFileName`, while the Image Search page also
+  carries a handler-less `_save_like` look-alike under the identical name.
+  Two published buttons, one inventory entry, and enumeration order decides
+  which a driver resolves; the lookup had returned the inert one. Undeclaring
+  it on that basis made a torture run leave a `Save File` dialog standing,
+  which surfaced as keyboard focus sitting on it while an unrelated control
+  was driven. Restored, and the ambiguity documented at the contract — which
+  also explains why that control's failures were always intermittent.
+
+**Ubuntu 26.10 (uinput): a key-up that fails mid-`type_text`.** The verdict
+is read from the kernel's own key state for the device pyguitest created —
+`EVIOCGKEY` through evdev's `active_keys()` — rather than from anything
+pyguitest reports about itself. A *transient* fault is the one that matters:
+a device that refuses a release forever cannot be unwound by anyone, and an
+earlier version of this probe failed every `KEY_B` key-up including the
+handler's own retry, which made the fix look broken. With one injected
+key-up failure the kernel was left holding nothing, after two key-up
+attempts; with the releases sharing a single `suppress` block again, the
+same probe left the kernel holding code 48 (`KEY_B`) after one attempt — a
+character key stuck down for every client on the seat. The key-*down*
+failure case is in the same run and passes both ways: nothing was pressed,
+so no key-up may be invented.
+
+**Ubuntu 26.10 (private headless sway): a command sway refused.** Every
+sway command carries its own `success` flag, and the socket transport handed
+the reply back for callers to discard. A window killed out from under its
+handle — the real race, a window going between a `windows()` call and the
+command built from it — now raises `WindowNotFound` ("no window with id 5 to
+kill"), and so does `activate_window` through the same path, which shows the
+check is not special-cased to close. With the reply discarded again, both
+calls returned **silently**: a close that never happened, reported as one.
+A live window still closes in both versions.
+
+**Fedora 44 KDE (Wayland): a KWin script that fails halfway.**
+`_load_and_run_script` loads the window-events script, then builds a proxy
+for it and calls `run`; only the closer returned at the end unloads it, and
+that closer is never created when something in between raises. Judged
+against KWin's own `isScriptLoaded`, not a mock — and the oracle was
+verified first: false before, true after a successful load, false after the
+closer runs. With the script proxy made to refuse (a failure *after*
+`loadScript`, the only kind that can leak), the call raised
+`BackendUnavailable` and `isScriptLoaded` answered false: unloaded on the
+way out. With the `if loaded:` block stripped from the deployed copy, the
+same probe left `isScriptLoaded` true — the script resident in the
+compositor for the life of the session with nothing holding a handle to it.
+Restored afterwards and confirmed by checksum, with no script left loaded.
+
+## GNOME/Mutter: what an accessible action opens arrives without an input serial (2026-11-18)
+
+Two behaviours of the same shape, both found by driving the Qt torture
+fixture on Debian 13 (GNOME Shell, Mutter 48, Qt 6.12) and both confirmed on
+Ubuntu 26.10. Neither is a pyguitest defect and nothing in the library
+changed for them; they are recorded because an automation that opens menus
+and dialogs through `Element.click()` on a GNOME desktop will meet them, and
+each looks like a flaky driver until it is measured.
+
+The mechanism is one fact about Wayland. A compositor grants a client focus
+or a popup grab against the **serial of a recent input event** the client
+received. A real click or key press carries one; a `DoAction` over AT-SPI is
+a D-Bus call and carries none. So an opening that originates in an
+accessible action asks the compositor for something it has no serial to
+justify, and Mutter's policy on both counts is to decline.
+
+**A menu opened by `Show Menu` after a chord is dismissed before it shows.**
+Qt gives every popup an `xdg_popup` grab against its last input serial.
+Mutter honours that grab only if the serial is the pointer's implicit grab,
+the last key *release*, or a key press still held down — and a chorded key's
+press is evicted when the next key event arrives. So after `Ctrl+Tab` (or a
+shifted letter), the next action-opened menu gets `popup_done` and closes
+with no item ever `SHOWING`; after a lone `Escape` or `Tab` it stays open.
+Predicted from the Mutter and qtbase sources and confirmed live on five
+counts; a plain retry can never recover it, and one real key tap before the
+action can. KWin, Hyprland and COSMIC never dismissed the grab across the
+same fleet sweep. The fixture's walk now taps `Escape` before its first
+action-opened menu — a driver's concern, since the library has no business
+inventing keystrokes.
+
+**A dialog opened by an action is not given focus; the same dialog opened by
+a key is.** Measured with the fixture's own `Color Picker…`, `Font Picker…`,
+`Save As…` and `Open…`, each watched through `active_window()` and the
+dialog's AT-SPI states for 4–5 s after it appeared:
+
+- opened through the menu item's accessible action, the two pickers sat
+  `MODAL SHOWING VISIBLE` with the **main window still `ACTIVE`** for the
+  whole watch (one run of three took focus at once); the file dialogs took
+  it at once or about 3 s later; a `QMessageBox` took it at once. The same
+  leaves failed the same way on an idle box ten minutes later, so this is
+  not load;
+- opened by `Down`×N and `Return` through the same menu, all four were
+  `ACTIVE` in the first poll that listed them, four of four.
+
+Everything pyguitest reports here is what the compositor did: the dialog is
+in the tree, reachable, and closes through its own `Cancel` (Escape does not
+close the Qt pickers either way — see the PR #77 entry above). What is
+missing is keyboard focus, so a `wait_window_focus()` on such a dialog can
+legitimately time out, and keystrokes meant for it will land in the main
+window. A driver that must type into an action-opened dialog on GNOME should
+`focus_window()` it first — and act on the `bool` it answers, since it never
+raises on its own: a `False` here is the compositor declining again, and the
+keys that follow would land in the main window just the same — or open the
+dialog with real input. The torture driver's
+strict focus check records each occurrence as a failure by design, and the
+two GNOME boxes carry it as a documented condition.
+
+The 0.26.1 asynchronous dispatch is what made this visible at all: before
+it, the synchronous call on these leaves raised after libatspi's timeout, the
+walk passed over them without a word, and every earlier "clean" Qt run on
+Mutter had never reached a modal dialog. A pass that is read as evidence
+needs to name what it drove.
+
+## The second PR-review round: a bus-name wait with no way to wake it (2026-11-19)
+
+The review's KWin finding is about a wait, and a wait is a thing a mock
+cannot judge: the harness that covered it returned from
+`iteration(True)` the moment it ran out of callbacks, which is exactly what
+a real main context does not do. Driven against real Gio and GLib on the
+development box's own session bus instead — no KWin and no window, since
+`connect=False` builds only the bus half of the backend, which is the half
+the finding is about.
+
+The mechanism first, on its own: a private `GMainContext` pushed as
+thread-default, a `GLib.timeout_source_new(120)` attached to it, and a
+`while not fired: ctx.iteration(True)` loop. The blocking iteration woke on
+the timeout after 0.122s and `is_destroyed()` answered true after
+`destroy()`. `MainContext.get_thread_default()` answers None with nothing
+pushed, which is what makes the fallback to the global default context the
+ordinary path.
+
+Then `_host_service` itself, three ways:
+
+| case | before | after |
+|---|---|---|
+| nothing pushed as thread-default | owns the name | owns the name, 0.00s |
+| a private context pushed as thread-default | **hung** — killed at 120s | owns the name, 0.00s |
+| a second process while the first holds the name | refused | refused, 0.00s, "another instance may already be running" |
+
+A fourth case, the deadline's own, measured the same way with only
+`bus_own_name` faked -- it hands back a subscription id and never calls a
+single callback, which is a wedged bus daemon as seen from here. The wait
+ended at **5.00s and 5.02s** (no context pushed, and with one pushed) on the
+development box and at **5.01s and 5.05s** on the KDE box, each with the
+`BackendUnavailable` the five-second deadline is for. That refusal now says
+which of the two failures it was: a name another session holds is answered in
+about 70ms, so a refusal that took the whole deadline is a bus that said
+nothing at all, not an instance to go looking for.
+
+The middle row is both halves of the finding in one run. Gio delivers
+`bus_acquired`/`name_acquired` on the context that was thread-default when
+`bus_own_name` was called, so a wait that iterates the *global default* one
+is handed nothing to dispatch — and because `iteration(True)` blocks until
+some source is ready, and the only source that could have woken it was on
+the other context, the five-second deadline checked between iterations never
+got a look in. Not "times out after five seconds": hangs, for as long as the
+session bus stays quiet. With the deadline attached to the context the
+callbacks arrive on, the same case owns the name immediately, and a bus that
+never answers reaches the `BackendUnavailable` the deadline was always meant
+to produce.
+
+## The second review round, driven on the fleet (2026-11-19)
+
+Four of that round's fixes change what a *desktop* does rather than what the
+code says, so each was driven on a box with its opposite arranged in the same
+run, and two of them were measured against the code they replace.
+
+**Two windows one ranking cannot tell apart (KWin and COSMIC).** A fixture of
+one process with two toplevels, same title, same size, at different positions
+— two documents of one editor. Both compositors list them exactly so: KWin at
+(440, 213) and (467, 229), both 400x328; COSMIC at (440, 118) and (488, 166),
+both 400x336. The frames themselves report (0, 0, 400, 300) for SCREEN and
+WINDOW alike, the Qt-on-Wayland shape, so each is placed by a listing — and
+the ranking scores both listings identically for *both* frames, `(0, 28)`
+each, a tie between two different rectangles.
+
+| | KWin | COSMIC |
+|---|---|---|
+| before | both widgets placed at **(451, 252, 378, 247)** | both at **(451, 165, 378, 247)** |
+| | — the same rectangle, inside the *first* window, for widgets that are in two different windows | — likewise |
+| after | both refused, naming two windows it cannot tell apart | both refused |
+| with the sizes made distinct | each widget placed in its own window: (451, 252) and (478, 268) | (451, 165) and (459, 213), differing by exactly the windows' own offset (8, 48) |
+
+The last row is what says the refusal is not placement switched off: a tie the
+ranking *can* break still places both frames, each by its own window.
+
+**The join's two sides, on a Mac (Sequoia 15.8.1).** Driven over one TextEdit
+run: a lone window took a move and a resize and read them back (120, 120,
+420, 320), its AX match resolved unambiguously, no twin was counted on the
+window server's side, and its title was its own. A second document was opened
+and the two placed apart — each kept its own title — and then moved onto one
+rectangle, where both titles went empty, a twin was counted for each handle,
+and `close_window` on either was refused naming the shared rectangle. No
+*write* can separate them, which is the refusal working, so the pointer and
+keyboard did: a click inside the rectangle and Cmd-W closed the front one, and
+the survivor's title came back, its twin count went to zero, its AX match
+resolved again, a move was accepted again, and `close_window` closed exactly
+it. The case the new server-side count exists for — a shared rectangle where
+AX reads only one of the two frames — cannot be arranged on a live Mac; what
+is live here is that the count itself answers correctly both ways, which is
+what decides whether a write is aimed.
+
+**The KWin script sweep (Fedora 44 KDE, Plasma 6).** Three questions, each
+measured against KWin rather than reasoned about:
+
+- *Can two copies coexist?* Three `loadScript` calls with the same path
+  returned three distinct ids, and `unloadScript` removed one per call:
+  `(removed, still loaded)` across four rounds was (True, True), (True,
+  True), (True, False), (False, False). So one unload is not a sweep.
+- *Does a second copy do harm?* With the service hosted and one extra copy
+  planted, a single dialog's open and close arrived as **four** events —
+  `new, new, close, close` — against two with one copy. And a copy that
+  outlived its session still delivers to the next session that owns the
+  name, which is the predecessor case.
+- *Does the loop clear what one unload did not?* Two copies planted, the
+  backend brought up over them, and `isScriptLoaded` asked after the
+  session closed its own: with the loop, nothing left loaded; with the
+  single unload this replaces, **a copy survived**. Each window change in
+  both runs still arrived once, because a copy planted while no service was
+  ever up stays quiet — the duplication needs the predecessor state above,
+  which is exactly the one the loop guards.
+
+**Overlapping buttons, captured live (KWin, evdev capture of uinput input).**
+R8's premise is that releases arrive out of press order, which only a capture
+can say. Left down, right down, right up, left up, injected at the kernel seat
+and captured by the recorder's own Wayland backend: `press 1 @2202.018, press
+3 @2202.218, release 3 @2202.419, release 1 @2202.720` — and the normalizer
+emitted the **right** button's click first, which is the queueing order that
+used to hand the first click a bound earlier than its own press.
+
+**No new failure class where placement is used hardest (Debian 13, GNOME).**
+The Qt torture fixture, 104 controls declared, driven on the branch: the same
+four toolkit-unreachable names, 41 menu leaves, no un-dispatched leaf, no
+dialog opened-but-not-reported, and three action-opened dialogs that never
+took keyboard focus — the documented Mutter condition, a subset of the four
+that round recorded, which is the per-dialog intermittency already written
+down. The recorder's full X11 pipeline is green too: on GhostBSD, against its
+own private Xvfb, 89 raw events captured, the generated script named its
+controls, `validate: clean`, the recording re-rendered identically, and the
+replay ran clean against fresh windows.
+
+**The macOS capture check's stop-chord verdict.** The real run reports the
+chord and answers OK, with the replay passing — so reading capture's own stop
+recognition raises no false alarm. With that one fact removed (capture
+recognises no stop press, which is what a Ctrl-C leaves behind) the same run
+reports "the run ended without capture seeing it" and fails, where the old
+check printed "the recorder stopped on the two Escapes" and could still
+answer OK on a recording that validated clean.
+
+## The third review round, driven on the fleet (2026-11-19)
+
+**Window events read from inside a pushed context (Fedora 44 KDE).** The
+backend constructed with a private `GMainContext` pushed as thread-default,
+and a dialog opened and closed while `window_events` was asked for events:
+`new` and `close` both arrive. On the code this replaces the loop ran on the
+global default context, where Gio delivers none of this service's calls.
+
+**A copy of the script loaded from another path is invisible to the sweep,
+and the measurement that proves it.** KWin keys a loaded script by the
+*path* it was loaded from, so the probe deployments of one afternoon --
+`/tmp/pgt-r2/src`, `/tmp/pgt-r2/old/src`, `/tmp/pgt-r2/oldatspi/src` -- each
+registered their own plugin name, and a sweep of one cannot see the others.
+Two of those copies were still resident (their files long deleted; KWin had
+already compiled them) and every window event was arriving **twice** for
+both the old code and the new. Cleared by unloading each name explicitly,
+after which one copy answers once and a second copy doubles it again, as the
+earlier measurement had it. Worth knowing twice over: it is the duplication
+the sweep exists to prevent, reproduced by accident, and it is a trap for
+any deployment that unloads by path.
+
+**The two refusals, measured on a real session bus.** A sweep query that
+cannot be answered is not the same as one there is no method for, and this
+module cannot read a GLib error *code* -- PyGObject is the dependency it may
+be missing -- so it matches the error name in the text. What Gio actually
+produces, driven here against the development box's own bus: a method the
+service does not have is `g-dbus-error-quark: GDBus.Error:org.freedesktop.
+DBus.Error.UnknownMethod: Invalid method call (19)`, and a call that ran out
+of its 200ms budget against a deliberately slow service is `g-io-error-quark:
+Timeout was reached (24)`. The first classifies as "no such method" and keeps
+the single best-effort unload; the second does not, and is retried for the
+sweep's budget before refusing. Both strings are pinned in the tests.
+
+**And the name is now a constant, measured before it was trusted.** The gap
+above is a property of naming a script by its path, which is what the
+one-argument `loadScript(path)` does. KWin's two-argument
+`loadScript(path, pluginName)` takes a name instead, and the four things that
+decide whether that is safe were asked of Plasma 6 directly:
+
+| question | answer |
+|---|---|
+| does the two-argument form load? | yes, script id `0` |
+| what does `isScriptLoaded` answer about? | the **name** (True); the path answers False |
+| a second load under a name already loaded | **`-1`** -- KWin's duplicate check refuses it |
+| another path under the same name | `-1` as well |
+| one `unloadScript(name)` | clears it |
+
+The third row is the one that changes the story: under a constant name a
+second copy cannot be registered at all, so the duplication this sweep was
+built to prevent is impossible for a session that got as far as loading --
+confirmed end to end, with a service hosted and a second copy attempted
+while it ran: refused with `-1`, and one event per window change throughout.
+The `-1` is also why the load now checks for it rather than building a proxy
+for `/Scripting/Script-1`, a path nothing sits at.
+
+Three end-to-end runs on the live session, each with its own dialog: plain;
+with a predecessor's copy planted under the **path** name, which is what a
+version of this package that named scripts by their path would have left and
+what a sweep of the constant alone cannot see (so both names are swept); and
+with a copy planted under the **constant** name, the ordinary
+SIGKILLed-session case. One event per change in all three, and nothing left
+loaded under either name after each.
+
+The rest of the round's KWin work was re-driven on the same session and
+holds: the ownership wait owns the name in 0.00s with and without a pushed
+thread-default context, refuses a second instance in 0.00s ("it answered that
+org.pyguitest.KWinEvents is taken"), ends at 5.01s on a bus that never
+answers ("the session bus did not answer the request within 5.0s"), and
+`window_events` dispatches inside a pushed context.
+
+**macOS (Sequoia 15.8.1), the join and the activation.** One TextEdit run,
+twenty-three checks, and two of them are the round's own:
+
+- **A minimized sibling on one rectangle is counted as a twin.** The
+  visible window's handle, the minimized one's rectangle: the count that
+  reads the full server list answers yes where the visible-only count
+  answered no, which is what keeps `close_window` off the wrong window.
+- **`AXRaise` on a minimized window answers success and leaves it
+  minimized.** So an accepted raise is not proof the window came forward --
+  `activate_window` returned normally for a window that is not on screen and
+  takes no keys, and `focus_window` reported True. Refused now; restoring
+  the window and activating it again works in the same run.
+
+The rest of that run is the round-2 story again, unchanged by the full-list
+twin scan: a lone window moves, resizes and closes and keeps its own title;
+two documents on one rectangle lose their titles and refuse every write; the
+pointer and keyboard separate them; and everything lifts for the survivor.
+Two traps the run turned up, both the probe's rather than the library's: a
+killed TextEdit **restores its documents** on the next launch, stacked on one
+rectangle, so a probe that counts windows at startup must close the extras
+first (the pointer-and-keyboard way, since no write can aim at them); and the
+Cmd-W that does that only lands if the click really made TextEdit frontmost,
+which is worth verifying rather than assuming.

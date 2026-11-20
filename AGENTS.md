@@ -6,6 +6,62 @@ Working conventions for this repo, learned from the maintainer (Dennis K.
 Paulsden) over prior sessions. This is about *how* to work here, not *what
 the code does* — read the source and `docs/` for that.
 
+## Resolve the issue; a note about it is not a resolution
+
+**The default response to a defect is to fix its cause.** Not to describe
+it, not to route around it, not to pin it as a known gap. If you find
+yourself reaching for prose where a fix belongs, that is the signal to stop
+and go fix it.
+
+None of the following count as resolving anything, and none of them should
+be the end state of a task:
+
+- a paragraph in `docs/validation.md`, `CHANGELOG.md` or a docstring saying
+  the thing is broken;
+- a comment explaining the symptom, however well written;
+- a workaround in the caller, a retry loop, a widened timeout or tolerance,
+  a `sleep`, a second attempt "in case the first misses";
+- an `except` that turns a failure into a pass;
+- a skipped, loosened or deleted test, or an assertion weakened to match
+  what the code currently does;
+- a "known gap" set pinned by a test so the gap stays legible — that device
+  is for *scheduling* a fix, never for retiring the question.
+
+**Phrases to treat as alarms in your own output.** "Left open and
+characterised", "reported rather than changed", "recorded here rather than
+fixed", "awaits a future round", "documented from the SDK", "out of scope
+for this change", "pre-existing, so not mine". Each of these has been
+written in this repo about something that was then fixed in an hour. When
+one appears, either fix the thing or ask — do not file it and move on.
+
+**Diagnose to the cause, not to the symptom.** A measurement that says
+*what* fails is the start of the work, not the end: keep going until you can
+say *why*, then fix that. Two routes that differ in one variable is usually
+the cheapest way to get there — the same action driven two ways, the same
+call with one guard neutralized. If a result is nondeterministic, that is a
+race to find, not a flake to retry around.
+
+**The only acceptable reasons to leave something unfixed**, and both of
+them end in asking rather than writing:
+
+1. **The fix is the maintainer's call, not yours** — it changes a public
+   contract, an API shape, or behaviour another repo in the family depends
+   on (a `torture_contract` set six drivers key off, a `Capability` a
+   backend advertises). Say what is wrong, say what the fix is, and ask.
+2. **You are genuinely blocked** — the platform is unreachable this
+   session, a permission you cannot grant is needed, the cause lives in a
+   dependency or compositor you do not control. Say which, and say what you
+   established before you ran out of road.
+
+"It is only a latency", "it only happens on one compositor", and "the SDK
+says it should work" are not on that list.
+
+**Documentation's job is to record a resolved thing.** Write the
+measurement that proves the fix — that is what `docs/validation.md` is for,
+and why its entries name numbers and non-vacuous controls. A docs change
+whose subject is an *unfixed* defect needs the maintainer to have agreed to
+leave it unfixed first.
+
 ## Git workflow
 
 - **AI will never commit.** Never run `git commit` (or `git add` in

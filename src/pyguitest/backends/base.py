@@ -1608,12 +1608,17 @@ class GUIBackend(ABC):
         self.require(Capability.ELEMENT_GEOMETRY)
         raise NotImplementedError
 
-    def element_at(self, x: int, y: int) -> Element | None:
+    def element_at(self, x: int, y: int, *, pid: int | None = None) -> Element | None:
         """The deepest accessible element at a screen coordinate, or None.
 
         The element counterpart of window_at, and takes no `screen`
         argument on purpose: the accessible tree is addressed in one
         desktop-wide coordinate space, with no per-output index to pass.
+
+        `pid` scopes the search to one process. A backend whose coordinates are
+        trustworthy on their own has no need of it and ignores it; it exists for
+        the pure-Wayland case, where scoping to an already-placed window's
+        process is what lets a coordinate be named at all (see `AtspiBackend`).
         """
         self.require(Capability.ELEMENT_GEOMETRY)
         raise NotImplementedError

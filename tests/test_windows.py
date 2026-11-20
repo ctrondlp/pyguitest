@@ -108,7 +108,9 @@ class FakeSway:
 
     def run_command(self, command):
         self.commands.append(command)
-        return []
+        # Per-command success flags are what sway really answers; `reply`
+        # lets a test hand back a refusal or the CLI transport's text.
+        return getattr(self, "reply", [])
 
     def subscribe(self, events=("window",), deadline=None):
         yield from self.events
@@ -288,6 +290,36 @@ class TestSway(unittest.TestCase):
         # sway's `kill` is the graceful xdg close -- the surface gets a
         # close event and the application keeps its "Save changes?" say --
         # not a process kill, despite the name.
+        self.gui.close_window(self.gui.windows()[0])
+        self.assertEqual(self.transport.commands[-1], "[con_id=7] kill")
+
+    def test_a_refused_command_is_not_reported_as_success(self):
+        """Sway answers a command for a vanished window, and says so.
+
+        `[{"success": false, "error": "No matching node."}]` was handed
+        back unexamined and discarded by the caller, so `close_window` on
+        a window that had already gone returned normally -- a close that
+        never happened, reported as one. A stale handle is spelled
+        `WindowNotFound` here as it is everywhere else in this module.
+        """
+        self.transport.reply = [{"success": False, "error": "No matching node."}]
+        with self.assertRaises(WindowNotFound):
+            self.gui.close_window(self.gui.windows()[0])
+
+    def test_any_other_refusal_is_surfaced_too(self):
+        self.transport.reply = [{"success": False, "error": "Invalid command"}]
+        with self.assertRaises(PyGUITestError) as caught:
+            self.gui.close_window(self.gui.windows()[0])
+        self.assertIn("Invalid command", str(caught.exception))
+
+    def test_the_cli_transports_text_reply_is_left_alone(self):
+        """It raises on a non-zero exit, so there is no flag to read.
+
+        `swaymsg` prints human-readable text and exits non-zero on a
+        refusal, which `SwayCLI._run` already turns into an OSError -- so a
+        string reply must not be mistaken for a refusal here.
+        """
+        self.transport.reply = "nothing to report\n"
         self.gui.close_window(self.gui.windows()[0])
         self.assertEqual(self.transport.commands[-1], "[con_id=7] kill")
 

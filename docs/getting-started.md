@@ -9,8 +9,8 @@ already know what you want and just need the signature, go to
 Python 3.10 or newer. Pick the line for your platform:
 
 ```sh
-pip install "pyguitest[atspi]"     # Linux and the BSDs — elements, and input
-pip install "pyguitest[x11]"       # X11 or XWayland — tier-6 reads, native capture
+pip install "pyguitest[atspi]"     # Linux and the BSDs — element automation
+pip install "pyguitest[x11]"       # X11 or XWayland — native capture, and the reads only X11 allows
 pip install "pyguitest[windows]"   # Windows
 pip install "pyguitest[macos]"     # macOS
 ```
@@ -24,10 +24,43 @@ libei). The full set, and which platforms each one is for, is in
 [install.md](install.md#the-extras-all-of-them). Double quotes work in every
 shell, including Command Prompt, which does not strip single ones.
 
+Note what `atspi` does *not* add: it is the element tree, not input. Typing
+and clicking come from a CLI tool the desktop already has, or from `uinput`
+or `eiinput` above — which is why `pyguitest doctor` below reports the two
+separately.
+
+One piece of vocabulary used throughout these pages: every capability sits
+in a **tier**, which says how portable it is rather than how useful. Tier 1
+works everywhere; tier 6 means *deliberately prevented* — reading another
+window's keystrokes, say, which only X11 allows and which Wayland refuses
+by design. So "a tier-6 read" is not a feature you are missing out on; it
+is one the platform has decided nobody gets. The full scale is in
+[api.md](api.md#tiers).
+
 Then ask the machine what else it needs:
 
 ```sh
 pyguitest doctor
+```
+
+It reads like this — abridged, from one GNOME session over Xwayland, so
+yours will differ in the particulars and that is the point of running it:
+
+```text
+session      xwayland
+compositor   mutter (GNOME)
+input        uinput (in-process)
+tools        compare, magick, xclip
+mechanisms   libei, portal, uinput, at-spi, xtest
+note         Mutter implements no foreign-toplevel protocol; window
+             capabilities need a Shell extension
+
+To unlock more capabilities:
+
+  screenshots -- screen capture: no screenshot tool can work on this
+      session, but the Screenshot portal can -- connect(
+      backend="portalcapture"). It prompts for consent once, then the
+      desktop remembers it
 ```
 
 `doctor` prints the exact commands for whatever is missing: your
@@ -60,14 +93,43 @@ script and get different results; this is where that difference shows. A
 desktop that cannot, say, move windows reports it here, and the call raises
 rather than silently doing nothing.
 
+The shape to expect — the same session as above, heavily abridged, with the
+tiers §1 glossed and a `[yes]`/`[ no]` column for *this* session:
+
+```text
+backend      gnomeshell+atspi+uinput+clipboard:xclip+imagesearch:compare+x11
+
+T1 PORTABLE -- No display server involved
+  [yes] IMAGE_LOCATE
+  [yes] PROCESS_LAUNCH
+  [yes] TIMING
+T2 DIRECT -- Core Wayland protocol
+  [yes] SCREEN_INFO
+T3 COMPOSITOR -- Per-desktop backend
+  ...
+```
+
+A `[ no]` is not necessarily a problem to fix: it can be the desktop's
+design (tier 6), a tool to install, or a permission to grant — `doctor` is
+what says which.
+
 ## 3. Drive something
+
+This is the shape of a script rather than one to run: the window and the
+three element names belong to an imagined address-book application, because
+no stock editor has a `Name` field or a `Save` button that answers with a
+`Saved` label, and what matters here is the shape — find the window, act
+through named elements, assert on what the application did. For a script that
+runs as written, [`examples/04_drive_an_editor.py`](../examples/04_drive_an_editor.py)
+launches a real editor with `start_app()`, types into it and closes it; the
+Windows and macOS versions further down are self-contained too.
 
 ```python
 import pyguitest
 
 with pyguitest.connect() as gui:
-    editor = gui.expect_window("Text Editor", timeout=10)
-    gui.activate_window(editor)
+    contacts = gui.expect_window("Contacts", timeout=10)
+    gui.activate_window(contacts)
 
     gui.text_field("Name").set_text("Ada Lovelace")
     gui.button("Save").click()
@@ -84,6 +146,92 @@ substring — pass `re.compile(...)` for a regular expression.
 few capabilities is the normal case, not an error. What raises is *asking for
 something this session cannot do*, and it raises a typed
 `CapabilityUnsupported` naming the capability.
+
+### The same first script on Windows
+
+Everything above is the Linux spelling of a shape that is the same
+everywhere: launch, find the window, act through named elements. On Windows
+the stock editor makes a self-contained first script — run it from the
+logged-in desktop session, since a service or SSH shell has no desktop to
+drive:
+
+```python
+import pyguitest
+from pyguitest import Role
+
+with pyguitest.connect() as gui, gui.start_app(["notepad.exe"]) as app:
+    window = gui.expect_window("Notepad", timeout=15)
+    if not gui.focus_window(window):
+        raise RuntimeError("Notepad did not take keyboard focus")
+    gui.type_text("Hello from pyguitest")
+    gui.close_window(window)  # asks; Notepad answers, or just goes
+    prompt = gui.wait_for_element(Role.PUSH_BUTTON, "Don't Save", timeout=5)
+    if prompt is not None:
+        prompt.click()
+    if not gui.wait_window_close(window, timeout=5):
+        raise RuntimeError("Notepad is still open")
+```
+
+Three things in there are the shape of every script that types, not Notepad
+quirks. `focus_window` rather than `activate_window`: activating asks the
+window manager once and returns at once, so text typed straight afterwards
+can land in whatever held focus before — `focus_window` asks, confirms the
+window actually holds focus, retries, and reports `False` when it never
+did, which is the one answer worth stopping on. `wait_for_element` rather
+than `button` for the prompt: `close_window` returns as soon as the request
+is delivered, and the application puts its prompt up a moment later, so a
+lookup that does not wait finds nothing. And the prompt is met rather than
+assumed: `close_window` posts the same request the title-bar button does,
+so an application with unsaved work answers with its own prompt rather than
+exiting — which is the behaviour a test usually wants to meet head-on. But
+Windows 11's Notepad, left on its default *Open content from the previous
+session* setting, keeps unsaved text for the next launch and closes without
+asking, so a script that *requires* the prompt fails on a stock machine.
+`wait_for_element` returns `None` when nothing appears in time, where
+`expect_element` would raise; the script takes either answer and then
+confirms the one thing it actually wanted, that the window is gone.
+
+Run it with no other Notepad window open: `"Notepad"` matches any window of
+that title, and the first script has no better handle to go by — on
+Windows 11, `notepad.exe` is a short-lived launcher that hands off to the
+packaged app, so `app.pid` is *not* the window's process and
+`expect_window(pid=app.pid)` would wait for a window that never comes.
+Packaged Store applications launch by a different spelling; see
+[recipes.md](recipes.md#native-macos-and-windows-applications).
+
+### And on macOS
+
+```python
+import pyguitest
+
+with pyguitest.connect() as gui, gui.start_app(["TextEdit"]) as app:
+    # TextEdit decides what to show at launch: a blank document, or on a
+    # Mac signed into iCloud the iCloud Drive browser. Wait for whichever
+    # it is, then ask for a document outright -- File > New works from
+    # either -- and find *that* one. A document-based app titles its
+    # window after the document, so look by process and title, not by
+    # the app's name.
+    opened = gui.expect_window(pid=app.pid, timeout=15)
+    if not gui.focus_window(opened):
+        raise RuntimeError("TextEdit did not come to the front")
+    gui.send_keys("#(n)")
+    window = gui.expect_window("Untitled", pid=app.pid, timeout=15)
+    if not gui.focus_window(window):
+        raise RuntimeError("TextEdit did not take keyboard focus")
+    gui.type_text("Hello from pyguitest")
+```
+
+Before this runs, System Settings must grant the permissions listed in
+§1 — `doctor` says which are missing. `start_app` takes the installed-app
+name and launches the bundle properly; the plain-executable pattern breaks
+on `.app` bundles in measured ways, also in
+[recipes.md](recipes.md#native-macos-and-windows-applications). The
+`File > New` step is what makes the script land its text in a document of
+its own: with iCloud Drive on for TextEdit — the default on a Mac signed
+into iCloud — the first window up is the file browser, and typing into it
+searches rather than writes. `#` is how `send_keys` spells the Command key
+on macOS; [api.md](api.md#modifier-prefixes) says what the prefix holds on
+the other platforms.
 
 ## Which API should I use?
 

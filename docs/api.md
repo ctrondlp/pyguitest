@@ -235,7 +235,7 @@ The recommended way to drive an application: match on what a widget is and what 
 | [`window_element(title: str \| re.Pattern[str])`](#window_element) | [`ELEMENT_TREE`](#cap-element_tree) — uses [`WINDOW_LIST`](#cap-window_list) if present | The accessible Element for the window matching `title`. |
 | [`focused()`](#focused) | uses [`ELEMENT_TREE`](#cap-element_tree), [`WINDOW_STATE`](#cap-window_state) if present | The accessible element that currently has keyboard focus, or None. |
 | [`focus_tracking_works()`](#focus_tracking_works) | uses [`ELEMENT_TREE`](#cap-element_tree), [`WINDOW_STATE`](#cap-window_state) if present | Whether this desktop actually publishes per-widget keyboard focus. |
-| [`element_at(x: int, y: int)`](#element_at) | [`ELEMENT_GEOMETRY`](#cap-element_geometry) | The deepest accessible element at a screen coordinate, or None. |
+| [`element_at(x: int, y: int, *, pid: int \| None = None)`](#element_at) | [`ELEMENT_GEOMETRY`](#cap-element_geometry) | The deepest accessible element at a screen coordinate, or None. |
 | [`extents(element: Element)`](#extents) | [`ELEMENT_GEOMETRY`](#cap-element_geometry) | `element`'s (x, y, width, height) in screen coordinates. |
 | [`tree_items(root: Element, *, role: str \| None = None, max_depth: int = 24)`](#tree_items) | [`ELEMENT_ACTION`](#cap-element_action), [`ELEMENT_TREE`](#cap-element_tree) | Every descendant of `root`, opening collapsed branches to reach them. |
 | [`row_values(row: Element)`](#row_values) |  | `row`'s own column values, as plain text, one per child cell. |
@@ -609,7 +609,7 @@ rather than a desktop that cannot report focus.
 ### `element_at`
 
 ```python
-element_at(x: int, y: int)
+element_at(x: int, y: int, *, pid: int | None = None)
 ```
 
 **Parameters**
@@ -618,6 +618,7 @@ element_at(x: int, y: int)
 |-----------|------|---------|
 | `x` | `int` | **required** |
 | `y` | `int` | **required** |
+| `pid` | `int \| None` | `None` |
 
 **Returns** `Element | None`
 
@@ -630,6 +631,14 @@ origin -- makes one element claim every point, and nothing here can
 tell that apart from a correct answer, so a caller turning a
 coordinate into a locator should check that the element it got back
 really covers the point (extents() says).
+
+`pid` scopes the search to one process's windows. On a pure Wayland
+session, where an unscoped coordinate lookup is refused (a client is
+never told where its windows sit on screen), naming the process of a
+window already placed -- by `window_at`, which resolves stacking --
+is what lets this answer at all: only that process's toplevels are
+placed, through the window backend that knows their positions. Ignored
+where coordinates are trustworthy on their own (X11, Windows, macOS).
 
 ### `extents`
 
@@ -1985,10 +1994,15 @@ growth, with the state read `is_window_maximized` to verify it --
 drive a layout at its largest for a responsive-UI check, then
 restore and confirm the window really left the state.
 
-On Windows -- and only there -- maximizing also *activates* the
-window: `SW_MAXIMIZE` is documented to, and no non-activating
-spelling exists, where every other backend's maximize leaves focus
-alone. Re-focus the window your next input is for.
+This promises nothing about keyboard focus, in either direction:
+where the next step is input, check `active_window()` first, or use
+`focus_window` on the window you mean. What has been observed is that
+every backend's maximize leaves focus where it was, Windows included
+-- and on Windows that is a measurement, not a contract.
+`SW_MAXIMIZE` is documented to activate the window it maximizes and
+has no non-activating spelling, so this used to tell you to re-focus
+afterwards; driven live against another application's window, which
+is the only thing pyguitest ever maximizes, it did not.
 
 Needs Capability.WINDOW_MAXIMIZE, which is declared only where the
 desktop genuinely has the concept: X11, Windows, COSMIC, and GNOME
@@ -4782,7 +4796,6 @@ A connected automation session.
 
 ```python
 Session(
-    self,
     backend: GUIBackend,
     environment: Environment,
     event_delay: float = 0.0,
@@ -5448,10 +5461,17 @@ Two exceptions to "literally", and the first is the one that bites.
 `\r` each send Enter and `\t` sends Tab, because that is what
 send_keys does with them, so text carrying Windows line endings sends
 *two* Returns per break (`"a\r\nb"` arrives as a, Enter, Enter, b) and
-a tab arrives as a focus change rather than as whitespace. Normalise
-the line endings first, or use type_text for text that has to arrive
-exactly as written -- it is the keymap-aware path and reads no syntax
-at all.
+a tab arrives as a focus change rather than as whitespace.
+
+Normalise the line endings to LF before calling this, and note that
+type_text is not the way around it. Where a control character is a
+command rather than text -- `_CONTROL_VK` on win32, `_CONTROL_KEYSYMS`
+on x11 and the portal -- it sends `\r` and `\n` as Enter too, so CRLF
+arrives as two Enters by that route as well; macOS posts each as the
+character it is (`CGEventKeyboardSetUnicodeString`), and what the
+target makes of a bare carriage return is then its decision rather
+than the package's. No route collapses a CRLF into one break;
+normalising first is the fix.
 
 The second, deliberately kept from upstream: `&` (AltGr) is not
 escaped, so a `&` in `text` is read as the modifier. `{&}` is the literal
