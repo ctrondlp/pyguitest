@@ -315,13 +315,15 @@ def click_by_pointer(element: Element, reason: str) -> None:
     capabilities -- those belong to whichever input backend the session was
     built with, not to the accessibility one.
 
-    `AtspiBackend` reaches here too, as a second rung rather than a second
-    attempt at the same wall: it tries dogtail's own `Node.click()` first,
-    but modern dogtail injects through GNOME's gnome-ponytail-daemon, so on
-    a desktop without that daemon -- GhostBSD/X11, KWin, sway -- dogtail
-    refuses while this session's `x11`/`uinput`/compositor pointer clicks
-    perfectly well. The two rungs have different dependencies, which is why
-    trying the second one is worth doing.
+    `AtspiBackend` reaches here too, and reaches it *first*: dogtail's own
+    `Node.click()` is the rung after this one there, for a session that
+    cannot point at a rectangle. Both orders have been measured. With dogtail
+    first, a desktop without GNOME's gnome-ponytail-daemon -- GhostBSD/X11,
+    KWin, sway -- refused loudly and this rung recovered the click; but a
+    GNOME/Wayland session did something worse than refuse, injecting nothing
+    and raising nothing, so this rung was never reached and `via="pointer"`
+    silently clicked nowhere. A rung that can fail silently cannot be the one
+    that goes first.
 
     `reason` is the backend's own account of what it tried, in this
     platform's words; this appends the one thing the pointer route needs and
@@ -801,9 +803,16 @@ class Element(Protocol):
         default action, AT-SPI's `click`. Where the element publishes none at
         all, the click falls back to the pointer at the element's own
         rectangle, which is what a person does with a widget that offers
-        nothing; `click_by_pointer` is that step on Windows and macOS, and on
-        Linux it is dogtail's own coordinate click, already the last item in
-        the ladder there.
+        nothing; `click_by_pointer` is that step on all three backends,
+        aiming this session's own pointer. On Linux dogtail's own coordinate
+        click is the rung *after* it, for a session that cannot point at a
+        rectangle -- one built with the accessibility half alone, or a
+        compositor publishing no `ELEMENT_GEOMETRY`. That order is the way
+        round it is because dogtail does not always fail loudly where it
+        cannot work: measured on a GNOME/Wayland session, its injection went
+        nowhere and raised nothing, so with it first `via="pointer"` moved no
+        pointer and clicked nothing at all while the session's own pointer was
+        working perfectly in the same script.
 
         An element with no session behind it -- one taken straight from a
         backend -- has no pointer to reach, and raises `ElementNotActionable`

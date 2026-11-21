@@ -593,6 +593,31 @@ class TestTheRoleTable(unittest.TestCase):
         self.assertIn("AXButton", macos._ax_roles("button"))
         self.assertIsNone(macos._ax_roles(None))
 
+    def test_a_search_for_a_dialog_visits_windows(self):
+        """A dialog's own role is `AXWindow`, so the walk has to go there.
+
+        Without this a search for `dialog` matched `AXSheet` alone and walked
+        straight past every modal on the desktop -- which is what the live
+        measurement found: nothing on a Mac answered `role="dialog"`.
+        """
+        wanted = macos._ax_roles(Role.DIALOG)
+        self.assertIn("AXWindow", wanted)
+        self.assertIn("AXSheet", wanted)
+        self.assertIn("AXDialog", wanted)
+
+    def test_a_search_for_a_window_still_names_windows(self):
+        self.assertIn("AXWindow", macos._ax_roles(Role.WINDOW))
+
+    def test_every_mapped_subrole_is_an_atspi_name(self):
+        constants = {
+            value
+            for name, value in vars(Role).items()
+            if not name.startswith("_") and isinstance(value, str)
+        }
+        for subrole, reported in macos._AX_SUBROLES.items():
+            self.assertTrue(subrole.startswith("AX"), subrole)
+            self.assertIn(reported, constants, f"{subrole} -> {reported}")
+
     def test_a_raw_ax_role_can_be_searched_for(self):
         # A caller who read `AXTextField` off a live tree should be able to ask for it
         # by the name AX uses.
@@ -2333,6 +2358,52 @@ class TestElementReading(BackendTestCase):
         self.assertEqual(self.element(role="AXButton").role, Role.PUSH_BUTTON)
         self.assertEqual(self.element(role="AXTextField").role, Role.ENTRY)
         self.assertEqual(self.element(role="AXWindow").role, Role.WINDOW)
+
+    def test_a_window_whose_subrole_says_dialog_is_a_dialog(self):
+        """The one place AX publishes it, and the table used to miss it entirely.
+
+        Measured on macOS 15.8.1: a dialog raised in the logged-in session
+        read `role='AXWindow' subrole='AXSystemDialog'`, where a Terminal
+        window read `AXWindow`/`AXStandardWindow`. `_AX_ROLES` has carried
+        `AXDialog` and `AXSystemDialog` since this backend landed and nothing
+        ever matched them -- those names arrive as a *subrole*, so every Mac
+        modal was reported as a plain `window`.
+        """
+        for subrole in ("AXDialog", "AXSystemDialog"):
+            node = self.element(role="AXWindow", attrs={"kAXSubroleAttribute": subrole})
+            self.assertEqual(node.role, Role.DIALOG, subrole)
+
+    def test_an_ordinary_windows_subrole_leaves_it_a_window(self):
+        for subrole in (
+            "AXStandardWindow",
+            "AXFloatingWindow",
+            "AXSystemFloatingWindow",
+            # A subrole this table has never heard of is not evidence of
+            # anything, and neither is one the element does not publish.
+            "AXSomethingNew",
+            "",
+        ):
+            node = self.element(role="AXWindow", attrs={"kAXSubroleAttribute": subrole})
+            self.assertEqual(node.role, Role.WINDOW, subrole)
+        self.assertEqual(self.element(role="AXWindow").role, Role.WINDOW)
+
+    def test_a_sheet_is_still_a_dialog_by_its_role_alone(self):
+        # AXSheet really is a *role*, unlike the two above, and a sheet is the
+        # modal shape AppKit attaches to a window.
+        self.assertEqual(self.element(role="AXSheet").role, Role.DIALOG)
+
+    def test_only_a_window_pays_for_the_subrole_read(self):
+        """The cost, kept where it earns itself -- as `_AX_PARENT_ROLES` does.
+
+        A tree walk reads the role of everything; a subrole read on every one
+        of those would be a second round trip per element for an answer only a
+        toplevel can give.
+        """
+        button = FakeElement(role="AXButton")
+        macos.Element(button, self.backend).role
+        reads = [name for name in button.attrs if name]
+        self.assertNotIn("kAXSubroleAttribute", button.attrs)
+        self.assertEqual(reads, ["kAXRoleAttribute"])
 
     def test_a_title_is_the_name_and_a_description_is_the_fallback(self):
         # Measured: a control drawn as an image has no title and publishes its label as

@@ -341,6 +341,12 @@ interviewed, where `unknown` is exactly what happened.
 _AX_ROLES = {
     # -- windows and containers --------------------------------------------
     "AXApplication": "application",
+    # Every toplevel an application opens is an `AXWindow`; *what kind* it is
+    # lives in `kAXSubroleAttribute`, which is why `role` consults
+    # `_AX_SUBROLES` for this one name. `AXDialog` and `AXSystemDialog` are
+    # below as well because a subrole string is a role name a caller can also
+    # search for directly (see `_ax_roles`), and because AX is not consistent
+    # about which attribute carries them.
     "AXWindow": Role.WINDOW,
     "AXSheet": Role.DIALOG,
     "AXDialog": Role.DIALOG,
@@ -495,6 +501,50 @@ def _ax_role_in_context(raw: str, parent_raw: str | None) -> str | None:
     return by_parent.get(parent_raw)
 
 
+_AX_SUBROLES = {
+    "AXDialog": Role.DIALOG,
+    "AXSystemDialog": Role.DIALOG,
+}
+"""Window subroles that mean something more specific than `window`.
+
+**The one place AX publishes "this is a dialog".** Every toplevel a Mac
+application opens has `kAXRoleAttribute` of `AXWindow`; which *kind* of window
+it is lives in `kAXSubroleAttribute` -- `AXStandardWindow` for an ordinary one,
+`AXDialog` or `AXSystemDialog` for a modal. Measured on macOS 15.8.1, both
+sides of it: a dialog raised in the logged-in session read
+`role='AXWindow' subrole='AXSystemDialog' title='' roleDescription='system
+dialog'`, while a Terminal window read `AXWindow`/`AXStandardWindow` with its
+title. `_AX_ROLES` has carried `AXDialog` and `AXSystemDialog` since the
+backend landed, and nothing ever matched them: those names do not arrive as a
+*role*, so every Mac dialog was reported as a plain `window` -- the role an
+ordinary window has, which is the one answer that makes a dialog
+indistinguishable from the application behind it.
+
+That mattered beyond tidiness. `role="dialog"` is how a portable script scopes
+a lookup to the modal it just opened (`gui.window_element` aside, it is what
+`gui.element(role=Role.DIALOG, ...)` asks for), and how
+`pyguitest-recorder`'s resolver recognises a toplevel that is stacked over
+another and about to go away. Both silently had nothing to match on a Mac.
+
+A subrole this table does not know leaves the role alone: `AXStandardWindow`,
+`AXFloatingWindow` and `AXSystemFloatingWindow` are all windows, and an
+unmapped subrole is not evidence of anything else. The read costs one extra
+attribute, and only for an element whose own role is `AXWindow` -- the same
+shape `_AX_PARENT_ROLES` uses to pay for its parent read only where it
+matters.
+"""
+
+_AX_SUBROLE_ROLES = frozenset({"AXWindow"})
+"""The raw roles whose subrole is consulted -- see `_AX_SUBROLES`."""
+
+
+def _ax_role_by_subrole(raw: str, subrole: str | None) -> str | None:
+    """The role for `raw` given its subrole, or None if unaffected."""
+    if raw not in _AX_SUBROLE_ROLES or not subrole:
+        return None
+    return _AX_SUBROLES.get(subrole)
+
+
 _AX_ACTIONS = {
     "AXPress": "click",
     "AXShowMenu": "show menu",
@@ -620,6 +670,13 @@ def _ax_roles(role: str | Sequence[str] | None):
     for raw, by_parent in _AX_PARENT_ROLES.items():
         if wanted & set(by_parent.values()):
             named.add(raw)
+    # And the subrole-dependent one, for the same reason: a dialog's own role
+    # is `AXWindow`, so a search for `dialog` that did not visit windows would
+    # walk straight past every modal on the desktop. Which of the windows
+    # visited actually match is decided per element in `_build_predicate`,
+    # off the role read *with* its subrole.
+    if wanted & set(_AX_SUBROLES.values()):
+        named |= _AX_SUBROLE_ROLES
     for one in names:
         if one.startswith("AX"):
             named.add(one)
@@ -830,8 +887,20 @@ class Element:
         inside an `AXList`. `_AX_PARENT_ROLES` has the measurements; the
         parent read it costs happens only for an element whose own role is one
         of those two.
+
+        A window is read with its *subrole*, for the same kind of reason and
+        at the same kind of cost: `AXWindow` is every toplevel, and whether
+        one is a dialog is published in `kAXSubroleAttribute` alone. See
+        `_AX_SUBROLES` -- without this a Mac modal answered `window`, the same
+        as the application window behind it.
         """
         raw = self._read(self._ax.kAXRoleAttribute, "")
+        if raw in _AX_SUBROLE_ROLES:
+            by_subrole = _ax_role_by_subrole(
+                raw, self._read(self._ax.kAXSubroleAttribute, "")
+            )
+            if by_subrole is not None:
+                return by_subrole
         if raw in _AX_PARENT_ROLES:
             parent = self._backend._parent(self.node)
             if parent is not None:
@@ -2888,14 +2957,15 @@ class MacosBackend(GUIBackend):
             if wanted is not None and raw not in wanted:
                 return False
             # `_ax_roles` widened the walk to include the AX names whose role
-            # depends on their container, so the ones that are not actually
-            # what was asked for are rejected here -- by the role read in
-            # context, which is the same answer `Element.role` gives. Without
-            # this, asking for a page tab returns every radio button, and
-            # asking for a radio button returns the tabs.
+            # depends on their container or their subrole, so the ones that are
+            # not actually what was asked for are rejected here -- by the role
+            # read in context, which is the same answer `Element.role` gives.
+            # Without this, asking for a page tab returns every radio button,
+            # asking for a radio button returns the tabs, and asking for a
+            # dialog returns every window on the desktop.
             if (
                 asked is not None
-                and raw in _AX_PARENT_ROLES
+                and (raw in _AX_PARENT_ROLES or raw in _AX_SUBROLE_ROLES)
                 and element.role not in asked
                 and raw not in asked
             ):

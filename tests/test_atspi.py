@@ -2215,16 +2215,65 @@ class TestWaylandElementGeometry(AtspiTestCase):
         session.extents.assert_not_called()
         session.click_element.assert_not_called()
 
-    def test_click_with_no_rectangle_chains_dogtail_s_refusal_underneath(self):
-        # The refusal says what the session could not do; the cause names
-        # the rung this desktop lacks. Without the chain a ponytail-less
-        # desktop reads as "no session".
+    def test_click_with_no_rectangle_refuses_in_the_sessions_own_words(self):
+        """No rectangle closes the only rung a pointing session has.
+
+        dogtail is not asked here, and there is nothing to chain underneath:
+        with the session's pointer as the first rung (see
+        `_click_by_coordinate`), the refusal is the session's own, and "no
+        rectangle" is the whole of it -- dogtail needs a rectangle too, read
+        from the same AT-SPI component, so trying it could only produce the
+        same answer in another voice.
+        """
         node = self._ponytail_less_node()
         session = self._pointer_session(extents=None)
         with self.assertRaises(ElementNotActionable) as ctx:
             self.atspi.Element(node, session).click()
         self.assertIn("no rectangle", str(ctx.exception))
-        self.assertIsInstance(ctx.exception.__cause__, RuntimeError)
+        self.assertFalse(node.clicked)
+        session.click_element.assert_not_called()
+
+    def test_a_session_that_can_point_never_reaches_dogtails_click(self):
+        """The order the measurement forced, pinned.
+
+        Measured on Debian 13 GNOME/Wayland against an XWayland client:
+        dogtail's injection did nothing *and raised nothing*, so with it
+        first the session's own pointer -- which worked -- was never reached
+        and `click(via="pointer")` silently clicked nowhere. A session that
+        can drive a pointer at a rectangle must not depend on dogtail
+        failing loudly first.
+        """
+        node = FakeNode(name="Open", role="menu item", actions={"ShowMenu": {}})
+        session = self._pointer_session()
+        element = self.atspi.Element(node, session)
+        element.click(via="pointer")
+        session.click_element.assert_called_once_with(element)
+        self.assertFalse(node.clicked)
+
+    def test_dogtail_is_still_the_rung_for_a_session_that_cannot_point(self):
+        # A session built with the accessibility half alone, or a compositor
+        # with no ELEMENT_GEOMETRY: dogtail's own click is then the only
+        # coordinate route there is, and it is still taken.
+        node = FakeNode(name="Open", role="menu item", actions={"ShowMenu": {}})
+        session = self._pointer_session()
+        session.supports.return_value = False
+        self.atspi.Element(node, session).click(via="pointer")
+        self.assertTrue(node.clicked)
+        session.click_element.assert_not_called()
+
+    def test_the_pointer_rung_needs_geometry_as_well_as_a_pointer(self):
+        # All three capabilities, because that rung reads the rectangle, moves
+        # to it and clicks. A session that can inject but cannot measure --
+        # Hyprland, measured, which publishes no ELEMENT_GEOMETRY -- has
+        # dogtail as its route rather than a CapabilityUnsupported from the
+        # extents read.
+        node = FakeNode(name="Open", role="menu item", actions={"ShowMenu": {}})
+        session = self._pointer_session()
+        session.supports.side_effect = lambda capability: (
+            capability != (pyguitest.Capability.ELEMENT_GEOMETRY)
+        )
+        self.atspi.Element(node, session).click(via="pointer")
+        self.assertTrue(node.clicked)
         session.click_element.assert_not_called()
 
     def test_a_hang_in_the_pointer_rung_stays_a_hang(self):
