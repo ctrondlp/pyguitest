@@ -254,6 +254,35 @@ def _at_point(coords, node, x, y):
     return _run_bounded(_DEFAULT_CALL_TIMEOUT, _call)
 
 
+def _can_drive_a_pointer(session) -> bool:
+    """Whether `session` can click the pointer at an element's rectangle.
+
+    The precondition for `_click_by_coordinate`'s first rung, asked of the
+    session's own capabilities rather than discovered by trying and catching:
+    all three are needed, because that rung reads the element's rectangle
+    (`ELEMENT_GEOMETRY`), moves the pointer to it (`POINTER_MOVE`) and clicks
+    (`POINTER_BUTTON`), and a session missing any of them has dogtail's own
+    click as its only coordinate route.
+
+    False for no session at all -- an element taken straight from a backend --
+    and for a `supports()` that raises, which is a session answering nothing
+    rather than answering no.
+    """
+    if session is None:
+        return False
+    try:
+        return all(
+            session.supports(capability)
+            for capability in (
+                Capability.POINTER_MOVE,
+                Capability.POINTER_BUTTON,
+                Capability.ELEMENT_GEOMETRY,
+            )
+        )
+    except Exception:  # noqa: BLE001 - a session that cannot answer cannot point
+        return False
+
+
 def _frame_pid(frame):
     """A toplevel frame's process id, or None.
 
@@ -1213,34 +1242,50 @@ class Element:
         self._click_by_coordinate()
 
     def _click_by_coordinate(self):
-        """The pointer route: dogtail's coordinate click, then the session's.
+        """The pointer route: the session's own pointer, then dogtail's click.
 
         The step `click(via="auto")` falls to when the element offers no
         Action interface, and the whole of `click(via="pointer")`.
 
-        dogtail is tried first because where it works it needs nothing of the
-        session, but it is not the only coordinate rung available and it is
-        not the session's own: modern dogtail injects through GNOME's
-        gnome-ponytail-daemon, so on a desktop without that daemon it refuses
-        outright -- GhostBSD/X11, KWin, sway -- while the `x11`, `uinput` or
-        compositor pointer the same session was built with is perfectly able
-        to click. `click_by_pointer` is the rung UI Automation and AX already
-        end on, and this now ends there too, which is what makes "three
-        backends, one contract" true rather than nearly true.
+        **The session's pointer goes first, and that order is a bug fix.**
+        dogtail used to be tried first, on the reasoning that where it works
+        it needs nothing of the session -- true, and it misses the case that
+        matters: dogtail does not always *fail loudly* where it cannot work.
+        Measured on a Debian 13 GNOME/Wayland session driving an XWayland
+        client, `x11+atspi` composed and every pointer capability reported:
 
-        Measured live on GhostBSD, replaying a recording: a menu item that
-        publishes no click action raised `ElementNotActionable` naming a
-        daemon that platform has never had, in a session whose x11 pointer
-        had just served thousands of `gui.click()` calls. The second rung
-        turns that into the click the caller asked for; where it also has
-        nothing to work with -- no session, or no rectangle to aim at --
-        `click_by_pointer` raises the same typed refusal, so an element that
-        genuinely cannot be clicked still says so.
+            gui.move_mouse(centre); gui.click()   -> the dialog opened
+            gui.click_element(element)            -> the dialog opened
+            element.click(via="pointer")          -> nothing happened at all
 
-        AT-SPI's INT_MIN "not showing" sentinel is handled the same way: the
-        element has no position dogtail can use, but the session may still
-        have extents for it.
+        The pointer did not move and nothing was clicked: dogtail's injection
+        went nowhere on that compositor and raised nothing, so the second
+        rung -- the session's own pointer, which had just served the two calls
+        above -- was never reached. `via="pointer"` is the route a caller asks
+        for when the user pathway is the point (it is what
+        `pyguitest-recorder`'s `--click-via pointer` emits, for exactly that
+        reason), and it was silently doing nothing on a whole class of
+        desktop.
+
+        So where the session can drive a pointer at a rectangle -- the three
+        capabilities below -- that is the route, through `click_by_pointer`,
+        the same rung UI Automation and AX end on. It is the mechanism every
+        other input call in the script already uses, it moves the real
+        pointer, and a failure in it is reported rather than silent.
+
+        dogtail's own click remains the rung for a session that *cannot*
+        point: one built with the accessibility half alone, or a compositor
+        with no `ELEMENT_GEOMETRY` for the rectangle to come from. Its
+        failures are still translated below -- a missing
+        gnome-ponytail-daemon (GhostBSD/X11, KWin, sway) and AT-SPI's INT_MIN
+        "not showing" sentinel -- into the typed refusal an element that
+        genuinely cannot be clicked gets, with the session's pointer tried
+        after it in case the session has extents dogtail did not.
         """
+        session = getattr(self, "_session", None)
+        if _can_drive_a_pointer(session):
+            click_by_pointer(self, "a pointer click is the route this click takes")
+            return
         try:
             _run_bounded(_DEFAULT_CALL_TIMEOUT, self.node.click)
         except BackendCallTimeout:

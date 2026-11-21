@@ -5,6 +5,72 @@ All notable changes to pyguitest are recorded here. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html) — with the usual
 0.x caveat that the API may still change between minor versions.
 
+## [0.27.0] — 2026-11-21
+
+A minor for one changed answer: a macOS dialog now reports the `dialog` role
+it has everywhere else, where it used to report `window`. Nothing is added or
+removed; a script that matched a Mac modal by `role=Role.WINDOW` is the one
+thing that has to change, and a script written for any other platform is the
+thing that starts working.
+
+### Fixed
+
+- **A Mac dialog is a dialog.** `_AX_ROLES` has mapped `AXDialog` and
+  `AXSystemDialog` to `Role.DIALOG` since the backend landed, and nothing ever
+  matched either: those names do not arrive as a *role*. Every toplevel an
+  application opens has `kAXRoleAttribute` of `AXWindow`, and which kind of
+  window it is lives in `kAXSubroleAttribute` — so every modal on a Mac was
+  reported as a plain `window`, the same answer the application window behind
+  it gives, and `gui.element(role=Role.DIALOG, …)` found nothing at all there.
+  Measured on macOS 15.8.1, both sides of it: a dialog raised in the
+  logged-in session read `role='AXWindow' subrole='AXSystemDialog'
+  title='' roleDescription='system dialog'`, a Terminal window
+  `AXWindow`/`AXStandardWindow`. `role` now consults `_AX_SUBROLES` for a
+  window, a `dialog` search visits windows (a dialog's own role being
+  `AXWindow`, a search that skipped them walked past every modal), and the
+  per-element check rejects the windows that are not dialogs — the same shape
+  `_AX_PARENT_ROLES` already used for the two roles AX distinguishes only by
+  their container, and the same one-extra-read cost, paid only for a window.
+  `AXStandardWindow`, `AXFloatingWindow` and an unmapped subrole are all
+  still `window`.
+
+  Verified live: `gui.elements(role=Role.DIALOG)` returns the modal where it
+  returned nothing, `role=Role.WINDOW` no longer returns it, and
+  `pyguitest-recorder`'s resolver — which recognises a toplevel stacked over
+  another by exactly this role — now sees one on a Mac.
+
+- **`Element.click(via="pointer")` moves the pointer again on AT-SPI.** It
+  could silently do nothing at all. The pointer route tried dogtail's own
+  `Node.click()` first and fell back to this session's pointer only when
+  dogtail *raised*; measured on a Debian 13 GNOME/Wayland session driving an
+  XWayland client, with `x11+atspi` composed and every pointer capability
+  reported true:
+
+  ```
+  gui.move_mouse(centre); gui.click()   -> the dialog opened
+  gui.click_element(element)            -> the dialog opened
+  element.click(via="pointer")          -> nothing happened at all
+  ```
+
+  The pointer never moved: dogtail's injection went nowhere on that
+  compositor and raised nothing, so the second rung was never reached. A rung
+  that can fail silently cannot be the one that goes first, so the order is
+  now the session's own pointer (`click_by_pointer`, the rung UI Automation
+  and AX already end on) and dogtail after it, for a session that cannot
+  point at a rectangle — the accessibility half alone, or a compositor
+  publishing no `ELEMENT_GEOMETRY`. Every refusal dogtail's rung used to
+  translate is still translated there. `via="pointer"` is what a caller asks
+  for when the user pathway is the point — `pyguitest-recorder --click-via
+  pointer` emits it for that reason — and it was doing nothing on a whole
+  class of desktop. Verified live on the same box: all four routes now land.
+
+  **The default ladder was affected too**, which is the wider half of this:
+  `Element.click()` falls to the same rung whenever an element publishes no
+  clickable action — a label, a Qt entry on at-spi, KDE's QML Kickoff
+  entries — so those clicks were going nowhere on that compositor as well.
+  Measured after the fix, on an action-less element with the pointer parked
+  far away: `click()` left the pointer exactly at the element's centre.
+
 ## [0.26.1] — 2026-11-17
 
 ### Added
@@ -7079,7 +7145,8 @@ First public release.
 - A `pyguitest` command-line entry point.
 - PEP 561 type information (`py.typed`); no hard runtime dependencies.
 
-[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.26.1...HEAD
+[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.27.0...HEAD
+[0.27.0]: https://github.com/ctrondlp/pyguitest/compare/v0.26.1...v0.27.0
 [0.26.1]: https://github.com/ctrondlp/pyguitest/compare/v0.26.0...v0.26.1
 [0.26.0]: https://github.com/ctrondlp/pyguitest/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/ctrondlp/pyguitest/compare/v0.24.0...v0.25.0
