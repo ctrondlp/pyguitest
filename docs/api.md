@@ -1691,8 +1691,11 @@ What changed on the way here is set out above and in quote_for_type
 -- the `#` Meta prefix the original escaper omitted, a `)` releasing
 only what its own `(` added, and a failure the desktop causes being a
 different exception from a failure the string causes. The notation
-itself did not, so a string written for any of the three ancestors
-means here what it meant there.
+itself did not. One spelling family stayed the win32 backend's own,
+though: Win32::GuiTest's long key names (`{ENTER}`, `{BACKSPACE}`)
+are honoured as second names there and nowhere else, so the
+three-letter abbreviations (`{ENT}`, `{BAC}`) are the spellings a
+string that has to run everywhere uses.
 
 ### `press_key`
 

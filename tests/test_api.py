@@ -2924,6 +2924,20 @@ class TestTypeTextNaturally(unittest.TestCase):
             {"typos": 1.5},
             {"pause": -1},
             {"latency": -1},
+            # Non-finite values answer False to every ordered comparison, so
+            # the range checks alone let NaN through -- and a NaN budget made
+            # `remaining > 0` never sleep, typing the passage flat-out while
+            # looking paced. Finiteness is its own gate, checked first.
+            {"wpm": float("nan")},
+            {"wpm": float("inf")},
+            {"duration": float("nan")},
+            {"duration": float("inf")},
+            {"rhythm": float("nan")},
+            {"drift": float("inf")},
+            {"jitter": float("nan")},
+            {"typos": float("nan")},
+            {"pause": float("inf")},
+            {"latency": float("nan")},
         )
         for kwargs in bad:
             with self.subTest(**kwargs):

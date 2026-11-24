@@ -216,19 +216,27 @@ class Observer:
         backend.type_text = self._on_type
         backend.press_key = self._on_press
 
-    def _note(self, what):
-        now = time.monotonic()
+    def _note(self, what, entered):
         if not self.strokes:
-            self.began = now
-        self.strokes.append((now - self.began, what))
+            self.began = entered
+        self.strokes.append((entered - self.began, what))
 
+    # The timestamp is taken on the way in -- so the gaps measure the
+    # schedule rather than the backend's own latency -- but the record is
+    # committed only after the backend call returns. A Ctrl-C landing
+    # between the two therefore drops the stroke rather than reporting a
+    # keystroke that may never have gone out: the honest reading of an
+    # interrupted dispatch is "uncertain", and an uncertain stroke must not
+    # inflate the delivered count the report below is built from.
     def _on_type(self, text, **kwargs):
-        self._note(text)
+        entered = time.monotonic()
         self._typed(text, **kwargs)
+        self._note(text, entered)
 
     def _on_press(self, key):
-        self._note(BACKSPACE)
+        entered = time.monotonic()
         self._pressed(key)
+        self._note(BACKSPACE, entered)
 
     def restore(self):
         """Put the backend's own methods back."""
@@ -281,10 +289,20 @@ def report(observer, text, window):
     # net one character -- so delivered = strokes - 2 x backspaces.
     backspaces = sum(1 for _, what in strokes if what == BACKSPACE)
     delivered = len(strokes) - 2 * backspaces
+    # The clock starts at the first stroke, so the elapsed time spans
+    # delivered - 1 character intervals -- the same arithmetic budget_for
+    # and the rate table use. Dividing the character count itself by the
+    # elapsed time reported a two-character, one-second run as 24 wpm while
+    # the table beside it said 12.
+    intervals = delivered - 1
+    overall = (
+        f" -> {intervals / total * 60 / WORD_CHARS:.1f} wpm measured overall"
+        if intervals > 0 and total > 0
+        else ""
+    )
     print(
         f"\n{delivered} of {len(text)} characters, {len(strokes)} keystrokes, "
-        f"{total:.2f}s -> {delivered / total * 60 / WORD_CHARS:.1f} wpm "
-        "measured overall"
+        f"{total:.2f}s{overall}"
     )
     print(
         f"gaps: shortest {min(gaps) * 1000:.0f}ms, longest "

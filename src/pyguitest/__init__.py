@@ -2400,9 +2400,30 @@ class Session:
 
         Split out for the same reason _check_natural is -- the complexity
         ceiling is better spent on the part that shapes the rhythm than on
-        eight range checks in a row. Returns `latency` with None resolved to
-        the session's `event_delay`, so the caller cannot forget to.
+        a row of range checks. Returns `latency` with None resolved to the
+        session's `event_delay`, so the caller cannot forget to.
+
+        Finiteness is its own check, first, because every range check below
+        is an ordered comparison and NaN answers False to all of them: a
+        `wpm=float("nan")` sailed through `wpm <= 0`, made the budget NaN,
+        and `remaining > 0` then never slept -- the passage typed flat-out
+        while looking paced. `inf` fails the same gate; the range checks
+        keep rejecting signs and bounds for the finite values that get past
+        it. Resolved `latency` is re-checked after resolution, since the
+        session's own `event_delay` arrives by the same door.
         """
+        for name, value in (
+            ("duration", duration),
+            ("wpm", wpm),
+            ("rhythm", rhythm),
+            ("drift", drift),
+            ("jitter", jitter),
+            ("typos", typos),
+            ("pause", pause),
+            ("latency", latency),
+        ):
+            if value is not None and not math.isfinite(value):
+                raise ValueError(f"{name} must be a finite number, got {value!r}")
         if duration is not None and duration < 0:
             raise ValueError(f"duration must not be negative, got {duration!r}")
         if wpm <= 0:
@@ -2419,8 +2440,10 @@ class Session:
             raise ValueError(f"pause must not be negative, got {pause!r}")
         if latency is None:
             latency = self.event_delay
-        if latency < 0:
-            raise ValueError(f"latency must not be negative, got {latency!r}")
+        if not math.isfinite(latency) or latency < 0:
+            raise ValueError(
+                f"latency must be a finite number, 0 or more, got {latency!r}"
+            )
         return latency
 
     def type_text_naturally(
@@ -2708,8 +2731,11 @@ class Session:
         -- the `#` Meta prefix the original escaper omitted, a `)` releasing
         only what its own `(` added, and a failure the desktop causes being a
         different exception from a failure the string causes. The notation
-        itself did not, so a string written for any of the three ancestors
-        means here what it meant there.
+        itself did not. One spelling family stayed the win32 backend's own,
+        though: Win32::GuiTest's long key names (`{ENTER}`, `{BACKSPACE}`)
+        are honoured as second names there and nowhere else, so the
+        three-letter abbreviations (`{ENT}`, `{BAC}`) are the spellings a
+        string that has to run everywhere uses.
         """
         KeySender(self).send(keys)
 
