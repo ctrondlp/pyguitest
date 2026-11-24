@@ -4,8 +4,10 @@ import ctypes
 import json
 import math
 import os
+import random
 import re
 import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -2643,6 +2645,639 @@ class TestMoveMouseNaturally(unittest.TestCase):
             with self.subTest(**kwargs):
                 with self.assertRaises(ValueError):
                     gui.move_mouse_naturally(400, 300, start=(0, 0), **kwargs)
+
+
+def scatter(values):
+    """Spread as a fraction of the mean: a coefficient of variation.
+
+    The right statistic for comparing the three timing terms, because it is
+    scale-free -- the same number whether the passage was budgeted at one
+    second or thirty -- and because averaging reduces it predictably, which
+    is what separates a per-keystroke jitter from a slow drift.
+    """
+    mean = statistics.fmean(values)
+    return statistics.pstdev(values) / mean
+
+
+PANGRAM = "The quick brown fox jumps over the lazy dog. Pack six boxes!"
+"""One passage for the typing tests: prose, with boundaries worth pausing at.
+
+Long enough for a drift to swell over, and it carries a word boundary, a
+clause-free sentence end and a shifted character, which are three of the
+things the rhythm is supposed to react to.
+"""
+
+
+class _Metronome:
+    """A clock that advances only when something sleeps on it.
+
+    Same device, and the same reasoning, as FakeClock in
+    tests/test_pointer_paths.py: `type_text_naturally` sleeps against the
+    moment it started rather than against the previous keystroke, so on a
+    real clock the recorded sleeps are each short by however long the
+    machine took to get there. Against this one they are the schedule
+    exactly, which is what the assertions below are about -- and they are
+    about arithmetic, not about wall-clock behaviour, so there is nothing
+    load can make untrue.
+    """
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+class _Typist(GUIBackend):
+    """Records what was typed, and in what pieces."""
+
+    name = "typist"
+
+    def __init__(self, caps=None):
+        self.typed: list[str] = []
+        self.keys: list[str] = []
+        self.kwargs: list[dict] = []
+        self._caps = caps or {Capability.TEXT_ENTRY, Capability.KEY_EVENT}
+
+    @property
+    def capabilities(self):
+        return CapabilitySet(self._caps)
+
+    def type_text(self, text, delay=0.0, **kwargs):
+        self.typed.append(text)
+        self.kwargs.append({"delay": delay, **kwargs})
+
+    def press_key(self, key):
+        self.keys.append(key)
+        self.typed.append(f"<{key}>")
+
+    def release_key(self, key):
+        pass
+
+    @property
+    def result(self) -> str:
+        """Everything that reached the backend, in order, as one string."""
+        return "".join(self.typed)
+
+
+class TestTypeTextNaturally(unittest.TestCase):
+    """The text has to be exact; only its timing is allowed to be human."""
+
+    def gui(self, caps=None, **kwargs):
+        backend = _Typist(caps)
+        return pyguitest.Session(backend, pyguitest.detect(), **kwargs), backend
+
+    def driving(self, clock):
+        """Run the body with `clock` standing in for Session's use of time."""
+        return mock.patch.multiple(
+            pyguitest.time, monotonic=clock.monotonic, sleep=clock.sleep
+        )
+
+    def test_the_text_arrives_exactly_and_one_character_at_a_time(self):
+        # The rhythm is the only thing allowed to be approximate. A gap is
+        # per character, so the characters have to be sent separately --
+        # which is also what makes a per-keystroke listener in the
+        # application see what a person's typing looks like.
+        gui, backend = self.gui()
+        gui.type_text_naturally(PANGRAM, duration=0.0)
+        self.assertEqual(backend.result, PANGRAM)
+        self.assertEqual(len(backend.typed), len(PANGRAM))
+
+    def test_an_empty_text_types_nothing_at_all(self):
+        gui, backend = self.gui()
+        with mock.patch("pyguitest.time.sleep") as slept:
+            gui.type_text_naturally("", latency=0.2)
+        self.assertEqual(backend.typed, [])
+        self.assertEqual(slept.call_args_list, [])
+
+    def test_an_empty_text_still_checks_its_arguments(self):
+        # Otherwise a script with a bad argument would pass silently on the
+        # one input that happens to be empty and raise on the next one.
+        gui, _ = self.gui()
+        with self.assertRaises(ValueError):
+            gui.type_text_naturally("", wpm=0)
+
+    def test_the_gaps_sum_to_the_duration_that_was_asked_for(self):
+        clock = _Metronome()
+        gui, _ = self.gui()
+        with self.driving(clock):
+            gui.type_text_naturally(PANGRAM, duration=2.0, latency=0.0)
+        self.assertAlmostEqual(sum(clock.sleeps), 2.0, places=6)
+
+    def test_the_default_duration_comes_from_the_published_rate(self):
+        # n characters have n-1 gaps: there is nothing to wait for after the
+        # last keystroke, and a budget that pretended otherwise would make
+        # every short string measurably slow.
+        clock = _Metronome()
+        gui, _ = self.gui()
+        with self.driving(clock):
+            gui.type_text_naturally(PANGRAM, latency=0.0)
+        expected = (len(PANGRAM) - 1) * 60.0 / (52.0 * 5.0)
+        self.assertAlmostEqual(sum(clock.sleeps), expected, places=6)
+
+    def test_a_higher_rate_types_the_same_text_proportionally_faster(self):
+        totals = {}
+        for wpm in (40.0, 80.0):
+            clock = _Metronome()
+            gui, _ = self.gui()
+            with self.driving(clock):
+                gui.type_text_naturally(PANGRAM, wpm=wpm, latency=0.0)
+            totals[wpm] = sum(clock.sleeps)
+        self.assertAlmostEqual(totals[40.0] / totals[80.0], 2.0, places=6)
+
+    def test_event_delay_is_not_charged_per_character(self):
+        # `event_delay` is the pause between discrete actions. Charged once
+        # per keystroke it would swamp the rhythm this method exists to
+        # shape -- the same rule _walk follows for a pointer path, and the
+        # reason both go straight to the backend.
+        clock = _Metronome()
+        gui, _ = self.gui(event_delay=0.05)
+        with self.driving(clock):
+            gui.type_text_naturally(PANGRAM, duration=0.0)
+        self.assertEqual(clock.sleeps, [0.05])
+
+    def test_latency_defaults_to_the_sessions_event_delay(self):
+        gui, _ = self.gui(event_delay=0.05)
+        with mock.patch("pyguitest.time.sleep") as slept:
+            gui.type_text_naturally("hello", duration=0.0)
+        self.assertEqual(slept.call_args_list[0].args, (0.05,))
+
+    def test_latency_can_be_overridden(self):
+        gui, _ = self.gui(event_delay=0.05)
+        with mock.patch("pyguitest.time.sleep") as slept:
+            gui.type_text_naturally("hello", latency=0.2, duration=0.0)
+        self.assertEqual(slept.call_args_list[0].args, (0.2,))
+
+    def test_pause_adds_one_hesitation_at_a_word_boundary(self):
+        clock = _Metronome()
+        gui, backend = self.gui()
+        with self.driving(clock):
+            gui.type_text_naturally(
+                "alpha beta gamma delta", duration=0.0, latency=0.0, pause=0.4
+            )
+        # Nothing else sleeps at all with the budget set to zero, so the one
+        # recorded sleep is the hesitation -- and it lands where a hand
+        # stops, which is on the first letter of a word rather than inside
+        # one. "gamma" is the first word to begin past the midpoint.
+        self.assertEqual(len(clock.sleeps), 1)
+        self.assertAlmostEqual(clock.sleeps[0], 0.4, places=6)
+        self.assertEqual(backend.result, "alpha beta gamma delta")
+
+    def test_the_hesitation_falls_on_the_first_letter_of_a_word(self):
+        text = "alpha beta gamma delta"
+        plan = pyguitest._typing_plan(
+            text,
+            budget=0.0,
+            mean_gap=0.0,
+            rhythm=1.0,
+            drift=0.0,
+            jitter=0.0,
+            typos=0.0,
+            rng=random.Random(1),
+        )
+        index = pyguitest._hesitation(plan)
+        self.assertEqual(plan[index].char, "g")
+        self.assertEqual(plan[index - 1].char, " ")
+
+    def test_pause_is_ignored_where_there_is_no_part_way_through(self):
+        # One keystroke has no middle to hesitate in, and a pause that
+        # landed in front of it would silently be extra latency instead.
+        clock = _Metronome()
+        gui, _ = self.gui()
+        with self.driving(clock):
+            gui.type_text_naturally("x", latency=0.0, pause=0.4)
+        self.assertEqual(clock.sleeps, [])
+
+    def test_the_same_text_replays_identically(self):
+        # The seeded default, and the reason for it: a second take has to
+        # match the first, and a test on the rhythm has to be trustworthy.
+        schedules = []
+        for _ in range(2):
+            clock = _Metronome()
+            gui, backend = self.gui()
+            with self.driving(clock):
+                gui.type_text_naturally(PANGRAM, latency=0.0)
+            schedules.append((clock.sleeps, backend.typed))
+        self.assertEqual(schedules[0], schedules[1])
+
+    def test_a_given_seed_overrides_the_derived_one(self):
+        schedules = []
+        for _ in range(2):
+            clock = _Metronome()
+            gui, _ = self.gui()
+            with self.driving(clock):
+                gui.type_text_naturally(PANGRAM, latency=0.0, seed=7)
+            schedules.append(clock.sleeps)
+        self.assertEqual(schedules[0], schedules[1])
+
+    def test_a_different_seed_gives_a_different_rhythm(self):
+        # Otherwise the default seed would be decorative and every passage
+        # of the same length would be typed to the same beat.
+        schedules = []
+        for seed in (1, 2):
+            clock = _Metronome()
+            gui, _ = self.gui()
+            with self.driving(clock):
+                gui.type_text_naturally(PANGRAM, latency=0.0, seed=seed)
+            schedules.append(clock.sleeps)
+        self.assertNotEqual(schedules[0], schedules[1])
+
+    def test_a_different_text_gets_a_different_rhythm(self):
+        schedules = []
+        for text in (PANGRAM, PANGRAM.replace("quick", "slick")):
+            clock = _Metronome()
+            gui, _ = self.gui()
+            with self.driving(clock):
+                gui.type_text_naturally(text, duration=1.0, latency=0.0)
+            schedules.append(clock.sleeps)
+        self.assertNotEqual(schedules[0], schedules[1])
+
+    def test_kwargs_reach_the_backend(self):
+        gui, backend = self.gui()
+        gui.type_text_naturally("ab", duration=0.0, allow_keymap_unsafe=False)
+        self.assertEqual(
+            backend.kwargs,
+            [{"delay": 0.0, "allow_keymap_unsafe": False}] * 2,
+        )
+
+    def test_text_entry_is_required(self):
+        gui, backend = self.gui(caps={Capability.KEY_EVENT})
+        with self.assertRaises(CapabilityUnsupported):
+            gui.type_text_naturally("hello", duration=0.0)
+        self.assertEqual(backend.typed, [])
+
+    def test_it_refuses_the_arguments_it_cannot_honour(self):
+        gui, _ = self.gui()
+        bad = (
+            {"duration": -1},
+            {"wpm": 0},
+            {"wpm": -10},
+            {"rhythm": -0.1},
+            {"drift": -0.1},
+            {"jitter": -0.1},
+            {"typos": -0.1},
+            {"typos": 1.5},
+            {"pause": -1},
+            {"latency": -1},
+            # Non-finite values answer False to every ordered comparison, so
+            # the range checks alone let NaN through -- and a NaN budget made
+            # `remaining > 0` never sleep, typing the passage flat-out while
+            # looking paced. Finiteness is its own gate, checked first.
+            {"wpm": float("nan")},
+            {"wpm": float("inf")},
+            {"duration": float("nan")},
+            {"duration": float("inf")},
+            {"rhythm": float("nan")},
+            {"drift": float("inf")},
+            {"jitter": float("nan")},
+            {"typos": float("nan")},
+            {"pause": float("inf")},
+            {"latency": float("nan")},
+        )
+        for kwargs in bad:
+            with self.subTest(**kwargs):
+                with self.assertRaises(ValueError):
+                    gui.type_text_naturally(PANGRAM, **kwargs)
+
+
+class TestTypingTypos(unittest.TestCase):
+    """The correction, which is the one term that changes what is typed."""
+
+    def gui(self, caps=None, **kwargs):
+        backend = _Typist(caps)
+        return pyguitest.Session(backend, pyguitest.detect(), **kwargs), backend
+
+    def test_a_slip_is_a_neighbouring_key_undone_by_a_backspace(self):
+        gui, backend = self.gui()
+        gui.type_text_naturally("hello", duration=0.0, typos=1.0)
+        # Every character slips at typos=1.0, so the shape is exact: a wrong
+        # key, a Backspace, the right key, three times per character.
+        self.assertEqual(len(backend.keys), len("hello"))
+        self.assertEqual(backend.keys, ["BackSpace"] * len("hello"))
+        for index, char in enumerate("hello"):
+            wrong, undo, right = backend.typed[index * 3 : index * 3 + 3]
+            self.assertIn(wrong, pyguitest._NEIGHBOURS[char])
+            self.assertEqual(undo, "<BackSpace>")
+            self.assertEqual(right, char)
+
+    def test_the_intended_text_still_survives_the_corrections(self):
+        gui, backend = self.gui()
+        gui.type_text_naturally(PANGRAM, duration=0.0, typos=1.0)
+        # What is left once every slip-and-undo pair cancels out is the
+        # text, which is the only promise a typo model may not break.
+        typed = backend.typed
+        kept = [
+            char
+            for index, char in enumerate(typed)
+            if char != "<BackSpace>"
+            and not (index + 1 < len(typed) and typed[index + 1] == "<BackSpace>")
+        ]
+        self.assertEqual("".join(kept), PANGRAM)
+
+    def test_a_character_with_no_modelled_neighbour_is_never_mistyped(self):
+        # A newline has no key next to it on the rows this models, and
+        # substituting something arbitrary for it would be a worse lie than
+        # typing it correctly.
+        gui, backend = self.gui()
+        gui.type_text_naturally("a\nb", duration=0.0, typos=1.0)
+        self.assertEqual(backend.typed.count("\n"), 1)
+
+    def test_typos_are_off_by_default(self):
+        gui, backend = self.gui()
+        gui.type_text_naturally(PANGRAM, duration=0.0)
+        self.assertEqual(backend.result, PANGRAM)
+        self.assertEqual(backend.keys, [])
+
+    def test_a_correction_spends_over_the_budget_rather_than_out_of_it(self):
+        # The same contract move_mouse_naturally's overshoot has: the three
+        # extra points are extra. A correction paid for out of the budget
+        # would speed up the rest of the line to afford it.
+        plain, mistyped = [], []
+        for typos, into in ((0.0, plain), (1.0, mistyped)):
+            clock = _Metronome()
+            gui, _ = self.gui()
+            with mock.patch.multiple(
+                pyguitest.time, monotonic=clock.monotonic, sleep=clock.sleep
+            ):
+                gui.type_text_naturally("hello", duration=1.0, latency=0.0, typos=typos)
+            into.append(sum(clock.sleeps))
+        self.assertAlmostEqual(plain[0], 1.0, places=6)
+        self.assertGreater(mistyped[0], 1.0)
+
+    def test_a_typo_needs_key_event_and_says_so_before_typing_anything(self):
+        # Half a line typed and then a raise is the worst of both: the field
+        # is dirty and the script never got to its assertion.
+        gui, backend = self.gui(caps={Capability.TEXT_ENTRY})
+        with self.assertRaises(CapabilityUnsupported):
+            gui.type_text_naturally(PANGRAM, duration=0.0, typos=0.5)
+        self.assertEqual(backend.typed, [])
+
+    def test_a_backspace_free_session_can_still_type_naturally(self):
+        gui, backend = self.gui(caps={Capability.TEXT_ENTRY})
+        gui.type_text_naturally(PANGRAM, duration=0.0)
+        self.assertEqual(backend.result, PANGRAM)
+
+    def test_an_interrupted_correction_does_not_leave_backspace_held(self):
+        # press_key can fail *after* its key-down went out -- x11
+        # synchronizes after emitting -- and a held Backspace autorepeats
+        # into the field. The release has to be attempted on the way out,
+        # and the press's own error is the one that propagates.
+        class _DiesMidPress(_Typist):
+            def __init__(self):
+                super().__init__()
+                self.released: list[str] = []
+
+            def press_key(self, key):
+                super().press_key(key)  # the key-down is already out
+                raise KeyboardInterrupt
+
+            def release_key(self, key):
+                self.released.append(key)
+
+        backend = _DiesMidPress()
+        gui = pyguitest.Session(backend, pyguitest.detect())
+        with self.assertRaises(KeyboardInterrupt):
+            gui.type_text_naturally("a", duration=0.0, typos=1.0)
+        self.assertEqual(backend.released, ["BackSpace"])
+
+    def test_the_press_failure_is_reported_when_the_release_fails_too(self):
+        # A press that failed because the backend died means the release
+        # raises as well; in a plain `finally` that second error would
+        # replace the first, and the first is the one that says what
+        # happened. Same contract as drag's unwind.
+        class _DeadMidPress(_Typist):
+            def press_key(self, key):
+                super().press_key(key)
+                raise RuntimeError("the backend died mid-press")
+
+            def release_key(self, key):
+                raise OSError("and the release cannot reach it either")
+
+        backend = _DeadMidPress()
+        gui = pyguitest.Session(backend, pyguitest.detect())
+        with self.assertRaises(RuntimeError):
+            gui.type_text_naturally("a", duration=0.0, typos=1.0)
+
+
+class TestTypingRhythm(unittest.TestCase):
+    """What the three timing terms do, asserted on the schedule itself.
+
+    `_typing_plan` is a pure function of its arguments and a seeded
+    generator, so these need no session, no clock and no backend: the gaps
+    it returns *are* the rhythm.
+    """
+
+    def plan(self, text=PANGRAM, *, budget=1.0, seed=1, **kwargs):
+        """One schedule, with the defaults the method itself would use.
+
+        `seed=None` resolves to the text-derived seed, as the method does, so
+        a test can pin what an ordinary call produces rather than only what
+        an explicitly seeded one does.
+        """
+        shape = {"rhythm": 1.0, "drift": 0.2, "jitter": 0.35, "typos": 0.0}
+        shape.update(kwargs)
+        return pyguitest._typing_plan(
+            text,
+            budget=budget,
+            mean_gap=budget / max(1, len(text) - 1),
+            rng=random.Random(pyguitest._text_seed(text) if seed is None else seed),
+            **shape,
+        )
+
+    def gaps(self, **kwargs):
+        return [stroke.gap for stroke in self.plan(**kwargs)[1:]]
+
+    def windows(self, gaps, size=10):
+        """Mean gap over each successive window, which is an inverse rate."""
+        return [
+            sum(gaps[start : start + size]) / size
+            for start in range(0, len(gaps) - size, size)
+        ]
+
+    def test_the_first_keystroke_waits_for_nothing(self):
+        # `latency` is the reaction time, and charging a gap in front of the
+        # first character as well would double it.
+        self.assertEqual(self.plan()[0].gap, 0.0)
+
+    def test_the_gaps_sum_to_the_budget_however_they_are_shaped(self):
+        for kwargs in (
+            {},
+            {"rhythm": 0.0},
+            {"drift": 0.0},
+            {"jitter": 0.0},
+            {"rhythm": 3.0, "drift": 0.6, "jitter": 0.9},
+        ):
+            with self.subTest(**kwargs):
+                self.assertAlmostEqual(sum(self.gaps(**kwargs)), 1.0, places=6)
+
+    def test_the_default_rhythm_is_pinned_to_exact_numbers(self):
+        """The cross-version reproducibility claim, as numbers.
+
+        The docstring promises that a passage types identically on every
+        Python this package supports, which is why the lognormal draw is
+        spelled out from `random()` instead of calling `gauss()`. Nothing
+        inside one interpreter can check that, so these are the gaps
+        measured under 3.10, 3.11, 3.12, 3.13 and 3.14 -- byte-identical on
+        all five -- pinned here so a change to how the generator is consumed
+        reddens a test instead of quietly breaking a recorded take.
+
+        Deliberately changing the model means updating these numbers, and
+        that is the point: it should not be possible to do by accident.
+        """
+        gaps = [round(gap, 9) for gap in self.gaps(seed=None)]
+        self.assertEqual(
+            gaps[:6],
+            [
+                0.008706601,
+                0.004332622,
+                0.013318889,
+                0.013970726,
+                0.012583885,
+                0.015730445,
+            ],
+        )
+        self.assertEqual(gaps[-3:], [0.011827313, 0.014566261, 0.025498666])
+
+    def test_the_rhythm_is_flat_only_when_every_term_is_off(self):
+        flat = self.gaps(rhythm=0.0, drift=0.0, jitter=0.0)
+        self.assertEqual(len({round(gap, 9) for gap in flat}), 1)
+        shaped = self.gaps()
+        self.assertGreater(len({round(gap, 9) for gap in shaped}), 10)
+
+    def test_the_rate_waxes_and_wanes_across_the_passage(self):
+        # The thing an even stream most obviously lacks, and the reason
+        # `drift` is a separate term from `jitter`: it is coherent over a
+        # window of ten keystrokes where scatter is not, so averaging does
+        # not remove it. A long passage, so the swells have room to be slow.
+        text = PANGRAM * 4
+        drifting = scatter(self.windows(self.gaps(text=text, jitter=0.0, drift=0.35)))
+        steady = scatter(self.windows(self.gaps(text=text, jitter=0.0, drift=0.0)))
+        self.assertGreater(drifting, 0.1)
+        self.assertLess(steady, drifting / 2)
+
+    def test_jitter_scatters_single_gaps_far_more_than_whole_windows(self):
+        # The other half of that separation. Averaging ten independent
+        # draws cuts their scatter by about the root of ten, so a window
+        # mean is far steadier than the gaps in it -- which is exactly what
+        # a drift does not do, and how the two terms stay distinguishable.
+        text = PANGRAM * 4
+        jittered = self.gaps(text=text, jitter=0.6, drift=0.0)
+        self.assertGreater(scatter(jittered), 0.4)
+        self.assertLess(scatter(self.windows(jittered)), scatter(jittered) / 2)
+
+    def test_a_word_boundary_is_slower_than_the_middle_of_a_word(self):
+        text = "alphabet alphabet"
+        gaps = self.gaps(text=text, drift=0.0, jitter=0.0)
+        # The gap before the "a" that opens the second word, against the
+        # mean of the gaps inside the first one.
+        boundary = gaps[text.index(" ") + 1 - 1]
+        inside = gaps[: text.index(" ") - 1]
+        self.assertGreater(boundary, max(inside))
+
+    def test_a_sentence_end_is_the_longest_pause_in_ordinary_prose(self):
+        text = "one. two, three four"
+        gaps = self.gaps(text=text, drift=0.0, jitter=0.0)
+        sentence = gaps[text.index(".") + 1 - 1]
+        clause = gaps[text.index(",") + 1 - 1]
+        self.assertGreater(sentence, clause)
+        self.assertGreater(clause, min(gaps))
+
+    def test_rhythm_scales_the_structure_and_zero_removes_it(self):
+        text = "one. two, three four"
+        strong = self.gaps(text=text, rhythm=2.0, drift=0.0, jitter=0.0)
+        normal = self.gaps(text=text, rhythm=1.0, drift=0.0, jitter=0.0)
+        none = self.gaps(text=text, rhythm=0.0, drift=0.0, jitter=0.0)
+        self.assertGreater(max(strong) / min(strong), max(normal) / min(normal))
+        self.assertAlmostEqual(max(none), min(none), places=9)
+
+    def test_a_hard_driven_rhythm_never_produces_a_negative_gap(self):
+        # The floor _WEIGHT_FLOOR exists for this: `rhythm` above 1
+        # exaggerates the terms below the mean towards zero and past it.
+        for rhythm in (2.0, 5.0, 20.0):
+            with self.subTest(rhythm=rhythm):
+                gaps = self.gaps(rhythm=rhythm, drift=0.0, jitter=0.0)
+                self.assertGreater(min(gaps), 0.0)
+                self.assertAlmostEqual(sum(gaps), 1.0, places=6)
+
+
+class TestTypingKeyboardModel(unittest.TestCase):
+    """The QWERTY tables the rhythm reads, and the orderings they encode."""
+
+    def test_every_printable_ascii_character_has_a_finger(self):
+        # A character missing from the table falls to the neutral digraph
+        # class, which is not wrong but is a silently flatter rhythm --
+        # better caught here than wondered about later.
+        for code in range(0x20, 0x7F):
+            char = chr(code)
+            with self.subTest(char=char):
+                self.assertIn(char, pyguitest._FINGERS)
+
+    def test_the_hands_are_the_sign_and_the_fingers_the_value(self):
+        fingers = pyguitest._FINGERS
+        self.assertLess(fingers["a"], 0)
+        self.assertGreater(fingers["l"], 0)
+        self.assertEqual(fingers["a"], fingers["q"])
+        self.assertEqual(fingers["a"], fingers["A"])
+        self.assertEqual(fingers["1"], fingers["!"])
+        self.assertEqual(fingers[" "], 0)
+
+    def test_the_digraph_classes_come_out_in_the_published_order(self):
+        # Doubled letter fastest, then the hands alternating, then one hand
+        # doing both keys, then one finger doing both -- which is the
+        # slowest digraph there is. The exact ratios are a model; this
+        # ordering is the finding.
+        weight = pyguitest._digraph_weight
+        repeat = weight("l", "l")
+        alternate = weight("f", "j")
+        hand = weight("f", "d")
+        finger = weight("f", "g")
+        self.assertLess(repeat, alternate)
+        self.assertLess(alternate, hand)
+        self.assertLess(hand, finger)
+
+    def test_a_shifted_character_costs_the_modifier_it_needs(self):
+        weight = pyguitest._digraph_weight
+        self.assertGreater(weight("a", "P"), weight("a", "p"))
+        self.assertGreater(weight("a", "$"), weight("a", "4"))
+
+    def test_a_neighbour_is_a_key_next_door_on_the_same_row(self):
+        self.assertEqual(pyguitest._NEIGHBOURS["s"], "ad")
+        self.assertEqual(pyguitest._NEIGHBOURS["S"], "AD")
+        self.assertEqual(pyguitest._NEIGHBOURS["q"], "w")
+        self.assertNotIn("\n", pyguitest._NEIGHBOURS)
+
+    def test_a_slip_is_drawn_from_the_neighbours_and_keeps_its_case(self):
+        rng = random.Random(0)
+        for char in "qwertyuiopasdfghjklzxcvbnmQWERTY":
+            with self.subTest(char=char):
+                slip = pyguitest._slip(char, rng)
+                self.assertIn(slip, pyguitest._NEIGHBOURS[char])
+                self.assertEqual(slip.isupper(), char.isupper())
+
+    def test_the_jitter_draw_stays_inside_its_clip(self):
+        # Lognormal is unbounded; one untamed draw in a long passage stalls
+        # a line mid-word. The clip is a bound on the tail, so a thousand
+        # draws at a wide spread must still all land inside it.
+        rng = random.Random(4)
+        bound = math.exp(pyguitest._JITTER_CLIP)
+        draws = [pyguitest._keystroke_jitter(rng, 2.0) for _ in range(1000)]
+        self.assertLessEqual(max(draws), bound)
+        self.assertGreaterEqual(min(draws), 1 / bound)
+        # And a zero spread is an exactly even rhythm, not a near one.
+        self.assertEqual(pyguitest._keystroke_jitter(rng, 0.0), 1.0)
+
+    def test_the_text_seed_is_stable_and_text_dependent(self):
+        # Stable across processes, which hash() is not for a string: a take
+        # that replayed only within one run would be no use at all.
+        seed = pyguitest._text_seed
+        self.assertEqual(seed("hello"), seed("hello"))
+        self.assertNotEqual(seed("hello"), seed("hellp"))
+        self.assertEqual(seed(""), 0)
 
 
 class TestProcHelpers(unittest.TestCase):

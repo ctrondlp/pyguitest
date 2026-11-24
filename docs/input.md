@@ -494,6 +494,74 @@ callable from a fraction in [0, 1] to one, clamped) and is off by default,
 because constant velocity is what a flick test wants: an ease-out decelerates
 into the target, and a flick released at zero speed does not throw.
 
+`move_mouse_naturally()` is the deliberate exception, and the word doing the
+work is *seeded*: a minimum-jerk speed ramp, an arch on every leg, a slow
+drift and an overshoot that corrects back onto the target — all drawn from a
+generator seeded, by default, from the move itself. So the same move is the
+same events every run, which is what the objection above is actually about.
+It is for a region that reacts to being crossed, and for a take that has to
+look performed.
+
+## Typing to a human rhythm: `type_text_naturally()`
+
+The same argument, one device over. `type_text()` sends every character with
+the same gap after it, and that even stream is the right shape for filling in
+a form and the wrong one for two cases:
+
+- **A field that reacts to the timing and not only to the result.** A search
+  box that debounces on a timer, an autocomplete that fires between
+  keystrokes, a validator that runs per character. A flat gap either never
+  trips them or trips them identically every time, and neither is what a
+  person does.
+- **A take that has to look typed** — a demo, a screen recording, an insert
+  for film or TV, where even keystrokes read as a script however good the
+  text is.
+
+```python
+gui.type_text_naturally("Hello, how are you?")
+gui.type_text_naturally(query, wpm=35, drift=0.35)  # slower, more uneven
+gui.type_text_naturally(line, typos=0.04, seed=7)  # mistakes, repeatably
+```
+
+`wpm` is the rate — words per minute at the standard five characters to the
+word, defaulting to 52, the mean of the largest published keystroke sample
+there is (Dhakal et al., CHI 2018, 136 million keystrokes). Three terms then
+shape the time around that mean, and they are separate because they are
+visible separately:
+
+| Term | Default | What it does |
+|------|---------|--------------|
+| `rhythm` | `1.0` | The gaps the text and the fingers make unavoidable: longer at word, clause and sentence boundaries, longer again when one finger makes both keystrokes, shorter on a doubled letter or when the hands alternate. |
+| `drift` | `0.2` | The rate itself waxing and waning in slow swells across the passage — the thing an even stream most obviously lacks. |
+| `jitter` | `0.35` | Lognormal scatter on each individual gap, which is what makes a rhythm ragged rather than breathing. |
+
+The three multiply and are then scaled to the duration asked for, so **the
+mean rate stays what you set while the instantaneous rate moves around it**.
+Measured over a 160-character passage at the default 52 WPM: 52.3 WPM
+overall, with twenty-character windows running between 45 and 63.
+
+`typos` is the fourth, and it is **off by default** where
+`move_mouse_naturally`'s `overshoot` is on. An overshot pointer passes over a
+pixel and comes back, invisible to the application. A typo is not: the field
+genuinely holds the wrong character until the Backspace lands, so a
+per-keystroke listener sees it, and a `maxlength` that truncates the slip
+leaves the Backspace eating a character that was meant to stay. Switch it on
+for a take; think first for a test.
+
+`seed` is the same promise as the pointer's: left alone it comes from the text
+itself, so typing the same string twice gives identical gaps. `latency` is the
+reaction time before the first keystroke and defaults to the session's
+`event_delay`; `pause` adds one hesitation part-way through, at a word
+boundary, because a hand that stops to think stops between words.
+
+A backend with real per-character cost is the honest limit. Each gap is slept
+against the moment the first keystroke went out, so that cost comes out of the
+gaps rather than being added to the total — but a backend slower per character
+than the rate asks for cannot be made to keep up by arithmetic, and the
+rhythm flattens towards as-fast-as-it-goes. `xdotool`, `wtype` and `ydotool`
+spawn a process per call; a lower `wpm` is the answer there, not a shorter
+gap.
+
 ## Knowing the input arrived: `sync()`
 
 Every GUI script grows a `time.sleep()` after injection, and every one of

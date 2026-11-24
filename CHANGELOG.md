@@ -5,6 +5,98 @@ All notable changes to pyguitest are recorded here. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html) — with the usual
 0.x caveat that the API may still change between minor versions.
 
+## [0.28.0] — 2026-11-24
+
+A minor for one new call: `type_text_naturally()`, the keyboard's counterpart
+to `move_mouse_naturally()`. Nothing existing changes behaviour.
+
+### Added
+
+- **`Session.type_text_naturally()` types to a human rhythm.** `type_text`
+  sends every character with the same gap after it, which is the right shape
+  for filling in a form and the wrong one for the two cases where *how* the
+  input arrives is part of the question: a field that reacts to the timing
+  rather than only to the result — a search box that debounces on a timer, an
+  autocomplete that fires between keystrokes, a validator that runs per
+  character — and a take that has to look like a person typed it. An even
+  stream either never trips a debounce or trips it identically every time,
+  and on screen it reads as a script however good the text is.
+
+  The rate is `wpm`, words per minute at the standard five characters to the
+  word, defaulting to 52 — the mean of the largest published keystroke sample
+  there is (Dhakal et al., CHI 2018, 136 million keystrokes), the same
+  argument `move_mouse_naturally` makes for taking minimum-jerk off the
+  shelf rather than inventing a curve. Three terms then shape the time around
+  that mean, separate because they are visible separately: `rhythm` for the
+  gaps the text and the fingers make unavoidable (longer at word, clause and
+  sentence boundaries, longer again when one finger makes both keystrokes,
+  shorter on a doubled letter or when the hands alternate), `drift` for the
+  rate itself waxing and waning in slow swells across the passage, and
+  `jitter` for lognormal scatter on each individual gap.
+
+  **The three are scaled to the duration asked for after being shaped, so the
+  mean rate stays what it was set to while the instantaneous rate moves
+  around it.** Measured over a 160-character passage at the default: 52.3 WPM
+  overall, with twenty-character windows running between 45 and 63. That is
+  the property that makes the fluctuation usable rather than merely present —
+  `duration=` still means what it says, and a suite's timing does not drift
+  because the typing looks human.
+
+  `typos` is the fourth term and the counterpart of `overshoot`: a
+  per-character probability of hitting a neighbouring key, noticing it,
+  pressing Backspace and typing the right one. **It defaults to 0.0 where
+  `overshoot` defaults to 0.04, and the asymmetry is deliberate** — an
+  overshot pointer passes over a pixel and comes back, invisible to the
+  application, while a typo leaves the field genuinely holding the wrong
+  character until the Backspace lands. A per-keystroke listener sees it, and
+  a `maxlength` that truncates the slip leaves the Backspace eating a
+  character that was meant to stay. On for a take, considered for a test.
+
+  `latency`, `pause` and `seed` mean what they do on the pointer side, down
+  to `latency` defaulting to the session's `event_delay` so one knob paces a
+  whole script and `seed` defaulting to one derived from the text, so a
+  passage replays identically and a test on the rhythm cannot flake. Gaps are
+  slept against the moment the first keystroke went out rather than against
+  the previous one, so a backend with real per-character cost loses that cost
+  from the gaps instead of adding it to the total — `_walk`'s schedule, for
+  `_walk`'s reason. `event_delay` is charged nowhere else: per character it
+  would flatten exactly what the method exists to shape.
+
+  The QWERTY finger and neighbour tables the rhythm reads are consulted for
+  *timing only*, never for which character to send — the characters go to the
+  backend's keymap-aware `type_text`, so somebody on Dvorak gets their text
+  typed correctly with a rhythm computed for the wrong fingers. That is the
+  right way round for the error to fall, and is stated where the table is
+  defined.
+
+  `examples/11_natural_typing.py` types a passage and then measures what came
+  out, by wrapping `gui.backend.type_text` rather than predicting a schedule:
+  overall WPM, the rate over each window of keystrokes, and the five longest
+  gaps with what they fell in front of. `--rhythm 0 --drift 0 --jitter 0`
+  prints the same tables for an even stream at the same average rate, which is
+  the comparison worth running once.
+
+### Documentation
+
+- **`send_keys` now carries its lineage, and the credit that travels with
+  it.** The `{}` grammar is not this package's invention: it arrives here
+  from X11::GUITest's `SendKeys`, which took it from Win32::GuiTest, whose
+  own `SendKeys` was a port of Delphi source code published by Al Williams in
+  Dr. Dobb's Journal in 1997. Win32::GuiTest asks that the attribution
+  accompany the implementation; three ports later it still does. The note
+  also marks what changed on the way — the `#` Meta prefix the original
+  escaper omitted, a `)` releasing only what its own `(` added, and a failure
+  the desktop causes being a different exception from a failure the string
+  causes — and what did not, which is the notation itself.
+
+- **`docs/input.md` no longer argues against something this package ships.**
+  Its *On natural-looking paths* section rejected randomised wobble as
+  bot-detection evasion that "buys only flakiness", written before
+  `move_mouse_naturally` existed and never revisited, so the page and the API
+  disagreed. The section now names the seeded exception and the word that
+  makes it one, and a new *Typing to a human rhythm* section covers the
+  keyboard side with the measured numbers above.
+
 ## [0.27.0] — 2026-11-21
 
 A minor for one changed answer: a macOS dialog now reports the `dialog` role
@@ -7145,7 +7237,8 @@ First public release.
 - A `pyguitest` command-line entry point.
 - PEP 561 type information (`py.typed`); no hard runtime dependencies.
 
-[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.27.0...HEAD
+[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.28.0...HEAD
+[0.28.0]: https://github.com/ctrondlp/pyguitest/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/ctrondlp/pyguitest/compare/v0.26.1...v0.27.0
 [0.26.1]: https://github.com/ctrondlp/pyguitest/compare/v0.26.0...v0.26.1
 [0.26.0]: https://github.com/ctrondlp/pyguitest/compare/v0.25.0...v0.26.0

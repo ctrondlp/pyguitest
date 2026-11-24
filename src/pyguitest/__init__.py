@@ -89,7 +89,7 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T")
 
-__version__ = "0.27.0"
+__version__ = "0.28.0"
 
 __all__ = [
     "connect",
@@ -819,6 +819,400 @@ def _correction(past: tuple[int, int], end: tuple[int, int]) -> list[tuple[int, 
         )
         for ratio in (0.6, 0.9, 1.0)
     ]
+
+
+_WPM_CHARS = 5.0
+"""Characters to a word, which is what makes a WPM figure mean anything.
+
+Five, spaces included, is the standard words-per-minute convention: every
+typing-speed number quoted anywhere is in these units rather than in
+dictionary words. It is what lets a rate become a mean inter-key interval --
+60 / (wpm * 5) seconds -- without anything having to know what the text says.
+"""
+
+_TYPING_WPM = 52.0
+"""Default typing speed, in words per minute.
+
+The mean of the largest published sample of the thing: 136 million keystrokes
+from 168,000 volunteers (Dhakal et al., CHI 2018), which puts the average at
+52 WPM. At five characters to the word that is a 231ms mean gap between
+keystrokes, against the 239ms the same study measures directly -- the
+difference being entirely the five-character word, not a disagreement.
+
+Picking the measured middle of a real population rather than a number that
+felt right is the same argument _natural_profile makes for minimum-jerk.
+"""
+
+_KEY_ROWS = ("1234567890-=", "qwertyuiop[]\\", "asdfghjkl;'", "zxcvbnm,./")
+"""The character rows of a US QWERTY keyboard, left to right.
+
+Read only for the *rhythm*, never for which character to send: the characters
+themselves go to the backend's keymap-aware type_text, so somebody on Dvorak
+gets their text typed correctly with a rhythm computed for the wrong fingers.
+That is the right way round for the error to fall -- a wrong rhythm is a
+take that looks slightly off, a wrong keymap is wrong text.
+"""
+
+_COLUMN_FINGERS = (-4, -3, -2, -1, -1, 1, 1, 2, 3, 4)
+"""Which finger touch typing assigns to each column: 1 index to 4 little.
+
+Negative is the left hand, so two characters share a hand when the product of
+their codes is positive and a finger when the codes are equal -- which is the
+whole of what the digraph classes below need to tell apart. Everything past
+the tenth column is the right little finger's reach, so the index is clamped
+rather than the tuple extended.
+"""
+
+_SHIFTED_CHARS = '~!@#$%^&*()_+{}|:"<>?'
+_UNSHIFTED_CHARS = "`1234567890-=[]\\;',./"
+"""The shifted punctuation and the base keys it shares, aligned by position.
+
+Two strings rather than a dict because the alignment *is* the data, and a
+reader can check it by eye. They give the finger map its shifted entries and
+tell _digraph_weight which characters cost a modifier to reach.
+"""
+
+_DIGRAPH = {
+    "repeat": 0.8,
+    "finger": 1.6,
+    "hand": 1.15,
+    "alternate": 0.95,
+    "unknown": 1.0,
+}
+"""How long each class of two-key sequence takes, relative to an average one.
+
+The classes are the published ones -- transcription typing is faster when the
+hands alternate than when one hand does both keys, slower again when one
+*finger* does both, and fastest of all on a doubled letter, where the finger
+is already on the key (Salthouse, 1986, reviewing the digraph literature).
+The ratios are plausible rather than measured, and deliberately so: the
+caller normalises the whole set to the duration it asked for, so only their
+order and rough spacing survive into the rhythm. Getting the order right is
+what makes a word feel typed; getting 1.6 exactly right would change nothing
+a viewer could see.
+"""
+
+_CONTEXT = {
+    "sentence": 2.4,
+    "clause": 1.5,
+    "word": 1.35,
+    "space": 1.1,
+    "line": 2.0,
+    "shift": 1.25,
+}
+"""The pauses that come from the text rather than from the fingers.
+
+Also published behaviour, and the half of the rhythm a viewer actually reads:
+typing is bursty, the bursts end at word and clause boundaries, and a
+sentence boundary is the longest pause in ordinary prose. `shift` is the
+coordination cost of a modifier, which is why a capital letter lands slightly
+late. Same honesty as _DIGRAPH about the exact numbers.
+"""
+
+_SENTENCE_END = ".!?"
+_CLAUSE_END = ",;:"
+
+_WEIGHT_FLOOR = 0.05
+"""The smallest a rhythm-scaled weight may become, relative to the mean.
+
+`rhythm` above 1 exaggerates every structural term, which pushes the terms
+below 1 -- the doubled letter, the alternating hands -- towards zero and past
+it. A floor keeps a hard-driven rhythm from inverting into negative gaps,
+without touching anything at the default.
+"""
+
+_JITTER_CLIP = 1.1
+"""How far into the lognormal tail a single keystroke may go, in exponents.
+
+About a factor of three either way. Lognormal is unbounded, and one five-
+sigma draw in a thousand keystrokes stalls a line mid-word for a second and a
+half -- a bound on the tail, not a reshaping of the distribution.
+"""
+
+_SLIP_NOTICE = 2.6
+_SLIP_RETYPE = 1.3
+"""The two halves of a correction, as multiples of the mean gap.
+
+Noticing is the slow part and retyping is nearly ordinary speed, which is
+what makes a correction read as one: the giveaway is the hesitation before
+the Backspace, not the Backspace. These are *extra* time, over and above the
+duration the text was given, for the same reason move_mouse_naturally's
+overshoot adds three points over its own budget -- a correction that had to
+be paid for out of the budget would speed up the surrounding text to afford
+it, and nothing about a slip makes the rest of the line faster.
+"""
+
+
+def _finger_map() -> dict[str, int]:
+    """Build the character -> finger code table, once, at import.
+
+    Letters are entered in both cases: a capital is the same finger as its
+    lowercase, which is why `shift` is a separate cost rather than a
+    different hand. Space is the thumb and gets code 0, which every digraph
+    class treats as neutral -- a thumb shares neither a hand nor a finger
+    with anything, and a space between two words should not read as an
+    awkward same-hand reach.
+    """
+    # Space is the thumb, Tab and Return the little fingers, and the grave
+    # key is the left little finger's reach the way everything past the tenth
+    # column is the right's -- it sits outside _KEY_ROWS because putting it
+    # there would shift every other key on the number row by a column.
+    fingers = {" ": 0, "\t": -4, "\n": 4, "`": -4}
+    for row in _KEY_ROWS:
+        for column, char in enumerate(row):
+            code = _COLUMN_FINGERS[min(column, len(_COLUMN_FINGERS) - 1)]
+            fingers[char] = code
+            if char.isalpha():
+                fingers[char.upper()] = code
+    for shifted, base in zip(_SHIFTED_CHARS, _UNSHIFTED_CHARS, strict=True):
+        fingers[shifted] = fingers[base]
+    return fingers
+
+
+_FINGERS = _finger_map()
+"""char -> finger code, left hand negative, thumb 0. See _finger_map."""
+
+
+def _neighbour_map() -> dict[str, str]:
+    """Build the character -> keys-either-side table, once, at import.
+
+    The row neighbours, which is where a slip of one key goes. Row-adjacent
+    only: the keys above and below are a reach the hand does not make by
+    accident nearly as often, and including them would make a modelled typo
+    less recognisable as one rather than more.
+    """
+    neighbours: dict[str, str] = {}
+    for row in _KEY_ROWS:
+        for column, char in enumerate(row):
+            sides = row[max(0, column - 1) : column] + row[column + 1 : column + 2]
+            neighbours[char] = sides
+            if char.isalpha():
+                neighbours[char.upper()] = sides.upper()
+    return neighbours
+
+
+_NEIGHBOURS = _neighbour_map()
+"""char -> the characters either side of it in its row. See _neighbour_map."""
+
+
+def _text_seed(text: str) -> int:
+    """Build a seed from the text itself.
+
+    The typing counterpart of _path_seed, for the same reason: typing the
+    same string twice has to come out identically -- a second take has to
+    match the first, and a test on the rhythm cannot be allowed to flake --
+    while a different string gets a rhythm of its own.
+
+    Folded from the code points directly rather than through hash(), which
+    is salted per process for strings and would make every run differ.
+    """
+    seed = 0
+    for char in text:
+        seed = (seed * 31 + ord(char)) & 0xFFFFFFFF
+    return seed
+
+
+def _digraph_weight(before: str, after: str) -> float:
+    """How long the gap between two characters should be, relatively.
+
+    One number, the product of what the fingers have to do (_DIGRAPH) and
+    what the text is doing at that point (_CONTEXT). Relative to an average
+    gap throughout: the caller scales the whole set to the duration it wants,
+    so nothing here needs to know a rate.
+
+    A newline short-circuits the finger classes. Pressing Return is a
+    decision -- the end of a line is the end of a thought -- and which finger
+    reached the key has nothing to do with how long the pause before it was.
+    """
+    if "\n" in (before, after):
+        return _CONTEXT["line"]
+    first = _FINGERS.get(before)
+    second = _FINGERS.get(after)
+    if not first or not second:
+        # Unknown to the table, or the thumb, which shares nothing with
+        # anything: no finger claim to make, so the gap is an average one.
+        weight = _DIGRAPH["unknown"]
+    elif before == after:
+        weight = _DIGRAPH["repeat"]
+    elif first == second:
+        weight = _DIGRAPH["finger"]
+    elif first * second > 0:
+        weight = _DIGRAPH["hand"]
+    else:
+        weight = _DIGRAPH["alternate"]
+    if before in _SENTENCE_END:
+        weight *= _CONTEXT["sentence"]
+    elif before in _CLAUSE_END:
+        weight *= _CONTEXT["clause"]
+    elif before == " ":
+        weight *= _CONTEXT["word"]
+    if after == " ":
+        weight *= _CONTEXT["space"]
+    if after.isupper() or after in _SHIFTED_CHARS:
+        weight *= _CONTEXT["shift"]
+    return weight
+
+
+def _rate_swell(rng: random.Random, amount: float, count: int) -> list[float]:
+    """A slow rise and fall in typing speed: one factor per gap.
+
+    Nobody holds one rate for a paragraph. Speed arrives in swells -- a run
+    of familiar words goes quickly, the next phrase slows down -- over
+    seconds rather than keystrokes, which is a different thing from the
+    keystroke-to-keystroke scatter `jitter` adds and is visible in a
+    different way: jitter makes a rhythm ragged, this makes it breathe.
+
+    Two sines with seeded phases and periods, the second faster and weaker,
+    so the pattern does not read as one obvious wave; the same device as
+    _natural_leg's drift, which is a seeded sine across a path for the same
+    reason. Exponentiated, so one `amount` speeds up and slows down by the
+    same ratio instead of taking a gap negative at the bottom of a deep
+    swell.
+
+    The caller normalises these away in aggregate, which is the point: the
+    *mean* rate stays the one that was asked for while the instantaneous rate
+    moves around it.
+    """
+    if not amount:
+        return [1.0] * count
+    periods = (rng.uniform(0.6, 1.4), rng.uniform(2.1, 3.7))
+    phases = (rng.uniform(0.0, 2 * math.pi), rng.uniform(0.0, 2 * math.pi))
+    factors = []
+    for index in range(count):
+        progress = index / max(1, count - 1)
+        swell = 0.65 * math.sin(
+            phases[0] + 2 * math.pi * periods[0] * progress
+        ) + 0.35 * math.sin(phases[1] + 2 * math.pi * periods[1] * progress)
+        factors.append(math.exp(amount * swell))
+    return factors
+
+
+def _keystroke_jitter(rng: random.Random, spread: float) -> float:
+    """One lognormal multiplier on an inter-key gap.
+
+    Inter-key intervals are right-skewed: a gap twice the usual length is far
+    commoner than one half of it, because hesitating is easy and beating your
+    own best digraph is not. Lognormal is the usual description of that, and
+    `spread` is the standard deviation of the normal underneath, so 0 is a
+    perfectly even rhythm.
+
+    Built out of rng.random() rather than rng.gauss() deliberately. A seeded
+    Random promises the same random() stream on every Python this package
+    supports; gauss() carries a cached spare value between calls, so its
+    stream depends on how many times it has been called before. This has to
+    replay identically, so Box-Muller is spelled out here instead.
+    """
+    radius = math.sqrt(-2.0 * math.log(1.0 - rng.random()))
+    normal = radius * math.cos(2 * math.pi * rng.random())
+    return math.exp(max(-_JITTER_CLIP, min(_JITTER_CLIP, spread * normal)))
+
+
+def _slip(char: str, rng: random.Random) -> str | None:
+    """Pick a plausible wrong key for `char`: the one next to it in its row.
+
+    Which is the slip a single Backspace undoes, and the reason this models
+    that one. The other common typing error is a transposition -- "teh" for
+    "the" -- and it is left out on purpose: correcting one costs two
+    backspaces and retypes both characters, so including it would change the
+    shape of the correction rather than only its content.
+
+    Returns None for a character not on the modelled rows -- a non-ASCII
+    letter, a newline -- so the caller types it correctly rather than
+    substituting something arbitrary for it.
+    """
+    options = _NEIGHBOURS.get(char)
+    if not options:
+        return None
+    # int(random() * n) rather than randrange(n): random() is the one stream
+    # with a reproducibility promise across versions. See _keystroke_jitter.
+    return options[int(rng.random() * len(options))]
+
+
+class _Keystroke(NamedTuple):
+    """One character to type, or one Backspace, and the gap before it."""
+
+    gap: float
+    """Seconds to wait before sending this one, measured from the last."""
+
+    char: str
+    """The character to type. Empty when `correction` is set."""
+
+    correction: bool = False
+    """Send Backspace rather than `char` -- the undo half of a typo."""
+
+
+def _typing_plan(
+    text: str,
+    *,
+    budget: float,
+    mean_gap: float,
+    rhythm: float,
+    drift: float,
+    jitter: float,
+    typos: float,
+    rng: random.Random,
+) -> list[_Keystroke]:
+    """Turn `text` into keystrokes with a gap in front of each.
+
+    The three timing terms multiply, which is why they can be argued about
+    one at a time: _digraph_weight is what the text and the fingers make
+    unavoidable, _rate_swell is the slow wax and wane over the passage, and
+    _keystroke_jitter is the scatter on each individual gap. The product is
+    then scaled so the gaps sum to `budget` exactly -- so none of the three
+    can drift the overall speed away from the rate that was asked for, and
+    all three remain visible inside it.
+
+    `typos` is the one term that adds keystrokes rather than reshaping the
+    ones already here: a mistyped character becomes the wrong character, a
+    Backspace and the right character, and the two extra gaps are multiples
+    of `mean_gap` rather than shares of `budget` (see _SLIP_NOTICE).
+    """
+    shaped = [
+        max(_WEIGHT_FLOOR, 1.0 + rhythm * (_digraph_weight(text[i - 1], text[i]) - 1.0))
+        for i in range(1, len(text))
+    ]
+    swell = _rate_swell(rng, drift, len(shaped))
+    weights = [
+        weight * swell[index] * _keystroke_jitter(rng, jitter)
+        for index, weight in enumerate(shaped)
+    ]
+    total = sum(weights)
+    scale = budget / total if total else 0.0
+
+    plan: list[_Keystroke] = []
+    for index, char in enumerate(text):
+        gap = weights[index - 1] * scale if index else 0.0
+        slip = _slip(char, rng) if typos and rng.random() < typos else None
+        if slip is None:
+            plan.append(_Keystroke(gap, char))
+            continue
+        plan.append(_Keystroke(gap, slip))
+        plan.append(_Keystroke(mean_gap * _SLIP_NOTICE, "", correction=True))
+        plan.append(_Keystroke(mean_gap * _SLIP_RETYPE, char))
+    return plan
+
+
+def _hesitation(plan: Sequence[_Keystroke]) -> int:
+    """Which keystroke one deliberate hesitation goes in front of.
+
+    A hand that stops to think stops between words, not between the third
+    and fourth letter of one, so the pause lands on the first keystroke of a
+    word rather than at the arithmetic midpoint. Past halfway rather than
+    nearest to it, so a long opening word cannot put the hesitation in the
+    first beat of the line. The midpoint is the fallback for a string with no
+    word boundary in its second half -- one long token, where there is
+    nowhere better for it to go.
+
+    Returns -1 where there is no part-way through to hesitate in: a single
+    keystroke, or none.
+    """
+    if len(plan) < 2:
+        return -1
+    middle = len(plan) // 2
+    for index in range(max(1, middle), len(plan)):
+        if plan[index - 1].char == " " and plan[index].char != " ":
+            return index
+    return middle
 
 
 class Session:
@@ -1990,6 +2384,267 @@ class Session:
         delay = self.key_delay if delay is None else delay
         self.backend.type_text(text, delay=delay, **kwargs)
 
+    def _check_natural_typing(
+        self,
+        *,
+        duration: float | None,
+        wpm: float,
+        rhythm: float,
+        drift: float,
+        jitter: float,
+        typos: float,
+        pause: float,
+        latency: float | None,
+    ) -> float:
+        """Check type_text_naturally's shaping arguments; resolve `latency`.
+
+        Split out for the same reason _check_natural is -- the complexity
+        ceiling is better spent on the part that shapes the rhythm than on
+        a row of range checks. Returns `latency` with None resolved to the
+        session's `event_delay`, so the caller cannot forget to.
+
+        Finiteness is its own check, first, because every range check below
+        is an ordered comparison and NaN answers False to all of them: a
+        `wpm=float("nan")` sailed through `wpm <= 0`, made the budget NaN,
+        and `remaining > 0` then never slept -- the passage typed flat-out
+        while looking paced. `inf` fails the same gate; the range checks
+        keep rejecting signs and bounds for the finite values that get past
+        it. Resolved `latency` is re-checked after resolution, since the
+        session's own `event_delay` arrives by the same door.
+        """
+        for name, value in (
+            ("duration", duration),
+            ("wpm", wpm),
+            ("rhythm", rhythm),
+            ("drift", drift),
+            ("jitter", jitter),
+            ("typos", typos),
+            ("pause", pause),
+            ("latency", latency),
+        ):
+            if value is not None and not math.isfinite(value):
+                raise ValueError(f"{name} must be a finite number, got {value!r}")
+        if duration is not None and duration < 0:
+            raise ValueError(f"duration must not be negative, got {duration!r}")
+        if wpm <= 0:
+            raise ValueError(f"wpm must be positive, got {wpm!r}")
+        if rhythm < 0:
+            raise ValueError(f"rhythm must not be negative, got {rhythm!r}")
+        if drift < 0:
+            raise ValueError(f"drift must not be negative, got {drift!r}")
+        if jitter < 0:
+            raise ValueError(f"jitter must not be negative, got {jitter!r}")
+        if not 0.0 <= typos <= 1.0:
+            raise ValueError(f"typos is a probability in [0, 1], got {typos!r}")
+        if pause < 0:
+            raise ValueError(f"pause must not be negative, got {pause!r}")
+        if latency is None:
+            latency = self.event_delay
+        if not math.isfinite(latency) or latency < 0:
+            raise ValueError(
+                f"latency must be a finite number, 0 or more, got {latency!r}"
+            )
+        return latency
+
+    def type_text_naturally(
+        self,
+        text: str,
+        *,
+        duration: float | None = None,
+        wpm: float = _TYPING_WPM,
+        rhythm: float = 1.0,
+        drift: float = 0.2,
+        jitter: float = 0.35,
+        typos: float = 0.0,
+        latency: float | None = None,
+        pause: float = 0.0,
+        seed: int | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Type `text` the way a hand does, not the way a loop does.
+
+        type_text() sends every character with the same gap after it --
+        `key_delay`, usually zero -- which is the right shape for filling in
+        a form and the wrong one for anything watching the typing happen.
+        This is the keyboard's counterpart to move_mouse_naturally(), and it
+        exists for the same two cases, where *how* the input arrives is part
+        of the question rather than noise in it:
+
+        * **A field that reacts to the rhythm, not just the result.** A
+          search box that debounces on a timer, an autocomplete that fires
+          between keystrokes, a form that validates per character, a
+          progressive filter -- all of them behave differently under an even
+          stream than under a human one, and a flat gap either never trips
+          them or trips them every single time.
+        * **A take that has to look like a person did it** -- a demo, a
+          screen recording, a film or TV insert -- where perfectly even
+          keystrokes read as a script however good the text is.
+
+        Five things make it look typed, and each is a published behaviour
+        rather than a taste:
+
+        * a **rate** -- `wpm` in words per minute, five characters to the
+          word, defaulting to the measured population mean (_TYPING_WPM);
+        * a **rhythm** -- gaps that follow the text and the fingers: longer
+          at word, clause and sentence boundaries, longer again when one
+          finger has to make both keystrokes, shorter on a doubled letter
+          and when the hands alternate (_DIGRAPH, _CONTEXT);
+        * a **drift** -- the rate itself waxing and waning in slow swells
+          across the passage, which is `drift` and is the thing an even
+          stream most obviously lacks (_rate_swell);
+        * a **jitter** -- lognormal scatter on each individual gap
+          (_keystroke_jitter);
+        * **typos and corrections** -- `typos` as a per-character
+          probability of hitting a neighbouring key, noticing, pressing
+          Backspace and typing the right one. The counterpart of
+          move_mouse_naturally's overshoot, and the most recognisable human
+          artifact there is.
+
+        **`typos` defaults to 0.0, and that asymmetry with `overshoot` is
+        deliberate.** An overshot pointer is invisible to the application --
+        it passes over a pixel and comes back. A typo is not: the field
+        genuinely holds the wrong character until the Backspace lands, so
+        anything reacting per keystroke sees it, a `maxlength` that truncates
+        the slip leaves the Backspace eating a character that was meant to
+        stay, and a field that transforms its content as you type may not
+        give the character back. Switch it on for a take; think before
+        switching it on for a test.
+
+        `duration` is wall-clock seconds for the whole passage and overrides
+        `wpm` when given. Either way the gaps are scaled to sum to it
+        exactly, so none of the three timing terms can drag the overall speed
+        off the rate that was asked for -- they move the rhythm around inside
+        the budget. The budget covers the gaps *between* keystrokes, there
+        being nothing to wait for after the last one, so n characters have
+        n-1 gaps. **A typo spends extra**, two gaps over the budget for each
+        one, for the same reason move_mouse_naturally's overshoot adds three
+        points over its own: a correction paid for out of the budget would
+        speed up the surrounding text to afford it, and nothing about a slip
+        makes the rest of the line faster.
+
+        `latency` is the pause before the first keystroke, defaulting to the
+        session's own `event_delay` so one knob paces a whole script, and
+        `pause` inserts a single hesitation part-way through -- at a word
+        boundary past the midpoint, because a hand that stops to think stops
+        between words. `event_delay` is charged nowhere else: the schedule
+        here *is* the timing, and a per-character delay on top of it would
+        flatten exactly what this method exists to shape. `key_delay` is
+        likewise not consulted -- `wpm` replaces it.
+
+        `seed` makes the rhythm reproducible: identical gaps for a repeated
+        take, and a test that cannot flake. Left as None it comes from the
+        text itself (_text_seed), so typing the same string always comes out
+        the same while a different string gets its own rhythm.
+
+        Each gap is slept against the time the first keystroke went out
+        rather than against the one before it, so a backend with real
+        per-character cost loses that cost from the gaps instead of adding it
+        to the total -- the same fixed schedule _walk uses, for the same
+        reason. A backend slower per character than the rate asks for cannot
+        be made to keep up by arithmetic: the rhythm flattens towards as-fast
+        as-it-goes, and a lower `wpm` is the honest answer.
+
+        Focus is the caller's business, exactly as in type_text: this types
+        into whatever holds keyboard focus and focuses nothing. `**kwargs`
+        reach the backend, `allow_keymap_unsafe=False` included.
+
+            # Only the text is required.
+            gui.type_text_naturally("Hello, how are you?")
+
+            # Slower, and visibly uneven -- for a search box that
+            # debounces, or a demo that has to look unhurried.
+            gui.type_text_naturally(query, wpm=35, drift=0.35)
+
+            # A take that has to look hand-driven, mistakes and all, and
+            # has to come out the same on every run: seed it.
+            gui.type_text_naturally(line, typos=0.04, seed=7)
+
+            # Even and exact: the rhythm off, the rate the only thing
+            # left. type_text(delay=...) is cheaper if this is all you
+            # want.
+            gui.type_text_naturally(text, rhythm=0, drift=0, jitter=0)
+
+        An empty `text` checks its arguments and does nothing else -- there
+        is no rhythm to a passage with no keystrokes in it.
+
+        Raises ValueError for a negative shaping argument, a non-positive
+        `wpm`, or a `typos` outside [0, 1]. Needs `TEXT_ENTRY`, and
+        `KEY_EVENT` as well when `typos` is non-zero, for the Backspace;
+        both are required up front rather than part way through a half-typed
+        line.
+        """
+        latency = self._check_natural_typing(
+            duration=duration,
+            wpm=wpm,
+            rhythm=rhythm,
+            drift=drift,
+            jitter=jitter,
+            typos=typos,
+            pause=pause,
+            latency=latency,
+        )
+        if not text:
+            return
+        self.require(Capability.TEXT_ENTRY)
+        backspace = ""
+        if typos:
+            self.require(Capability.KEY_EVENT)
+            # Not .get(): every backend's KEY_ALIASES names a Backspace in its
+            # own vocabulary, and a slip cannot be undone without one. Looked
+            # up here rather than at the slip, so a backend missing it fails
+            # on an empty field instead of on a half-finished line.
+            backspace = self.backend.KEY_ALIASES["BAC"]
+
+        base = 60.0 / (wpm * _WPM_CHARS)
+        budget = base * (len(text) - 1) if duration is None else duration
+        mean_gap = budget / (len(text) - 1) if len(text) > 1 else base
+        plan = _typing_plan(
+            text,
+            budget=budget,
+            mean_gap=mean_gap,
+            rhythm=rhythm,
+            drift=drift,
+            jitter=jitter,
+            typos=typos,
+            rng=random.Random(_text_seed(text) if seed is None else seed),
+        )
+        hesitation = _hesitation(plan)
+
+        if latency:
+            time.sleep(latency)
+        began = time.monotonic()
+        elapsed = 0.0
+        for index, stroke in enumerate(plan):
+            elapsed += stroke.gap
+            if index == hesitation:
+                elapsed += pause
+            remaining = began + elapsed - time.monotonic()
+            if remaining > 0:
+                time.sleep(remaining)
+            # Straight to the backend, as _walk goes straight to move_mouse:
+            # the session's own press_key/type_text would charge event_delay
+            # per keystroke, and this method's schedule is already the timing.
+            if stroke.correction:
+                try:
+                    self.backend.press_key(backspace)
+                except BaseException:
+                    # Same shape as drag's unwind, for the same reasons: a
+                    # press can fail *after* its key-down went out (x11
+                    # synchronizes after emitting), a Ctrl-C can land inside
+                    # it, and a held Backspace autorepeats into the field --
+                    # release_key's own docstring calls this the worst stuck
+                    # state. Not a plain `finally`: when the press failed
+                    # because the backend died, the release raises too, and
+                    # in a `finally` that second error would replace the
+                    # first. A release for a press that never emitted is a
+                    # no-op at the server, so the pairing costs nothing.
+                    with contextlib.suppress(Exception):
+                        self.backend.release_key(backspace)
+                    raise
+                self.backend.release_key(backspace)
+            else:
+                self.backend.type_text(stroke.char, delay=0.0, **kwargs)
+
     def send_keys(self, keys: str) -> None:
         r"""Send literal text and key combinations in one string.
 
@@ -2064,6 +2719,23 @@ class Session:
         contract named only `ValueError` before, so a caller following it
         with `except ValueError` saw an uncaught error for a condition that
         is about the keyboard rather than their own call.
+
+        **Lineage.** Both this grammar and the implementation behind it are
+        older than this package. `send_keys` descends from X11::GUITest's
+        SendKeys, which took it from Win32::GuiTest, whose SendKeys was in
+        turn a port of Delphi source code published by Al Williams in Dr.
+        Dobb's Journal in 1997. Win32::GuiTest asks that the credit travel
+        with the implementation; three ports later it still does.
+
+        What changed on the way here is set out above and in quote_for_type
+        -- the `#` Meta prefix the original escaper omitted, a `)` releasing
+        only what its own `(` added, and a failure the desktop causes being a
+        different exception from a failure the string causes. The notation
+        itself did not. One spelling family stayed the win32 backend's own,
+        though: Win32::GuiTest's long key names (`{ENTER}`, `{BACKSPACE}`)
+        are honoured as second names there and nowhere else, so the
+        three-letter abbreviations (`{ENT}`, `{BAC}`) are the spellings a
+        string that has to run everywhere uses.
         """
         KeySender(self).send(keys)
 
