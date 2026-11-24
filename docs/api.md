@@ -1397,11 +1397,12 @@ negotiated privately between client and compositor.
 
 ## Keyboard
 
-`type_text` is for literal text and `send_keys` for chords and named keys. Both go to whatever holds focus, so focus a window or element first -- see `focus_window` -- or the keystrokes land somewhere else. Typed text depends on the session keymap; [input.md](input.md) covers when that matters.
+`type_text` is for literal text and `send_keys` for chords and named keys. Both go to whatever holds focus, so focus a window or element first -- see `focus_window` -- or the keystrokes land somewhere else. Typed text depends on the session keymap; [input.md](input.md) covers when that matters. `type_text_naturally` sends the same characters to a human rhythm, for a field that reacts to the timing and for a take that has to look typed.
 
 | Call | Needs | What it does |
 |------|-------|--------------|
 | [`type_text(text: str, delay: float \| None = None, **kwargs: Any)`](#type_text) | [`TEXT_ENTRY`](#cap-text_entry) | Type `text`, using the session's `key_delay` unless overridden. |
+| [`type_text_naturally(text, ...)`](#type_text_naturally) | [`TEXT_ENTRY`](#cap-text_entry) — [`KEY_EVENT`](#cap-key_event) only with `typos` | Type `text` the way a hand does, not the way a loop does. |
 | [`send_keys(keys: str)`](#send_keys) | [`KEY_EVENT`](#cap-key_event) | Send literal text and key combinations in one string. |
 | [`press_key(key: str)`](#press_key) | [`KEY_EVENT`](#cap-key_event) | Press a key by name, without releasing it. |
 | [`release_key(key: str)`](#release_key) | [`KEY_EVENT`](#cap-key_event) | Release a key by name. |
@@ -1443,6 +1444,153 @@ see quote_for_type.
 type through a scancode-injecting backend (uinput, ydotool) that
 cannot know the active layout, rather than typing the wrong
 characters -- see GUIBackend.type_text.
+
+### `type_text_naturally`
+
+```python
+type_text_naturally(
+    text: str,
+    *,
+    duration: float | None = None,
+    wpm: float = 52.0,
+    rhythm: float = 1.0,
+    drift: float = 0.2,
+    jitter: float = 0.35,
+    typos: float = 0.0,
+    latency: float | None = None,
+    pause: float = 0.0,
+    seed: int | None = None,
+    **kwargs: Any,
+)
+```
+
+**Parameters**
+
+| Parameter | Type | Default |
+|-----------|------|---------|
+| `text` | `str` | **required** |
+| `duration` | `float \| None` | `None` |
+| `wpm` | `float` | `52.0` |
+| `rhythm` | `float` | `1.0` |
+| `drift` | `float` | `0.2` |
+| `jitter` | `float` | `0.35` |
+| `typos` | `float` | `0.0` |
+| `latency` | `float \| None` | `None` |
+| `pause` | `float` | `0.0` |
+| `seed` | `int \| None` | `None` |
+| `**kwargs` |  | *any keyword* |
+
+type_text() sends every character with the same gap after it --
+`key_delay`, usually zero -- which is the right shape for filling in
+a form and the wrong one for anything watching the typing happen.
+This is the keyboard's counterpart to move_mouse_naturally(), and it
+exists for the same two cases, where *how* the input arrives is part
+of the question rather than noise in it:
+
+* **A field that reacts to the rhythm, not just the result.** A
+  search box that debounces on a timer, an autocomplete that fires
+  between keystrokes, a form that validates per character, a
+  progressive filter -- all of them behave differently under an even
+  stream than under a human one, and a flat gap either never trips
+  them or trips them every single time.
+* **A take that has to look like a person did it** -- a demo, a
+  screen recording, a film or TV insert -- where perfectly even
+  keystrokes read as a script however good the text is.
+
+Five things make it look typed, and each is a published behaviour
+rather than a taste:
+
+* a **rate** -- `wpm` in words per minute, five characters to the
+  word, defaulting to the measured population mean (_TYPING_WPM);
+* a **rhythm** -- gaps that follow the text and the fingers: longer
+  at word, clause and sentence boundaries, longer again when one
+  finger has to make both keystrokes, shorter on a doubled letter
+  and when the hands alternate (_DIGRAPH, _CONTEXT);
+* a **drift** -- the rate itself waxing and waning in slow swells
+  across the passage, which is `drift` and is the thing an even
+  stream most obviously lacks (_rate_swell);
+* a **jitter** -- lognormal scatter on each individual gap
+  (_keystroke_jitter);
+* **typos and corrections** -- `typos` as a per-character
+  probability of hitting a neighbouring key, noticing, pressing
+  Backspace and typing the right one. The counterpart of
+  move_mouse_naturally's overshoot, and the most recognisable human
+  artifact there is.
+
+**`typos` defaults to 0.0, and that asymmetry with `overshoot` is
+deliberate.** An overshot pointer is invisible to the application --
+it passes over a pixel and comes back. A typo is not: the field
+genuinely holds the wrong character until the Backspace lands, so
+anything reacting per keystroke sees it, a `maxlength` that truncates
+the slip leaves the Backspace eating a character that was meant to
+stay, and a field that transforms its content as you type may not
+give the character back. Switch it on for a take; think before
+switching it on for a test.
+
+`duration` is wall-clock seconds for the whole passage and overrides
+`wpm` when given. Either way the gaps are scaled to sum to it
+exactly, so none of the three timing terms can drag the overall speed
+off the rate that was asked for -- they move the rhythm around inside
+the budget. The budget covers the gaps *between* keystrokes, there
+being nothing to wait for after the last one, so n characters have
+n-1 gaps. **A typo spends extra**, two gaps over the budget for each
+one, for the same reason move_mouse_naturally's overshoot adds three
+points over its own: a correction paid for out of the budget would
+speed up the surrounding text to afford it, and nothing about a slip
+makes the rest of the line faster.
+
+`latency` is the pause before the first keystroke, defaulting to the
+session's own `event_delay` so one knob paces a whole script, and
+`pause` inserts a single hesitation part-way through -- at a word
+boundary past the midpoint, because a hand that stops to think stops
+between words. `event_delay` is charged nowhere else: the schedule
+here *is* the timing, and a per-character delay on top of it would
+flatten exactly what this method exists to shape. `key_delay` is
+likewise not consulted -- `wpm` replaces it.
+
+`seed` makes the rhythm reproducible: identical gaps for a repeated
+take, and a test that cannot flake. Left as None it comes from the
+text itself (_text_seed), so typing the same string always comes out
+the same while a different string gets its own rhythm.
+
+Each gap is slept against the time the first keystroke went out
+rather than against the one before it, so a backend with real
+per-character cost loses that cost from the gaps instead of adding it
+to the total -- the same fixed schedule _walk uses, for the same
+reason. A backend slower per character than the rate asks for cannot
+be made to keep up by arithmetic: the rhythm flattens towards as-fast
+as-it-goes, and a lower `wpm` is the honest answer.
+
+Focus is the caller's business, exactly as in type_text: this types
+into whatever holds keyboard focus and focuses nothing. `**kwargs`
+reach the backend, `allow_keymap_unsafe=False` included.
+
+```python
+# Only the text is required.
+gui.type_text_naturally("Hello, how are you?")
+
+# Slower, and visibly uneven -- for a search box that
+# debounces, or a demo that has to look unhurried.
+gui.type_text_naturally(query, wpm=35, drift=0.35)
+
+# A take that has to look hand-driven, mistakes and all, and
+# has to come out the same on every run: seed it.
+gui.type_text_naturally(line, typos=0.04, seed=7)
+
+# Even and exact: the rhythm off, the rate the only thing
+# left. type_text(delay=...) is cheaper if this is all you
+# want.
+gui.type_text_naturally(text, rhythm=0, drift=0, jitter=0)
+```
+
+An empty `text` checks its arguments and does nothing else -- there
+is no rhythm to a passage with no keystrokes in it.
+
+Raises ValueError for a negative shaping argument, a non-positive
+`wpm`, or a `typos` outside [0, 1]. Needs `TEXT_ENTRY`, and
+`KEY_EVENT` as well when `typos` is non-zero, for the Backspace;
+both are required up front rather than part way through a half-typed
+line.
 
 ### `send_keys`
 
@@ -1531,6 +1679,20 @@ genuine keysym and then finds no physical key bound to it. The
 contract named only `ValueError` before, so a caller following it
 with `except ValueError` saw an uncaught error for a condition that
 is about the keyboard rather than their own call.
+
+**Lineage.** Both this grammar and the implementation behind it are
+older than this package. `send_keys` descends from X11::GUITest's
+SendKeys, which took it from Win32::GuiTest, whose SendKeys was in
+turn a port of Delphi source code published by Al Williams in Dr.
+Dobb's Journal in 1997. Win32::GuiTest asks that the credit travel
+with the implementation; three ports later it still does.
+
+What changed on the way here is set out above and in quote_for_type
+-- the `#` Meta prefix the original escaper omitted, a `)` releasing
+only what its own `(` added, and a failure the desktop causes being a
+different exception from a failure the string causes. The notation
+itself did not, so a string written for any of the three ancestors
+means here what it meant there.
 
 ### `press_key`
 

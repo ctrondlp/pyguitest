@@ -137,9 +137,12 @@ GROUPS: list[tuple[str, str, list[str]]] = [
         "`type_text` is for literal text and `send_keys` for chords and named keys. "
         "Both go to whatever holds focus, so focus a window or element first -- see "
         "`focus_window` -- or the keystrokes land somewhere else. Typed text depends "
-        "on the session keymap; [input.md](input.md) covers when that matters.",
+        "on the session keymap; [input.md](input.md) covers when that matters. "
+        "`type_text_naturally` sends the same characters to a human rhythm, for a "
+        "field that reacts to the timing and for a take that has to look typed.",
         [
             "type_text",
+            "type_text_naturally",
             "send_keys",
             "press_key",
             "release_key",
@@ -1021,10 +1024,25 @@ def needs_cell(required, optional, x11_only: set[str]) -> str:
     return cell_text
 
 
+ARGUMENT_NEEDS: dict[str, dict[str, str]] = {
+    # A capability a call requires only when a particular argument asks for
+    # the behaviour that spends it. The scanner cannot see the `if` around a
+    # require() -- any `Capability.X` in the source reads as required -- and
+    # the `supports()` bucket would be a lie in the other direction: "uses X
+    # if present" is graceful degradation, where these calls *refuse* the
+    # argument without the capability rather than quietly doing less.
+    "type_text_naturally": {"KEY_EVENT": "only with `typos`"},
+}
+"""Session method -> capability -> when it is actually required."""
+
+
 def session_row(name: str, x11_only: set[str]) -> str:
     """One Session method as a table row."""
     required, optional = method_capabilities(pyguitest.Session, name)
-    needs = needs_cell(required, optional, x11_only)
+    conditional = ARGUMENT_NEEDS.get(name, {})
+    needs = needs_cell(set(required) - set(conditional), optional, x11_only)
+    for capability, when in sorted(conditional.items()):
+        needs += (" — " if needs else "") + f"{cap_link(capability)} {when}"
     doc = first_line(inspect.getattr_static(pyguitest.Session, name))
     sig = cell(short_signature(pyguitest.Session, name))
     return f"| [`{sig}`](#{name}) | {needs} | {cell(doc)} |"
