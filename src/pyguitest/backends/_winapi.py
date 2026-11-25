@@ -95,6 +95,14 @@ WS_EX_APPWINDOW = 0x00040000
 list: a tool window is a palette or a floating toolbar and never does, and an
 owned window only does when it says so."""
 
+WS_EX_DLGMODALFRAME = 0x00000001
+"""The dialog-frame extended style: a window drawn with a dialog's border.
+
+A MessageBox carries it (measured on Windows 10, exstyle 0x10101) and an
+application's own top-level does not set it on itself, which is what lets
+`uia._hwnd_is_dialog` read "this is a dialog" off a window whose UIA provider
+says nothing."""
+
 GW_OWNER = 4
 """`GetWindow`'s index for a window's owner, which is what separates a dialog
 from a toplevel in `EnumWindows`' output."""
@@ -681,6 +689,8 @@ def _declare_user32(lib):
     lib.IsWindow.restype = wintypes.BOOL
     lib.IsIconic.argtypes = (wintypes.HWND,)
     lib.IsIconic.restype = wintypes.BOOL
+    lib.IsWindowEnabled.argtypes = (wintypes.HWND,)
+    lib.IsWindowEnabled.restype = wintypes.BOOL
     lib.IsZoomed.argtypes = (wintypes.HWND,)
     lib.IsZoomed.restype = wintypes.BOOL
     lib.OpenClipboard.argtypes = (wintypes.HWND,)

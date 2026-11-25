@@ -85,6 +85,10 @@ _PLAIN = {
     "`": "GRAVE",
     " ": "SPACE",
     "\n": "ENTER",
+    # The same key: type_text()'s own contract says `\n` and `\r` each send
+    # Enter (x11 and win32 already do), and this table raising on `\r` made
+    # a CRLF-bearing text replay everywhere except here.
+    "\r": "ENTER",
     "\t": "TAB",
 }
 

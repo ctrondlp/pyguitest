@@ -550,11 +550,12 @@ class TestTheRoleTable(unittest.TestCase):
             for name, value in vars(Role).items()
             if not name.startswith("_") and isinstance(value, str)
         }
+        # `menu bar` and `tool tip` left this set when `Role.MENU_BAR` and
+        # `Role.TOOL_TIP` were promoted -- see uia.py's
+        # `_ATSPI_NAMES_WITHOUT_CONSTANTS` for the road out.
         nameless = {
             "application",
-            "menu bar",
             "thumb",
-            "tool tip",
             "unknown",
         }
         for ax_name, reported in macos._AX_ROLES.items():
@@ -608,6 +609,11 @@ class TestTheRoleTable(unittest.TestCase):
     def test_a_search_for_a_window_still_names_windows(self):
         self.assertIn("AXWindow", macos._ax_roles(Role.WINDOW))
 
+    def test_a_search_for_a_switch_visits_checkboxes(self):
+        # A switch's own role is AXCheckBox -- the subrole is what tells it
+        # apart -- so the walk has to go there, and the predicate decides.
+        self.assertIn("AXCheckBox", macos._ax_roles(Role.SWITCH))
+
     def test_every_mapped_subrole_is_an_atspi_name(self):
         constants = {
             value
@@ -623,11 +629,28 @@ class TestTheRoleTable(unittest.TestCase):
         # by the name AX uses.
         self.assertEqual(macos._ax_roles("AXTextField"), {"AXTextField"})
 
-    def test_a_role_nothing_reports_matches_nothing(self):
-        # `{role}` rather than an empty set: a search for a role this backend never
-        # produces should come back empty because no element has it, not because the
-        # filter was silently dropped.
-        self.assertEqual(macos._ax_roles("calendar"), {"calendar"})
+    def test_an_unmapped_spelling_is_bridged_to_its_camel_cased_ax_name(self):
+        # The spelling nothing maps is answered by the one AX name that would
+        # read back as exactly those words -- `Element.role` says "heading"
+        # for AXHeading through `_camel_words`, and a search for "heading"
+        # has to find it, or the backend names roles no search can ask for.
+        # A role no element has still comes back empty, because visiting
+        # AXCalendar where none exists matches nothing -- the filter is
+        # never silently dropped.
+        self.assertEqual(macos._ax_roles(Role.HEADING), {"AXHeading"})
+        self.assertEqual(macos._ax_roles("calendar"), {"AXCalendar"})
+        self.assertIn("AXColorWell", macos._ax_roles("color well"))
+
+    def test_the_old_camel_spelling_of_a_newly_mapped_role_still_searches(self):
+        # A recording made before AXCell was mapped carries role="cell"; the
+        # bridge keeps it replayable, the raw-AX passthrough's argument
+        # exactly.
+        self.assertIn("AXCell", macos._ax_roles("cell"))
+
+    def test_a_cell_is_a_table_cell_as_on_every_other_platform(self):
+        # Before the entry, AXCell fell through to `_camel_words` as "cell" --
+        # a spelling the search side could never ask for.
+        self.assertEqual(macos._ax_role("AXCell"), Role.TABLE_CELL)
 
 
 class TestTheActionTable(BackendTestCase):
@@ -2392,12 +2415,27 @@ class TestElementReading(BackendTestCase):
         # modal shape AppKit attaches to a window.
         self.assertEqual(self.element(role="AXSheet").role, Role.DIALOG)
 
-    def test_only_a_window_pays_for_the_subrole_read(self):
+    def test_a_checkbox_whose_subrole_says_switch_is_a_switch(self):
+        # Measured on macOS 26 (System Settings, Desktop & Dock): eleven
+        # AXCheckBox/AXSwitch toggles, one plain AXCheckBox beside them.
+        node = self.element(
+            role="AXCheckBox", attrs={"kAXSubroleAttribute": "AXSwitch"}
+        )
+        self.assertEqual(node.role, Role.SWITCH)
+
+    def test_a_checkbox_without_the_subrole_stays_a_check_box(self):
+        # The other half of the same measurement: "In Stage Manager" in that
+        # pane publishes no subrole at all.
+        self.assertEqual(self.element(role="AXCheckBox").role, Role.CHECK_BOX)
+        node = self.element(role="AXCheckBox", attrs={"kAXSubroleAttribute": ""})
+        self.assertEqual(node.role, Role.CHECK_BOX)
+
+    def test_only_the_subrole_consulting_roles_pay_for_the_read(self):
         """The cost, kept where it earns itself -- as `_AX_PARENT_ROLES` does.
 
         A tree walk reads the role of everything; a subrole read on every one
-        of those would be a second round trip per element for an answer only a
-        toplevel can give.
+        of those would be a second round trip per element for an answer only
+        a window or a checkbox can give.
         """
         button = FakeElement(role="AXButton")
         macos.Element(button, self.backend).role
@@ -2477,6 +2515,26 @@ class TestElementReading(BackendTestCase):
         self.assertIs(off.checked, False)
         self.assertIs(on.checked, True)
         self.assertTrue(on.checkable)
+
+    def test_a_switch_stays_checkable_now_that_its_subrole_refines_the_role(self):
+        # The subrole turned AXCheckBox/AXSwitch's *role* into `switch`; the
+        # checkable gate is on the role, so the switch had to follow it --
+        # it reads and writes kAXValueAttribute exactly as a check box does.
+        switch = self.element(
+            role="AXCheckBox",
+            attrs={"kAXSubroleAttribute": "AXSwitch", "kAXValueAttribute": 1},
+        )
+        self.assertEqual(switch.role, Role.SWITCH)
+        self.assertTrue(switch.checkable)
+        self.assertIs(switch.checked, True)
+
+    def test_an_outline_rows_activation_is_still_its_selection(self):
+        # The container refinement renamed an outline's row to `tree item`;
+        # the press-is-selection set carries the new name, as data, so
+        # select() on one keeps its fallback instead of a typed refusal.
+        self.assertIn(Role.TREE_ITEM, macos._AX_SELECT_BY_PRESS)
+        self.assertIn(Role.LIST_ITEM, macos._AX_SELECT_BY_PRESS)
+        self.assertIn(Role.TABLE_ROW, macos._AX_SELECT_BY_PRESS)
 
     def test_a_menu_items_tick_is_its_checked_state(self):
         # AX splits what at-spi calls one state: a menu item carries a mark character
@@ -3450,10 +3508,27 @@ class TestRolesReadInContext(BackendTestCase):
             role="AXTable",
             children=[FakeElement(role="AXRow")],
         )
+        # An outline: the same AXRow again, in the third container that
+        # changes its meaning -- what at-spi and UIA both call a tree item.
+        outline = FakeElement(
+            role="AXOutline",
+            attrs={"kAXTitleAttribute": "File Tree"},
+            children=[
+                FakeElement(
+                    role="AXRow",
+                    children=[
+                        FakeElement(
+                            role="AXStaticText",
+                            attrs={"kAXTitleAttribute": "Branch One"},
+                        )
+                    ],
+                )
+            ],
+        )
         return FakeElement(
             role="AXWindow",
             attrs={"kAXTitleAttribute": "PortFixture"},
-            children=[tabs, options, rows, table_row],
+            children=[tabs, options, rows, table_row, outline],
         )
 
     def _backend(self):
@@ -3497,10 +3572,23 @@ class TestRolesReadInContext(BackendTestCase):
         self.assertEqual(row.role, Role.LIST_ITEM)
 
     def test_a_row_in_a_table_stays_a_table_row(self):
+        # Exactly one: the outline's row is a tree item and must not be here.
         backend = self._backend()
         rows = backend.find_elements(role=Role.TABLE_ROW)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].role, Role.TABLE_ROW)
+
+    def test_a_row_in_an_outline_is_a_tree_item(self):
+        # What at-spi and UIA both call an outline's row; `role="tree item"`
+        # matched nothing at all on a Mac before this.
+        backend = self._backend()
+        row = backend.find_element(role=Role.TREE_ITEM, name="Branch One")
+        self.assertEqual(row.role, Role.TREE_ITEM)
+
+    def test_a_table_row_search_does_not_return_the_outlines_rows(self):
+        backend = self._backend()
+        names = {e.name for e in backend.find_elements(role=Role.TABLE_ROW)}
+        self.assertNotIn("Branch One", names)
 
     def test_a_row_takes_its_name_from_its_cells(self):
         # A Qt list row reaches AX with an empty title, description and value;
@@ -3514,6 +3602,133 @@ class TestRolesReadInContext(BackendTestCase):
         backend = self._backend()
         tab = backend.find_element(role=Role.PAGE_TAB, name="Controls")
         self.assertEqual(tab.name, "Controls")
+
+
+class TestUnmappedRoleSpellings(BackendTestCase):
+    """The bridge that keeps a `_camel_words` role searchable, end to end."""
+
+    def _backend(self):
+        win = FakeElement(
+            role="AXWindow",
+            attrs={"kAXTitleAttribute": "PortFixture"},
+            children=[
+                FakeElement(
+                    role="AXTable",
+                    children=[
+                        FakeElement(
+                            role="AXRow",
+                            children=[
+                                FakeElement(
+                                    role="AXCell",
+                                    attrs={"kAXTitleAttribute": "Cell A"},
+                                )
+                            ],
+                        )
+                    ],
+                ),
+                FakeElement(role="AXHeading", attrs={"kAXTitleAttribute": "Section"}),
+                # An acronym-cased unmapped role: `_camel_words` lowercases
+                # the acronym ("html content"), which the inverse bridge
+                # cannot rebuild, so the forward match in the predicate is
+                # the only thing that finds it.
+                FakeElement(
+                    role="AXHTMLContent", attrs={"kAXTitleAttribute": "Article"}
+                ),
+            ],
+        )
+        app = FakeElement(
+            role="AXApplication",
+            attrs={"kAXTitleAttribute": "PortFixture"},
+            children=[win],
+            pid=4242,
+        )
+        listed = window(1, 4242, "PortFixture", (0, 0, 980, 620))
+        return self.make(
+            applications={4242: app}, onscreen=[listed], everything=[listed]
+        )
+
+    def test_a_cell_reads_and_searches_as_a_table_cell(self):
+        backend = self._backend()
+        cell = backend.find_element(role=Role.TABLE_CELL, name="Cell A")
+        self.assertEqual(cell.role, Role.TABLE_CELL)
+
+    def test_the_old_camel_spelling_still_finds_the_cell(self):
+        # A recording made before AXCell was mapped carries role="cell";
+        # the bridge keeps it replayable.
+        backend = self._backend()
+        cell = backend.find_element(role="cell", name="Cell A")
+        self.assertIsNotNone(cell)
+
+    def test_an_unmapped_role_is_searchable_by_the_words_it_reads_back_as(self):
+        # `Element.role` says "heading" (AXHeading through `_camel_words`);
+        # a search for exactly those words has to find it, or this backend
+        # names roles no search can ask for.
+        backend = self._backend()
+        heading = backend.find_element(role=Role.HEADING, name="Section")
+        self.assertEqual(heading.role, Role.HEADING)
+
+    def test_an_acronym_cased_unmapped_role_is_found_by_its_read_back_words(self):
+        # The bridge rebuilds "html content" as AXHtmlContent, which never
+        # matches the live AXHTMLContent; the predicate's forward match on
+        # the role each element reads back is what finds it. The reconstructed
+        # name genuinely misses, so this is the only path.
+        self.assertNotIn("AXHTMLContent", macos._ax_roles("html content"))
+        backend = self._backend()
+        article = backend.find_element(role="html content", name="Article")
+        self.assertIsNotNone(article)
+        self.assertEqual(article.role, "html content")
+
+    def test_a_search_for_an_unmapped_role_no_element_has_is_empty(self):
+        # The forward match must not turn an absent role into a false hit.
+        backend = self._backend()
+        self.assertEqual(backend.find_elements(role="color well"), [])
+
+
+class TestSwitchSubroleSearches(BackendTestCase):
+    """Both directions of the switch rule, through a real search.
+
+    The measured pane shape: switches and a plain checkbox side by side,
+    so each search has something it must find and something it must not.
+    """
+
+    def _backend(self):
+        win = FakeElement(
+            role="AXWindow",
+            attrs={"kAXTitleAttribute": "PortFixture"},
+            children=[
+                FakeElement(
+                    role="AXCheckBox",
+                    attrs={
+                        "kAXTitleAttribute": "Wi-Fi",
+                        "kAXSubroleAttribute": "AXSwitch",
+                    },
+                ),
+                FakeElement(
+                    role="AXCheckBox",
+                    attrs={"kAXTitleAttribute": "In Stage Manager"},
+                ),
+            ],
+        )
+        app = FakeElement(
+            role="AXApplication",
+            attrs={"kAXTitleAttribute": "PortFixture"},
+            children=[win],
+            pid=4242,
+        )
+        listed = window(1, 4242, "PortFixture", (0, 0, 980, 620))
+        return self.make(
+            applications={4242: app}, onscreen=[listed], everything=[listed]
+        )
+
+    def test_a_switch_search_finds_only_the_switch(self):
+        backend = self._backend()
+        names = {e.name for e in backend.find_elements(role=Role.SWITCH)}
+        self.assertEqual(names, {"Wi-Fi"})
+
+    def test_a_check_box_search_rejects_the_switch(self):
+        backend = self._backend()
+        names = {e.name for e in backend.find_elements(role=Role.CHECK_BOX)}
+        self.assertEqual(names, {"In Stage Manager"})
 
 
 class TestSelectFallsBackToClicking(BackendTestCase):

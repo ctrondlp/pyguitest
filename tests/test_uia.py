@@ -10,7 +10,9 @@ import unittest
 
 from pyguitest.backends.uia import (
     _ATSPI_NAMES_WITHOUT_CONSTANTS,
+    _CONTEXT_CONTROL_TYPES,
     _NO_ATSPI_COUNTERPART,
+    _REFINED_CONTROL_TYPES,
     _UIA_ROLES,
     _UNKNOWN_ROLE,
 )
@@ -60,9 +62,12 @@ class TestTheValuesAreNamesACallerCouldHaveLearned(unittest.TestCase):
         self.assertFalse(_ATSPI_NAMES_WITHOUT_CONSTANTS & _NO_ATSPI_COUNTERPART)
 
     def test_the_sets_say_exactly_what_they_claim_to(self):
+        # `menu bar` and `tool tip` left the first set when Role.MENU_BAR and
+        # Role.TOOL_TIP were promoted -- the same road out TABLE_COLUMN_HEADER
+        # took.
         self.assertEqual(
             _ATSPI_NAMES_WITHOUT_CONSTANTS,
-            {"calendar", "header", "menu bar", "tool tip"},
+            {"calendar", "header"},
         )
         self.assertEqual(
             _NO_ATSPI_COUNTERPART, {"custom", "semantic zoom", "thumb", "title bar"}
@@ -81,9 +86,13 @@ class TestTheMismatchesAreTheDocumentedOnes(unittest.TestCase):
     """The four collapses 3.1 of the Windows analysis calls the interesting part."""
 
     def test_there_is_no_toggle_button_control_type(self):
-        # UIA has one button type; whether it toggles is a pattern, so a role
-        # of "toggle button" can never come back from a Windows session.
+        # UIA has one button type; whether it toggles is a pattern. The flat
+        # table therefore never says "toggle button" -- the context route
+        # (`_CONTEXT_CONTROL_TYPES`) is how the role comes back from a
+        # Windows session, read off the Button type plus the Toggle
+        # pattern's availability.
         self.assertNotIn(Role.TOGGLE_BUTTON, _UIA_ROLES.values())
+        self.assertIn(Role.TOGGLE_BUTTON, _CONTEXT_CONTROL_TYPES)
 
     def test_the_menu_item_family_collapses_to_one_value(self):
         self.assertEqual(_UIA_ROLES[50011], Role.MENU_ITEM)
@@ -91,11 +100,16 @@ class TestTheMismatchesAreTheDocumentedOnes(unittest.TestCase):
         self.assertNotIn(Role.CHECK_MENU_ITEM, values)
         self.assertNotIn(Role.RADIO_MENU_ITEM, values)
 
-    def test_uia_text_covers_what_at_spi_calls_label_and_text(self):
-        # The sentence the docs have to carry: a Windows label is found by
-        # role="text", and "label" matches nothing there.
-        self.assertEqual(_UIA_ROLES[50020], Role.TEXT)
-        self.assertNotIn(Role.LABEL, _UIA_ROLES.values())
+    def test_the_one_text_control_type_is_a_label_flatly(self):
+        # UIA has one Text control type for both at-spi's `label` and `text`,
+        # and it is a caption on every framework measured -- Win32, WPF,
+        # WinForms, and UWP, whose TextBlock captions all publish the Text
+        # pattern, which is why the pattern cannot be the discriminant. So
+        # `text` has no Windows producer at all -- a body is an `entry` or a
+        # `document frame` -- the same honest shape as `switch`.
+        self.assertEqual(_UIA_ROLES[50020], Role.LABEL)
+        self.assertNotIn(Role.TEXT, _UIA_ROLES.values())
+        self.assertNotIn(Role.TEXT, _CONTEXT_CONTROL_TYPES)
 
     def test_a_pane_and_a_group_both_land_on_panel(self):
         # "Pane is at-spi's panel only most of the time" -- and Group, which is
@@ -120,6 +134,40 @@ class TestTheMismatchesAreTheDocumentedOnes(unittest.TestCase):
                 if role == Role.SCROLL_BAR
             ],
             [50014],
+        )
+
+
+class TestContextDependentRoles(unittest.TestCase):
+    """The roles a control type alone cannot name -- as data."""
+
+    def test_each_context_role_is_unreachable_through_the_flat_table(self):
+        # If the table ever grows a direct control type for one of these,
+        # the context route stops being the only road and wants revisiting.
+        for name in _CONTEXT_CONTROL_TYPES:
+            with self.subTest(role=name):
+                self.assertNotIn(name, set(_UIA_ROLES.values()))
+
+    def test_the_set_is_exactly_the_documented_ones(self):
+        self.assertEqual(
+            set(_CONTEXT_CONTROL_TYPES),
+            {
+                Role.DIALOG,
+                Role.PASSWORD_TEXT,
+                Role.TOGGLE_BUTTON,
+                Role.CHECK_MENU_ITEM,
+            },
+        )
+
+    def test_each_visited_control_type_is_in_the_table(self):
+        # The widened search visits a real control type; a typo here would
+        # narrow a dialog search to nothing without a word.
+        for name, control_type in _CONTEXT_CONTROL_TYPES.items():
+            with self.subTest(role=name):
+                self.assertIn(control_type, _UIA_ROLES)
+
+    def test_the_refined_set_is_exactly_the_visited_types(self):
+        self.assertEqual(
+            _REFINED_CONTROL_TYPES, frozenset(_CONTEXT_CONTROL_TYPES.values())
         )
 
 

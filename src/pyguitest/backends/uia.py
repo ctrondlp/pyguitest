@@ -68,10 +68,13 @@ spelling, chosen here, not a name the platform uses:
   answers `TogglePattern` is what at-spi would call `toggle button`. Both
   come back as `push button` here, and a caller that has to tell them apart
   asks the pattern rather than the role.
-- **`Text` covers what at-spi splits in two.** `label` (static text) and
-  `text` (a document or an editable body) are one control type in UIA, so a
-  Windows label is found by `role="text"` and `Role.LABEL` matches nothing
-  on that platform.
+- **UIA `Text` is at-spi's `label`.** at-spi splits static text into `label`
+  (a caption) and `text` (a text body); UIA has one Text control type for
+  both, and this backend maps it to `label` flatly. Measured across four
+  frameworks and UWP, every Text control is a caption, and the Text pattern
+  does not separate the two -- UWP TextBlock captions publish it too -- so a
+  body is an `entry` (Edit) or a `document frame` (Document) and `text` has
+  no Windows spelling at all.
 - **`Pane` is at-spi's `panel` only most of the time.** A UIA pane is also
   what at-spi would call a `scroll pane`, a `viewport` or a `filler`
   depending on what it contains; there is no scroll-pane control type,
@@ -132,7 +135,7 @@ _UIA_ROLES = {
     50007: Role.LIST_ITEM,
     50008: Role.LIST,
     50009: Role.MENU,
-    50010: "menu bar",
+    50010: Role.MENU_BAR,
     50011: Role.MENU_ITEM,
     50012: Role.PROGRESS_BAR,
     50013: Role.RADIO_BUTTON,
@@ -142,9 +145,17 @@ _UIA_ROLES = {
     50017: Role.STATUS_BAR,
     50018: Role.PAGE_TAB_LIST,
     50019: Role.PAGE_TAB,
-    50020: Role.TEXT,
+    # Text is a caption, flatly. Measured on Windows 10 across four
+    # frameworks: a Win32 STATIC, a WPF TextBlock, a WPF Label and a
+    # WinForms Label are all control type 50020, while every text body is
+    # Edit (50004, `entry`) or Document (50030, `document frame`) -- and
+    # the Text pattern cannot tell the two apart, because UWP/XAML
+    # TextBlock captions all publish it (measured over the Settings app:
+    # twelve of twelve True). So there is no `text` on Windows at all, the
+    # honest answer -- a body is an entry or a document frame.
+    50020: Role.LABEL,
     50021: Role.TOOL_BAR,
-    50022: "tool tip",
+    50022: Role.TOOL_TIP,
     50023: Role.TREE,
     50024: Role.TREE_ITEM,
     50025: "custom",
@@ -191,20 +202,19 @@ provider reporting something outside it, which is a genuine "the provider did
 not answer" rather than a mismatch to be papered over.
 """
 
-_ATSPI_NAMES_WITHOUT_CONSTANTS = frozenset(
-    {"calendar", "header", "menu bar", "tool tip"}
-)
+_ATSPI_NAMES_WITHOUT_CONSTANTS = frozenset({"calendar", "header"})
 """Values that are real at-spi role names with no `Role` constant beside them.
 
-Four of the fifty-odd names at-spi can report have no constant in `roles.py`,
-because until now nothing in this package could produce them. `"table column
-header"` was a fifth until a live WinDirStat session needed one:
-`gui.element(role="table column header", name="Bytes")` was the only way to
-reach a sortable list's own column headers, a string with no named spelling
-next to `Role.TABLE_CELL`/`TABLE_ROW` it already sits beside. `Role.
-TABLE_COLUMN_HEADER` now names it, on both backends -- UIA's `HeaderItem`
-(id 50035) already reported exactly this string, just not through the
-constant.
+Two of the fifty-odd names at-spi can report have no constant in `roles.py`,
+because nothing has yet needed to ask for them by name. The set shrinks as
+that stops being true: `"table column header"` left it when a live WinDirStat
+session needed one -- `gui.element(role="table column header", name="Bytes")`
+was the only way to reach a sortable list's own column headers -- and
+`Role.TABLE_COLUMN_HEADER` now names what UIA's `HeaderItem` (id 50035)
+already reported. `"menu bar"` and `"tool tip"` followed the same road out:
+every backend produced those exact strings (at-spi natively, `AXMenuBar` and
+`AXHelpTag` on macOS, ids 50010 and 50022 here) while only a raw string could
+ask, so `Role.MENU_BAR` and `Role.TOOL_TIP` name them now.
 """
 
 _NO_ATSPI_COUNTERPART = frozenset({"custom", "semantic zoom", "thumb", "title bar"})
@@ -249,8 +259,30 @@ UIA_IsEnabledPropertyId = 30010
 UIA_HelpTextPropertyId = 30013
 """The element's help text: at-spi's description, and often a tooltip."""
 
+UIA_NativeWindowHandlePropertyId = 30020
+"""The element's HWND, for the reads UIA cannot answer and user32 can.
+
+Zero for the many elements that are not windows of their own -- WPF and
+modern toolkits draw client-side -- but a *top-level* always has one, which
+is what `_hwnd_is_dialog` needs it for."""
+
 UIA_IsOffscreenPropertyId = 30022
 """Whether the element is scrolled out of view. The inverse of `visible`."""
+
+UIA_IsTogglePatternAvailablePropertyId = 30041
+"""Whether the element publishes the Toggle pattern.
+
+Read through `GetCurrentPropertyValue` -- pattern availability is a property
+with no `Current*` attribute of its own -- and what tells a toggle button
+apart from a push button: both are the Button control type, and only one of
+them answers Toggle. See `_CONTEXT_CONTROL_TYPES`."""
+
+UIA_WindowIsModalPropertyId = 30077
+"""Whether a Window-type element is modal.
+
+The Window pattern's modality, read through `GetCurrentPropertyValue` for the
+same reason as the pattern-availability id above. One of the two facts that
+make a Window a `dialog` -- see `_CONTEXT_CONTROL_TYPES`."""
 
 UIA_InvokePatternId = 10000
 """The pattern a button publishes: `Invoke` is its "I have been pressed"."""
@@ -625,19 +657,166 @@ def _matches_text(value, wanted):
     return value == wanted
 
 
+def _property_value(node, property_id, default=None):
+    """`GetCurrentPropertyValue(property_id)`, or `default` where refused.
+
+    For the properties comtypes does not bind as a `Current*` attribute -- a
+    pattern's availability, a window's modality -- which every
+    IUIAutomationElement still answers through the generic read. The same
+    contract as `_current`: a provider that refuses has not answered, and
+    every caller here has a sensible default for that.
+    """
+    try:
+        method = node.GetCurrentPropertyValue
+    except Exception:  # noqa: BLE001 - a refused read is not an error
+        return default
+    try:
+        return method(property_id)
+    except Exception:  # noqa: BLE001 - the same, from the call itself
+        return default
+
+
+_CONTEXT_CONTROL_TYPES = {
+    Role.DIALOG: 50032,  # Window: #32770 class, modal, or the HWND signals
+    Role.PASSWORD_TEXT: 50004,  # Edit: IsPassword
+    Role.TOGGLE_BUTTON: 50000,  # Button: publishes the Toggle pattern
+    Role.CHECK_MENU_ITEM: 50011,  # MenuItem: publishes the Toggle pattern
+}
+"""Roles the table alone cannot name: a control type plus one more fact.
+
+The UIA counterpart of `macos._AX_PARENT_ROLES`. Roles every other
+backend reports are spelled here as a control type *plus a property*, so a
+search for one has to visit that control type and decide per element --
+`_build_predicate` re-checks by the refined role, otherwise asking for a
+dialog would return every window on the desktop. The other direction is
+rejected the same way: a modal is not an answer to `role="window"`, matching
+what at-spi reports for the same widget.
+
+- **A dialog is a Window that any of four reads says is one**, tried
+  cheapest first: the `#32770` window class (the Win32 common dialogs --
+  message box, file/color/font/print pickers -- and every DialogBox-created
+  window, modal or not: a modeless find dialog is still a `dialog` on every
+  other backend); UIA's own `IsModal`; and, failing both, the HWND signals
+  in `_hwnd_is_dialog` -- a disabled owner, or the dialog-frame style. The
+  HWND half exists because **managed modality never reaches UIA, measured
+  on Windows 10**: WPF `Window.ShowDialog()` and WinForms
+  `Form.ShowDialog()` both report `IsModal` False through the property
+  *and* `WindowPattern.CurrentIsModal` alike, so without it every managed
+  dialog read back `window`. The one honest residual is an *ownerless*
+  managed modal -- it disables nothing, so no API anywhere can tell it from
+  a window, and it stays one; `_hwnd_is_dialog`'s docstring carries the
+  measurements.
+- **A password field is an Edit whose `IsPassword` is true** -- the property
+  exists for exactly this distinction, and at-spi's `password text` is the
+  same field seen from Linux.
+- **A toggle button is a Button that publishes the Toggle pattern** -- an
+  ordinary push button publishes Invoke and not Toggle; a WPF or WinForms
+  toggle button publishes Toggle. CheckBox has its own control type and is
+  unaffected either way.
+- **A check menu item is a MenuItem that publishes the Toggle pattern.**
+  Measured on Windows 10: a WPF `IsCheckable` menu item answers Toggle
+  whether currently checked or not -- the stable, capability-shaped signal
+  a role needs -- while a plain item does not. The classic Win32 menu
+  proxy exposes *neither* Toggle nor SelectionItem even on a checked or
+  `MFT_RADIOCHECK` item, so classic menu items honestly stay `menu item`,
+  and `radio menu item` has no Windows spelling at all -- nothing
+  distinguishes one through UIA.
+"""
+
+_REFINED_CONTROL_TYPES = frozenset(_CONTEXT_CONTROL_TYPES.values())
+"""The control types `_refined_role` reads more than the type for -- and the
+only ones the search predicate re-checks, so a walk over labels and panes
+never pays for a window's modality."""
+
+
+def _hwnd_is_dialog(hwnd):
+    """Whether the window's own HWND says dialog, where UIA would not.
+
+    Measured on Windows 10: a WPF `Window.ShowDialog()` and a WinForms
+    `Form.ShowDialog()` both report UIA IsModal False -- through the property
+    and `WindowPattern.CurrentIsModal` alike -- so managed modality has to be
+    read from below UIA. Two signals, each authoritative on its own:
+
+    - **The owner is disabled.** Disabling the owner IS Win32 modality --
+      it is what `ShowDialog` and `DialogBox` do -- and it is readable from
+      outside the process. Guarded three ways: the candidate itself must be
+      enabled (during a modal only the modal is), must not be a tool window
+      (a palette owned by the same disabled owner is not a dialog), and must
+      actually have an owner -- an ownerless `ShowDialog` disables nothing,
+      blocks only its own thread, and is honestly indistinguishable from a
+      window (measured: owner 0, no frame bit, generic class), so it stays
+      a `window`.
+    - **`WS_EX_DLGMODALFRAME`** -- the dialog-frame extended style. A
+      MessageBox carries it (measured, 0x10101) and an application's own
+      top-level does not set it on itself.
+
+    False where user32 cannot be asked -- off Windows, or a dead HWND --
+    which is "no evidence", not "not a dialog": the #32770 and IsModal reads
+    beside this stand on their own.
+    """
+    if not hwnd:
+        return False
+    lib = _winapi.user32()
+    if lib is None:
+        return False
+    exstyle = _winapi.get_window_ex_style(hwnd)
+    if exstyle & _winapi.WS_EX_DLGMODALFRAME:
+        return True
+    if exstyle & _winapi.WS_EX_TOOLWINDOW:
+        return False
+    owner = lib.GetWindow(hwnd, _winapi.GW_OWNER)
+    return bool(owner and lib.IsWindowEnabled(hwnd) and not lib.IsWindowEnabled(owner))
+
+
+def _refined_role(node, control_type):
+    """The role for `node`, read in context where the table alone cannot say.
+
+    The table's answer for every control type not in
+    `_CONTEXT_CONTROL_TYPES`; for those, the extra reads happen only on
+    elements of that type -- and for a Window, in cheapest-first order:
+    the class is one attribute, the modality one generic property, and the
+    HWND signals a handle read plus two user32 calls.
+    """
+    if control_type == 50032:
+        if _as_text(_current(node, "CurrentClassName", "")) == "#32770":
+            return Role.DIALOG
+        if bool(_property_value(node, UIA_WindowIsModalPropertyId, False)):
+            return Role.DIALOG
+        raw_hwnd = _property_value(node, UIA_NativeWindowHandlePropertyId, 0)
+        if _hwnd_is_dialog(raw_hwnd if isinstance(raw_hwnd, int) else 0):
+            return Role.DIALOG
+        return _UIA_ROLES.get(control_type, _UNKNOWN_ROLE)
+    if control_type == 50004 and bool(_current(node, "CurrentIsPassword", False)):
+        return Role.PASSWORD_TEXT
+    if control_type == 50000 and bool(
+        _property_value(node, UIA_IsTogglePatternAvailablePropertyId, False)
+    ):
+        return Role.TOGGLE_BUTTON
+    if control_type == 50011 and bool(
+        _property_value(node, UIA_IsTogglePatternAvailablePropertyId, False)
+    ):
+        return Role.CHECK_MENU_ITEM
+    return _UIA_ROLES.get(control_type, _UNKNOWN_ROLE)
+
+
 def _control_types(role):
     """The UIA control type ids this package reports as `role`.
 
     Usually one, and five times in the table above two -- `push button` covers
     both a Button and a SplitButton, `panel` covers Pane and Group -- which is
     why a role filter becomes an *or* of two property conditions rather than
-    one.
+    one. A handful of roles are a control type plus a property --
+    `_CONTEXT_CONTROL_TYPES` -- so asking for one visits its control type and
+    the predicate decides per element.
 
-    Empty for a role UIA cannot produce at all. `Role.LABEL` is the one a
-    caller is likeliest to ask for, since UIA's single Text control type comes
-    back as `text`; an empty set means the search narrows to nothing and then
-    rejects every candidate, which is the honest answer -- there is no label to
-    find on Windows -- rather than an error about the question.
+    Empty for a role UIA cannot produce at all -- `alert`, `file chooser`,
+    `switch` and the rest have no control type here, so an empty set narrows
+    the search to nothing and the predicate rejects every candidate, the
+    honest answer rather than an error about the question. `text` is one of
+    those here: the one Text control type (50020) is a caption on every
+    framework measured -- the table entry carries the four-framework and
+    UWP measurements -- so a body is an `entry` or a `document frame` and
+    nothing on Windows answers `text`.
 
     Compared against every spelling of the role, for the reason
     `atspi._build_predicate` does the same: "button" and "push button" are one
@@ -645,9 +824,15 @@ def _control_types(role):
     written on Linux keeps working here.
     """
     wanted = spellings(role)
-    return frozenset(
+    types = {
         control_type for control_type, name in _UIA_ROLES.items() if name in wanted
+    }
+    types.update(
+        control_type
+        for name, control_type in _CONTEXT_CONTROL_TYPES.items()
+        if name in wanted
     )
+    return frozenset(types)
 
 
 def _point(client, x, y):
@@ -748,9 +933,13 @@ class Element:
         Translated from UIA's control type through the table at the top of this
         module, which is why the answer is an at-spi role name rather than
         UIA's, and `unknown` for a control type outside the documented range.
+        Three control types are read with one more fact -- see
+        `_CONTEXT_CONTROL_TYPES`: a modal or `#32770`-class Window is a
+        `dialog`, an Edit whose IsPassword is true is `password text`, and a
+        Button publishing the Toggle pattern is a `toggle button`.
         """
         control_type = _current(self.node, "CurrentControlType", None)
-        return _UIA_ROLES.get(control_type, _UNKNOWN_ROLE)
+        return _refined_role(self.node, control_type)
 
     @property
     def parent(self):
@@ -1232,7 +1421,10 @@ class Element:
         """
         self._backend._call_pattern(self.node, "expand")
         for container in (self, self._backend.root_element()):
-            for role in (Role.MENU_ITEM, Role.LIST_ITEM):
+            # The entry can be any of the menu-item roles -- a checkable one
+            # is a `check menu item`, not a `menu item` -- and the sequence
+            # keeps it one walk; see Role.MENU_ITEM_ROLES.
+            for role in (Role.MENU_ITEM_ROLES, Role.LIST_ITEM):
                 candidate = container.child(role=role, name=option)
                 if candidate is None:
                     continue
@@ -1253,7 +1445,7 @@ class Element:
         an empty list is a truthful answer about a combo box whose popup has
         not been opened, not a failure.
         """
-        found = self.find(role=Role.MENU_ITEM)
+        found = self.find(role=Role.MENU_ITEM_ROLES)
         return found or self.find(role=Role.LIST_ITEM)
 
     def find(self, role=None, name=None):
@@ -1591,6 +1783,7 @@ class UiaBackend(GUIBackend):
         reports for it *and* every spelling of the role that was asked for.
         """
         control_types = None if role is None else _control_types(role)
+        asked = None if role is None else spellings(role)
 
         def matches(node):
             """Whether this node has the wanted role and matches the filters.
@@ -1602,8 +1795,20 @@ class UiaBackend(GUIBackend):
             provider that ignores a condition entirely answers with everything,
             which is the case this half exists for.
             """
-            if control_types is not None and (
-                _current(node, "CurrentControlType", None) not in control_types
+            control_type = _current(node, "CurrentControlType", None)
+            if control_types is not None and control_type not in control_types:
+                return False
+            # The three context-dependent roles: `_control_types` widened the
+            # visit to Window, Edit or Button wherever one of them was asked
+            # for, so the candidates that are not actually what was asked are
+            # rejected here -- by the role read in context, the same answer
+            # `Element.role` gives. Without this, asking for a dialog returns
+            # every window on the desktop; and the other direction holds too,
+            # a modal is not an answer to `role="window"`.
+            if (
+                asked is not None
+                and control_type in _REFINED_CONTROL_TYPES
+                and _refined_role(node, control_type) not in asked
             ):
                 return False
             if name is not None and not _matches_text(

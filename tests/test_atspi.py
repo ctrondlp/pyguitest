@@ -2464,6 +2464,23 @@ class TestWaylandElementGeometry(AtspiTestCase):
         # asking raises. That still has to answer False, not propagate.
         self.assertFalse(self.atspi.Element(_RaisesOnDead()).alive)
 
+    def test_options_includes_checkable_and_radio_menu_items(self):
+        # A View menu's toggle is a `check menu item` and a format group's
+        # entry a `radio menu item`; keyed on the plain `menu item` alone,
+        # options() walked straight past both -- a pre-existing gap the
+        # Windows review round surfaced. Role.MENU_ITEM_ROLES is the search
+        # now, one walk for the three.
+        combo = FakeNode(
+            role="combo box",
+            children=[
+                FakeNode(role="menu item", name="Cut"),
+                FakeNode(role="check menu item", name="Word Wrap"),
+                FakeNode(role="radio menu item", name="Left"),
+            ],
+        )
+        names = [option.name for option in self.atspi.Element(combo).options()]
+        self.assertEqual(names, ["Cut", "Word Wrap", "Left"])
+
     def test_choose_sets_the_text_child_on_an_editable_combo_box(self):
         # Qt publishes an editable combo's entry as a `text` child, and that
         # is the only selection path: the popup items expose no `click`
