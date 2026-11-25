@@ -142,14 +142,17 @@ only after live checks on real Windows and macOS desktops.
   only the mark char differs, which feeds `Element.checked` rather than a
   role.
 
-- **A role a Mac reports is now a role a Mac can search for.**
+- **A role a Mac reports is now a role a Mac can search for — acronyms
+  included.**
   `Element.role` spells an unmapped AX role out into words (`AXHeading` →
   `heading`, `AXColorWell` → `color well`), but the search side only knew
   the mapping table — so the backend named roles no search could ask for,
   and a script that read a role off a live tree could not find it again. A
   spelling nothing maps is now bridged back to the camel-cased AX name it
-  came from. An acronym-cased AX name (`AXHTMLContent`) does not round-trip
-  that way and wants a real table entry instead.
+  came from. An acronym-cased AX name (`AXHTMLContent` → `html
+  content` → `AXHtmlContent`) does not round-trip through the bridge, so
+  that case is matched instead against the role each element reads back
+  as — the search finds it either way.
 
 ## [0.28.0] — 2026-11-24
 

@@ -68,10 +68,13 @@ spelling, chosen here, not a name the platform uses:
   answers `TogglePattern` is what at-spi would call `toggle button`. Both
   come back as `push button` here, and a caller that has to tell them apart
   asks the pattern rather than the role.
-- **`Text` covers what at-spi splits in two.** `label` (a static caption)
-  and `text` (a text body) are one control type in UIA; they are told apart
-  by the Text pattern, which a caption does not publish and a body does, so
-  both are reachable -- see `_CONTEXT_CONTROL_TYPES`.
+- **UIA `Text` is at-spi's `label`.** at-spi splits static text into `label`
+  (a caption) and `text` (a text body); UIA has one Text control type for
+  both, and this backend maps it to `label` flatly. Measured across four
+  frameworks and UWP, every Text control is a caption, and the Text pattern
+  does not separate the two -- UWP TextBlock captions publish it too -- so a
+  body is an `entry` (Edit) or a `document frame` (Document) and `text` has
+  no Windows spelling at all.
 - **`Pane` is at-spi's `panel` only most of the time.** A UIA pane is also
   what at-spi would call a `scroll pane`, a `viewport` or a `filler`
   depending on what it contains; there is no scroll-pane control type,

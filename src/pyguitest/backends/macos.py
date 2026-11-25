@@ -701,10 +701,15 @@ def _ax_roles(role: str | Sequence[str] | None):
     ("heading" from `AXHeading`, "color well" from `AXColorWell`), and a
     search for exactly those words must find those elements, or this backend
     would name roles no search can ask for. The bridge is the camel-cased
-    reassembly of the words; an acronym-cased AX name (`AXHTMLContent`) does
-    not round-trip that way and wants a real `_AX_ROLES` entry instead. A
-    role this backend never produces still comes back empty because no
-    element has it, not because the filter was dropped.
+    reassembly of the words. It cannot recover an acronym's casing --
+    `AXHTMLContent` reads back `"html content"` and rebuilds as
+    `AXHtmlContent` -- so that case is caught in `_build_predicate` instead,
+    which matches an unmapped spelling against the role each visited element
+    reads back as; this set only has to carry the names that *do* round-trip,
+    which is what lets an old recording's pre-mapping spelling (`"cell"` for
+    what is now `AXCell`/`table cell`) still find its element. A role this
+    backend never produces still comes back empty because no element has it,
+    not because the filter was dropped.
     """
     if role is None:
         return None
@@ -3020,11 +3025,28 @@ class MacosBackend(GUIBackend):
         wanted = _ax_roles(role)
 
         asked = None if role is None else spellings(role)
+        # Spellings no table produces -- a role reported only through
+        # `_camel_words`. The inverse bridge in `_ax_roles` reconstructs an AX
+        # name for these, but it cannot recover an acronym's casing
+        # (`AXHTMLContent` reads back `"html content"` and rebuilds as
+        # `AXHtmlContent`), so a search for one is also matched here by the
+        # role the element reads back as. Empty for every ordinary search, so
+        # the per-element `element.role` read below is paid only when a
+        # camel-words spelling was asked for, and only on elements the raw
+        # filter already rejected.
+        unmapped = None if asked is None else asked - _AX_REPORTED
 
         def matches(element):
             """Whether this element has the wanted role and matches the filters."""
             raw = _raw_role(element)
-            if wanted is not None and raw not in wanted:
+            # Reject a raw role no table named, unless it is an unmapped
+            # (`_camel_words`) spelling the element reads back as -- the
+            # acronym case the inverse bridge cannot reconstruct.
+            if (
+                wanted is not None
+                and raw not in wanted
+                and not (unmapped and element.role in unmapped)
+            ):
                 return False
             # `_ax_roles` widened the walk to include the AX names whose role
             # depends on their container or their subrole, so the ones that are

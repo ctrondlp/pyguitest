@@ -6051,3 +6051,27 @@ reads `check menu item`, and on Linux it always had, a pre-existing gap the
 round surfaced. `Role.MENU_ITEM_ROLES` names the trio and all three
 backends search it in one walk, with behavioural tests on the UIA and
 AT-SPI sides.
+
+## PR #82 review: two more, verified against the code (2026-11-25)
+
+A second automated pass on the opened pull request raised two Minor
+findings, both correct.
+
+**An acronym-cased unmapped AX role could not be searched for.** The inverse
+bridge rebuilds a `_camel_words` spelling into an AX name by capitalizing
+each word, which cannot recover an acronym: `AXHTMLContent` reads back `"html
+content"` and the bridge rebuilds `AXHtmlContent`, so a search for `"html
+content"` missed the live `AXHTMLContent`. The predicate now also matches an
+unmapped spelling against the role each visited element reads back as —
+paid only for a search whose spelling no table produces, and only on
+elements the raw filter already rejected. The bridge stays for the names
+that *do* round-trip, which is what keeps an old recording's pre-mapping
+`"cell"` finding what is now `AXCell`. Both halves are pinned by test,
+including that an absent unmapped role still returns nothing.
+
+**A stale docstring still promised the Text-pattern split.** One bullet in
+`uia.py`'s module docstring described `Role.TEXT` as reachable through
+Text-pattern refinement — true of an earlier draft, falsified by the UWP
+measurement that flattened the mapping. Corrected to state that UIA Text
+maps to `label` flatly and `text` has no Windows spelling, matching
+`_UIA_ROLES` and the tests.

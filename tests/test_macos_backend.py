@@ -3627,6 +3627,13 @@ class TestUnmappedRoleSpellings(BackendTestCase):
                     ],
                 ),
                 FakeElement(role="AXHeading", attrs={"kAXTitleAttribute": "Section"}),
+                # An acronym-cased unmapped role: `_camel_words` lowercases
+                # the acronym ("html content"), which the inverse bridge
+                # cannot rebuild, so the forward match in the predicate is
+                # the only thing that finds it.
+                FakeElement(
+                    role="AXHTMLContent", attrs={"kAXTitleAttribute": "Article"}
+                ),
             ],
         )
         app = FakeElement(
@@ -3659,6 +3666,22 @@ class TestUnmappedRoleSpellings(BackendTestCase):
         backend = self._backend()
         heading = backend.find_element(role=Role.HEADING, name="Section")
         self.assertEqual(heading.role, Role.HEADING)
+
+    def test_an_acronym_cased_unmapped_role_is_found_by_its_read_back_words(self):
+        # The bridge rebuilds "html content" as AXHtmlContent, which never
+        # matches the live AXHTMLContent; the predicate's forward match on
+        # the role each element reads back is what finds it. The reconstructed
+        # name genuinely misses, so this is the only path.
+        self.assertNotIn("AXHTMLContent", macos._ax_roles("html content"))
+        backend = self._backend()
+        article = backend.find_element(role="html content", name="Article")
+        self.assertIsNotNone(article)
+        self.assertEqual(article.role, "html content")
+
+    def test_a_search_for_an_unmapped_role_no_element_has_is_empty(self):
+        # The forward match must not turn an absent role into a false hit.
+        backend = self._backend()
+        self.assertEqual(backend.find_elements(role="color well"), [])
 
 
 class TestSwitchSubroleSearches(BackendTestCase):
