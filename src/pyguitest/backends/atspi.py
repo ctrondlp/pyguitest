@@ -1509,7 +1509,7 @@ class Element:
 
     def options(self):
         """The choices this dropdown or list offers, as Elements."""
-        found = self.find(role=Role.MENU_ITEM)
+        found = self.find(role=Role.MENU_ITEM_ROLES)
         return found or self.find(role=Role.LIST_ITEM)
 
     def find(self, role=None, name=None):

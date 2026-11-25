@@ -949,10 +949,11 @@ class TestFindingElements(UiaTestCase):
         self.assertEqual([element.name for element in found], ["Delete"])
 
     def test_a_role_uia_cannot_report_finds_nothing_and_says_so(self):
-        # UIA has one Text control type, reported as `text`, so a Windows label
-        # is found by that name and `label` matches nothing at all.
-        self.automation.root.children.append(self.node(control_type=50020, name="Hi"))
-        self.assertEqual(self.backend.find_elements(role="label"), [])
+        # `switch` has no UIA control type at all -- a search for it narrows
+        # to nothing (no property condition) and the predicate rejects every
+        # candidate, the honest "there is none here".
+        self.automation.root.children.append(self.node(control_type=50002, name="Hi"))
+        self.assertEqual(self.backend.find_elements(role="switch"), [])
         self.assertEqual(self.property_conditions(), [])
 
     def test_find_element_is_the_first_match(self):
@@ -1546,6 +1547,23 @@ class TestElementActions(UiaTestCase):
             [option.name for option in self.element(node).options()], ["Cut"]
         )
 
+    def test_options_includes_checkable_menu_items(self):
+        # A checkable entry is a `check menu item`, not a `menu item`, so a
+        # lookup keyed on the plain role walked straight past it -- the
+        # Role.MENU_ITEM_ROLES trio is what options() searches now.
+        node = self.node(control_type=50003)
+        self.add(node, control_type=50011, name="Cut")
+        self.add(
+            node,
+            control_type=50011,
+            name="Word Wrap",
+            GetCurrentPropertyValue=lambda pid: (
+                pid == uia.UIA_IsTogglePatternAvailablePropertyId
+            ),
+        )
+        names = [option.name for option in self.element(node).options()]
+        self.assertEqual(names, ["Cut", "Word Wrap"])
+
     def test_options_falls_back_to_list_items(self):
         node = self.node(control_type=50003)
         self.add(node, control_type=50007, name="First")
@@ -2048,6 +2066,317 @@ class TestThroughASession(UiaTestCase):
         with self.assertRaises(CapabilityUnsupported) as caught:
             gui.button("Save").double_click()
         self.assertEqual(caught.exception.capability, Capability.POINTER_MOVE)
+
+
+class TestContextDependentRoleReads(UiaTestCase):
+    """A control type plus one more fact: dialogs, password fields, toggles."""
+
+    def test_a_modal_window_is_a_dialog(self):
+        node = self.node(
+            control_type=50032,
+            GetCurrentPropertyValue=lambda pid: pid == uia.UIA_WindowIsModalPropertyId,
+        )
+        self.assertEqual(self.element(node).role, "dialog")
+
+    def test_a_32770_class_window_is_a_dialog_even_when_modeless(self):
+        # The class of the Win32 common dialogs and of every DialogBox-created
+        # window; a modeless find dialog is still a `dialog` on every other
+        # backend, which is why the class counts without the modality.
+        node = self.node(
+            control_type=50032,
+            CurrentClassName="#32770",
+            GetCurrentPropertyValue=lambda pid: False,
+        )
+        self.assertEqual(self.element(node).role, "dialog")
+
+    def test_an_ordinary_window_stays_a_window(self):
+        node = self.node(control_type=50032, GetCurrentPropertyValue=lambda pid: False)
+        self.assertEqual(self.element(node).role, "window")
+
+    def test_a_window_that_refuses_the_modality_read_stays_a_window(self):
+        # No answer is not evidence of a dialog -- `_property_value`'s default.
+        node = self.node(control_type=50032)
+        self.assertEqual(self.element(node).role, "window")
+
+    def test_a_password_edit_is_password_text(self):
+        node = self.node(control_type=50004, CurrentIsPassword=True)
+        self.assertEqual(self.element(node).role, "password text")
+
+    def test_an_ordinary_edit_stays_an_entry(self):
+        node = self.node(control_type=50004, CurrentIsPassword=False)
+        self.assertEqual(self.element(node).role, "entry")
+
+    def test_a_button_publishing_toggle_is_a_toggle_button(self):
+        node = self.node(
+            control_type=50000,
+            GetCurrentPropertyValue=lambda pid: (
+                pid == uia.UIA_IsTogglePatternAvailablePropertyId
+            ),
+        )
+        self.assertEqual(self.element(node).role, "toggle button")
+
+    def test_an_invoke_only_button_stays_a_push_button(self):
+        node = self.node(control_type=50000, GetCurrentPropertyValue=lambda pid: False)
+        self.assertEqual(self.element(node).role, "push button")
+
+    def test_a_menu_item_publishing_toggle_is_a_check_menu_item(self):
+        # The WPF IsCheckable shape, measured: Toggle answers whether the
+        # item is currently checked or not, so the role is stable.
+        node = self.node(
+            control_type=50011,
+            GetCurrentPropertyValue=lambda pid: (
+                pid == uia.UIA_IsTogglePatternAvailablePropertyId
+            ),
+        )
+        self.assertEqual(self.element(node).role, "check menu item")
+
+    def test_a_plain_menu_item_stays_a_menu_item(self):
+        # Also the classic Win32 shape: the proxy exposes no Toggle even on
+        # a checked or MFT_RADIOCHECK item, measured, so they land here.
+        node = self.node(control_type=50011, GetCurrentPropertyValue=lambda pid: False)
+        self.assertEqual(self.element(node).role, "menu item")
+
+    def test_a_text_control_is_a_label_with_or_without_the_text_pattern(self):
+        # Win32/WPF/WinForms captions publish no Text pattern; UWP TextBlock
+        # captions all do (measured, twelve of twelve across the Settings
+        # app) -- so the pattern cannot tell a caption from anything, and
+        # every Text control is a label.
+        plain = self.node(control_type=50020, GetCurrentPropertyValue=lambda pid: False)
+        self.assertEqual(self.element(plain).role, "label")
+        uwp = self.node(
+            control_type=50020,
+            # 30040 = IsTextPatternAvailable, the UWP caption shape.
+            GetCurrentPropertyValue=lambda pid: pid == 30040,
+        )
+        self.assertEqual(self.element(uwp).role, "label")
+
+
+class FakeUser32:
+    """GetWindow/IsWindowEnabled over a dict-described desktop.
+
+    `owners` maps HWND -> owner HWND (absent = unowned, as GetWindow answers
+    0); `disabled` is the set of HWNDs IsWindowEnabled says no about.
+    """
+
+    def __init__(self, owners=None, disabled=()):
+        self.owners = dict(owners or {})
+        self.disabled = set(disabled)
+
+    def GetWindow(self, hwnd, flag):
+        return self.owners.get(hwnd, 0)
+
+    def IsWindowEnabled(self, hwnd):
+        return hwnd not in self.disabled
+
+
+class TestHwndDialogSignals(UiaTestCase):
+    """The reads below UIA: a disabled owner, or the dialog-frame style.
+
+    Each case is one of the measured Windows 10 shapes -- the probe matrix
+    that produced them lives in the role-audit log.
+    """
+
+    def world(self, owners=None, disabled=(), exstyles=None):
+        lib = FakeUser32(owners, disabled)
+        for target, value in (
+            ("user32", lambda: lib),
+            ("get_window_ex_style", lambda hwnd: (exstyles or {}).get(hwnd, 0)),
+        ):
+            patcher = mock.patch.object(uia._winapi, target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def window_node(self, hwnd, modal=False):
+        return self.node(
+            control_type=50032,
+            GetCurrentPropertyValue=lambda pid: (
+                hwnd
+                if pid == uia.UIA_NativeWindowHandlePropertyId
+                else bool(modal)
+                if pid == uia.UIA_WindowIsModalPropertyId
+                else False
+            ),
+        )
+
+    def test_a_window_whose_owner_is_disabled_is_a_dialog(self):
+        # The real-world WPF/WinForms ShowDialog shape: owner disabled, the
+        # modal itself enabled, nothing said through UIA.
+        self.world(owners={0x50: 0x10}, disabled={0x10})
+        self.assertEqual(self.element(self.window_node(0x50)).role, "dialog")
+
+    def test_an_ownerless_managed_modal_stays_a_window(self):
+        # Measured: ShowDialog with no owner disables nothing -- owner 0, no
+        # frame bit, generic class -- so no API anywhere can call it a
+        # dialog, and claiming one would be a guess.
+        self.world()
+        self.assertEqual(self.element(self.window_node(0x50)).role, "window")
+
+    def test_an_owned_window_whose_owner_is_enabled_is_not_a_dialog(self):
+        self.world(owners={0x50: 0x10})
+        self.assertEqual(self.element(self.window_node(0x50)).role, "window")
+
+    def test_a_disabled_candidate_is_not_the_modal(self):
+        # During a modal only the modal is enabled; a sibling that is itself
+        # disabled must not borrow the owner's state as evidence.
+        self.world(owners={0x50: 0x10, 0x60: 0x10}, disabled={0x10, 0x60})
+        self.assertEqual(self.element(self.window_node(0x60)).role, "window")
+
+    def test_a_tool_window_is_never_a_dialog(self):
+        # A palette owned by the same disabled owner is not a dialog.
+        self.world(
+            owners={0x70: 0x10},
+            disabled={0x10},
+            exstyles={0x70: uia._winapi.WS_EX_TOOLWINDOW},
+        )
+        self.assertEqual(self.element(self.window_node(0x70)).role, "window")
+
+    def test_the_dialog_frame_style_is_a_dialog_on_its_own(self):
+        # A MessageBox wears WS_EX_DLGMODALFRAME (measured, 0x10101) --
+        # ownership not required.
+        self.world(exstyles={0x80: uia._winapi.WS_EX_DLGMODALFRAME})
+        self.assertEqual(self.element(self.window_node(0x80)).role, "dialog")
+
+    def test_no_user32_means_no_evidence_not_no_dialog(self):
+        # Off Windows the HWND reads cannot be asked; the class and IsModal
+        # routes above this one still stand on their own.
+        patcher = mock.patch.object(uia._winapi, "user32", lambda: None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.assertEqual(self.element(self.window_node(0x50)).role, "window")
+        modal = self.window_node(0x50, modal=True)
+        self.assertEqual(self.element(modal).role, "dialog")
+
+    def test_a_zero_handle_is_not_asked_about(self):
+        self.world(owners={0: 0x10}, disabled={0x10})
+        self.assertEqual(self.element(self.window_node(0)).role, "window")
+
+
+class TestContextDependentRoleSearches(UiaTestCase):
+    """Both directions of each refinement, through `find_elements`.
+
+    The widened control-type visit is what lets a dialog search see windows
+    at all; the predicate's re-check is what keeps the plain ones out -- and
+    keeps the refined ones out of a search for the plain role, matching what
+    at-spi reports for the same widgets.
+    """
+
+    def test_a_dialog_search_finds_the_modal_and_not_the_plain_window(self):
+        modal = self.node(
+            control_type=50032,
+            GetCurrentPropertyValue=lambda pid: pid == uia.UIA_WindowIsModalPropertyId,
+        )
+        plain = self.node(control_type=50032, GetCurrentPropertyValue=lambda pid: False)
+        self.automation.root.children.extend([modal, plain])
+        found = self.backend.find_elements(role="dialog")
+        self.assertEqual([element.node for element in found], [modal])
+
+    def test_a_window_search_rejects_the_modal(self):
+        modal = self.node(
+            control_type=50032,
+            GetCurrentPropertyValue=lambda pid: pid == uia.UIA_WindowIsModalPropertyId,
+        )
+        plain = self.node(control_type=50032, GetCurrentPropertyValue=lambda pid: False)
+        self.automation.root.children.extend([modal, plain])
+        found = self.backend.find_elements(role="window")
+        self.assertEqual([element.node for element in found], [plain])
+
+    def test_a_password_text_search_finds_only_the_password_edit(self):
+        secret = self.node(control_type=50004, CurrentIsPassword=True)
+        plain = self.node(control_type=50004, CurrentIsPassword=False)
+        self.automation.root.children.extend([secret, plain])
+        found = self.backend.find_elements(role="password text")
+        self.assertEqual([element.node for element in found], [secret])
+
+    def test_an_entry_search_rejects_the_password_edit(self):
+        secret = self.node(control_type=50004, CurrentIsPassword=True)
+        plain = self.node(control_type=50004, CurrentIsPassword=False)
+        self.automation.root.children.extend([secret, plain])
+        found = self.backend.find_elements(role="entry")
+        self.assertEqual([element.node for element in found], [plain])
+
+    def test_a_toggle_button_search_finds_only_the_toggling_button(self):
+        toggling = self.node(
+            control_type=50000,
+            GetCurrentPropertyValue=lambda pid: (
+                pid == uia.UIA_IsTogglePatternAvailablePropertyId
+            ),
+        )
+        plain = self.node(control_type=50000, GetCurrentPropertyValue=lambda pid: False)
+        self.automation.root.children.extend([toggling, plain])
+        found = self.backend.find_elements(role="toggle button")
+        self.assertEqual([element.node for element in found], [toggling])
+
+    def test_an_owner_disabled_managed_modal_is_found_as_a_dialog(self):
+        # The WPF/WinForms case end to end: UIA says nothing (IsModal False,
+        # not #32770), the HWND does -- see TestHwndDialogSignals for the
+        # signal itself; this pins that the search route consults it.
+        lib = FakeUser32(owners={0x50: 0x10}, disabled={0x10})
+        for target, value in (
+            ("user32", lambda: lib),
+            ("get_window_ex_style", lambda hwnd: 0),
+        ):
+            patcher = mock.patch.object(uia._winapi, target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        modal = self.node(
+            control_type=50032,
+            GetCurrentPropertyValue=lambda pid: (
+                0x50 if pid == uia.UIA_NativeWindowHandlePropertyId else False
+            ),
+        )
+        self.automation.root.children.append(modal)
+        found = self.backend.find_elements(role="dialog")
+        self.assertEqual([element.node for element in found], [modal])
+        self.assertEqual(self.backend.find_elements(role="window"), [])
+
+    def test_both_push_button_spellings_reject_the_toggling_button(self):
+        toggling = self.node(
+            control_type=50000,
+            GetCurrentPropertyValue=lambda pid: (
+                pid == uia.UIA_IsTogglePatternAvailablePropertyId
+            ),
+        )
+        plain = self.node(control_type=50000, GetCurrentPropertyValue=lambda pid: False)
+        self.automation.root.children.extend([toggling, plain])
+        for spelling in ("push button", "button"):
+            with self.subTest(role=spelling):
+                found = self.backend.find_elements(role=spelling)
+                self.assertEqual([element.node for element in found], [plain])
+
+    def test_a_check_menu_item_search_finds_only_the_checkable_item(self):
+        checkable = self.node(
+            control_type=50011,
+            GetCurrentPropertyValue=lambda pid: (
+                pid == uia.UIA_IsTogglePatternAvailablePropertyId
+            ),
+        )
+        plain = self.node(control_type=50011, GetCurrentPropertyValue=lambda pid: False)
+        self.automation.root.children.extend([checkable, plain])
+        found = self.backend.find_elements(role="check menu item")
+        self.assertEqual([element.node for element in found], [checkable])
+
+    def test_a_menu_item_search_rejects_the_checkable_item(self):
+        checkable = self.node(
+            control_type=50011,
+            GetCurrentPropertyValue=lambda pid: (
+                pid == uia.UIA_IsTogglePatternAvailablePropertyId
+            ),
+        )
+        plain = self.node(control_type=50011, GetCurrentPropertyValue=lambda pid: False)
+        self.automation.root.children.extend([checkable, plain])
+        found = self.backend.find_elements(role="menu item")
+        self.assertEqual([element.node for element in found], [plain])
+
+    def test_a_label_search_finds_every_caption_and_a_text_search_nothing(self):
+        plain = self.node(control_type=50020, GetCurrentPropertyValue=lambda pid: False)
+        uwp = self.node(
+            control_type=50020,
+            GetCurrentPropertyValue=lambda pid: pid == 30040,
+        )
+        self.automation.root.children.extend([plain, uwp])
+        labels = self.backend.find_elements(role="label")
+        self.assertEqual([element.node for element in labels], [plain, uwp])
+        self.assertEqual(self.backend.find_elements(role="text"), [])
 
 
 if __name__ == "__main__":

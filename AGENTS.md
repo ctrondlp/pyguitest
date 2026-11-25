@@ -101,6 +101,33 @@ Fix lint/format/type issues right the first time rather than looping
 edit-check-edit-check; run the full gate once near the end of a change, not
 after every edit.
 
+## Cross-platform compatibility is the product, not a side effect
+
+The portable surface — `role=`, `Capability`, the key spellings, the window
+kinds — is what this package sells. A behaviour that differs between
+backends has the same standing as a crash: close it, or measure it into an
+honest, documented absence. What it must never be is silent divergence that
+a script discovers on the platform its author does not have.
+
+- **at-spi's vocabulary is canonical.** Every backend maps its native names
+  into it — `_AX_ROLES`, `_UIA_ROLES`, and the context tables for the roles
+  a flat name cannot carry (a dialog's subrole, a password field's
+  property, a tab's container). A platform name with no counterpart keeps
+  its own honest spelling rather than borrowing a wrong one.
+- **Both directions must hold.** A search for X must not return Y — a
+  `window` search returns no dialogs, a `check box` search no switches —
+  and whatever `Element.role` reads back must be searchable by exactly
+  that spelling; the macOS camel bridge exists because a read-back-only
+  name is a trap a recording falls into on replay.
+- **Measure before mapping.** A new mapping rests on a live reading of
+  what the platform actually publishes — the 2026-11-25 role audit in
+  `docs/validation.md` is the template, including measuring the signal
+  that *lies* (`GetCurrentPattern` on a caption) before trusting one.
+- **A forced divergence is documented where a caller looks**: the role
+  constant's own docstring in `roles.py`, the backend table's comment
+  beside the entry, and a flagged CHANGELOG entry when a read-back
+  changes.
+
 ## Backend conventions
 
 **A capture failure is one of three kinds, and the exception type is how

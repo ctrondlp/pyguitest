@@ -366,6 +366,10 @@ _AX_ROLES = {
     "AXBrowser": Role.TREE,
     "AXRow": Role.TABLE_ROW,
     "AXColumn": Role.TABLE_COLUMN_HEADER,
+    # A table's or an outline's cell. at-spi's `table cell` is the same
+    # thing seen from Linux; before this entry the name fell through to
+    # `_camel_words` as "cell", a spelling nothing could search for.
+    "AXCell": Role.TABLE_CELL,
     # -- things you press --------------------------------------------------
     "AXButton": Role.PUSH_BUTTON,
     # GtkMenuButton reports `push button` on Linux: it is a control that opens
@@ -384,7 +388,7 @@ _AX_ROLES = {
     "AXTextArea": Role.TEXT,
     "AXSecureTextField": Role.PASSWORD_TEXT,
     # -- menus -------------------------------------------------------------
-    "AXMenuBar": "menu bar",
+    "AXMenuBar": Role.MENU_BAR,
     # A menu bar item is what a menu hangs from, so `menu item` rather than
     # `menu bar`: the bar itself is the element above it, and at-spi names no
     # role for the entry hanging from one.
@@ -407,7 +411,7 @@ _AX_ROLES = {
     # against either found nothing here. Measured on macOS 26.7: hovering
     # TextEdit's Bold checkbox, whose AXHelp is "Bold text", added exactly one
     # element to the application's tree, an AXHelpTag.
-    "AXHelpTag": "tool tip",
+    "AXHelpTag": Role.TOOL_TIP,
     "AXProgressIndicator": Role.PROGRESS_BAR,
     "AXSeparator": Role.SEPARATOR,
     "AXSplitter": Role.SEPARATOR,
@@ -447,14 +451,23 @@ def _ax_role(name: str) -> str:
 
 
 _AX_SELECT_BY_PRESS = frozenset(
-    {Role.PAGE_TAB, Role.LIST_ITEM, Role.TABLE_ROW, Role.RADIO_BUTTON}
+    {
+        Role.PAGE_TAB,
+        Role.LIST_ITEM,
+        Role.TABLE_ROW,
+        # An outline's row is a `tree item` now that its container refines
+        # the role; its activation is its selection exactly as a list's or a
+        # flat table's row's is, so the press fallback moved with the name.
+        Role.TREE_ITEM,
+        Role.RADIO_BUTTON,
+    }
 )
 """Roles whose activation *is* their selection, for `Element.select()`.
 
 AX publishes `kAXSelectedAttribute` on some selectable things and not others
--- a Qt tab has none, measured -- and for these four pressing is what a
-person does to select one. Everything else keeps the typed refusal: pressing
-a push button is not selecting it.
+-- a Qt tab has none, measured -- and for these pressing is what a person
+does to select one. Everything else keeps the typed refusal: pressing a push
+button is not selecting it.
 """
 
 _AX_ROW_ROLES = frozenset({"AXRow"})
@@ -465,7 +478,7 @@ Scopes `Element._name_from_cells`, so nothing else pays for a row's problem.
 
 _AX_PARENT_ROLES = {
     "AXRadioButton": {"AXTabGroup": Role.PAGE_TAB},
-    "AXRow": {"AXList": Role.LIST_ITEM},
+    "AXRow": {"AXList": Role.LIST_ITEM, "AXOutline": Role.TREE_ITEM},
 }
 """Roles AX only tells apart by what contains them: (own role, parent role).
 
@@ -478,9 +491,13 @@ cases are ones a portable script asks for by the *other* name:
   empty on both. So `role="page tab"` matched nothing at all on a Mac, and a
   script recorded anywhere else died at its first tab.
 - **A list row is an `AXRow` inside an `AXList`.** An `AXRow` inside an
-  `AXTable` or `AXOutline` really is a table row, which is what the flat
-  table reports; inside a list it is what at-spi and UIA both call a list
-  item.
+  `AXTable` really is a table row, which is what the flat table reports;
+  inside a list it is what at-spi and UIA both call a list item.
+- **An outline's row is an `AXRow` inside an `AXOutline`** -- what at-spi
+  and UIA both call a tree item. The outline itself was already `tree`
+  (`AXOutline` in the flat table), but its rows answering `table row` was
+  the same cross-platform dead end as the tabs: `role="tree item"` matched
+  nothing at all on a Mac.
 
 The cost is one parent read, and only for an element whose own role is a key
 here -- so it is paid on radio buttons and rows, never on the static text and
@@ -504,8 +521,14 @@ def _ax_role_in_context(raw: str, parent_raw: str | None) -> str | None:
 _AX_SUBROLES = {
     "AXDialog": Role.DIALOG,
     "AXSystemDialog": Role.DIALOG,
+    # A switch is an AXCheckBox whose subrole says so. Measured on macOS 26
+    # (System Settings, Desktop & Dock): eleven AXCheckBox/AXSwitch toggles
+    # and, in the same pane, one AXCheckBox with no subrole at all -- a real
+    # checkbox -- so the subrole is exactly the line between the two, and
+    # GTK4's `switch` role has a macOS counterpart.
+    "AXSwitch": Role.SWITCH,
 }
-"""Window subroles that mean something more specific than `window`.
+"""Subroles that mean something more specific than the role carrying them.
 
 **The one place AX publishes "this is a dialog".** Every toplevel a Mac
 application opens has `kAXRoleAttribute` of `AXWindow`; which *kind* of window
@@ -529,13 +552,19 @@ another and about to go away. Both silently had nothing to match on a Mac.
 A subrole this table does not know leaves the role alone: `AXStandardWindow`,
 `AXFloatingWindow` and `AXSystemFloatingWindow` are all windows, and an
 unmapped subrole is not evidence of anything else. The read costs one extra
-attribute, and only for an element whose own role is `AXWindow` -- the same
-shape `_AX_PARENT_ROLES` uses to pay for its parent read only where it
-matters.
+attribute, and only for an element whose own role is in `_AX_SUBROLE_ROLES`
+-- the same shape `_AX_PARENT_ROLES` uses to pay for its parent read only
+where it matters. `AXSwitch` rides the same mechanism for checkboxes; its
+measurement is beside its entry.
 """
 
-_AX_SUBROLE_ROLES = frozenset({"AXWindow"})
-"""The raw roles whose subrole is consulted -- see `_AX_SUBROLES`."""
+_AX_SUBROLE_ROLES = frozenset({"AXWindow", "AXCheckBox"})
+"""The raw roles whose subrole is consulted -- see `_AX_SUBROLES`.
+
+The same pay-only-where-it-matters shape as `_AX_PARENT_ROLES`: the subrole
+read costs one attribute, and only windows and checkboxes pay it -- a window
+can be a dialog, a checkbox can be a switch, and nothing else here changes
+meaning by subrole."""
 
 
 def _ax_role_by_subrole(raw: str, subrole: str | None) -> str | None:
@@ -543,6 +572,20 @@ def _ax_role_by_subrole(raw: str, subrole: str | None) -> str | None:
     if raw not in _AX_SUBROLE_ROLES or not subrole:
         return None
     return _AX_SUBROLES.get(subrole)
+
+
+_AX_REPORTED = (
+    frozenset(_AX_ROLES.values())
+    | frozenset(
+        role for by_parent in _AX_PARENT_ROLES.values() for role in by_parent.values()
+    )
+    | frozenset(_AX_SUBROLES.values())
+)
+"""Every role string the tables above can report.
+
+The spellings a search resolves through the tables; anything else an element
+reads back came through `_camel_words`, which is what `_ax_roles`' inverse
+bridge exists for."""
 
 
 _AX_ACTIONS = {
@@ -651,22 +694,29 @@ def _ax_roles(role: str | Sequence[str] | None):
 
     A raw AX name is accepted as itself, so a caller who read `AXTextField`
     off a live tree can search for it -- checked per role when `role` names
-    several at once, since `str.startswith` has no sequence form. Where
-    nothing maps, the role strings asked for are returned as themselves
-    rather than an empty set: an empty set would silently match nothing, and
-    a search for a role this backend never produces should come back empty
-    because no element has it, not because the filter was dropped.
+    several at once, since `str.startswith` has no sequence form.
+
+    A spelling nothing here maps is bridged back through `_camel_words`'
+    inverse: `Element.role` reports an unmapped AX role as its own words
+    ("heading" from `AXHeading`, "color well" from `AXColorWell`), and a
+    search for exactly those words must find those elements, or this backend
+    would name roles no search can ask for. The bridge is the camel-cased
+    reassembly of the words; an acronym-cased AX name (`AXHTMLContent`) does
+    not round-trip that way and wants a real `_AX_ROLES` entry instead. A
+    role this backend never produces still comes back empty because no
+    element has it, not because the filter was dropped.
     """
     if role is None:
         return None
     names = (role,) if isinstance(role, str) else tuple(role)
     wanted = spellings(role)
     named = {name for name, reported in _AX_ROLES.items() if reported in wanted}
-    # The two context-dependent roles: an AXRadioButton can be a page tab and
-    # an AXRow can be a list item, so a search for either has to *visit* those
-    # AX names. Which of them actually match is then decided per element by
-    # `_build_predicate`, which compares the role read in context -- otherwise
-    # asking for a page tab would return every radio button on the desktop.
+    # The context-dependent roles: an AXRadioButton can be a page tab, and an
+    # AXRow can be a list item or a tree item, so a search for any of those
+    # has to *visit* those AX names. Which of them actually match is then
+    # decided per element by `_build_predicate`, which compares the role read
+    # in context -- otherwise asking for a page tab would return every radio
+    # button on the desktop.
     for raw, by_parent in _AX_PARENT_ROLES.items():
         if wanted & set(by_parent.values()):
             named.add(raw)
@@ -677,6 +727,12 @@ def _ax_roles(role: str | Sequence[str] | None):
     # off the role read *with* its subrole.
     if wanted & set(_AX_SUBROLES.values()):
         named |= _AX_SUBROLE_ROLES
+    # The inverse bridge for unmapped spellings -- see the docstring above. A
+    # raw `AX*` ask is not bridged: it is already an AX name, and the
+    # passthrough below is its road in.
+    for spelling in wanted:
+        if spelling not in _AX_REPORTED and not spelling.startswith("AX"):
+            named.add("AX" + "".join(word.capitalize() for word in spelling.split()))
     for one in names:
         if one.startswith("AX"):
             named.add(one)
@@ -888,11 +944,13 @@ class Element:
         parent read it costs happens only for an element whose own role is one
         of those two.
 
-        A window is read with its *subrole*, for the same kind of reason and
-        at the same kind of cost: `AXWindow` is every toplevel, and whether
-        one is a dialog is published in `kAXSubroleAttribute` alone. See
-        `_AX_SUBROLES` -- without this a Mac modal answered `window`, the same
-        as the application window behind it.
+        A window and a checkbox are read with their *subrole*, for the same
+        kind of reason and at the same kind of cost: `AXWindow` is every
+        toplevel and whether one is a dialog is in `kAXSubroleAttribute`
+        alone, and an `AXCheckBox` is a `switch` exactly when its subrole
+        says `AXSwitch`. See `_AX_SUBROLES` -- without this a Mac modal
+        answered `window` like the application behind it, and every switch
+        answered `check box`.
         """
         raw = self._read(self._ax.kAXRoleAttribute, "")
         if raw in _AX_SUBROLE_ROLES:
@@ -1049,7 +1107,15 @@ class Element:
         answers for a menu item -- whose role is `menu item` whether or not it
         can carry a tick.
         """
-        if self.role in (Role.CHECK_BOX, Role.RADIO_BUTTON, Role.TOGGLE_BUTTON):
+        if self.role in (
+            Role.CHECK_BOX,
+            Role.RADIO_BUTTON,
+            Role.TOGGLE_BUTTON,
+            # A switch is a checkbox by raw role and stayed checkable when its
+            # subrole started refining the role -- it reads and writes
+            # kAXValueAttribute exactly as a check box does.
+            Role.SWITCH,
+        ):
             return True
         mark = self._state(self._ax.kAXMenuItemMarkCharAttribute, None)
         return isinstance(mark, str)
@@ -1462,7 +1528,11 @@ class Element:
         with contextlib.suppress(CapabilityUnsupported):
             self._press()
         for container in (self, self._backend.root_element()):
-            for role in (Role.MENU_ITEM, Role.LIST_ITEM):
+            # Any of the menu-item roles -- see Role.MENU_ITEM_ROLES. AX menu
+            # entries keep the plain role (the mark char is state, measured),
+            # so the widening costs nothing here and keeps the backends one
+            # contract.
+            for role in (Role.MENU_ITEM_ROLES, Role.LIST_ITEM):
                 candidate = container.child(role=role, name=option)
                 if candidate is None:
                     continue
@@ -1483,7 +1553,7 @@ class Element:
         empty list is a truthful answer about a popup whose menu has not been
         opened, not a failure.
         """
-        found = self.find(role=Role.MENU_ITEM)
+        found = self.find(role=Role.MENU_ITEM_ROLES)
         return found or self.find(role=Role.LIST_ITEM)
 
     def find(self, role=None, name=None):

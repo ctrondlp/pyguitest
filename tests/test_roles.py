@@ -95,5 +95,45 @@ class TestToplevelRoles(unittest.TestCase):
                 self.assertEqual(spellings(new_role), frozenset({new_role}))
 
 
+class TestPromotedAndToolkitSplitNames(unittest.TestCase):
+    """Names that gained constants, and the menu split that is NOT an alias."""
+
+    def test_the_promoted_constants_name_what_every_backend_produces(self):
+        # at-spi natively, AXMenuBar/AXHelpTag on macOS, UIA ids 50010/50022
+        # -- the same promotion TABLE_COLUMN_HEADER earned from a live
+        # WinDirStat session, see uia.py's set of names still without one.
+        self.assertEqual(Role.MENU_BAR, "menu bar")
+        self.assertEqual(Role.TOOL_TIP, "tool tip")
+
+    def test_popup_menu_is_qts_spelling_for_an_opened_menu(self):
+        self.assertEqual(Role.POPUP_MENU, "popup menu")
+
+    def test_popup_menu_is_not_an_alias_of_menu(self):
+        # Both names are live roles in one at-spi2 -- GTK says `menu`, Qt
+        # says `popup menu` -- unlike the renamed push button, where a given
+        # at-spi2 knows only one spelling. An alias group would make a
+        # search for one silently claim the other; MENU_ROLES is the
+        # deliberate way to ask for both.
+        self.assertEqual(spellings(Role.MENU), frozenset({"menu"}))
+        self.assertEqual(spellings(Role.POPUP_MENU), frozenset({"popup menu"}))
+
+    def test_menu_roles_covers_both_toolkit_spellings(self):
+        self.assertEqual(Role.MENU_ROLES, (Role.MENU, Role.POPUP_MENU))
+        self.assertEqual(spellings(Role.MENU_ROLES), frozenset({"menu", "popup menu"}))
+
+    def test_choice_roles_carries_both_menu_spellings(self):
+        self.assertIn(Role.MENU, Role.CHOICE_ROLES)
+        self.assertIn(Role.POPUP_MENU, Role.CHOICE_ROLES)
+
+    def test_menu_item_roles_is_every_role_a_menus_entry_can_carry(self):
+        # What choose()/options() search on every backend: a checkable entry
+        # is a `check menu item`, not a `menu item`, and a lookup keyed on
+        # the plain role alone walked straight past half a real menu.
+        self.assertEqual(
+            Role.MENU_ITEM_ROLES,
+            (Role.MENU_ITEM, Role.CHECK_MENU_ITEM, Role.RADIO_MENU_ITEM),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

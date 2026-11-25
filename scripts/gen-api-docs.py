@@ -1575,7 +1575,7 @@ def render_names(out: list[str]) -> None:
         # a reader scanning one flat list would take `WINDOW_ROLES` for a
         # role in its own right and pass it to `element(role=...)`.
         out += [
-            "`Role` also carries three ready-made groups, for the calls that "
+            "`Role` also carries ready-made groups, for the calls that "
             "take several roles at once (`elements(role=...)` accepts a "
             "sequence). Each is a set of the names above, not a role itself:",
             "",

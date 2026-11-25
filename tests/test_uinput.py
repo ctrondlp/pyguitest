@@ -516,6 +516,14 @@ class TestSendKeysMapping(UinputTestCase):
         self.assertEqual(self.gui.resolve_char_key("1"), ("1", False))
         self.assertEqual(self.gui.resolve_char_key("!"), ("1", True))
 
+    def test_both_line_break_characters_are_enter(self):
+        # type_text()'s documented contract: `\n` and `\r` each send Enter
+        # (x11 says Return, win32 says VK_RETURN); this table raising on
+        # `\r` made a CRLF-bearing text replay everywhere except here, and
+        # a CRLF still arrives as two Returns, exactly as documented.
+        self.assertEqual(self.gui.resolve_char_key("\n"), ("ENTER", False))
+        self.assertEqual(self.gui.resolve_char_key("\r"), ("ENTER", False))
+
     def test_modifier_keys_are_evdev_names(self):
         self.assertEqual(
             self.gui.MODIFIER_KEYS,

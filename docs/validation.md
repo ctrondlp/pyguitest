@@ -145,6 +145,13 @@ been tried at all". The same record sorted that way instead:
   compositor, and a dialog opened through an action is left without
   keyboard focus while the same dialog opened by a key takes it four of four
   — compositor policy, measured, and what to do about it from a script.
+- **Every desktop at once, role by role** — [cross-platform role coverage,
+  driven on the
+  fleet](#cross-platform-role-coverage-driven-on-the-fleet-2026-11-25):
+  dialogs, password fields and toggle buttons found on Windows, outline rows
+  and cells on a Mac, three at-spi2 versions agreeing on the one renamed
+  role — and the managed-dialog read that had to come from below UIA, with
+  the one case no API can answer named as such.
 - **[Not run live](#not-run-live)** is the half worth reading first: it is
   what stops anything above being a promise about your desktop.
 
@@ -5882,3 +5889,165 @@ rectangle, so a probe that counts windows at startup must close the extras
 first (the pointer-and-keyboard way, since no write can aim at them); and the
 Cmd-W that does that only lands if the click really made TextEdit frontmost,
 which is worth verifying rather than assuming.
+
+## Cross-platform role coverage, driven on the fleet (2026-11-25)
+
+The round that made `role=` mean the same thing on every backend it could,
+and say so where it cannot. Each claim below is live-session tested on the
+named desktop through the code that shipped it; the full working log is a
+dated audit note outside the repo.
+
+**Three at-spi2 versions, one renamed role.** The role vocabulary was
+enumerated on at-spi2-core 2.56.2 (Debian 13), 2.60.7 (KaOS) and 2.62.1
+(Fedora 45): 132 names each, and on all three exactly one `Role` constant
+has no live counterpart — `push button`, the one the alias table carries.
+All three already emit the new spelling, so the rename predates 2.56.2 and
+the old spelling survives only in recordings and scripts. `popup menu` is a
+live role beside `menu` on all three, which is what `Role.POPUP_MENU` and
+`MENU_ROLES` exist for.
+
+**macOS, against Finder's real tree (macOS 26, Tahoe).** With a home-folder
+window open: `role="tree item"` finds 192 outline rows that previously read
+back `table row` (a `table row` search now finds none of them, which is the
+other direction of the same rule); `role="table cell"` finds 696 `AXCell`s
+that previously fell through to a spelling nothing could search for;
+`role="menu bar"` answers through the promoted constant. The camel bridge
+was proven on a role this package deliberately does not map: Finder
+publishes one `AXRadioGroup`, `Element.role` reads it back as
+`radio group`, and a search for exactly those words finds exactly it.
+
+**Windows 10, fixtures in separate processes.** A MessageBox is found by
+`role="dialog"` and refused by `role="window"`; an `ES_PASSWORD` edit is
+found by `role="password text"` and refused by `role="entry"`, whose
+search returns only the plain edit beside it; a WPF toggle button is found
+by `role="toggle button"` and refused by both push-button spellings while
+the Win32 button beside it stays a push button; and the documented
+label-divergence reproduced — a STATIC reads `text`, a `label` search
+honestly finds nothing here.
+
+**The managed-dialog read had to come from below UIA.** Measured first: a
+WPF `Window.ShowDialog()` and a WinForms `Form.ShowDialog()` both answer
+`IsModal` False — through `GetCurrentPropertyValue` and
+`WindowPattern.CurrentIsModal` alike, with the pattern present — so UIA
+never says a managed dialog is one. The signal matrix over four live
+windows (a plain top-level, a MessageBox, both managed modals) showed what
+does: the `#32770` class and the `WS_EX_DLGMODALFRAME` style on the native
+side, and for the managed side the owner that `ShowDialog` disables. With
+`_hwnd_is_dialog` reading those off the element's own HWND, an *owned*
+WinForms modal and an *owned* WPF modal both read and search as `dialog`
+while their disabled owners stay windows. **Known limitation, measured
+rather than guessed:** an *ownerless* managed modal disables nothing — its
+owner is 0, it wears no dialog frame, its class is generic — so nothing
+observable anywhere calls it a dialog, and this package reports the
+`window` every API sees rather than inventing one.
+
+**One X11 recording, every compositor.** A pyguitest-recorder script made
+on X11 (one element-named click, one raw screen coordinate, a
+`require(...)` naming `WINDOW_LIST` and `POINTER_MOVE` among seven) was
+replayed three times per configuration across the live fleet: Debian GNOME
+and Ubuntu GNOME (X11 and native Wayland each), COSMIC, KDE Plasma and
+Hyprland (Wayland), Mint (X11), and niri (both) — 27 runs, 27 passes. KWin
+and Hyprland passed with no XWayland display reachable at all, so their
+window lists came from this package's own compositor-native providers, not
+from an X fallback. The one shape still unmeasured is a Wayland session
+with no XWayland *and* no window-list provider; no box in the fleet is
+currently configured that way.
+
+## Three more roles closed, and one keystroke, driven live (2026-11-25)
+
+The follow-on round to the one above, each fix measured before it was
+written and proven after.
+
+**`role="switch"` on macOS (macOS 26, System Settings).** The Desktop & Dock
+pane was read raw first: eleven `AXCheckBox` elements whose subrole is
+`AXSwitch`, and in the same pane a plain `AXCheckBox` with no subrole ("In
+Stage Manager") — so the subrole is exactly the line between a switch and a
+checkbox. Through the shipped code, an unscoped search of the running
+Settings processes found 18 switches, every one reading back `switch`, while
+the plain checkboxes still read `check box`. (Noted in passing, not a defect:
+System Settings presents several `AXApplication` elements — a content-bearing
+one and childless remote-view helpers of the same name — so a search scoped
+`within=` an app element found by name can land on a childless twin; an
+unscoped search walks them all and is unaffected.)
+
+**`role="check menu item"` on Windows (Windows 10).** Measured over a Win32
+menu bar and a WPF menu, reading each item's patterns directly: a WPF
+`IsCheckable` MenuItem answers the Toggle pattern whether checked or not —
+the stable, capability-shaped signal — while a plain item does not; the
+classic Win32 menu proxy answers *neither* Toggle nor SelectionItem even on
+a checked or `MFT_RADIOCHECK` item. So a checkable item is a MenuItem that
+publishes Toggle, and that is all UIA can tell: classic items stay `menu
+item`, and `radio menu item` has no Windows spelling. Through the code: the
+two WPF checkable items read `check menu item` and a check-item search found
+only them; the three classic items read `menu item` and were refused by it.
+
+**The uinput `\r` keystroke (Debian GNOME, through the real seat).** A
+non-vacuous pair: the deployed character table raises on `\r` before the fix
+and answers Enter after, so the before/after is load-bearing. Then
+`type_text("a\r\nb")` driven through composed uinput into a live entry
+produced `ab` with one blank line between — a CRLF arriving as two Returns,
+exactly as `type_text`'s contract documents, where before it raised.
+
+**Element-level action on niri, non-vacuously (KaOS, niri).** The one
+compositor whose AT-SPI `Element.click()` had never been shown to *do*
+anything live. A Qt check box was clicked through the accessible action and
+its `checked` state read back: False before, True after one click, False
+after a second — flipped both ways, so the action is known to land rather
+than merely not raise.
+
+## `label` and `text` told apart on Windows (2026-11-25)
+
+The cross-platform split this release had left documented rather than fixed.
+at-spi calls a static caption `label` and a text body `text`; UIA has one
+Text control type (50020) for both, and it used to map to `text`, so a
+Windows caption read `text` and `role="label"` found nothing — the reverse
+of Linux, and the one role a Linux recording's `role=Role.LABEL` could not
+replay on Windows.
+
+Measured first, over four caption kinds and two bodies: a Win32 STATIC, a
+WPF TextBlock and a WPF Label are all control type 50020 with
+`IsTextPatternAvailable` **False**; a read-only WPF TextBox is Edit (50004,
+already `entry`) and a read-only RichTextBox is Document (50030, already
+`document frame`). So no caption publishes the Text pattern and no body is
+control type 50020 — the property is the clean line between the two. The
+`GetCurrentPattern(Text)` call was measured to lie here (a non-null wrapper
+on a caption that does not support the pattern), which is why the property,
+not the pattern fetch, is the read.
+
+Through the shipped code: a Win32 STATIC, a WPF TextBlock and a WinForms
+Label all read `label` and a `label` search found all three; the read-only
+TextBox stayed `entry` and was refused by the label search; and a `text`
+search returned none of the captions. So 50020 is `label` by default and
+`text` only when the Text pattern is genuinely available — a behaviour
+change for a Windows caller that searched `role="text"` for a caption, which
+now answers to `role="label"` as on every other backend.
+
+## The review round that re-measured its own fixes (2026-11-25, evening)
+
+A deep automated review of the whole branch produced seven findings; each
+was measured rather than argued with, and three were right.
+
+**The Text pattern is not a caption/body discriminant — UWP says so.** The
+label split above originally kept `text` reachable for a Text control that
+genuinely publishes the Text pattern. Measured across the Settings app:
+twelve of twelve UWP TextBlock *captions* publish it, so the pattern
+separates frameworks, not kinds. Control type 50020 is now `label` flatly —
+live, a Win32 STATIC and real UWP TextBlocks all read and search as
+`label`, and a `text` search answers empty, the same honest no-producer
+shape as `switch`. In the same round `UIA_IsDialog` (30174) was measured
+and declined: it answers True exactly where the `#32770` class already
+does, on every dialog shape tried.
+
+**A refined role has to carry its behaviour with it.** Three places keyed
+behaviour on the old spelling: macOS `checkable` listed `check box` but not
+`switch`, so every switch silently stopped answering True — fixed and read
+back live (a real switch answers `checkable` True, `checked` False); the
+press-is-selection set listed `table row` but not `tree item`, so an
+outline row's `select()` fell to a typed refusal — the set carries the new
+name, pinned by test on the same mechanism a list item has always used
+live; and `choose()`/`options()` searched `menu item` alone on every
+backend, which walked past a checkable entry — on Windows because it now
+reads `check menu item`, and on Linux it always had, a pre-existing gap the
+round surfaced. `Role.MENU_ITEM_ROLES` names the trio and all three
+backends search it in one walk, with behavioural tests on the UIA and
+AT-SPI sides.

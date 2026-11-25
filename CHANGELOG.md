@@ -5,6 +5,152 @@ All notable changes to pyguitest are recorded here. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html) — with the usual
 0.x caveat that the API may still change between minor versions.
 
+## [0.29.0] — 2026-11-25
+
+The cross-platform role audit's fixable findings, in one round: every one of
+these is a case where a portable script's `role=` worked on Linux and
+silently found nothing — or read back a name nothing could search for — on
+Windows or macOS. Platform-specific throughout, so a version carries them
+only after live checks on real Windows and macOS desktops.
+
+### Added
+
+- **`Role.POPUP_MENU`, and `Role.MENU_ROLES` to ask for both menu spellings
+  in one search.** GTK publishes an opened menu as `menu`; Qt publishes
+  `popup menu`, submenus included — two real roles side by side in one
+  at-spi2 (2.62.1 lists both), so this is a constant and deliberately not an
+  alias group the way `push button`/`button` is: those are one renamed role,
+  these are two. The torture fixture's drivers had been accepting both
+  spellings by hand, which is exactly the job `MENU_ROLES` takes over.
+  `Role.CHOICE_ROLES` now carries both spellings too.
+
+- **`Role.MENU_BAR` and `Role.TOOL_TIP`.** Every backend already produced
+  exactly those strings — at-spi natively, `AXMenuBar`/`AXHelpTag` on macOS,
+  UIA control types 50010/50022 — but only a raw string could ask for them.
+  The same promotion `TABLE_COLUMN_HEADER` earned from a live WinDirStat
+  session; `uia.py`'s names-without-constants set shrinks to `calendar` and
+  `header`.
+
+### Fixed
+
+- **`type_text("…\r…")` sends Enter on the uinput path instead of raising.**
+  `type_text`'s own contract says `\n` and `\r` each send Enter — x11 sends
+  Return, win32 sends VK_RETURN — but the uinput character table had `\n`
+  and not `\r`, so a CRLF-bearing text (anything carried over from a Windows
+  edit, or a recording made there) raised `only ASCII is reachable` on Linux
+  where it replayed everywhere else. `\r` now maps to Enter too, so a CRLF
+  arrives as two Returns exactly as documented. Proven on Debian: the table
+  raised before and answers Enter after, and `type_text("a\r\nb")` types
+  `ab` with a blank line between into a live field.
+
+- **`role="dialog"` finds dialogs on Windows.** The exact gap 0.27.0 closed
+  on macOS, where which *kind* of toplevel lives in the subrole: UIA has no
+  dialog control type, so every Windows dialog read back as a plain `window`
+  and a dialog search found nothing. A Window element is now a `dialog` when
+  its window class is `#32770` — the class of the Win32 common dialogs (the
+  message box, the file/color/font/print pickers) and of every
+  DialogBox-created window, modal or not, since a modeless find dialog is
+  still a `dialog` on every other backend — or when UIA reports it modal.
+  Both directions hold: a dialog search does not return plain windows, and a
+  modal is not an answer to `role="window"`. **Managed dialogs needed a read
+  from below UIA — measured, then closed:** a WPF `Window.ShowDialog()` and
+  a WinForms `Form.ShowDialog()` both report `IsModal` *False* through UIA
+  (property and `WindowPattern.CurrentIsModal` alike), so UIA never says a
+  managed dialog is one. The backend now also reads the window's own HWND
+  (`UIA_NativeWindowHandle` → user32): a window whose **owner is disabled**
+  is a dialog — disabling the owner *is* Win32 modality, it is what
+  `ShowDialog` and `DialogBox` do — guarded so that only an enabled,
+  non-tool-window, actually-owned candidate counts; and a window carrying
+  **`WS_EX_DLGMODALFRAME`**, the dialog-frame style a MessageBox wears, is
+  one too. The honest residual is an *ownerless* managed modal: it disables
+  nothing, blocks only its own thread, and no API anywhere can tell it from
+  a window — measured (owner 0, no frame bit, generic class), so it stays
+  `window`.
+
+- **`role="password text"` finds password fields on Windows.** An Edit whose
+  `IsPassword` is true — the property exists for exactly this distinction —
+  now reads and searches as `password text` rather than `entry`, matching
+  what the same field publishes on Linux and macOS.
+
+- **`role="toggle button"` finds toggle buttons on Windows.** UIA has one
+  Button control type; whether it toggles is a pattern. A Button publishing
+  the Toggle pattern is now a `toggle button`, and is no longer an answer to
+  a `push button` search — the same two-direction honesty as the dialog.
+
+- **`role="tree item"` finds an outline's rows on macOS.** An `AXRow` inside
+  an `AXOutline` is what at-spi and UIA both call a tree item; it read back
+  `table row` before, so a tree-walking script found rows on Linux and
+  Windows and nothing on a Mac. The third entry in the existing
+  container-context table, beside the tab and the list item.
+
+- **`role="table cell"` finds cells on macOS.** `AXCell` had no mapping and
+  fell through to the camel-words fallback as `"cell"` — a spelling the
+  search side could never ask for. A recording that carries the old
+  `role="cell"` still replays, through the bridge below.
+
+- **`role="label"` finds captions on Windows — a behaviour change for
+  Windows callers.** at-spi splits static text into `label` (a caption) and
+  `text` (a text body); UIA has one Text control type (50020) for both, and
+  it used to map to `text`, so a Windows caption read `text` and
+  `role="label"` found nothing — the reverse of every other backend, and a
+  cross-platform script's `role=Role.LABEL` broke there. Measured on
+  Windows 10 across four frameworks: a Win32 STATIC, a WPF TextBlock, a WPF
+  Label and a WinForms Label are all control type 50020, and every genuine
+  body is Edit (50004 → `entry`) or Document (50030 → `document frame`).
+  The Text *pattern* was tried as a caption/body discriminant and measured
+  out of the job: UWP TextBlock captions all publish it (twelve of twelve
+  across the Settings app), so 50020 is `label` flatly, and `text` has no
+  Windows spelling at all — a body is an entry or a document frame, the
+  same honest shape as `switch`. (`UIA_IsDialog`, 30174, was measured in
+  the same round and declined: it answers True only where the `#32770`
+  class already does.) **This changes a read-back:** a Windows caller that
+  searched `role="text"` for a caption must now ask `role="label"`, as on
+  Linux and macOS — which is the point.
+
+- **A switch is still checkable, an outline row still selects, and a menu's
+  checkable entries are back in `options()` — the review round's catches.**
+  Three consequences of the role refinements, each fixed with the role it
+  followed: macOS `checkable` keyed on the role, so a switch (now `switch`,
+  no longer `check box`) silently stopped answering True — it is in the
+  checkable set now, reading and writing `kAXValueAttribute` exactly as a
+  check box does; the press-is-selection set carried `table row` but not
+  `tree item`, so an outline row's `select()` lost its press fallback to a
+  typed refusal — the set carries the new name; and `choose()`/`options()`
+  on every backend searched `menu item` alone, which walked straight past a
+  checkable entry — on Windows because it now reads `check menu item`, and
+  on Linux it always had. `Role.MENU_ITEM_ROLES` names the trio and all
+  three backends search it in one walk.
+
+- **`role="switch"` finds switches on macOS.** GTK4's `switch` had a Linux
+  spelling and nothing elsewhere; a Mac has one — an `AXCheckBox` whose
+  subrole is `AXSwitch`, measured on macOS 26 (System Settings, Desktop &
+  Dock: eleven switches and a plain checkbox side by side, the subrole the
+  only thing between them). It rides the existing window-subrole mechanism,
+  so a switch search finds only switches and a check-box search no longer
+  returns them. Live: 18 switches found across the Settings panes, all
+  reading `switch`, the plain checkboxes still `check box`.
+
+- **`role="check menu item"` finds checkable menu items on Windows.** UIA
+  has one MenuItem control type; whether it checks is a pattern. A MenuItem
+  publishing the Toggle pattern is now a `check menu item` — measured on
+  Windows 10, a WPF `IsCheckable` item answers Toggle whether currently
+  checked or not, the stable signal a role needs. Both honest limits were
+  measured too: the classic Win32 menu proxy exposes neither Toggle nor
+  SelectionItem even on a checked or `MFT_RADIOCHECK` item, so classic
+  items stay `menu item` and `radio menu item` has no Windows spelling at
+  all; on a Mac every `AXMenuItem` carries the identical attribute set and
+  only the mark char differs, which feeds `Element.checked` rather than a
+  role.
+
+- **A role a Mac reports is now a role a Mac can search for.**
+  `Element.role` spells an unmapped AX role out into words (`AXHeading` →
+  `heading`, `AXColorWell` → `color well`), but the search side only knew
+  the mapping table — so the backend named roles no search could ask for,
+  and a script that read a role off a live tree could not find it again. A
+  spelling nothing maps is now bridged back to the camel-cased AX name it
+  came from. An acronym-cased AX name (`AXHTMLContent`) does not round-trip
+  that way and wants a real table entry instead.
+
 ## [0.28.0] — 2026-11-24
 
 A minor for one new call: `type_text_naturally()`, the keyboard's counterpart
@@ -7238,6 +7384,7 @@ First public release.
 - PEP 561 type information (`py.typed`); no hard runtime dependencies.
 
 [Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.28.0...HEAD
+[0.29.0]: https://github.com/ctrondlp/pyguitest/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/ctrondlp/pyguitest/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/ctrondlp/pyguitest/compare/v0.26.1...v0.27.0
 [0.26.1]: https://github.com/ctrondlp/pyguitest/compare/v0.26.0...v0.26.1

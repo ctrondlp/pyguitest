@@ -33,10 +33,21 @@ class Role:
     SWITCH = "switch"
     """A GTK4 `GtkSwitch`, measured live (4.24.1). Qt has no equivalent --
     a QCheckBox is `check box` there -- which is why this is new rather
-    than an existing role simply being found."""
+    than an existing role simply being found. Windows has no spelling for
+    it: UIA's control-type table, which is total over the documented ids,
+    maps nothing onto `switch`. A Mac has one -- an `AXCheckBox` whose
+    subrole is `AXSwitch`, measured on macOS 26 with a real checkbox beside
+    the switches in the same pane telling the two apart."""
 
     # -- things you type into ----------------------------------------------
     TEXT = "text"
+    """A text body -- a region of text in its own right, as against a
+    caption (`LABEL`). Windows has no spelling for it: every control type
+    50020 element measured -- Win32 STATIC, WPF TextBlock and Label,
+    WinForms Label, and UWP TextBlocks across the Settings app -- is a
+    caption, and the Text pattern cannot separate the two because the UWP
+    captions all publish it; a body there is an `entry` or a
+    `document frame`."""
     ENTRY = "entry"
     PASSWORD_TEXT = "password text"
     SPIN_BUTTON = "spin button"
@@ -45,10 +56,37 @@ class Role:
     COMBO_BOX = "combo box"
     LIST = "list"
     LIST_ITEM = "list item"
+    MENU_BAR = "menu bar"
+    """The bar the menus hang from. Every backend already produced exactly
+    this string -- at-spi natively, macOS's `AXMenuBar`, UIA control type
+    50010 -- but only as a raw string a caller had to know; promoted to a
+    constant the way `TABLE_COLUMN_HEADER` was once something could ask
+    for it by name."""
     MENU = "menu"
+    POPUP_MENU = "popup menu"
+    """Qt's spelling for an opened menu -- a `QMenu`, submenus included,
+    publishes `popup menu` where GTK publishes `menu`. Measured live on the
+    torture fixture, whose drivers had to accept both spellings by hand.
+    These are two real roles side by side in one at-spi2 (2.62.1 lists
+    both), unlike the renamed push button -- so this is a constant and not
+    an alias group, and a search that wants every opened menu asks for
+    both: `MENU_ROLES`."""
     MENU_ITEM = "menu item"
     CHECK_MENU_ITEM = "check menu item"
+    """On Windows, a MenuItem publishing the Toggle pattern: a WPF
+    `IsCheckable` item answers Toggle whether currently checked or not --
+    the stable signal a role needs, measured on Windows 10 -- while the
+    classic Win32 menu proxy exposes nothing even on a checked item, so
+    classic items honestly stay `menu item`. On a Mac the role cannot
+    exist: every `AXMenuItem` carries the identical attribute set and only
+    the mark char -- the checked *state* -- differs, measured across
+    Finder's menus, so an unchecked checkable item is indistinguishable
+    from a plain one; the mark feeds `Element.checked` instead."""
     RADIO_MENU_ITEM = "radio menu item"
+    """A Linux spelling only. Nothing on Windows distinguishes one --
+    even an `MFT_RADIOCHECK` item exposes neither Toggle nor SelectionItem
+    through the classic menu proxy, measured on Windows 10 -- and a Mac
+    has only the mark char; see `CHECK_MENU_ITEM` for both measurements."""
     PAGE_TAB = "page tab"
     PAGE_TAB_LIST = "page tab list"
 
@@ -62,14 +100,19 @@ class Role:
     measured live on seven desktops (GTK4's `Gtk.AlertDialog` is a plain
     `dialog`). A toplevel in its own right: an application's direct
     child, listed by `windows()` and ascended to as the window by element
-    geometry, which is why it is in `WINDOW_ROLES`."""
+    geometry, which is why it is in `WINDOW_ROLES`. A Linux spelling:
+    Windows and macOS have no `alert` role, and a message box there
+    reports `dialog` -- which is the other reason `WINDOW_ROLES` carries
+    both."""
     FILE_CHOOSER = "file chooser"
     """A file dialog's toplevel -- `GtkFileChooserDialog`, and so Qt's
     `QFileDialog` wherever it uses the GTK platform dialog -- publishes
     as `file chooser` rather than `dialog`, measured live on GTK 3.24. In
     `WINDOW_ROLES` for the same reason as `ALERT`: before it was, a Save
     dialog's Cancel button had no window to be placed in and its
-    `extents()` were refused on every Wayland desktop."""
+    `extents()` were refused on every Wayland desktop. Also a Linux
+    spelling -- the native file dialogs on Windows and macOS report
+    `dialog`."""
     PANEL = "panel"
     LAYERED_PANE = "layered pane"
     TOOL_BAR = "tool bar"
@@ -89,16 +132,28 @@ class Role:
     alias of either existing role: a `GtkColumnView`'s own cells publish
     `listitem.scroll-to` rather than `click`/`press`, so code written
     against `tree`'s usual action-click pattern would silently find
-    nothing to act on if this matched that role instead of its own."""
+    nothing to act on if this matched that role instead of its own.
+    Another GTK-only spelling: UIA maps nothing onto it (a data grid
+    there is `table`), and no AX name is mapped onto it either."""
     DOCUMENT_FRAME = "document frame"
     FILLER = "filler"
 
     # -- things you only read ----------------------------------------------
     LABEL = "label"
+    """Static text -- a caption, not something typed into. On Windows this
+    is UIA's one Text control type, flatly: measured across four frameworks
+    (Win32 STATIC, WPF TextBlock and Label, WinForms Label, UWP TextBlock),
+    every one is a caption, while an editable body is `entry` and a
+    document is `document frame`. See `Role.TEXT`."""
     HEADING = "heading"
     PARAGRAPH = "paragraph"
     IMAGE = "image"
     ICON = "icon"
+    TOOL_TIP = "tool tip"
+    """A hovering hint. at-spi says `tool tip` natively, UIA control type
+    50022 says the same, and macOS's `AXHelpTag` is mapped onto it (the
+    measurement lives beside that entry in `_AX_ROLES`); promoted to a
+    constant alongside `MENU_BAR`."""
     PROGRESS_BAR = "progress bar"
     LEVEL_BAR = "level bar"
     """A GTK4 `GtkLevelBar`, measured live (4.24.1) -- a read-only value
@@ -120,8 +175,29 @@ class Role:
     TEXT_ROLES = (TEXT, ENTRY, PASSWORD_TEXT, SPIN_BUTTON)
     """Roles that accept typed text."""
 
-    CHOICE_ROLES = (COMBO_BOX, LIST, MENU, PAGE_TAB_LIST)
-    """Roles that present a set of choices."""
+    CHOICE_ROLES = (COMBO_BOX, LIST, MENU, POPUP_MENU, PAGE_TAB_LIST)
+    """Roles that present a set of choices.
+
+    Carries both menu spellings for the reason `MENU_ROLES` exists: GTK
+    says `menu`, Qt says `popup menu`, and a caller walking everything
+    choosable wants both in the one search."""
+
+    MENU_ROLES = (MENU, POPUP_MENU)
+    """The two spellings an opened menu answers to across toolkits.
+
+    GTK publishes `menu`; Qt publishes `popup menu`, submenus included. A
+    walk that wants every opened menu asks for both in one search, the
+    same way `WINDOW_ROLES` covers every toplevel spelling."""
+
+    MENU_ITEM_ROLES = (MENU_ITEM, CHECK_MENU_ITEM, RADIO_MENU_ITEM)
+    """Every role a menu's entry can carry.
+
+    What `choose()` and `options()` search for: an entry that can be ticked
+    is a `check menu item`, not a `menu item`, so a lookup keyed on the
+    plain role alone walked straight past half a real menu -- a View menu's
+    toggles, a format menu's radio group. One search over the three costs
+    the same walk as a search for one; see `spellings` for the measurement
+    that makes that worth insisting on."""
 
 
 _ALIASES = (frozenset({"push button", "button"}),)
@@ -139,9 +215,12 @@ from the enum, so every application on a given version reports the same
 spelling whatever it was written in. dogtail met it first and its own
 `button()` accepts both, noting they are "represented by the same integer".
 
-Audited against every role name at-spi2 2.61.1 emits: this is the only one of
-`Role`'s constants with no live counterpart. Add a group here if that ever
-stops being true.
+Audited against every role name at-spi2 emits -- on 2.61.1 and again on
+2.62.1 (132 names) -- this is the only one of `Role`'s constants with no
+live counterpart. Add a group here if that ever stops being true. `popup
+menu` is deliberately NOT a group with `menu`: both names are live roles in
+one at-spi2, reported by different toolkits for the same kind of widget --
+see `Role.POPUP_MENU` and `MENU_ROLES`.
 """
 
 _SPELLINGS = {name: group for group in _ALIASES for name in group}
@@ -159,8 +238,11 @@ def canonical_role(raw: str) -> str:
 
     What `Element.role` reads a search's own role-spelling matching
     (`spellings`) gives for free but a *read-back* does not: a push button's
-    raw `roleName` is "button" on at-spi2 2.61.1 and "push button" on 2.56,
-    so a caller comparing `element.role` against `Role.PUSH_BUTTON` -- or
+    raw `roleName` is "button" on every at-spi2 measured on this project's
+    fleet -- 2.56.2, 2.61.1 and 2.62.1 all emit it, so the rename is older
+    than 2.56 and the old spelling survives in recordings, in scripts, and
+    in dogtail's note that both names are one integer -- so a caller
+    comparing `element.role` against `Role.PUSH_BUTTON` -- or
     against a `(name, role)` pair read out of its own test data -- gets a
     version-dependent answer unless something here settles on one spelling.
     Measured live: a driver enumerating every actable control by reading

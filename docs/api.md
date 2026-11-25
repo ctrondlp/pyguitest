@@ -5184,18 +5184,21 @@ provides the capability at all -- which today is nowhere.
 ALERT  CHECK_BOX  CHECK_MENU_ITEM  COMBO_BOX  DIAL  DIALOG
 DOCUMENT_FRAME  ENTRY  FILE_CHOOSER  FILLER  FRAME  HEADING  ICON
 IMAGE  LABEL  LAYERED_PANE  LEVEL_BAR  LINK  LIST  LIST_ITEM  MENU
-MENU_ITEM  PAGE_TAB  PAGE_TAB_LIST  PANEL  PARAGRAPH  PASSWORD_TEXT
-PROGRESS_BAR  PUSH_BUTTON  RADIO_BUTTON  RADIO_MENU_ITEM  SCROLL_BAR
-SCROLL_PANE  SEPARATOR  SLIDER  SPIN_BUTTON  SPLIT_PANE  STATUS_BAR
-SWITCH  TABLE  TABLE_CELL  TABLE_COLUMN_HEADER  TABLE_ROW  TEXT
-TOGGLE_BUTTON  TOOL_BAR  TREE  TREE_ITEM  TREE_TABLE  VIEWPORT  WINDOW
+MENU_BAR  MENU_ITEM  PAGE_TAB  PAGE_TAB_LIST  PANEL  PARAGRAPH
+PASSWORD_TEXT  POPUP_MENU  PROGRESS_BAR  PUSH_BUTTON  RADIO_BUTTON
+RADIO_MENU_ITEM  SCROLL_BAR  SCROLL_PANE  SEPARATOR  SLIDER
+SPIN_BUTTON  SPLIT_PANE  STATUS_BAR  SWITCH  TABLE  TABLE_CELL
+TABLE_COLUMN_HEADER  TABLE_ROW  TEXT  TOGGLE_BUTTON  TOOL_BAR
+TOOL_TIP  TREE  TREE_ITEM  TREE_TABLE  VIEWPORT  WINDOW
 ```
 
-`Role` also carries three ready-made groups, for the calls that take several roles at once (`elements(role=...)` accepts a sequence). Each is a set of the names above, not a role itself:
+`Role` also carries ready-made groups, for the calls that take several roles at once (`elements(role=...)` accepts a sequence). Each is a set of the names above, not a role itself:
 
 | Group | Holds |
 |-------|-------|
-| `Role.CHOICE_ROLES` | combo box, list, menu, page tab list |
+| `Role.CHOICE_ROLES` | combo box, list, menu, page tab list, popup menu |
+| `Role.MENU_ITEM_ROLES` | check menu item, menu item, radio menu item |
+| `Role.MENU_ROLES` | menu, popup menu |
 | `Role.TEXT_ROLES` | entry, password text, spin button, text |
 | `Role.WINDOW_ROLES` | alert, dialog, file chooser, frame, window |
 
