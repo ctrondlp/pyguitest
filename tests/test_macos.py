@@ -647,11 +647,35 @@ class TestMacquartz(unittest.TestCase):
         with self.assertRaises(ValueError):
             backend.resolve_char_key("\u00e9")
 
-    def test_an_unknown_key_names_the_vocabulary(self):
+    def test_a_real_key_this_hardware_lacks_is_a_desktop_limit(self):
+        # `Scroll_Lock` is in this package's portable vocabulary and a Mac
+        # keyboard has no such key, which is the condition
+        # `Session.send_keys` documents CapabilityUnsupported for: "the
+        # string is fine and this *desktop* cannot serve it". A caller
+        # catching it to fall back is right to.
         backend = self.build()
         with self.assertRaises(CapabilityUnsupported) as raised:
             backend.press_key("Scroll_Lock")
+        self.assertIn("does not have", str(raised.exception))
+
+    def test_a_name_that_is_not_a_key_is_a_value_error(self):
+        # The other half of the same contract: "a `{}` name that is not a key
+        # at all" is a ValueError, which every other KEY_EVENT backend
+        # already raises and which this one used to answer
+        # CapabilityUnsupported for -- so the documented `except ValueError`
+        # caught nothing on macOS.
+        backend = self.build()
+        with self.assertRaises(ValueError) as raised:
+            backend.press_key("Nonexistent_Key")
         self.assertIn("_KEYCODES", str(raised.exception))
+
+    @staticmethod
+    def _raised(backend, key):
+        try:
+            backend.press_key(key)
+        except Exception as exc:  # noqa: BLE001 - the type is the assertion
+            return exc
+        return None
 
     def test_alt_gr_is_refused_rather_than_aliased_to_option(self):
         # Option is a real key on a Mac and level 3 is not; aliasing would

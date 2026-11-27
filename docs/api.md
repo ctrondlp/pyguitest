@@ -237,7 +237,7 @@ The recommended way to drive an application: match on what a widget is and what 
 | [`focus_tracking_works()`](#focus_tracking_works) | uses [`ELEMENT_TREE`](#cap-element_tree), [`WINDOW_STATE`](#cap-window_state) if present | Whether this desktop actually publishes per-widget keyboard focus. |
 | [`element_at(x: int, y: int, *, pid: int \| None = None)`](#element_at) | [`ELEMENT_GEOMETRY`](#cap-element_geometry) | The deepest accessible element at a screen coordinate, or None. |
 | [`extents(element: Element)`](#extents) | [`ELEMENT_GEOMETRY`](#cap-element_geometry) | `element`'s (x, y, width, height) in screen coordinates. |
-| [`tree_items(root: Element, *, role: str \| None = None, max_depth: int = 24)`](#tree_items) | [`ELEMENT_ACTION`](#cap-element_action), [`ELEMENT_TREE`](#cap-element_tree) | Every descendant of `root`, opening collapsed branches to reach them. |
+| [`tree_items(root: Element, *, role: str \| Sequence[str] \| None = None, max_depth: int = 24)`](#tree_items) | [`ELEMENT_ACTION`](#cap-element_action), [`ELEMENT_TREE`](#cap-element_tree) | Every descendant of `root`, opening collapsed branches to reach them. |
 | [`row_values(row: Element)`](#row_values) |  | `row`'s own column values, as plain text, one per child cell. |
 
 ### `button`
@@ -310,7 +310,12 @@ the accessible *description* instead. Try the description before
 giving up.
 
 Raises ElementNotFound if nothing matches, the same as element():
-it never returns None, so there is nothing to test for.
+it never returns None, so there is nothing to test for. The refusal
+names what the caller asked for and says both places were tried --
+the inner `element()` call's own message would describe the retry's
+`description=` filter, which is not the word the caller used, and
+before that it reported neither and read as "no element with
+role='combo box'" with the name dropped entirely.
 
 ### `checkbox`
 
@@ -665,7 +670,7 @@ the accessible tree. Needs Capability.ELEMENT_GEOMETRY.
 ### `tree_items`
 
 ```python
-tree_items(root: Element, *, role: str | None = None, max_depth: int = 24)
+tree_items(root: Element, *, role: str | Sequence[str] | None = None, max_depth: int = 24)
 ```
 
 **Parameters**
@@ -673,7 +678,7 @@ tree_items(root: Element, *, role: str | None = None, max_depth: int = 24)
 | Parameter | Type | Default |
 |-----------|------|---------|
 | `root` | `Element` | **required** |
-| `role` | `str \| None` | `None` |
+| `role` | `str \| Sequence[str] \| None` | `None` |
 | `max_depth` | `int` | `24` |
 
 **Returns** `list[Element]`
@@ -736,7 +741,16 @@ tree with nothing left collapsed costs exactly the walk it did before.
 `role` filters what is *returned* -- `Role.TABLE_CELL` for a GTK tree
 view's rows, `Role.TREE_ITEM` for UI Automation's, say -- without
 changing what gets walked or expanded; `None` (the default) returns
-every descendant, matching `elements()`'s own convention. Rows this
+every descendant, matching `elements()`'s own convention. That
+convention includes naming several roles at once, which is what one
+portable tree walk needs, since those two spellings are the same
+concept on different platforms:
+
+```python
+gui.tree_items(tree, role=(Role.TABLE_CELL, Role.TREE_ITEM))
+```
+
+Rows this
 expands stay expanded afterward: collapsing them back would cost a
 second full walk for a state nothing asked to have preserved, the
 same tradeoff `os.walk` makes about a directory's mtimes.
@@ -820,10 +834,10 @@ Coordinates are absolute screen pixels, and `screen=` selects the monitor. Prefe
 | [`release_button(button: int)`](#release_button) | [`POINTER_BUTTON`](#cap-pointer_button) | Release a mouse button. |
 | [`drag(start, end, ...)`](#drag) | [`POINTER_BUTTON`](#cap-pointer_button), [`POINTER_MOVE`](#cap-pointer_move) — uses [`POINTER_QUERY`](#cap-pointer_query) if present | Press at `start`, glide to `end`, release. Drag-and-drop. |
 | [`scroll(dx: int = 0, dy: int = 0)`](#scroll) | [`POINTER_SCROLL`](#cap-pointer_scroll) | Scroll by whole wheel detents: `dy` positive is up, `dx` right. |
-| [`click_element(element: Element, button: int = 1)`](#click_element) | [`ELEMENT_GEOMETRY`](#cap-element_geometry), [`POINTER_BUTTON`](#cap-pointer_button), [`POINTER_MOVE`](#cap-pointer_move) | Click a named element through the pointer. `element.click()` ends here. |
+| [`click_element(element: Element, button: int = 1)`](#click_element) | [`ELEMENT_GEOMETRY`](#cap-element_geometry), [`POINTER_BUTTON`](#cap-pointer_button), [`POINTER_MOVE`](#cap-pointer_move), [`SCREEN_INFO`](#cap-screen_info) | Click a named element through the pointer. `element.click()` ends here. |
 | [`double_click(button: int = 1)`](#double_click) | [`POINTER_BUTTON`](#cap-pointer_button) | Press and release a mouse button twice, as one double-click. |
-| [`double_click_element(element: Element)`](#double_click_element) | [`ELEMENT_GEOMETRY`](#cap-element_geometry), [`POINTER_BUTTON`](#cap-pointer_button), [`POINTER_MOVE`](#cap-pointer_move) | Double-click a named element. `element.double_click()` does the same. |
-| [`drag_element(source, target, ...)`](#drag_element) | [`ELEMENT_GEOMETRY`](#cap-element_geometry), [`POINTER_BUTTON`](#cap-pointer_button), [`POINTER_MOVE`](#cap-pointer_move) — uses [`POINTER_QUERY`](#cap-pointer_query) if present | Drag `source` onto `target`: press at one element, glide to the other. |
+| [`double_click_element(element: Element)`](#double_click_element) | [`ELEMENT_GEOMETRY`](#cap-element_geometry), [`POINTER_BUTTON`](#cap-pointer_button), [`POINTER_MOVE`](#cap-pointer_move), [`SCREEN_INFO`](#cap-screen_info) | Double-click a named element. `element.double_click()` does the same. |
+| [`drag_element(source, target, ...)`](#drag_element) | [`ELEMENT_GEOMETRY`](#cap-element_geometry), [`POINTER_BUTTON`](#cap-pointer_button), [`POINTER_MOVE`](#cap-pointer_move), [`SCREEN_INFO`](#cap-screen_info) — uses [`POINTER_QUERY`](#cap-pointer_query) if present | Drag `source` onto `target`: press at one element, glide to the other. |
 | [`pointer_position()`](#pointer_position) | [`POINTER_QUERY`](#cap-pointer_query) | The global pointer position. Replaces GetMousePos. |
 | [`is_button_pressed(button: int)`](#is_button_pressed) | [`INPUT_STATE_QUERY`](#cap-input_state_query) | Whether a mouse button is currently held down. |
 | [`is_window_cursor(window: Window, shape: int)`](#is_window_cursor) | [`WINDOW_CURSOR_QUERY`](#cap-window_cursor_query) | Whether `window` is currently showing cursor `shape`. |
@@ -2440,14 +2454,34 @@ screens()
 "Advertised order" is the display server's own, which is not a
 statement about which output the desktop calls primary -- there is
 no primary flag here, so a multi-monitor test should identify an
-output by `name` rather than trusting index 0. The `screen=`
-argument on move_mouse()/window_at() indexes this list.
+output by `name` rather than trusting index 0.
+
+The `screen=` argument on move_mouse()/window_at() does **not** index
+this list, whatever its name suggests. Every pointer backend treats
+coordinates as already absolute in one desktop-wide space and ignores
+the argument -- x11 accepts it and never reads it, win32 says so in
+its own docstring, input/eiinput/uinput do the same -- and macquartz
+raises `CapabilityUnsupported` for any non-zero value rather than
+accept one it cannot honour. So `move_mouse(100, 100, screen=1)`
+moves the pointer to (100, 100) of the shared space, which is the
+primary output, on Linux and Windows, and refuses on macOS. To aim at
+a second monitor, add that monitor's origin to the coordinates
+yourself; this list reports sizes, and deliberately not positions
+(see below), so the origin has to come from the desktop.
+
+This sentence used to claim the opposite, and was the only statement
+about the parameter anywhere in the package.
 
 A `Screen` reports size, scale and name but *not* its position in
 the desktop's coordinate space, so this alone cannot say where one
 output sits relative to another. `width`/`height` are physical
-pixels, the same units geometry() and screenshot() use; `scale` is
-DPI over 96 and never a pixel count.
+pixels, the same units geometry() and screenshot() use. `scale` is
+how much larger than 1:1 the output is drawn and never a pixel count
+-- but *which* quantity says so differs by platform, and
+`backends.base.Screen.scale` is where that is set out: DPI over 96 on
+Windows and macOS, the compositor's own factor on the Wayland
+members, and nothing at all on X11, which leaves it 1.0 however the
+desktop is scaled.
 
 ### `screenshot`
 
@@ -3868,7 +3902,7 @@ and AtspiBackend's Element keeps `node` for the parts this does not cover.
 
 | Member | What it does |
 |--------|--------------|
-| `actions` | The names of the actions this element offers, e.g. 'click'. |
+| `actions` | The names of the actions this element offers, in the platform's own words. |
 | `alive` | Whether the underlying widget still exists. |
 | `checkable` | Whether the element has a check box, radio button, or toggle. |
 | `checked` | Whether a check box, radio button, or toggle is set. |
@@ -3911,6 +3945,30 @@ order on macOS, so indexing into it means something different per
 platform. Print it before reaching for a toolkit-specific action
 name -- what a widget publishes is the toolkit's choice, and an
 element that publishes none at all is why `click` has a pointer rung.
+
+**The vocabulary is per-platform too, which is the part worth
+reading twice.** `do_action` aliases the three at-spi spellings on
+both other backends, so *writing* `do_action("click")` works
+everywhere -- but this property reads back what the platform
+publishes, and those are different words:
+
+- AT-SPI returns the toolkit's own names: `click`, `press`, `toggle`.
+- macOS maps `AXPress` to `click`, so a Mac button reads `click`.
+- UI Automation returns its pattern names. Measured on Windows 10
+  (19045) against Notepad: every push button reads
+  `['do default action', 'invoke']` and no button anywhere reads
+  `click`; a menu item reads `['collapse', 'do default action',
+  'expand', 'invoke']` and a text area `['do default action']`.
+
+So `if "click" in element.actions` is a branch that takes a different
+route on Windows, and a caller testing for clickability has to accept
+either vocabulary. The recorder does exactly that -- see
+`ElementRef._CLICK_ACTIONS`, which unions
+`{click, press, invoke, toggle, do default action}` deliberately and
+says why. Aliasing the read side to at-spi's words was considered and
+rejected: the names are a read-back that recordings and that
+resolver's own exact-match heuristics are written against, so the
+honest fix is this paragraph rather than a rename.
 
 #### `alive`
 
@@ -4368,9 +4426,9 @@ One output.
 | Member | What it does |
 |--------|--------------|
 | `height: int` | The output's height in physical pixels. |
-| `index: int` | This output's position in `screens()`, and the number a `screen=` argument takes. |
+| `index: int` | This output's position in the list `screens()` returned. |
 | `name: str` | The connector or display name the desktop reports (`HDMI-1`, `eDP-1`), or "" where it reports none. |
-| `scale: float` | The output's DPI divided by 96 -- 1.0 unscaled, 1.5 on a 144 DPI monitor -- and never a pixel count. See `__init__` for how each platform's answer is normalised to that definition. |
+| `scale: float` | How much larger than 1:1 this output is drawn, and never a pixel count. |
 | `size` | The output's (width, height) in pixels. |
 | `width: int` | The output's width in physical pixels, the same unit `geometry()` and `screenshot()` work in. |
 
@@ -5133,7 +5191,7 @@ provides the capability at all -- which today is nowhere.
 | <a id="cap-process_launch"></a>`PROCESS_LAUNCH` | T1 | *session itself* | Start and run applications |
 | <a id="cap-timing"></a>`TIMING` | T1 | *session itself* | Waits, and inter-event and inter-key delays |
 | <a id="cap-image_locate"></a>`IMAGE_LOCATE` | T1 | ToolImageSearchBackend | Find a template image's position inside an already-captured screenshot by pixel comparison; a new feature, X11::GUITest never had it, and needs no live display connection, only files |
-| <a id="cap-screen_info"></a>`SCREEN_INFO` | T2 | CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Output enumeration, resolution, scale (wl_output) |
+| <a id="cap-screen_info"></a>`SCREEN_INFO` | T2 | CosmicBackend, GnomeShellBackend, HyprlandBackend, KScreenBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Output enumeration, resolution, scale (wl_output) |
 | <a id="cap-pointer_move"></a>`POINTER_MOVE` | T4 | LibeiBackend, MacquartzBackend, ToolInputBackend, UinputBackend, Win32Backend, X11Backend | Absolute pointer positioning; relative-only injection cannot do this |
 | <a id="cap-pointer_button"></a>`POINTER_BUTTON` | T4 | LibeiBackend, MacquartzBackend, PortalBackend, ToolInputBackend, UinputBackend, Win32Backend, X11Backend | Button press and release |
 | <a id="cap-pointer_scroll"></a>`POINTER_SCROLL` | T4 | LibeiBackend, MacquartzBackend, PortalBackend, ToolInputBackend, UinputBackend, Win32Backend, X11Backend | Axis events; X11 buttons 4/5 were scroll, Wayland's are not |
@@ -5145,13 +5203,13 @@ provides the capability at all -- which today is nowhere.
 | <a id="cap-window_events"></a>`WINDOW_EVENTS` | T3 | CosmicBackend, GnomeShellBackend, KWinEventsBackend, NiriBackend, SwayBackend, Win32Backend | Subscribe to open/close/title-change instead of polling |
 | <a id="cap-window_state"></a>`WINDOW_STATE` | T3 | AtspiBackend, CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Read minimized and activated state |
 | <a id="cap-window_activate"></a>`WINDOW_ACTIVATE` | T3 | AtspiBackend, CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Raise and focus; there is no raise-without-focus operation |
-| <a id="cap-window_minimize"></a>`WINDOW_MINIMIZE` | T3 | CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Minimize and restore |
+| <a id="cap-window_minimize"></a>`WINDOW_MINIMIZE` | T3 | CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, SwayBackend, Win32Backend, X11Backend | Minimize and restore |
 | <a id="cap-window_maximize"></a>`WINDOW_MAXIMIZE` | T3 | CosmicBackend, GnomeShellBackend, Win32Backend, X11Backend | Maximize and restore, and read whether a window is maximized -- only where the desktop has the concept: a tiling compositor does not, and macOS zoom is not it |
 | <a id="cap-window_close"></a>`WINDOW_CLOSE` | T3 | CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Ask the window manager to close one window gracefully -- the route that lets the application prompt to save, where stopping the process cannot |
 | <a id="cap-window_geometry"></a>`WINDOW_GEOMETRY` | T3 | AtspiBackend, CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Read position and size; no foreign-toplevel protocol carries this |
-| <a id="cap-window_placement"></a>`WINDOW_PLACEMENT` | T3 | GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Move to a position; placement is the compositor's prerogative |
+| <a id="cap-window_placement"></a>`WINDOW_PLACEMENT` | T3 | GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, SwayBackend, Win32Backend, X11Backend | Move to a position; placement is the compositor's prerogative |
 | <a id="cap-window_resize"></a>`WINDOW_RESIZE` | T3 | GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Change width and height; separate from placement because a tiling compositor can size a window without letting anyone position it |
-| <a id="cap-window_pid"></a>`WINDOW_PID` | T3 | GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Map a window to a process id; prefer app_id |
+| <a id="cap-window_pid"></a>`WINDOW_PID` | T3 | GnomeShellBackend, HyprlandBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Map a window to a process id; prefer app_id |
 | <a id="cap-window_at_point"></a>`WINDOW_AT_POINT` | T3 | CosmicBackend, GnomeShellBackend, HyprlandBackend, KdotoolBackend, MacosBackend, NiriBackend, SwayBackend, Win32Backend, X11Backend | Hit-test a coordinate; needs geometry and stacking order |
 | <a id="cap-screen_capture"></a>`SCREEN_CAPTURE` | T3 | CosmicBackend, PortalCaptureBackend, ToolCaptureBackend, Win32Backend, X11Backend | Pixels; a new feature, X11::GUITest never had it |
 | <a id="cap-window_capture"></a>`WINDOW_CAPTURE` | T3 | CosmicBackend, GnomeShellBackend, MacosBackend, Win32Backend, X11Backend | Pixels of one window, captured natively rather than cropped out of a screen shot -- so an occluded or offscreen window still comes back whole |

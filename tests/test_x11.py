@@ -1689,3 +1689,47 @@ class TestDisplayNameReachesTheBackend(unittest.TestCase):
 
         environment = Environment(SessionType.X11, Compositor.NONE)
         self.assertIsNotNone(_x11_factory(environment))
+
+
+class TestKeysymGroupsAreLoaded(unittest.TestCase):
+    """Every keysym family `press_key` is expected to name has to be loaded.
+
+    `load_keysym_group` is what puts a family's names where
+    `string_to_keysym` can find them, and python-xlib auto-loads only
+    'miscellany' and 'latin1'. Anything else answered NoSymbol -- an honest
+    refusal for a key the server actually has.
+
+    Both cases here were measured against a live X11 session. The recorder
+    names a `ru` layout's keys `Cyrillic_ef` (it fell back to the hex
+    `0x6c6` until its own group list grew), and a chord over one generates
+    `send_keys('^({Cyrillic_ef})')`, which this side has to resolve or the
+    fix merely moves the failure. `XF86_AudioMute` is the older case: the
+    recorder's docstring has claimed `press_key` resolves media keys since
+    that naming went in, and it did not here.
+    """
+
+    REPRESENTATIVE = {
+        "Cyrillic_ef": "cyrillic",
+        "Greek_alpha": "greek",
+        "Lcaron": "latin2",
+        "hebrew_aleph": "hebrew",
+        "Thai_kokai": "thai",
+        "XF86_AudioMute": "xf86",
+        "ISO_Level3_Shift": "xkb",
+        "Return": "miscellany",
+    }
+
+    def test_one_name_from_each_loaded_group_resolves(self):
+        from pyguitest.backends.x11 import _xlib
+
+        parts = _xlib()
+        if parts is None:
+            self.skipTest("python-xlib is not installed")
+        XK = parts[1]
+        for name, group in sorted(self.REPRESENTATIVE.items()):
+            with self.subTest(name=name, group=group):
+                self.assertTrue(
+                    XK.string_to_keysym(name),
+                    f"{name!r} answers NoSymbol, so the {group!r} group is "
+                    "not loaded and press_key cannot name that family",
+                )

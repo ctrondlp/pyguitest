@@ -28,6 +28,7 @@ rather than an error.
 | `windows` | window control on sway, Hyprland, niri and COSMIC | — | — | — (unix sockets, stdlib only) |
 | `windows` (KWin) | window control on KDE | — | — | `kdotool` |
 | `kwinevents` | window open/close/title events on KDE | — | PyGObject | — (loads an ad hoc KWin script at runtime; nothing to install) |
+| `kscreen` | outputs with their size and KWin's scale factor, on KDE | — | — | `kscreen-doctor` (ships with plasma-workspace) |
 | `gnomeshell` | window control, prompt-free per-window capture, and outputs with their scale on GNOME | — | PyGObject | — (plus the [Shell extension](../gnome-shell-extension/README.md), installed by hand) |
 | `input` | pointer and keyboard through a CLI tool | — | — | `wdotool`, `wtype`, `ydotool` or `xdotool` |
 | `uinput` | in-process pointer and keyboard | `[uinput]` (evdev) | — | — (needs [`/dev/uinput` access](input.md#uinput-devuinput-permissions)) |
@@ -84,7 +85,7 @@ the Screenshot and Clipboard portals need only PyGObject.
 | COSMIC | `pip install 'pyguitest[uinput]'` + `wtype` — windows, capture and screens need nothing; `wtype` adds keymap-safe typing, and uinput adds keyboard input. **Do not count on a pointer here** — see [the note below](#the-pointer-on-wayland-measured-rather-than-assumed) |
 | GNOME | `pip install 'pyguitest[atspi]'` + three distribution packages |
 | GNOME, pure Wayland (no XWayland) | as GNOME, plus the [pyguitest-window-control extension](../gnome-shell-extension/README.md) for window placement/minimize |
-| KDE | as GNOME, plus `kdotool` for windows, and `gsettings set org.gnome.desktop.interface toolkit-accessibility true` or no application publishes any elements — [see below](#on-kde-one-more-step-that-is-not-a-package) |
+| KDE | as GNOME, plus `kdotool` for windows, and `gsettings set org.gnome.desktop.interface toolkit-accessibility true` or no application publishes any elements — [see below](#on-kde-one-more-step-that-is-not-a-package). `kscreen-doctor` is what answers `screens()`; it ships with Plasma, so it is normally already there |
 | X11 | `pip install 'pyguitest[x11]'` for windows, input, capture and tier-6 — add `'pyguitest[atspi]'` too for elements, since AT-SPI works on X11 exactly as it does on GNOME |
 | Any portal-supporting desktop, deliberately | `pip install 'pyguitest[atspi]'` for PyGObject, then `connect(backend="portal")` and click Allow (once, if you opt into `persist_mode`) |
 | Keymap-safe input over libei, deliberately | `pip install 'pyguitest[eiinput]'` + your distribution's `libei`, then `connect(backend="eiinput")` |
@@ -459,6 +460,7 @@ raises.
 | Capture | `grim` *(wlroots only)*, `gnome-screenshot` *(real X11 only)*, `spectacle` *(KDE only)*, `import` *(X11 only, and real X11 only)*, `screencapture` *(macOS only)* |
 | Clipboard | `wl-copy`/`wl-paste` (wl-clipboard — not on GNOME, where the `portal` row above is the only clipboard path), `xclip`, `xsel` *(X11 only)*, `pbcopy`/`pbpaste` *(macOS only)* |
 | Windows | `swaymsg`, `hyprctl`, `niri msg`, `kdotool` |
+| Screens | `kscreen-doctor` *(KDE only)* — the `kscreen` member; every other compositor answers `screens()` through a socket or D-Bus and needs no tool |
 | Image search | `compare` or `magick` (ImageMagick) |
 
 *X11 only* means the tool needs an X connection, which XWayland carries, so

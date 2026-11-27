@@ -167,17 +167,57 @@ class Screen:
     __slots__ = ("index", "width", "height", "scale", "name")
 
     index: int
-    """This output's position in `screens()`, and the number a `screen=`
-    argument takes."""
+    """This output's position in the list `screens()` returned.
+
+    An enumeration position and nothing more. It is **not** what a `screen=`
+    argument selects -- no backend reads that argument as an index into this
+    list; see `Session.screens()` for what it actually does."""
     width: int
     """The output's width in physical pixels, the same unit `geometry()`
     and `screenshot()` work in."""
     height: int
     """The output's height in physical pixels."""
     scale: float
-    """The output's DPI divided by 96 -- 1.0 unscaled, 1.5 on a 144 DPI
-    monitor -- and never a pixel count. See `__init__` for how each
-    platform's answer is normalised to that definition."""
+    """How much larger than 1:1 this output is drawn, and never a pixel count.
+
+    Two different quantities answer that, because the platforms expose
+    different things, and a caller comparing the number across platforms has
+    to know which it got:
+
+    - **DPI over 96** -- 1.0 unscaled, 1.5 on a 144 DPI monitor -- on
+      `win32` (`GetDpiForMonitor`, the effective DPI the user chose) and
+      `macos` (derived from `CGDisplayScreenSize`). A hardware property.
+      `macos.screens`' own measurement is the clearest case of the
+      difference: a virtual display reporting 72 DPI answers **0.75**, which
+      is honest for this definition and is not a number any compositor would
+      report.
+    - **The compositor's own scale factor** on every Wayland member --
+      `gnomeshell` (Mutter's logical layout scale), `cosmic` (`wl_output`'s
+      integer buffer scale), the `windows` group for sway/Hyprland/niri, and
+      `kscreen` on KWin. A user setting rather than a measurement, and the
+      only answer available: a VM output commonly reports a 0x0mm physical
+      size, from which no DPI can be computed at all.
+
+    On ordinary hardware the two coincide closely enough that the difference
+    rarely shows -- a display run at 2x is usually around 192 DPI -- which is
+    why this went unstated. They are still not the same question.
+
+    `x11` reports neither: it leaves the field at its 1.0 default whatever
+    the desktop is scaled to, so a scaled X session is indistinguishable
+    from an unscaled one through this API.
+
+    Either way the number is the *reported* scale and not a conversion:
+    nothing here has been multiplied or divided by it. `width`/`height` are
+    the pixel dimensions the backend reports, which on Windows and the
+    Wayland members are the same pixels `geometry()` and a capture work in.
+
+    On macOS that last part is not safe to assume: `screens()` reports
+    `CGDisplayPixelsWide`/`High` while the pointer and AX work in display
+    *points*, and on a Retina output those differ by the backing scale
+    factor -- which is not this `scale` and cannot be derived from it. The
+    two coincide on a 1x display, which is every Mac this has been measured
+    on, so treat a points-versus-pixels difference there as unverified
+    rather than as either promised or ruled out."""
     name: str
     """The connector or display name the desktop reports (`HDMI-1`,
     `eDP-1`), or "" where it reports none."""
@@ -192,12 +232,12 @@ class Screen:
     ) -> None:
         """Describe one output.
 
-        `scale` is the output's DPI divided by 96 — 1.0 unscaled, 1.5 on a
-        144 DPI monitor — and never a pixel count: `width` and `height` are
-        physical pixels, the same numbers `geometry()` and `screenshot()`
-        work in. Windows reports it as `GetDpiForMonitor` over 96, which is
-        the definition the other platforms' answers are normalised to as
-        well.
+        `scale` is how much larger than 1:1 the output is drawn, and never a
+        pixel count: `width` and `height` are physical pixels, the same
+        numbers `geometry()` and `screenshot()` work in. Which *quantity*
+        answers that differs by platform -- DPI over 96 on Windows and macOS,
+        the compositor's own factor on every Wayland member, nothing at all
+        on X11 -- and the field's own docstring above sets out why and where.
         """
         self.index = index
         self.width = width
@@ -352,6 +392,10 @@ def click_by_pointer(element: Element, reason: str) -> None:
             "the coordinate route is closed too: gui.extents(element) has "
             "nothing to hand back",
         )
+    # An aim point outside every reachable output is refused by
+    # `Session._element_center`, which is where the point the pointer is
+    # actually sent to is computed. Checking a rectangle read *here* would
+    # guard a different read from the one the gesture uses.
     session.click_element(element)
 
 
@@ -390,11 +434,32 @@ def require_click_route(element: Element, route: str) -> None:
     `"pointer"` needs the pointer half -- geometry to aim at, and move/button
     to inject -- which a headless or consent-less session may not have;
     `"action"` needs the accessible action. `"auto"` declares nothing, since
-    it degrades the way it always has. An element with no session behind it
-    has nothing to require, and the route itself reports the real problem.
+    it degrades the way it always has.
+
+    An element with no session is the one case this cannot check, and
+    `"pointer"` is refused outright there rather than let through. On UIA and
+    AX the route itself still reports the real problem, but on AT-SPI it does
+    not: `_can_drive_a_pointer(None)` is False by its own docstring ("False
+    for no session at all -- an element taken straight from a backend"), so
+    the call fell to dogtail's own coordinate click -- which `Element.click`
+    measures, in its own docstring, as going nowhere and raising nothing on
+    GNOME/Wayland. That is the silent failure the route reordering exists to
+    prevent, reached through the no-session door: a loop over
+    `backend.find_elements(...)` asking for `via="pointer"` ran clean and
+    clicked nothing. `Session.elements` binds every element it hands out, so
+    no documented route reaches this.
     """
     session = getattr(element, "_session", None)
     if session is None:
+        if route == "pointer":
+            raise CapabilityUnsupported(
+                Capability.POINTER_MOVE,
+                None,
+                "via='pointer' needs a session to drive the pointer through, "
+                "and this element has none -- it came from a backend's own "
+                "find_element/find_elements rather than from Session.element "
+                "or Session.elements, which bind what they return",
+            )
         return
     if route == "pointer":
         session.require(
@@ -751,7 +816,7 @@ class Element(Protocol):
 
     @property
     def actions(self) -> list[str]:
-        """The names of the actions this element offers, e.g. 'click'.
+        """The names of the actions this element offers, in the platform's own words.
 
         The names `do_action` takes. Treat it as a set, not a sequence: it
         comes back sorted on Linux and Windows but in AX's own preference
@@ -759,6 +824,30 @@ class Element(Protocol):
         platform. Print it before reaching for a toolkit-specific action
         name -- what a widget publishes is the toolkit's choice, and an
         element that publishes none at all is why `click` has a pointer rung.
+
+        **The vocabulary is per-platform too, which is the part worth
+        reading twice.** `do_action` aliases the three at-spi spellings on
+        both other backends, so *writing* `do_action("click")` works
+        everywhere -- but this property reads back what the platform
+        publishes, and those are different words:
+
+        - AT-SPI returns the toolkit's own names: `click`, `press`, `toggle`.
+        - macOS maps `AXPress` to `click`, so a Mac button reads `click`.
+        - UI Automation returns its pattern names. Measured on Windows 10
+          (19045) against Notepad: every push button reads
+          `['do default action', 'invoke']` and no button anywhere reads
+          `click`; a menu item reads `['collapse', 'do default action',
+          'expand', 'invoke']` and a text area `['do default action']`.
+
+        So `if "click" in element.actions` is a branch that takes a different
+        route on Windows, and a caller testing for clickability has to accept
+        either vocabulary. The recorder does exactly that -- see
+        `ElementRef._CLICK_ACTIONS`, which unions
+        `{click, press, invoke, toggle, do default action}` deliberately and
+        says why. Aliasing the read side to at-spi's words was considered and
+        rejected: the names are a read-back that recordings and that
+        resolver's own exact-match heuristics are written against, so the
+        honest fix is this paragraph rather than a rename.
         """
         ...
 

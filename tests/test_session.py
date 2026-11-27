@@ -124,6 +124,44 @@ class TestSessionClassification(unittest.TestCase):
         self.assertTrue(any("NO_AT_BRIDGE" in n for n in e.notes))
         self.assertFalse(any("NO_AT_BRIDGE" in n for n in quiet.notes))
 
+    def test_no_display_is_reported_on_a_headless_session(self):
+        """The note `_windows_notes`/`_darwin_notes` had no counterpart for.
+
+        An SSH login is the shape this exists for, and it is the one this
+        project's own fleet hits most: `doctor` reported every tier-3 and
+        tier-4 capability absent and answered with a package list, while the
+        cause -- no display to reach -- appeared nowhere. The compositor is
+        still detected from XDG_CURRENT_DESKTOP, which survives into a
+        non-graphical login, so the report positively looked like a working
+        desktop.
+        """
+        e = linux_detect(env())
+        self.assertIs(e.session_type, SessionType.HEADLESS)
+        self.assertTrue(any("no display server is reachable" in n for n in e.notes))
+
+    def test_no_display_is_reported_for_an_ssh_shell(self):
+        # XDG_SESSION_TYPE=tty with no DISPLAY: an ordinary `ssh` login, which
+        # detects as UNKNOWN rather than HEADLESS and needs the note just as
+        # much. The wording names the variable that is set, since that is the
+        # one a reader will check first.
+        e = linux_detect(env(XDG_SESSION_TYPE="tty"))
+        self.assertIs(e.session_type, SessionType.UNKNOWN)
+        note = next(n for n in e.notes if "no display server is reachable" in n)
+        self.assertIn("'tty'", note)
+
+    def test_a_graphical_session_gets_no_such_note(self):
+        for variables in (
+            env(WAYLAND_DISPLAY="wayland-0"),
+            env(DISPLAY=":0"),
+            env(DISPLAY=":0", WAYLAND_DISPLAY="wayland-0"),
+            env(XDG_SESSION_TYPE="wayland"),
+        ):
+            with self.subTest(env=variables):
+                e = linux_detect(variables)
+                self.assertFalse(
+                    any("no display server is reachable" in n for n in e.notes)
+                )
+
     def test_pure_x11(self):
         e = linux_detect(env(DISPLAY=":0", XDG_SESSION_TYPE="x11"))
         self.assertIs(e.session_type, SessionType.X11)

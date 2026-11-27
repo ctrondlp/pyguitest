@@ -121,6 +121,7 @@ from .. import xkb as _xkb
 from ..capabilities import Capability, CapabilitySet
 from ..errors import (
     BackendUnavailable,
+    CapabilityUnsupported,
     PermissionRequired,
     PortalTimeout,
     PyGUITestError,
@@ -758,7 +759,33 @@ class LibeiBackend(GUIBackend):
         if found is None and len(key) == 1:
             found = self._keymap.for_char(key)
         if found is None:
-            raise PyGUITestError(f"the active keyboard layout cannot produce {key!r}")
+            # One of the two types `Session.send_keys` documents, not the
+            # base class. Its contract is explicit: a `ValueError` means the
+            # string itself is wrong -- "a `{}` name that is not a key at
+            # all" -- and a `CapabilityUnsupported` means the string is fine
+            # and this desktop cannot serve it, "a real key with no keycode
+            # in the server's current keymap". This raised a bare
+            # `PyGUITestError` for both, which is neither: a caller
+            # following the contract with `except ValueError` saw nothing
+            # caught on any libei-driven session, and the two conditions
+            # could not be told apart at all.
+            #
+            # The keymap can tell them apart, which is what makes the split
+            # honest here: a name it cannot even turn into a keysym is a
+            # name, not a keyboard, problem.
+            named = self._keymap.keysym_for_name(key)
+            if not named and not (len(key) == 1 and self._keymap.keysym_for_char(key)):
+                raise ValueError(
+                    f"unknown key name {key!r}; names are X11 keysym "
+                    "spellings (`Return`, `Escape`, `F5`) or a single "
+                    "character"
+                )
+            raise CapabilityUnsupported(
+                Capability.KEY_EVENT,
+                self.name,
+                f"the active keyboard layout has no key for {key!r} -- it is "
+                "a real keysym, but this keymap binds no physical key to it",
+            )
         return found
 
     def press_key(self, key):

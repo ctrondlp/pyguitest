@@ -59,6 +59,20 @@ from .base import GUIBackend
 
 __all__ = ["MacquartzBackend", "available", "client", "request_post_event"]
 
+_PORTABLE_KEY_NAMES = frozenset(
+    name.lower() for name in GUIBackend.KEY_ALIASES.values()
+)
+"""Key names this package documents as portable, lower-cased for lookup.
+
+Derived from `GUIBackend.KEY_ALIASES` rather than listed, so it cannot drift
+from the vocabulary the book and `send_keys` promise. Its only use is telling
+`Session.send_keys`' two documented failures apart on this backend: a name in
+here that this Mac has no keycode for is a real key the *desktop* lacks, so
+`CapabilityUnsupported`; a name that is not in here at all is not a key, so
+`ValueError`. Collapsing both into one type broke a caller's fallback in one
+direction and the documented `except ValueError` in the other.
+"""
+
 _NEEDED = (
     "CGEventCreateMouseEvent",
     "CGEventCreateScrollWheelEvent",
@@ -251,12 +265,52 @@ _KEYCODES = {
     "right": 0x7C,
     "down": 0x7D,
     "up": 0x7E,
+    # The keypad, the Clear key and the ISO section key. Spelled the way
+    # `uinput` and `win32` already spell them (`kp_enter`, `kp_add`, `kp_0`
+    # ...), which is the X11 keysym name lower-cased -- so `press_key`
+    # ("KP_Enter") resolves here as it already did on the other three
+    # backends. It did not before: this table had no keypad at all, which
+    # made the Mac the one platform where a recorded keypad press could not
+    # be replayed, and where `tap_key("KP_Enter")` raised.
+    #
+    # Measured on macOS 15.8.1 rather than copied from `Events.h`:
+    # `UCKeyTranslate` against the session's live layout reports exactly the
+    # character each name claims -- '0'-'9' for the digits, '.', '*', '+',
+    # '/', '-', '=' for the operators, ETX for `kp_enter`, '§' for `section`
+    # -- with `return`, `escape` and `a` translated alongside them as a
+    # control on the probe itself.
+    "section": 0x0A,
+    "kp_decimal": 0x41,
+    "kp_multiply": 0x43,
+    "kp_add": 0x45,
+    "clear": 0x47,
+    "kp_divide": 0x4B,
+    "kp_enter": 0x4C,
+    "kp_subtract": 0x4E,
+    "kp_equal": 0x51,
+    "kp_0": 0x52,
+    "kp_1": 0x53,
+    "kp_2": 0x54,
+    "kp_3": 0x55,
+    "kp_4": 0x56,
+    "kp_5": 0x57,
+    "kp_6": 0x58,
+    "kp_7": 0x59,
+    "kp_8": 0x5B,
+    "kp_9": 0x5C,
 }
 """US-layout virtual keycodes, keyed by the name press_key takes.
 
 Case-insensitive at lookup, so `send_keys("{ENT}")` and `press_key("Return")`
 both land on `return`; the names are lower-case here because that is how the
 printed legends read.
+
+The four JIS keys (Yen 93, Underscore 94, KeypadComma 95, and Eisu/Kana
+102/104) are deliberately absent. Measured on the same machine: a non-JIS
+layout translates the first three to nothing at all and the last two to a
+function sentinel, so there is no reading from this keyboard that would
+justify a mapping -- which is the rule that kept the keypad out until it
+*was* measured. A JIS layout is what would settle them.
 """
 
 _X11_KEYSYMS = {
@@ -570,13 +624,26 @@ class MacquartzBackend(GUIBackend):
         "RSK": "rightcommand",
         "LMA": "command",
         "RMA": "rightcommand",
+        # Both name keys this backend's own `_KEYCODES` already has, so both
+        # were reachable as `press_key("Caps_Lock")`/`press_key("Help")` while
+        # `send_keys("{CAP}")` raised -- two spellings of one key disagreeing
+        # on one platform, which is the divergence the alias table exists to
+        # remove. The docstring below used to count them among the keys "a Mac
+        # does not have", which was not true of either.
+        "CAP": "capslock",
+        "HEL": "help",
     }
     """send_keys()'s `{BAC}`-style abbreviations, in this backend's vocabulary.
 
     The same abbreviations X11::GUITest used, mapped onto macOS key names
-    rather than X11 keysyms. Seven are deliberately absent -- BRE, CAN, HEL,
-    INS, MNU, NUM and PRT name keys a Mac does not have -- so `{INS}` raises
-    naming the key instead of quietly pressing a different one.
+    rather than X11 keysyms. Seven are deliberately absent -- BRE, CAN, INS,
+    MNU, NUM, PRT and SCR name keys a Mac does not have, and none of them has
+    a `_KEYCODES` entry either -- so `{INS}` raises naming the key instead of
+    quietly pressing a different one.
+
+    `tests/test_key_vocabulary.py` holds this to that claim in both
+    directions: every portable alias either resolves here or is one of those
+    seven, and each of those seven really has no keycode.
     """
 
     def __init__(self, environment=None, request=False):
@@ -839,12 +906,32 @@ class MacquartzBackend(GUIBackend):
         name = _key_name(key)
         code = _KEYCODES.get(name)
         if code is None:
-            raise CapabilityUnsupported(
-                Capability.KEY_EVENT,
-                self.name,
-                f"{key!r} is not a key this backend knows; the names in "
+            # Both halves of the split `Session.send_keys` documents, which
+            # one type cannot carry: "a `ValueError` means the string itself
+            # is wrong ... or a `{}` name that is not a key at all", against
+            # "a `CapabilityUnsupported` means the string is fine and this
+            # *desktop* cannot serve it".
+            #
+            # `Insert` and `Scroll_Lock` are the second kind: real keys, in
+            # this package's own portable vocabulary, that a Mac keyboard
+            # simply does not have -- so a caller catching
+            # CapabilityUnsupported to fall back is right to, and turning
+            # them into ValueError took that away. `Nonexistent_Key` is the
+            # first kind, and used to raise CapabilityUnsupported, which the
+            # documented `except ValueError` could not catch. Both were
+            # wrong; the vocabulary is what tells them apart.
+            if {_key_name(key), key.lower()} & _PORTABLE_KEY_NAMES:
+                raise CapabilityUnsupported(
+                    Capability.KEY_EVENT,
+                    self.name,
+                    f"{key!r} is a key a Mac keyboard does not have; the "
+                    "names in backends.macquartz._KEYCODES and _X11_KEYSYMS "
+                    "are the whole vocabulary it does",
+                )
+            raise ValueError(
+                f"unknown key name {key!r}; the names in "
                 "backends.macquartz._KEYCODES and _X11_KEYSYMS are the whole "
-                "vocabulary",
+                "vocabulary a Mac keyboard has"
             )
         return code
 

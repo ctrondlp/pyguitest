@@ -5,6 +5,300 @@ All notable changes to pyguitest are recorded here. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html) — with the usual
 0.x caveat that the API may still change between minor versions.
 
+## [0.30.0] — 2026-11-26
+
+An ease-of-use and cross-platform review of this package and the recorder.
+Nothing here is lint-shaped; the findings share one shape instead. An
+invariant is *stated* at the `Session`/`base.py` layer where callers read it,
+and nothing tested the backends against the statement — so `screen=`,
+`Screen.scale`, the key vocabulary and the exception types each drifted
+beneath a docstring that said they had not. Four conformance tests arrive
+with the fixes, and between them they would have caught most of this with no
+live desktop.
+
+### Fixed
+
+- **`tree_items(role=…)` returned an empty list for a role *group*, which is
+  the call its own docstring recommends.** The filter was `child.role ==
+  role` against a tuple, which nothing equals, so the cross-platform row
+  walk the docstring describes — `(Role.TABLE_CELL, Role.TREE_ITEM)`, GTK's
+  spelling and UIA's for the same concept — came back empty on both
+  platforms and read as "this tree has no rows". It now goes through
+  `spellings()` like every other role filter here, so a group matches and a
+  single role also matches the bus's other spellings for it. The annotation
+  said `str | None` while `elements()` said `str | Sequence[str] | None`;
+  they agree now.
+
+- **Three AT-SPI write verbs threw away dogtail's failure signal.** dogtail
+  reports these by *return value*: `set_text_contents` answers False for an
+  element that is not editable text, `grab_focus` for one with no Component
+  interface and from inside its own blanket `except`, and `select` where
+  neither the element nor its parent publishes a Selection interface. All
+  three answers were discarded, so `set_text` on a read-only field wrote
+  nothing and raised nothing, and `focus()` on an element with no way in
+  left the next `type_text` going wherever focus actually was. `base.py`
+  documents Windows and macOS as raising `CapabilityUnsupported` for exactly
+  these cases, on the stated grounds that silence cannot be told apart from
+  success; Linux does now too. `set_text` also stopped going through
+  `setattr`, which discarded the boolean before anything could read it.
+
+- **`click(via="pointer")` on an element with no session reverted to the
+  mechanism measured as doing nothing.** `require_click_route` returned
+  early there — correct on UIA and AX, where the route itself raises — but
+  on AT-SPI `_can_drive_a_pointer(None)` is False, so the call fell to
+  dogtail's own coordinate click, which `Element.click`'s docstring records
+  as moving no pointer and raising nothing on GNOME/Wayland. A loop over
+  `backend.find_elements(...)` asking for the user pathway therefore ran
+  clean and clicked nothing. That case is refused now.
+
+- **`Session` re-exported the three backend methods its own comment calls
+  "deliberately absent".** `__getattr__` forwarded `capture`,
+  `find_element` and `find_elements` to the backend, which hands back
+  elements with `session=None` where `Session.elements` binds every one —
+  and an unbound element cannot `double_click()`, loses `click()`'s
+  session-pointer rung and ignores `click_via`. All three now raise naming
+  the method to use instead. A plain typo also named whichever backend was
+  live (`'NullBackend' object has no attribute 'elemnts'`) rather than
+  `Session`, which is what the docstring promised.
+
+- **`ElementNotFound` omitted the filters that caused the miss, and for
+  three of them said nothing at all.** A `predicate=`, `description=` or
+  `visible=`-only lookup produced the literal dangling string `no element
+  with ` — and both of the first two are reached precisely when a locator is
+  already in trouble. A state filter was invisible, so a miss on
+  `element(role="check box", name="Enable", enabled=True)` against a
+  present-but-disabled box read as "it isn't there". `dropdown("Country")`
+  lost the name entirely, reporting only `role='combo box'`, because the
+  retry that looks in the accessible description passed `name=None`; it now
+  raises naming the word the caller used and both places it looked.
+
+- **The generated capability matrix over-reported four backend/capability
+  pairs.** `gen-api-docs.py` derived the "Provided by" column by scanning
+  each `capabilities` property for `Capability.X`, which reads a
+  *subtraction* as a declaration — so `NiriBackend` was listed for the two
+  it removes (WINDOW_PLACEMENT, WINDOW_MINIMIZE) and `KdotoolBackend` for
+  its two (WINDOW_PID, SCREEN_INFO). A reader on KDE Wayland who called
+  `gui.screens()` on the strength of the table got `CapabilityUnsupported`.
+  The property is evaluated now rather than scanned, and a new test checks
+  the published column against each backend's real set — `test_api_docs.py`
+  only ever checked that the file matched the generator, so it green-lit the
+  wrong content.
+
+- **An unknown key name raised three different exception types.**
+  `send_keys`' own docstring sets the contract — `ValueError` for "a `{}`
+  name that is not a key at all", `CapabilityUnsupported` for a real key
+  this desktop cannot serve — and x11, uinput, win32 and portal all raised
+  the first while macquartz raised the second and eiinput a bare
+  `PyGUITestError`. Neither of those is a `ValueError`, so the documented
+  `except ValueError` caught nothing on macOS and nothing on a libei-driven
+  session. macquartz raises `ValueError` for an unknown name now, and
+  eiinput tells the two apart properly: a name its keymap cannot even turn
+  into a keysym is a `ValueError`, a real keysym with no physical key is
+  `CapabilityUnsupported`.
+
+- **Nine brace aliases were unreachable on macOS, two of them for keys the
+  Mac has.** `{CAP}` raised while `press_key("Caps_Lock")` worked on the
+  same machine, and `{HEL}` likewise — both name keys already in
+  `_KEYCODES`. The table's docstring counted them among the seven "a Mac
+  does not have", which was untrue of either. Both are mapped now, and the
+  seven genuinely absent (BRE, CAN, INS, MNU, NUM, PRT, SCR) are pinned in
+  both directions: each must also lack a keycode. On uinput, `{PRT}` was
+  omitted as "uncertain" while the module's own `_KEYSYM_NAMES` already
+  mapped `print` → `SYSRQ`, so `press_key("Print")` pressed Print Screen and
+  `send_keys("{PRT}")` raised; it is mapped to SYSRQ now, and not to
+  `KEY_PRINT`, which is a printer key.
+
+- **An AltGr chord typed a literal ampersand on macOS.** The generator
+  spells `altgr` as `&`, which is `ISO_Level3_Shift` on X11 and the right
+  Alt key under uinput; macquartz has no entry for it, so the character fell
+  through to the literal path where `_CHAR_KEYS["&"]` is shift-7 —
+  `send_keys("&(q)")` typed `&` into the focused application and reported
+  success, against that table's own docstring ("a refusal a caller can see
+  beats a silent change of meaning"). Any modifier sigil a backend does not
+  map is now refused rather than typed.
+
+- **Five role constants resolved on one of macOS/Windows and not the other,
+  with nothing saying so.** `TABLE_CELL`, `SCROLL_PANE` and `SPLIT_PANE`
+  resolve on AX only; `STATUS_BAR` and `DOCUMENT_FRAME` on UIA only. The
+  0.29.0 round documented every asymmetry it introduced, and in fact
+  *created* the `TABLE_CELL` one by mapping `AXCell` — which left Windows
+  the single platform where that constant matches nothing. Each now carries
+  the docstring AGENTS.md asks for, naming the portable role group to use
+  instead, and a test requires one of any AX/UIA-asymmetric role.
+
+- **`doctor` never diagnosed the commonest reason nothing works.** A
+  service, a container or an SSH shell is its own session and cannot see the
+  logged-in desktop, and `detect()` reports that as HEADLESS or UNKNOWN with
+  every tier-3 and tier-4 capability absent — but there was no note for it,
+  so `doctor` answered with a package list while the compositor, read from
+  XDG_CURRENT_DESKTOP, was still detected and made the report look like a
+  working desktop. Installing everything suggested changed nothing. There is
+  a note now, alongside the Windows and macOS ones that exist for the same
+  stated reason, naming the variables to export.
+
+- **The portal probe searched only `/usr`, so a BSD box never found one.**
+  FreeBSD ports install under `/usr/local` and the service binary lands in
+  `libexec`, off PATH, so `shutil.which` does not rescue it either — a BSD
+  desktop with the portal installed answered `has_portal=False`, which
+  `pyguitest doctor` prints and which `can_use_clipboard`/`can_capture`
+  both read. The two `/usr/local` *executable* directories are searched now.
+
+  `/usr/local/share` is deliberately **not** among them, which the box
+  itself settled: GhostBSD (FreeBSD 15.1-RELEASE-p6) has
+  `/usr/local/share/xdg-desktop-portal` and no portal binary anywhere and no
+  such package installed — something else ships that config directory. Adding
+  it would have turned a correct `False` into a confident false `True` on
+  exactly the platform this was meant to fix. A data directory is not a
+  service. Verified on that box: still `False`, and the executable paths are
+  now searched.
+
+- **A pointer click on a macOS document body aimed thousands of pixels off
+  the screen, silently.** `Session._element_center` takes the raw midpoint of
+  an element's rectangle and `move_mouse` posts it with no bounds check, so a
+  rectangle larger than the display aimed outside it and the click landed
+  wherever the window server clamped that to — on whatever happened to be
+  there. AX reports a text area's *document* extent rather than its viewport,
+  which `macos.extents` has measured and warned about without anything
+  acting on it.
+
+  Reproduced on macOS 26.7: a 4000-line document in a 673x439 TextEdit window
+  published extents `(242, 139, 656, 52013)` on a 1920x1080 screen, so the
+  midpoint was `(570, 26145)` — about 26,000 pixels below the display.
+  `gui.text_field("Body").click()` reaches that path, because an AXTextArea
+  publishes no AXPress and is neither checkable nor selectable.
+
+  `click_by_pointer` now refuses an aim point that is on no screen, naming
+  the point, the rectangle and the two ways round it. Refused rather than
+  clamped because no clamp is correct: clipping to the screen gives
+  `(570, 609)` for that case, which is outside the 439-tall window and
+  therefore on a *different application* — worse than an error. Clipping to
+  the window would be right and this layer has no window to clip to. A
+  session that cannot enumerate screens does not refuse anything, since
+  "cannot tell" must not become "cannot click". Verified on the live
+  document, which now refuses instead of clicking.
+
+- **`press_key` could not name a key outside Latin-1 on X11, including every
+  media key.** `load_keysym_group` is what puts a keysym family's names where
+  `string_to_keysym` can find them, and python-xlib auto-loads only
+  'miscellany' and 'latin1'; this backend added 'xkb' for
+  `ISO_Level3_Shift` and stopped there. So every other family answered
+  NoSymbol — an honest refusal, for keys the server actually has.
+
+  Found from the other end, on a live X11 session switched to `ru`: the
+  recorder names that layout's keys correctly now, and a chord over one
+  generates `gui.send_keys('^({Cyrillic_ef})')`, which this side could not
+  resolve — so the recorder's fix only moved the failure until this list grew
+  to match. `xf86` is the longest-standing case of the same thing: the
+  recorder has named media keys `XF86_AudioMute` for some time, with a
+  docstring saying `press_key` resolves them, and
+  `string_to_keysym("XF86_AudioMute")` answered NoSymbol here throughout.
+  Verified on the live box: Cyrillic, Greek, Latin-2, Hebrew, Thai, the
+  media keys and `ISO_Level3_Shift` all resolve. Only the *name* lookup was
+  affected — typing text goes through `resolve_char_key`/`type_text`, and a
+  layout's characters were always reachable.
+
+- **The keypad was unreachable on macOS.** `press_key("KP_Enter")` worked on
+  X11, uinput and Windows — all three already spell the keypad `kp_enter`,
+  `kp_add`, `kp_0`… — and raised on a Mac, whose table had no keypad, Clear
+  or ISO section key at all. Measured on macOS 15.8.1 through
+  `UCKeyTranslate` against the live layout rather than copied from
+  `Events.h`: every code produces exactly the character its name claims, and
+  the control keys already mapped (`return`, `escape`, `a`) translated
+  alongside them as a check on the probe. Verified again on macOS 26.7,
+  where all nineteen names resolve and the X11 spellings a recording writes
+  (`KP_Enter`, `KP_5`, `Clear`) resolve with them. The four JIS keys stay
+  absent: the same probe shows a non-JIS layout gives them no character, so
+  nothing on that machine would justify a mapping.
+
+### Documentation
+
+- **`kscreen` is listed where a reader looks for a backend.** The new member
+  appeared in no install table, so a KDE user had no way to learn that
+  `screens()` answers on KWin now, or that `kscreen-doctor` is what answers
+  it. It is in the backend table, the by-desktop row and the external-tools
+  table; `doctor` does not yet discover the tool, which is a separate gap.
+
+- **The macOS section of `input.md` now covers the key vocabulary it was
+  silent about.** `&` has no Mac equivalent at all and is refused rather
+  than approximated -- it used to type a literal ampersand and report
+  success, because the character tables have `&` as shift-7. The exception
+  split `send_keys` documents is set out as a table (a name that is not a
+  key gives `ValueError`; a real key this desktop lacks gives
+  `CapabilityUnsupported`), and the keypad, `clear` and `section` names plus
+  the `{CAP}`/`{HEL}` aliases are named. Every row was checked against the
+  real tables rather than read off the diff.
+
+- **A validation-log entry showed `connect().capture()`, which 0.30.0
+  refuses.** The measurement stands as the record of that run; the entry now
+  names `screenshot(path=..., window=..., region=...)` as the call to write
+  today, and warns that the parameter order differs.
+
+### Added
+
+- **`gui.screens()` works on KDE.** KWin was the one Wayland compositor with
+  no `SCREEN_INFO` provider at all — every other has something to ask, while
+  `kdotool`, the "windows" member there, reports no outputs and subtracts the
+  capability — so the call raised `CapabilityUnsupported` on Plasma. The new
+  `kscreen` member reads `kscreen-doctor --json`, which ships with
+  plasma-workspace, and sits beside `kdotool` exactly as `kwinevents` does
+  rather than being folded into it.
+
+  The absence cost more than callers asking for screens. Measured on a
+  Fedora 44 KWin session scaled to 200%: the recorder's resolver asks
+  `screens()` to decide whether anything is scaled, caught the refusal and
+  answered False — so the one safeguard against the Wayland
+  physical/logical coordinate mismatch was inert on the one compositor that
+  could not answer. With this member the same question answers `False` at
+  scale 1 and `True` at scale 2, verified live at both.
+
+  `kscreen-doctor --json` was chosen over `org.kde.KWin.supportInformation()`,
+  which needs no tool but answers in prose meant for bug reports and gives
+  *logical* geometry (`Geometry: 0,0,640x400` at scale 2), so physical pixels
+  would have to be reconstructed by multiplying back up. The JSON carries the
+  mode size and the scale as separate fields, which is the pair `Screen` is
+  defined in. `scale` is KWin's own factor, matching what the GNOME member
+  already reports; this output's EDID physical size reads 0x0mm, so no DPI
+  can be computed from it.
+
+### Changed
+
+- **`Element.actions` now documents that the vocabulary is per-platform**,
+  where it previously warned only that the *order* differs. Measured on
+  Windows 10 (19045) against Notepad: every push button reads
+  `['do default action', 'invoke']` and none anywhere reads `click`; a menu
+  item reads `['collapse', 'do default action', 'expand', 'invoke']`. So
+  `if "click" in element.actions` is a branch that takes a different route
+  there. Aliasing the read side to at-spi's words was considered and
+  rejected: these names are a read-back that the recorder's
+  `ElementRef._CLICK_ACTIONS` already unions both vocabularies against
+  deliberately, and that its resolver matches exactly in one place, so a
+  rename would break a working downstream rather than fix it. The divergence
+  is documented where the caller reads instead.
+
+- **`Screen.scale` now says which quantity it carries, because two
+  different ones answer it.** The field was defined as DPI over 96, and
+  `win32` and `macos` really do report that — `macos.screens` measures a
+  72 DPI virtual display as **0.75**, which is correct for that definition
+  and is not a number any compositor would give. Every Wayland member
+  reports the compositor's own scale factor instead: Mutter's logical
+  layout scale, COSMIC's `wl_output` buffer scale, the sway/Hyprland/niri
+  group's, and KWin's through the new `kscreen` member. That is not an
+  oversight but the only answer available there — a VM output commonly
+  reports a 0x0mm physical size, from which no DPI can be computed. And
+  `x11` reports neither, leaving the field 1.0 however the desktop is
+  scaled, so a scaled X session is indistinguishable from an unscaled one
+  through this API. On ordinary hardware the two quantities coincide closely
+  enough that the difference rarely shows, which is why it went unstated;
+  they are still not the same question, and the three places that repeated
+  the old single definition now agree with the code.
+
+- **`Session.screens()` no longer claims that `screen=` indexes its list.**
+  It does not, anywhere: every pointer backend treats coordinates as
+  absolute in one desktop-wide space and ignores the argument, and macquartz
+  refuses a non-zero value outright. That sentence was the only statement
+  about the parameter in the package, and it was wrong in opposite ways on
+  Linux (silently the primary output) and macOS (an exception).
+
 ## [0.29.0] — 2026-11-25
 
 The cross-platform role audit's fixable findings, in one round: every one of
@@ -7386,7 +7680,8 @@ First public release.
 - A `pyguitest` command-line entry point.
 - PEP 561 type information (`py.typed`); no hard runtime dependencies.
 
-[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.28.0...HEAD
+[Unreleased]: https://github.com/ctrondlp/pyguitest/compare/v0.30.0...HEAD
+[0.30.0]: https://github.com/ctrondlp/pyguitest/compare/v0.29.0...v0.30.0
 [0.29.0]: https://github.com/ctrondlp/pyguitest/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/ctrondlp/pyguitest/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/ctrondlp/pyguitest/compare/v0.26.1...v0.27.0

@@ -117,11 +117,29 @@ class Role:
     LAYERED_PANE = "layered pane"
     TOOL_BAR = "tool bar"
     STATUS_BAR = "status bar"
+    """Windows and Linux only. UIA maps control type 50017 onto it; no AX
+    name is mapped, because a Mac's status surfaces are ordinary groups and
+    text with no distinguishing subrole to read -- so a `role=STATUS_BAR`
+    search matches nothing there rather than guessing at one."""
     SCROLL_PANE = "scroll pane"
+    """Linux and macOS only (`AXScrollArea`). UIA has no counterpart: a
+    scrollable region there is the control it scrolls, carrying the Scroll
+    pattern rather than a container role of its own, so a
+    `role=SCROLL_PANE` search matches nothing on Windows."""
     SPLIT_PANE = "split pane"
+    """Linux and macOS only (`AXSplitGroup`). UIA has no counterpart -- a
+    splitter there is a `pane` with a Transform pattern -- so a
+    `role=SPLIT_PANE` search matches nothing on Windows."""
     VIEWPORT = "viewport"
     TABLE = "table"
     TABLE_CELL = "table cell"
+    """Linux and macOS only, and the asymmetry is newer than the role:
+    0.29.0 mapped `AXCell` onto it, which left Windows the one platform
+    where it matches nothing. UIA reports the *row* (control type 50029)
+    where at-spi reports cells and rows separately -- see the note beside
+    that entry in `uia.py` -- so a portable row walk asks for the group,
+    `role=(Role.TABLE_CELL, Role.TREE_ITEM, Role.TABLE_ROW)`, rather than
+    this constant alone."""
     TABLE_ROW = "table row"
     TABLE_COLUMN_HEADER = "table column header"
     TREE = "tree"
@@ -136,6 +154,11 @@ class Role:
     Another GTK-only spelling: UIA maps nothing onto it (a data grid
     there is `table`), and no AX name is mapped onto it either."""
     DOCUMENT_FRAME = "document frame"
+    """Windows and Linux only. UIA maps control type 50030 onto it; no AX
+    name is mapped, because a Mac's document body is an `AXTextArea`,
+    which is `TEXT`. So the portable spelling for "the editable body of a
+    document" is `role=(Role.DOCUMENT_FRAME, Role.TEXT, Role.ENTRY)`, and
+    `role=DOCUMENT_FRAME` alone matches nothing on macOS."""
     FILLER = "filler"
 
     # -- things you only read ----------------------------------------------

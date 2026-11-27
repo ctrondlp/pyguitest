@@ -137,3 +137,48 @@ class TestReferenceQuality(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestProviderTableAgreesWithRuntime(unittest.TestCase):
+    """The reference's "Provided by" column against each backend's real set.
+
+    `test_committed_file_matches_the_source` only checks that the file matches
+    what the generator emits, so it green-lights wrong content: the generator
+    derived the column by scanning each `capabilities` property for
+    `Capability.X`, which reads a *subtraction* as a declaration. Both
+    backends that subtract were listed as providing exactly what they remove
+    -- `KdotoolBackend` for SCREEN_INFO and WINDOW_PID, `NiriBackend` for
+    WINDOW_PLACEMENT and WINDOW_MINIMIZE -- and a reader on KDE who called
+    `gui.screens()` on the strength of it got CapabilityUnsupported.
+
+    This asks the backends instead. Only those that construct off their own
+    platform can be asked, which is every window backend and the point: the
+    two that were wrong are both in `backends/windows.py`.
+    """
+
+    def test_listed_backends_really_declare_what_the_table_says(self):
+        from pyguitest.backends import windows
+        from pyguitest.capabilities import Capability
+        from pyguitest.session import detect
+
+        providers = load_generator().providers()
+        environment = detect()
+        checked = 0
+        for name, cls in inspect.getmembers(windows, inspect.isclass):
+            if cls.__module__ != windows.__name__ or not name.endswith("Backend"):
+                continue
+            try:
+                declared = cls(environment).capabilities
+            except Exception:  # noqa: BLE001 - not constructible here, skip it
+                continue
+            checked += 1
+            for capability in Capability:
+                listed = name in providers.get(capability.name, set())
+                with self.subTest(backend=name, capability=capability.name):
+                    self.assertEqual(
+                        listed,
+                        capability in declared,
+                        f"docs/api.md lists {name} for {capability.name} as "
+                        f"{listed}, the backend says {capability in declared}",
+                    )
+        self.assertGreater(checked, 0, "no window backend could be constructed")

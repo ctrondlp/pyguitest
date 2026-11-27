@@ -65,7 +65,7 @@ from .errors import (
     WindowNotFound,
 )
 from .png import png_size as _png_size
-from .roles import Role
+from .roles import Role, spellings
 from .sendkeys import KeySender
 from .session import (
     _PROCESS_QUERY_LIMITED_INFORMATION,
@@ -89,7 +89,7 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T")
 
-__version__ = "0.29.0"
+__version__ = "0.30.0"
 
 __all__ = [
     "connect",
@@ -1215,6 +1215,34 @@ def _hesitation(plan: Sequence[_Keystroke]) -> int:
     return middle
 
 
+_BACKEND_ONLY_NAMES = {
+    "find_element": (
+        "Session.element(), which takes the same arguments and binds what it "
+        "returns to this session"
+    ),
+    "find_elements": (
+        "Session.elements(), which takes the same arguments and binds what it "
+        "returns to this session"
+    ),
+    "capture": (
+        "Session.screenshot(window=..., path=..., region=...) -- name the\n"
+        "arguments, because the parameter order is not the same: this took\n"
+        "the window first and screenshot() takes the path first"
+    ),
+}
+"""Backend methods `Session` deliberately does not re-export, and what to use.
+
+Each has a Session-level equivalent taking the same arguments, and the
+difference is not cosmetic: `Session.elements` binds every element it returns
+to the session (`_bind`), while `AtspiBackend.find_elements` hands back
+wrappers with no session at all. An unbound element cannot `double_click()`,
+loses `click()`'s session-pointer rung and ignores `click_via` -- so reaching
+the backend's spelling through `Session.__getattr__`, which forwarded all
+three, silently produced elements that were quietly less capable than the
+ones every documented route hands out.
+"""
+
+
 class Session:
     """A connected automation session.
 
@@ -1660,7 +1688,79 @@ class Session:
         if extents is None:
             raise PyGUITestError(f"{element.name!r} has no extents to {verb}")
         x, y, width, height = extents
-        return x + width // 2, y + height // 2
+        aim = (x + width // 2, y + height // 2)
+        self._refuse_an_unreachable_aim(element, aim, extents, verb)
+        return aim
+
+    def _refuse_an_unreachable_aim(
+        self,
+        element: Element,
+        aim: tuple[int, int],
+        extents: tuple[int, int, int, int],
+        verb: str,
+    ) -> None:
+        """Refuse an aim point no arrangement of this desktop's outputs contains.
+
+        Checked here rather than in `backends.base.click_by_pointer` because
+        this is where the point the pointer is actually sent to is computed.
+        That function reads extents of its own to decide whether to proceed,
+        and every element-targeted gesture then calls *this* method, which
+        reads them again -- so validating the earlier rectangle left the
+        pointer free to use a different, later one. Validating here covers
+        click, double-click and drag from one place and cannot disagree with
+        the coordinate it guards.
+
+        **Why it exists.** `move_mouse` posts whatever it is given with no
+        bounds check, so a rectangle larger than the display aimed outside it
+        and the click landed wherever the window server clamped it -- on
+        whatever happened to be there. AX reports a text area's *document*
+        extent rather than its viewport: measured on macOS 26.7, a 4000-line
+        document in a 673x439 TextEdit window published
+        `(242, 139, 656, 52013)` on a 1920x1080 screen, aiming at
+        `(570, 26145)`, about 26,000 pixels below the display.
+
+        **Why the bound is the summed envelope and not each output's own
+        rectangle.** `Screen` carries size but deliberately *not* position,
+        so this cannot know how the outputs are arranged. Comparing the point
+        against each output's dimensions from the origin rejects a point that
+        is genuinely visible on a second monitor -- `(2100, 100)` on two
+        side-by-side 1920-wide outputs -- and rejects every negative
+        coordinate, which is where an output left of the primary lives. The
+        summed width and height are an envelope no arrangement can exceed in
+        either direction, so a point outside it is unreachable whatever the
+        layout, while anything a real layout could contain is allowed
+        through. That makes this deliberately loose: it catches a rectangle
+        that is absurd rather than every point that is merely off-screen.
+
+        It is loose in one more way worth stating: on a Retina Mac
+        `screens()` reports physical pixels while the pointer works in
+        points, so the envelope there is larger than the reachable area and
+        some genuinely off-screen aims pass. That is the behaviour this had
+        before the check existed, not a regression, and narrowing it needs a
+        points-space bound that `Screen` does not carry.
+        """
+        try:
+            screens = self.screens()
+            limit_x = sum(int(screen.width) for screen in screens)
+            limit_y = sum(int(screen.height) for screen in screens)
+        except Exception:  # noqa: BLE001 - "cannot tell" must not become "refuse"
+            return
+        if not screens or not limit_x or not limit_y:
+            return
+        if abs(aim[0]) <= limit_x and abs(aim[1]) <= limit_y:
+            return
+        _, _, width, height = extents
+        raise ElementNotActionable(
+            element.role,
+            element.name,
+            f"its {width}x{height} rectangle puts the point to {verb} at "
+            f"{aim}, which no arrangement of this desktop's outputs can "
+            f"reach (they total {limit_x}x{limit_y}). On macOS this is AX "
+            "reporting a text area's whole document rather than the part on "
+            "screen. Scroll the part you want into view and aim at a more "
+            "specific child element, or drive it with keys "
+            "(gui.type_text/send_keys) instead of the pointer",
+        )
 
     def double_click_element(self, element: Element) -> None:
         """Double-click a named element. `element.double_click()` does the same.
@@ -3499,19 +3599,65 @@ class Session:
         )
         if element is not None:
             return element
-        wanted = ", ".join(
-            part
-            for part in (
-                f"role={role!r}" if role else "",
-                f"name={name!r}" if name else "",
-            )
-            if part
-        )
+        wanted = self._locator_text(role=role, name=name, within=within)
         if timeout is not None:
             raise ElementNotFound(
                 f"no element with {wanted} appeared within {timeout:g}s"
             )
         raise ElementNotFound(f"no element with {wanted}")
+
+    @staticmethod
+    def _locator_text(
+        role: object = None,
+        name: object = None,
+        within: Element | None = None,
+        enabled: bool | None = None,
+        visible: bool | None = None,
+        description: object = None,
+        predicate: object = None,
+    ) -> str:
+        """How a failed lookup names what it was looking for.
+
+        Every filter the caller passed, not just `role` and `name`. Those two
+        were the only ones reported, which made three common misses
+        unreadable and one of them actively misleading:
+
+        - a `predicate=`, `description=` or `visible=`-only lookup produced
+          the literal dangling string "no element with ", because neither of
+          the two named parts was present. `predicate` is the documented
+          escape hatch and `description` is what `base.py` calls "the second
+          thing a locator should try" when a name is empty, so both are
+          reached precisely when a reader most needs the message.
+        - a state filter was invisible, so `element(role="check box",
+          name="Enable", enabled=True)` against a present-but-disabled box
+          reported "no element with role='check box', name='Enable'" -- "it
+          isn't there" about something that is there and disabled, which
+          sends the reader to `pyguitest inspect` hunting a naming problem
+          they do not have.
+
+        `within` is described rather than repr'd, and its own role and name
+        are read defensively: this runs on a failure path, where the element
+        a caller scoped to may itself be gone.
+        """
+        parts = [
+            f"role={role!r}" if role else "",
+            f"name={name!r}" if name else "",
+            f"description={description!r}" if description else "",
+            f"enabled={enabled!r}" if enabled is not None else "",
+            f"visible={visible!r}" if visible is not None else "",
+            "predicate=<given>" if predicate is not None else "",
+        ]
+        if within is not None:
+            scope = ""
+            with contextlib.suppress(Exception):
+                role_text = within.role
+                name_text = within.name
+                scope = f" {role_text!r}" + (f" {name_text!r}" if name_text else "")
+            parts.append(f"within=<element{scope}>")
+        wanted = ", ".join(part for part in parts if part)
+        # Never the dangling "no element with ": a lookup with no filters at
+        # all asked for anything and found nothing, and should say so.
+        return wanted or "no filters given"
 
     @staticmethod
     def _expect_label(role: str | None, name: str | None) -> str:
@@ -4236,13 +4382,14 @@ class Session:
             predicate=predicate,
         )
         if not found:
-            wanted = ", ".join(
-                part
-                for part in (
-                    f"role={role!r}" if role else "",
-                    f"name={name!r}" if name else "",
-                )
-                if part
+            wanted = self._locator_text(
+                role=role,
+                name=name,
+                within=within,
+                enabled=enabled,
+                visible=visible,
+                description=description,
+                predicate=predicate,
             )
             raise ElementNotFound(f"no element with {wanted}")
         return found[0]
@@ -4251,7 +4398,7 @@ class Session:
         self,
         root: Element,
         *,
-        role: str | None = None,
+        role: str | Sequence[str] | None = None,
         max_depth: int = 24,
     ) -> list[Element]:
         """Every descendant of `root`, opening collapsed branches to reach them.
@@ -4314,7 +4461,14 @@ class Session:
         `role` filters what is *returned* -- `Role.TABLE_CELL` for a GTK tree
         view's rows, `Role.TREE_ITEM` for UI Automation's, say -- without
         changing what gets walked or expanded; `None` (the default) returns
-        every descendant, matching `elements()`'s own convention. Rows this
+        every descendant, matching `elements()`'s own convention. That
+        convention includes naming several roles at once, which is what one
+        portable tree walk needs, since those two spellings are the same
+        concept on different platforms:
+
+            gui.tree_items(tree, role=(Role.TABLE_CELL, Role.TREE_ITEM))
+
+        Rows this
         expands stay expanded afterward: collapsing them back would cost a
         second full walk for a state nothing asked to have preserved, the
         same tradeoff `os.walk` makes about a directory's mtimes.
@@ -4347,6 +4501,16 @@ class Session:
         """
         self.require(Capability.ELEMENT_TREE)
         found: list[Element] = []
+        # Through `spellings`, like every other role filter in this class, and
+        # for two reasons the docstring above already promises. A role group --
+        # `role=(Role.TABLE_CELL, Role.TREE_ITEM)`, which is exactly what the
+        # cross-platform walk this docstring describes needs, since GTK
+        # publishes cells where UIA publishes tree items -- was compared with
+        # `child.role == role` against a tuple, which nothing equals, so the
+        # call returned an empty list and read as "this tree has no rows". And
+        # a single role now matches the bus's other spellings for it here too,
+        # as `elements()` has always done, rather than only the exact string.
+        wanted = None if role is None else spellings(role)
 
         def walk(container: Element, depth: int) -> None:
             if depth > max_depth:
@@ -4356,7 +4520,7 @@ class Session:
             while index < len(children):
                 child = children[index]
                 index += 1
-                if role is None or child.role == role:
+                if wanted is None or child.role in wanted:
                     found.append(child)
                 if child.expandable and not child.expanded:
                     self.require(Capability.ELEMENT_ACTION)
@@ -4773,12 +4937,25 @@ class Session:
         giving up.
 
         Raises ElementNotFound if nothing matches, the same as element():
-        it never returns None, so there is nothing to test for.
+        it never returns None, so there is nothing to test for. The refusal
+        names what the caller asked for and says both places were tried --
+        the inner `element()` call's own message would describe the retry's
+        `description=` filter, which is not the word the caller used, and
+        before that it reported neither and read as "no element with
+        role='combo box'" with the name dropped entirely.
         """
         try:
             return self.element(role=Role.COMBO_BOX, name=name, within=within)
         except ElementNotFound:
+            pass
+        try:
             return self.element(role=Role.COMBO_BOX, description=name, within=within)
+        except ElementNotFound:
+            raise ElementNotFound(
+                f"no combo box named {name!r} -- tried its accessible name and "
+                "its description, which is where a Qt combo box's stable name "
+                "travels"
+            ) from None
 
     def checkbox(self, name: str, within: Element | None = None) -> Element:
         """Return the check box named `name`.
@@ -4837,6 +5014,9 @@ class Session:
     # Only operations with no Session-level equivalent are listed. capture,
     # find_element and find_elements are deliberately absent: screenshot,
     # element and elements above are those, with the same arguments.
+    # `_BACKEND_ONLY_NAMES` is what makes "absent" true -- __getattr__ used to
+    # forward all three to the backend anyway, handing back elements with no
+    # session bound to them.
 
     def sync(self, timeout: float = 1.0) -> bool:
         """Block until the compositor has consumed the input sent so far.
@@ -4895,14 +5075,34 @@ class Session:
         "Advertised order" is the display server's own, which is not a
         statement about which output the desktop calls primary -- there is
         no primary flag here, so a multi-monitor test should identify an
-        output by `name` rather than trusting index 0. The `screen=`
-        argument on move_mouse()/window_at() indexes this list.
+        output by `name` rather than trusting index 0.
+
+        The `screen=` argument on move_mouse()/window_at() does **not** index
+        this list, whatever its name suggests. Every pointer backend treats
+        coordinates as already absolute in one desktop-wide space and ignores
+        the argument -- x11 accepts it and never reads it, win32 says so in
+        its own docstring, input/eiinput/uinput do the same -- and macquartz
+        raises `CapabilityUnsupported` for any non-zero value rather than
+        accept one it cannot honour. So `move_mouse(100, 100, screen=1)`
+        moves the pointer to (100, 100) of the shared space, which is the
+        primary output, on Linux and Windows, and refuses on macOS. To aim at
+        a second monitor, add that monitor's origin to the coordinates
+        yourself; this list reports sizes, and deliberately not positions
+        (see below), so the origin has to come from the desktop.
+
+        This sentence used to claim the opposite, and was the only statement
+        about the parameter anywhere in the package.
 
         A `Screen` reports size, scale and name but *not* its position in
         the desktop's coordinate space, so this alone cannot say where one
         output sits relative to another. `width`/`height` are physical
-        pixels, the same units geometry() and screenshot() use; `scale` is
-        DPI over 96 and never a pixel count.
+        pixels, the same units geometry() and screenshot() use. `scale` is
+        how much larger than 1:1 the output is drawn and never a pixel count
+        -- but *which* quantity says so differs by platform, and
+        `backends.base.Screen.scale` is where that is set out: DPI over 96 on
+        Windows and macOS, the compositor's own factor on the Wayland
+        members, and nothing at all on X11, which leaves it 1.0 however the
+        desktop is scaled.
         """
         return self.backend.screens()
 
@@ -5400,8 +5600,23 @@ class Session:
         # problem was.
         if attr.startswith("_"):
             raise AttributeError(attr)
+        if attr in _BACKEND_ONLY_NAMES:
+            raise AttributeError(
+                f"{type(self).__name__!r} object has no attribute {attr!r}; "
+                f"use {_BACKEND_ONLY_NAMES[attr]} instead"
+            )
         backend = object.__getattribute__(self, "backend")
-        return getattr(backend, attr)
+        # Named for `Session`, not for whatever backend happens to be live:
+        # a plain typo used to report "'NullBackend' object has no attribute
+        # 'elemnts'" -- or 'CompositeBackend' on a real desktop -- naming a
+        # class the caller never mentioned, where the comment above promises
+        # this reads "the way a normal attribute lookup would".
+        try:
+            return getattr(backend, attr)
+        except AttributeError:
+            raise AttributeError(
+                f"{type(self).__name__!r} object has no attribute {attr!r}"
+            ) from None
 
     def close(self) -> None:
         """Release the backend's resources.

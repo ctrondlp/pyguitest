@@ -22,6 +22,7 @@ import re
 import sys
 import textwrap
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
@@ -793,19 +794,113 @@ def function_signature(fn) -> str:
     return re.sub(r"'([^']*)'", r"\1", str(sig))
 
 
+class _NotStatic(Exception):
+    """The `capabilities` property is not a static set expression."""
+
+
+def _eval_capabilities(node: ast.expr, module: Any) -> set[Capability]:
+    """Evaluate one node of a `capabilities` expression into a capability set.
+
+    Handles exactly the shapes the backends use: a `Capability.X` attribute, a
+    set literal of them, a module-level constant naming such a set, a
+    `CapabilitySet(...)`/`frozenset(...)`/`set(...)` wrapper, and the set
+    operators composing those. Anything else raises `_NotStatic`, and the
+    caller falls back to scanning.
+    """
+    if isinstance(node, ast.Attribute):
+        if getattr(node.value, "id", None) != "Capability":
+            raise _NotStatic
+        member = getattr(Capability, node.attr, None)
+        if not isinstance(member, Capability):
+            raise _NotStatic
+        return {member}
+    if isinstance(node, (ast.Set, ast.Tuple, ast.List)):
+        found: set[Capability] = set()
+        for element in node.elts:
+            found |= _eval_capabilities(element, module)
+        return found
+    if isinstance(node, ast.Name):
+        values = getattr(module, node.id, None)
+        if not isinstance(values, (set, frozenset)):
+            raise _NotStatic
+        if not all(isinstance(value, Capability) for value in values):
+            raise _NotStatic
+        return set(values)
+    if isinstance(node, ast.Call):
+        callee = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+        if callee not in {"CapabilitySet", "frozenset", "set"} or len(node.args) != 1:
+            raise _NotStatic
+        return _eval_capabilities(node.args[0], module)
+    if isinstance(node, ast.BinOp):
+        return _combine(
+            node.op,
+            _eval_capabilities(node.left, module),
+            _eval_capabilities(node.right, module),
+        )
+    raise _NotStatic
+
+
+def _combine(
+    op: ast.operator, left: set[Capability], right: set[Capability]
+) -> set[Capability]:
+    """Apply one set operator. `Sub` is the whole reason this file reads ASTs."""
+    if isinstance(op, ast.BitOr):
+        return left | right
+    if isinstance(op, ast.Sub):
+        return left - right
+    if isinstance(op, ast.BitAnd):
+        return left & right
+    if isinstance(op, ast.BitXor):
+        return left ^ right
+    raise _NotStatic
+
+
+def _declared_capabilities(src: str, module: Any) -> set[Capability] | None:
+    """What a `capabilities` property returns, or None if it is not static.
+
+    Evaluated rather than scanned, which is the whole point: a scan counting
+    every `Capability.X` it can see reads a *subtraction* as a declaration.
+    `NiriBackend` returns `_COMMON - {WINDOW_PLACEMENT, WINDOW_MINIMIZE}` and
+    `KdotoolBackend` returns `_COMMON - {WINDOW_PID, SCREEN_INFO}` -- the only
+    two backends that subtract, and both were listed in docs/api.md as
+    providing exactly the four capabilities they remove. A reader on KDE who
+    took the table at its word and called `gui.screens()` got
+    `CapabilityUnsupported` on Wayland; `test_api_docs.py` passed throughout,
+    because it only checks the file matches what this script emits.
+    """
+    try:
+        tree = ast.parse(textwrap.dedent(src))
+    except SyntaxError:
+        return None
+    returns = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Return) and node.value is not None
+    ]
+    # More than one `return` is a property with a branch in it, which no
+    # single static set describes.
+    if len(returns) != 1 or returns[0].value is None:
+        return None
+    try:
+        return _eval_capabilities(returns[0].value, module)
+    except _NotStatic:
+        return None
+
+
 def providers() -> dict[str, set[str]]:
     """Capability name -> the backend classes declaring it.
 
     Read from each backend's `capabilities` property rather than a list
     kept here, so a new backend appears without editing this script.
 
-    Two shapes are understood, because backends legitimately use both. A property
-    that builds its set from `Capability.` members inline is read directly. A
-    property that composes named module-level sets -- `macos.py` returns
-    `_UNGATED | _AX_ONLY` so that each half can carry its own argument in its own
-    docstring -- is followed through those names, which is the difference between
-    a table that lists that backend and one that silently omits it. Measured:
-    before this, `MacosBackend` appeared nowhere in docs/api.md.
+    The property is *evaluated* where it is a static set expression -- see
+    `_declared_capabilities`, and the subtraction bug that motivated it. Only
+    where it is not does this fall back to scanning the source, which handles
+    the two shapes backends legitimately use beyond that: `Capability.` members
+    inline, and composed module-level sets (`macos.py` returns
+    `_UNGATED | _AX_ONLY` so each half can carry its own argument in its own
+    docstring). Measured: before that scan existed, `MacosBackend` appeared
+    nowhere in docs/api.md.
     """
     found: dict[str, set[str]] = {}
     for info in pkgutil.iter_modules(backends_pkg.__path__):
@@ -817,6 +912,11 @@ def providers() -> dict[str, set[str]]:
             if cls.__module__ != module.__name__ or not name.endswith("Backend"):
                 continue
             src = source_of(inspect.getattr_static(cls, "capabilities", None))
+            declared = _declared_capabilities(src, module)
+            if declared is not None:
+                for capability in declared:
+                    found.setdefault(capability.name, set()).add(name)
+                continue
             for cap in re.findall(r"Capability\.([A-Z_]+)", src):
                 found.setdefault(cap, set()).add(name)
             for constant in re.findall(r"\b(_[A-Z][A-Z_]*)\b", src):

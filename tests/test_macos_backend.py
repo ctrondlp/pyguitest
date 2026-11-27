@@ -21,6 +21,7 @@ import sys
 import tempfile
 import types
 import unittest
+import warnings
 from unittest import mock
 
 from pyguitest import backends, session, tools
@@ -3209,11 +3210,20 @@ class TestTreesThatLie(BackendTestCase):
         ]
         holder = FakeElement(role="AXGroup", children=children)
         backend = self.make()
-        with mock.patch.object(macos, "_MAX_NODES", 4):
+        with (
+            mock.patch.object(macos, "_MAX_NODES", 4),
+            warnings.catch_warnings(record=True) as caught,
+        ):
+            warnings.simplefilter("always")
             found = backend.find_elements(
                 role="button", within=macos.Element(holder, backend)
             )
         self.assertEqual([element.name for element in found], ["b0", "b1", "b2"])
+        # And it says so. A truncated answer is indistinguishable from a
+        # complete one at the call site, which is what let `find_element`
+        # raise ElementNotFound for an element that is really there.
+        self.assertEqual(len(caught), 1)
+        self.assertIn("stopped early", str(caught[0].message))
 
     def test_the_depth_limit_stops_a_chain_that_keeps_going(self):
         # `_MAX_DEPTH` is the other budget: a chain deeper than any real window
@@ -3223,10 +3233,18 @@ class TestTreesThatLie(BackendTestCase):
         for _ in range(macos._MAX_DEPTH + 4):
             chain.insert(0, FakeElement(role="AXGroup", children=chain[:1]))
         backend = self.make()
-        found = backend.find_elements(
-            role="button", within=macos.Element(chain[0], backend)
-        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            found = backend.find_elements(
+                role="button", within=macos.Element(chain[0], backend)
+            )
         self.assertEqual(found, [])
+        # The depth bound truncates with an *empty* queue, so the warning has
+        # to notice the cut-off branch rather than leftover work -- and this
+        # is the case that proves it does: an empty result here means the
+        # button below the limit was never reached.
+        self.assertEqual(len(caught), 1)
+        self.assertIn("depth limit", str(caught[0].message))
 
 
 class TestGeometryAndHitTesting(BackendTestCase):
@@ -3820,3 +3838,93 @@ class TestSelectFallsBackToClicking(BackendTestCase):
         with self.assertRaises(CapabilityUnsupported):
             button.select()
         self.assertEqual(self.target.performed, [])
+
+
+class TestASearchThatStoppedEarlySaysSo(unittest.TestCase):
+    """The bounded walk is the one that can return a partial answer silently.
+
+    macOS bounds its search at `_MAX_DEPTH` levels and `_MAX_NODES` nodes;
+    AT-SPI and UIA bound theirs not at all. The loop used to just exit and
+    return what it had, so `find_element` raised ElementNotFound for an
+    element that is really there and `elements()` quietly returned a subset.
+
+    Measured on a stock macOS 26.7 desktop, the deepest window nested 5
+    levels against the 24-level bound, so nothing ordinary reaches this --
+    `macos.py`'s own note names a browser or Electron tree as what does.
+    That is why it warns rather than raises: the elements found are genuine,
+    and failing the call would break working scripts to report a limit.
+    """
+
+    def _chain(self, length):
+        """A single branch `length` deep, so only the depth bound can bite."""
+        from pyguitest.backends import macos
+
+        nodes = [mock.Mock(name=f"n{i}") for i in range(length)]
+
+        class _Backend(macos.MacosBackend):
+            def __init__(inner):
+                # The trust gate `find_elements` passes through before it
+                # walks; everything else it needs is overridden below.
+                inner._trusted = True
+
+            def root_element(inner):
+                return nodes[0]
+
+            def _children(inner, item):
+                index = nodes.index(item) if item in nodes else None
+                if index is None or index + 1 >= len(nodes):
+                    return []
+                return [nodes[index + 1]]
+
+            def _same(inner, a, b):
+                return a is b
+
+            def _build_predicate(inner, *args, **kwargs):
+                return lambda element: False
+
+        return _Backend()
+
+    def test_a_walk_that_exhausts_the_tree_is_silent(self):
+        backend = self._chain(4)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            backend.find_elements(role="button")
+        self.assertEqual([str(w.message) for w in caught], [])
+
+    def test_a_walk_stopped_by_the_node_budget_warns(self):
+        from pyguitest.backends import macos
+
+        backend = self._chain(macos._MAX_NODES + 50)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            backend.find_elements(role="button")
+        self.assertEqual(len(caught), 1)
+        message = str(caught[0].message)
+        self.assertIn("stopped early", message)
+        self.assertIn("partial answer", message)
+
+    def test_a_walk_stopped_by_the_depth_bound_warns_too(self):
+        # The case the first version of this missed: a deep *single branch*
+        # is cut off by the depth limit and leaves the queue EMPTY, so a
+        # check for leftover branches alone never fires.
+        from pyguitest.backends import macos
+
+        backend = self._chain(macos._MAX_DEPTH + 10)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            backend.find_elements(role="button")
+        self.assertEqual(len(caught), 1)
+        message = str(caught[0].message)
+        self.assertIn("depth limit", message)
+        self.assertIn("partial answer", message)
+
+    def test_a_branch_ending_exactly_on_the_depth_bound_is_silent(self):
+        # Nothing was cut off: the node at the limit has no children, so the
+        # answer is complete and must not be reported as partial.
+        from pyguitest.backends import macos
+
+        backend = self._chain(macos._MAX_DEPTH + 1)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            backend.find_elements(role="button")
+        self.assertEqual([str(w.message) for w in caught], [])

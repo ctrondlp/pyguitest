@@ -20,7 +20,7 @@ from pyguitest.backends.base import (
     require_click_route,
     resolve_click_route,
 )
-from pyguitest.errors import CapabilityUnsupported
+from pyguitest.errors import CapabilityUnsupported, ElementNotActionable
 
 
 class _Element:
@@ -137,9 +137,20 @@ class TestRequireClickRoute(unittest.TestCase):
         require_click_route(_Element(session), "auto")
         self.assertEqual(session.required, [])
 
-    def test_an_element_with_no_session_requires_nothing(self):
-        # Nothing to require; the route itself reports the real problem.
-        require_click_route(_Element(), "pointer")
+    def test_via_pointer_without_a_session_is_refused(self):
+        # The assumption this used to encode -- "nothing to require; the
+        # route itself reports the real problem" -- held on UIA and AX and
+        # not on AT-SPI, where `_can_drive_a_pointer(None)` is False and the
+        # call fell to dogtail's own coordinate click, which that backend
+        # measures as going nowhere and raising nothing on GNOME/Wayland.
+        with self.assertRaises(CapabilityUnsupported):
+            require_click_route(_Element(), "pointer")
+
+    def test_the_other_routes_still_require_nothing_without_a_session(self):
+        # Only the pointer route needs a session to aim with; `action` is the
+        # element's own, and `auto` declares nothing by design.
+        require_click_route(_Element(), "action")
+        require_click_route(_Element(), "auto")
 
 
 class TestSessionClickVia(unittest.TestCase):
@@ -163,3 +174,92 @@ class TestSessionClickVia(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _Screen:
+    def __init__(self, width, height):
+        self.width, self.height = width, height
+
+
+class TestAnUnreachableAimIsRefused(unittest.TestCase):
+    """A rectangle bigger than the desktop aimed the pointer off it, silently.
+
+    `move_mouse` posts whatever it is given with no bounds check, so the click
+    landed wherever the window server clamped it -- on whatever happened to be
+    there. Measured on macOS 26.7, where AX reports a text area's *document*
+    extent rather than its viewport: a 4000-line document in a 673x439
+    TextEdit window published extents (242, 139, 656, 52013) on a 1920x1080
+    screen, aiming at (570, 26145), about 26,000 pixels below the display.
+
+    Checked in `_element_center`, which is where the point the pointer is sent
+    to is computed. A first version guarded a rectangle read earlier, in
+    `click_by_pointer`, while the gesture went on to read extents again --
+    so the validated point and the injected point could differ.
+
+    The bound is the *summed* width and height of the outputs, not each
+    output's own rectangle, because `Screen` carries size and deliberately
+    not position. Comparing against each output from the origin rejects a
+    point genuinely visible on a second monitor, and rejects every negative
+    coordinate, which is where an output left of the primary lives.
+    """
+
+    MEASURED = (242, 139, 656, 52013)
+
+    def _session(self, extents, screens=((1920, 1080),)):
+        session = pyguitest.Session(mock.Mock(), pyguitest.detect())
+        session.extents = lambda element: extents
+        session.screens = lambda: [_Screen(w, h) for w, h in screens]
+        return session
+
+    def _element(self):
+        element = mock.Mock()
+        element.role, element.name = "text", "Body"
+        return element
+
+    def test_the_measured_macos_rectangle_is_refused(self):
+        session = self._session(self.MEASURED)
+        with self.assertRaises(ElementNotActionable) as caught:
+            session._element_center(self._element(), "click")
+        message = str(caught.exception)
+        self.assertIn("(570, 26145)", message)
+        self.assertIn("no arrangement", message)
+
+    def test_an_ordinary_rectangle_is_aimed_at_normally(self):
+        session = self._session((100, 100, 80, 24))
+        self.assertEqual(session._element_center(self._element(), "click"), (140, 112))
+
+    def test_a_point_on_a_second_output_is_allowed_through(self):
+        # Two side-by-side 1920-wide outputs: (2100, 100) is visible on the
+        # second one. Checking each output's dimensions from the origin would
+        # reject it, because 2100 exceeds both widths.
+        session = self._session(
+            (2000, 50, 200, 100), screens=((1920, 1080), (1920, 1080))
+        )
+        self.assertEqual(session._element_center(self._element(), "click"), (2100, 100))
+
+    def test_a_negative_coordinate_is_allowed_through(self):
+        # Where an output left of the primary lives.
+        session = self._session(
+            (-900, -400, 200, 100), screens=((1920, 1080), (1920, 1080))
+        )
+        self.assertEqual(
+            session._element_center(self._element(), "click"), (-800, -350)
+        )
+
+    def test_a_session_that_cannot_enumerate_screens_does_not_refuse(self):
+        # "Cannot tell" must not become "cannot click": X11 reports no scale
+        # and some compositions provide no SCREEN_INFO at all.
+        session = pyguitest.Session(mock.Mock(), pyguitest.detect())
+        session.extents = lambda element: self.MEASURED
+        session.screens = lambda: (_ for _ in ()).throw(
+            CapabilityUnsupported(Capability.SCREEN_INFO, "fake")
+        )
+        self.assertEqual(
+            session._element_center(self._element(), "click"), (570, 26145)
+        )
+
+    def test_an_empty_screen_list_does_not_refuse(self):
+        session = self._session(self.MEASURED, screens=())
+        self.assertEqual(
+            session._element_center(self._element(), "click"), (570, 26145)
+        )

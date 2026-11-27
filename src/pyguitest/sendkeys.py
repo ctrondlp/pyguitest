@@ -23,8 +23,20 @@ import contextlib
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+from .capabilities import Capability
+from .errors import CapabilityUnsupported
+
 if TYPE_CHECKING:  # pragma: no cover - import cycle, types only
     from . import Session
+
+MODIFIER_SIGILS = frozenset("^%+#&")
+"""Every character the send_keys grammar reads as a modifier.
+
+The union of what the backends map, not any one backend's set: `&` (AltGr) is
+`ISO_Level3_Shift` on X11 and the right Alt key under uinput, and a Mac has no
+equivalent at all. Kept here so a sigil a backend lacks is *refused* rather
+than typed as text -- see `KeySender.character`.
+"""
 
 __all__ = ["KeySender"]
 
@@ -281,5 +293,24 @@ class KeySender:
         if char == "(":
             self.groups.append(len(self.held))
             return None
+        if char in MODIFIER_SIGILS:
+            # A sigil of the grammar that *this* backend has no modifier for.
+            # Falling through to `press_literal` typed it: macquartz has no
+            # `&`, so `send_keys("&(q)")` -- which the recorder emits for an
+            # AltGr chord, and which a Linux-authored script spells the same
+            # way -- typed a literal ampersand into the focused application
+            # and reported success, because `_CHAR_KEYS["&"]` is shift-7.
+            # macquartz's own MODIFIER_KEYS docstring says a refusal a caller
+            # can see beats a silent change of meaning; this is that refusal.
+            #
+            # CapabilityUnsupported rather than ValueError, by send_keys'
+            # documented split: the string is well formed and it is this
+            # desktop that cannot serve it.
+            raise CapabilityUnsupported(
+                Capability.KEY_EVENT,
+                getattr(self.session.backend, "name", None),
+                f"{char!r} is a send_keys modifier this backend has no key "
+                f"for; it offers {''.join(sorted(self.modifiers))}",
+            )
         self.press_literal(char)
         return None

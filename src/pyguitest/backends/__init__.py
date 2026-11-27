@@ -20,6 +20,7 @@ from .composite import CompositeBackend
 from .eiinput import LibeiBackend
 from .imagesearch import ToolImageSearchBackend
 from .input import ToolInputBackend
+from .kscreen import KScreenBackend
 from .kwinevents import KWinEventsBackend
 from .macos import MacosBackend
 from .macquartz import MacquartzBackend
@@ -37,6 +38,7 @@ __all__ = [
     "ToolCaptureBackend",
     "ToolClipboardBackend",
     "ToolImageSearchBackend",
+    "KScreenBackend",
     "KWinEventsBackend",
     "LibeiBackend",
     "MacosBackend",
@@ -873,12 +875,38 @@ def _kwinevents_factory(environment):
     return KWinEventsBackend()
 
 
+def _kscreen_factory(environment):
+    """Build the KScreen-backed SCREEN_INFO backend, KDE only.
+
+    The same shape as `_kwinevents_factory` above and for the same reason:
+    `kdotool`, the "windows" member on KDE, declines SCREEN_INFO because it
+    reports no outputs, so this is a separate member providing only that --
+    exactly as capture/clipboard/imagesearch sit alongside kdotool rather
+    than being folded into it. It is what closes the one compositor that had
+    no SCREEN_INFO provider at all; see `kscreen.py` for what the absence
+    cost beyond `screens()` itself.
+
+    Compositor-gated, because the tool reports KWin's own configuration and
+    is meaningless anywhere else, and because every other compositor already
+    has a member that answers this.
+    """
+    from ..session import Compositor
+    from .kscreen import available as kscreen_available
+
+    if environment.compositor is not Compositor.KWIN:
+        return None
+    if not kscreen_available():
+        return None
+    return KScreenBackend(environment)
+
+
 # Window IPC outranks AT-SPI: both can list windows, but only IPC reports
 # geometry that is trustworthy under Wayland.
 register(_window_factory, "windows", priority=95)
 register(_capture_factory, "capture", priority=60)
 register(_clipboard_factory, "clipboard", priority=58)
 register(_kwinevents_factory, "kwinevents", priority=57)
+register(_kscreen_factory, "kscreen", priority=56)
 register(_image_factory, "imagesearch", priority=55)
 
 

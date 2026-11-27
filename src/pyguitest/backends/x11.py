@@ -56,10 +56,53 @@ _CONTROL_KEYSYMS = {
 }
 
 
+_KEYSYM_GROUPS = (
+    "xkb",
+    "xf86",
+    "latin2",
+    "latin3",
+    "latin4",
+    "cyrillic",
+    "greek",
+    "hebrew",
+    "arabic",
+    "thai",
+    "katakana",
+    "korean",
+    "technical",
+    "publishing",
+    "special",
+    "apl",
+)
+"""Keysym groups to load, beyond the two python-xlib loads for itself.
+
+`load_keysym_group` is what puts a family's names where `string_to_keysym`
+can find them, and python-xlib auto-loads only 'miscellany' and 'latin1'.
+So every name outside those answered NoSymbol -- which is a refusal
+`press_key` reports honestly, but a refusal for a key the server has.
+
+Measured on a live X11 session switched to `ru`: the recorder names that
+layout's keys correctly now (`Cyrillic_ef` rather than the hex `0x6c6` it
+used to fall back to), and a chord over one generates
+`gui.send_keys('^({Cyrillic_ef})')` -- which this side then could not
+resolve, so the fix only moved the failure until this list grew to match.
+The two halves have to agree, which is why the group list here mirrors
+`pyguitest_recorder.backends.x11._keysym_names`. `xf86` is in it for the
+same reason and was the longest-standing case: that recorder names a media
+key `XF86_AudioMute` and its docstring says `press_key` can resolve it,
+which was never true on this side -- `string_to_keysym("XF86_AudioMute")`
+answered NoSymbol here until this list existed.
+
+Only the name lookup is affected. Typing text never needed this: a
+character goes through `resolve_char_key`/`type_text`, and a layout's
+*characters* were always reachable.
+"""
+
+
 def _xlib():
     """Import python-xlib, or return None.
 
-    Also loads the 'xkb' keysym group into `Xlib.XK`, which the module does
+    Also loads extra keysym groups into `Xlib.XK`, which the module does
     not do on its own: it auto-loads only 'miscellany' and 'latin1' at
     import time, and ISO_Level3_Shift -- the AltGr key most layouts use for
     keyboard group 2 -- lives in 'xkb'. Confirmed live, on python-xlib
@@ -79,8 +122,9 @@ def _xlib():
         from Xlib.protocol import event
     except Exception:
         return None
-    with contextlib.suppress(Exception):
-        XK.load_keysym_group("xkb")
+    for group in _KEYSYM_GROUPS:
+        with contextlib.suppress(Exception):
+            XK.load_keysym_group(group)
     return X, XK, display, xtest, event
 
 
