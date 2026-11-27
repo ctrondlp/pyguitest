@@ -196,19 +196,25 @@ class TestAnUnreachableAimIsRefused(unittest.TestCase):
     `click_by_pointer`, while the gesture went on to read extents again --
     so the validated point and the injected point could differ.
 
-    The bound is the *summed* width and height of the outputs, not each
-    output's own rectangle, because `Screen` carries size and deliberately
-    not position. Comparing against each output from the origin rejects a
-    point genuinely visible on a second monitor, and rejects every negative
-    coordinate, which is where an output left of the primary lives.
+    **Only a single-output desktop is checked**, because `Screen` carries size
+    and deliberately not position. A second version summed the output sizes,
+    on the reasoning that no arrangement could exceed the sum -- wrong, as
+    sway, Hyprland and RandR all let an output sit at an explicit coordinate
+    with a gap before it: two 1920-wide outputs at x=0 and x=3000 make x=4000
+    reachable while the sum says 3840. With one output the coordinate space
+    *is* that output, from (0, 0), so the check runs there and steps aside
+    everywhere else.
     """
 
     MEASURED = (242, 139, 656, 52013)
 
-    def _session(self, extents, screens=((1920, 1080),)):
+    def _session(self, extents, screens=((1920, 1080),), screen_info=True):
         session = pyguitest.Session(mock.Mock(), pyguitest.detect())
         session.extents = lambda element: extents
         session.screens = lambda: [_Screen(w, h) for w, h in screens]
+        session.supports = lambda capability: (
+            screen_info if capability is Capability.SCREEN_INFO else True
+        )
         return session
 
     def _element(self):
@@ -222,35 +228,61 @@ class TestAnUnreachableAimIsRefused(unittest.TestCase):
             session._element_center(self._element(), "click")
         message = str(caught.exception)
         self.assertIn("(570, 26145)", message)
-        self.assertIn("no arrangement", message)
+        self.assertIn("1920x1080", message)
 
     def test_an_ordinary_rectangle_is_aimed_at_normally(self):
         session = self._session((100, 100, 80, 24))
         self.assertEqual(session._element_center(self._element(), "click"), (140, 112))
 
-    def test_a_point_on_a_second_output_is_allowed_through(self):
-        # Two side-by-side 1920-wide outputs: (2100, 100) is visible on the
-        # second one. Checking each output's dimensions from the origin would
-        # reject it, because 2100 exceeds both widths.
-        session = self._session(
-            (2000, 50, 200, 100), screens=((1920, 1080), (1920, 1080))
-        )
-        self.assertEqual(session._element_center(self._element(), "click"), (2100, 100))
-
-    def test_a_negative_coordinate_is_allowed_through(self):
-        # Where an output left of the primary lives.
-        session = self._session(
-            (-900, -400, 200, 100), screens=((1920, 1080), (1920, 1080))
-        )
+    def test_a_point_at_the_very_edge_is_allowed_through(self):
+        # The bound is inclusive: a control flush with the bottom-right corner
+        # is reachable, and refusing it would break a maximized window's last
+        # pixel column.
+        session = self._session((1918, 1078, 4, 4))
         self.assertEqual(
-            session._element_center(self._element(), "click"), (-800, -350)
+            session._element_center(self._element(), "click"), (1920, 1080)
+        )
+
+    def test_more_than_one_output_is_never_refused(self):
+        # The sway/Hyprland/RandR case the summed-envelope version got wrong:
+        # outputs can sit at explicit positions with gaps between them, so no
+        # function of their *sizes* bounds the reachable space. (4000, 100) is
+        # visible on an output placed at x=3000, while the sum says 3840.
+        session = self._session(
+            (3900, 50, 200, 100), screens=((1920, 1080), (1920, 1080))
+        )
+        self.assertEqual(session._element_center(self._element(), "click"), (4000, 100))
+
+    def test_an_absurd_rectangle_is_allowed_through_on_several_outputs(self):
+        # Deliberate, and the cost of the above: with no output positions
+        # there is no bound to judge against, and "cannot tell" must not
+        # become "cannot click".
+        session = self._session(self.MEASURED, screens=((1920, 1080), (1920, 1080)))
+        self.assertEqual(
+            session._element_center(self._element(), "click"), (570, 26145)
+        )
+
+    def test_a_negative_coordinate_is_refused_on_a_single_output(self):
+        # With one output the space starts at (0, 0), so a negative point is
+        # off it -- and clamping would click whatever sits at the edge.
+        session = self._session((-900, -400, 200, 100))
+        with self.assertRaises(ElementNotActionable):
+            session._element_center(self._element(), "click")
+
+    def test_a_session_that_does_not_declare_screen_info_does_not_refuse(self):
+        # The `supports()` guard, which is also what tells
+        # scripts/gen-api-docs.py that SCREEN_INFO is optional here rather
+        # than required for every element gesture.
+        session = self._session(self.MEASURED, screen_info=False)
+        self.assertEqual(
+            session._element_center(self._element(), "click"), (570, 26145)
         )
 
     def test_a_session_that_cannot_enumerate_screens_does_not_refuse(self):
-        # "Cannot tell" must not become "cannot click": X11 reports no scale
-        # and some compositions provide no SCREEN_INFO at all.
+        # Declared but failing: "cannot tell" must not become "cannot click".
         session = pyguitest.Session(mock.Mock(), pyguitest.detect())
         session.extents = lambda element: self.MEASURED
+        session.supports = lambda capability: True
         session.screens = lambda: (_ for _ in ()).throw(
             CapabilityUnsupported(Capability.SCREEN_INFO, "fake")
         )

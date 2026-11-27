@@ -3246,6 +3246,38 @@ class TestTreesThatLie(BackendTestCase):
         self.assertEqual(len(caught), 1)
         self.assertIn("depth limit", str(caught[0].message))
 
+    def test_a_cycle_at_the_depth_limit_is_not_called_truncation(self):
+        """A node at the bound whose only child is its own ancestor.
+
+        The walk already refuses such a child -- following it would revisit
+        the same subtree forever -- so nothing was cut off and the answer is
+        complete. The first version of the depth check asked `_children`
+        directly, without that filter, and warned that a complete search was
+        partial: a caller treating the warning as "retry with a narrower
+        scope" would have been sent after nothing. Both the check and the
+        walk go through `_unvisited_children` now, so they cannot disagree.
+        """
+        top = FakeElement(role="AXGroup")
+        chain = [top]
+        for _ in range(macos._MAX_DEPTH):
+            node = FakeElement(role="AXGroup")
+            chain[-1].children = [node]
+            chain.append(node)
+        # The node sitting exactly on the bound points back at the root.
+        chain[-1].children = [top]
+        backend = self.make()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            found = backend.find_elements(
+                role="button", within=macos.Element(top, backend)
+            )
+        self.assertEqual(found, [])
+        self.assertEqual(
+            [str(warning.message) for warning in caught],
+            [],
+            "a complete search reported itself truncated",
+        )
+
 
 class TestGeometryAndHitTesting(BackendTestCase):
     """`extents` and `element_at`, in one global display space."""

@@ -2982,20 +2982,17 @@ class MacosBackend(GUIBackend):
                 # reaches it pays nothing, and one that does pays a single
                 # `_children` read per node at that depth. Without this the
                 # depth bound truncates with an *empty* queue, which the
-                # check after the loop cannot see.
-                if not depth_truncated and self._children(item):
+                # check after the loop cannot see. Through the same
+                # cycle-aware helper the walk below uses: a node whose only
+                # child is one of its own ancestors has nothing left to
+                # visit, so counting it as cut off would warn that a
+                # *complete* answer was partial.
+                if not depth_truncated and self._unvisited_children(item, ancestry):
                     depth_truncated = True
                 continue
-            # The raw nodes from the search root down to here, which is the set a
-            # child must not be in -- `_Desktop` has no node of its own, hence the
-            # None that is skipped rather than compared.
-            line = ancestry + (getattr(item, "node", None),)
             queue.extend(
-                (child, depth + 1, line)
-                for child in self._children(item)
-                if not any(
-                    seen is not None and self._same(child.node, seen) for seen in line
-                )
+                (child, depth + 1, ancestry + (getattr(item, "node", None),))
+                for child in self._unvisited_children(item, ancestry)
             )
         if queue or depth_truncated:
             # A budget ran out with tree left to walk, so `found` is a
@@ -3462,6 +3459,30 @@ class MacosBackend(GUIBackend):
             return self._applications()
         session = getattr(item, "_session", None)
         return [Element(node, self, session) for node in self._ax_children(item.node)]
+
+    def _unvisited_children(self, item, ancestry):
+        """`item`'s children, minus any that is one of its own ancestors.
+
+        AX trees report cycles: a pane whose `AXChildren` includes the window
+        it sits in, a toolbar listing its own parent. `ancestry` is the raw
+        nodes from the search root down to `item`, and a child in that set is
+        a step back up rather than a step down -- following it would walk the
+        same subtree forever.
+
+        One place rather than two, because the *depth* check needs exactly
+        the same answer as the walk. It asks "is there anything below this
+        node that was cut off", and a node whose only child is an ancestor
+        has nothing below it at all -- so filtering there too is what keeps a
+        complete search from reporting itself truncated. `_Desktop` has no
+        node of its own, hence the None that is skipped rather than compared.
+        """
+        return [
+            child
+            for child in self._children(item)
+            if not any(
+                seen is not None and self._same(child.node, seen) for seen in ancestry
+            )
+        ]
 
     def _window_node(self, node):
         """The AX window `node` sits in, or None.

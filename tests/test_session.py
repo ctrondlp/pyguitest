@@ -149,6 +149,28 @@ class TestSessionClassification(unittest.TestCase):
         note = next(n for n in e.notes if "no display server is reachable" in n)
         self.assertIn("'tty'", note)
 
+    def test_the_note_does_not_claim_at_spi_is_unavailable(self):
+        """It said every window and element capability was gone. Measured false.
+
+        AT-SPI reaches the accessibility bus, not a display: with DISPLAY and
+        WAYLAND_DISPLAY both unset on a GNOME session, `connect(backend="atspi")`
+        still served ELEMENT_TREE, ELEMENT_ACTION, WINDOW_LIST and
+        WINDOW_ACTIVATE, listed three applications and answered `windows()`.
+        The note's own closing advice -- export DBUS_SESSION_BUS_ADDRESS "for
+        AT-SPI" -- only makes sense if that works, so the blanket claim
+        contradicted the same sentence that repaired it.
+        """
+        note = next(
+            n
+            for n in linux_detect(env(XDG_SESSION_TYPE="tty")).notes
+            if "no display server is reachable" in n
+        )
+        self.assertNotIn("every window and element capability", note)
+        self.assertIn("AT-SPI", note)
+        self.assertIn("accessibility bus", note)
+        # The advice at the end has to stay, since it is what makes it work.
+        self.assertIn("DBUS_SESSION_BUS_ADDRESS", note)
+
     def test_a_graphical_session_gets_no_such_note(self):
         for variables in (
             env(WAYLAND_DISPLAY="wayland-0"),

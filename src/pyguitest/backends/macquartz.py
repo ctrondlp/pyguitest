@@ -920,7 +920,18 @@ class MacquartzBackend(GUIBackend):
             # first kind, and used to raise CapabilityUnsupported, which the
             # documented `except ValueError` could not catch. Both were
             # wrong; the vocabulary is what tells them apart.
-            if {_key_name(key), key.lower()} & _PORTABLE_KEY_NAMES:
+            # Through `GUIBackend.KEY_ALIASES` first, because `send_keys`
+            # hands the *abbreviation* straight through for an alias this
+            # backend omits: `KeySender.brace` resolves `{INS}` against
+            # macquartz's own table, finds nothing, and passes "INS". That is
+            # the same key as `Insert` and has to be refused the same way, but
+            # "ins" is not in the portable set -- only the full name "insert"
+            # is -- so the seven aliases a Mac lacks (INS, PRT, SCR among
+            # them) raised ValueError while their spelled-out forms raised
+            # CapabilityUnsupported. The abbreviation is the spelling a ported
+            # X11::GUITest script actually uses.
+            portable = GUIBackend.KEY_ALIASES.get(key.upper(), key)
+            if {_key_name(key), key.lower(), portable.lower()} & _PORTABLE_KEY_NAMES:
                 raise CapabilityUnsupported(
                     Capability.KEY_EVENT,
                     self.name,

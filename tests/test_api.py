@@ -4788,3 +4788,66 @@ class TestExpectTimeoutDefaults(unittest.TestCase):
             doc = inspect_module.getdoc(getattr(pyguitest.Session, name)) or ""
             with self.subTest(call=name):
                 self.assertIn("wait for as long", doc)
+
+
+class TestAFailedLookupNamesEveryFilter(unittest.TestCase):
+    """`Session._locator_text`, which is what ElementNotFound says it wanted.
+
+    Only `role` and `name` used to be reported, so a `predicate=`-only
+    lookup produced the dangling "no element with ", and a state filter was
+    invisible: `element(role="check box", name="Enable", enabled=True)`
+    against a present-but-disabled box said "no element with role='check
+    box', name='Enable'" -- "it isn't there" about something that is there
+    and disabled.
+    """
+
+    def text(self, **filters):
+        return pyguitest.Session._locator_text(**filters)
+
+    def test_every_filter_is_named(self):
+        self.assertEqual(
+            self.text(role="check box", name="Enable", enabled=True),
+            "role='check box', name='Enable', enabled=True",
+        )
+
+    def test_a_predicate_only_lookup_says_so(self):
+        self.assertEqual(self.text(predicate=lambda node: True), "predicate=<given>")
+
+    def test_a_state_filter_alone_is_named(self):
+        self.assertEqual(self.text(visible=False), "visible=False")
+
+    def test_an_empty_string_is_a_filter_not_an_omission(self):
+        """`_build_predicate` filters on `name is not None`, so "" is a search.
+
+        Reported by truthiness it vanished, and the message read "no element
+        with no filters given" -- which describes a different call, and sends
+        the reader looking for a bug in their filters rather than at the
+        empty variable they passed.
+        """
+        self.assertEqual(self.text(name=""), "name=''")
+        self.assertEqual(self.text(description=""), "description=''")
+
+    def test_an_empty_role_sequence_is_not_no_role(self):
+        # A role group with nothing in it matches nothing, where role=None
+        # matches any role. The two must not read the same.
+        self.assertEqual(self.text(role=()), "role=()")
+
+    def test_no_filters_at_all_says_that(self):
+        self.assertEqual(self.text(), "no filters given")
+
+    def test_a_scope_is_described_rather_than_repred(self):
+        within = mock.Mock()
+        within.role, within.name = "dialog", "Preferences"
+        self.assertEqual(
+            self.text(name="Save", within=within),
+            "name='Save', within=<element 'dialog' 'Preferences'>",
+        )
+
+    def test_a_scope_that_has_gone_does_not_break_the_message(self):
+        # This runs on a failure path, where the element a caller scoped to
+        # may itself be dead -- reading its role can raise.
+        within = mock.Mock()
+        type(within).role = mock.PropertyMock(side_effect=RuntimeError("gone"))
+        self.assertEqual(
+            self.text(name="Save", within=within), "name='Save', within=<element>"
+        )

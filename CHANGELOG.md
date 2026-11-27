@@ -16,6 +16,59 @@ beneath a docstring that said they had not. Four conformance tests arrive
 with the fixes, and between them they would have caught most of this with no
 live desktop.
 
+### Fixed (from the PR #83 review)
+
+- **The off-screen aim check rejected real clicks on a multi-monitor
+  desktop.** Its bound was the summed width and height of the outputs, on
+  the reasoning that no arrangement could exceed the sum. Wrong: sway,
+  Hyprland and RandR all let an output sit at an explicit coordinate with a
+  gap before it, so two 1920-wide outputs at x=0 and x=3000 make x=4000
+  reachable while the sum says 3840. Clicks, double-clicks and drags on part
+  of the second output were refused. It is scoped to a single output now,
+  where the coordinate space *is* that output.
+
+- **Every element gesture was published as needing `SCREEN_INFO`.** The same
+  check asks `screens()`, and `scripts/gen-api-docs.py` reads a capability
+  named in a method as required unless a `supports()` guard says otherwise —
+  so docs/api.md told a reader that `click_element`, `double_click_element`
+  and `drag_element` were unavailable without output reporting, when they
+  work fine without it. The guard is now there in the code as well as the
+  table, which is the honest spelling of an optional read.
+
+- **A portable key alias a Mac lacks raised the wrong exception.**
+  `send_keys("{INS}")` reaches `macquartz._keycode` as the abbreviation,
+  since `KeySender.brace` passes through a name this backend's own table
+  omits. Classified against the portable vocabulary — which holds the
+  spelled-out `insert` — the abbreviation missed, so all seven aliases a Mac
+  lacks raised `ValueError` while `{Insert}` raised `CapabilityUnsupported`.
+  Two answers for one key, and the abbreviation is the spelling a ported
+  X11::GUITest script uses.
+
+- **An explicitly empty filter was reported as no filter at all.**
+  `element(name="")` is a search for a node whose name is exactly empty —
+  `_build_predicate` filters on `name is not None` — but the new message
+  tested truthiness, so it read "no element with no filters given", which
+  describes a different call. Same for `description=""` and for `role=()`,
+  an empty group of spellings that matches nothing where `role=None` matches
+  any.
+
+- **A complete macOS search could report itself truncated.** The new
+  depth-limit check asked for a node's children without the ancestor-cycle
+  filter the walk itself applies, so a node at the bound whose only child is
+  one of its own ancestors — which AX trees do publish — looked like a cut-off
+  branch. Both paths go through one `_unvisited_children` helper now, so they
+  cannot disagree.
+
+- **The headless note claimed AT-SPI was unavailable.** It said every window
+  and element capability was gone "whatever is installed", then closed by
+  advising the reader to export `DBUS_SESSION_BUS_ADDRESS` *for AT-SPI* —
+  contradicting itself. AT-SPI reaches the accessibility bus, not a display.
+  Measured on a GNOME session with `DISPLAY` and `WAYLAND_DISPLAY` both
+  unset: `connect(backend="atspi")` served ELEMENT_TREE, ELEMENT_ACTION,
+  WINDOW_LIST and WINDOW_ACTIVATE, listed three applications and answered
+  `windows()`. The note now names the display-server backends as the ones
+  that go.
+
 ### Fixed
 
 - **`tree_items(role=…)` returned an empty list for a role *group*, which is
@@ -167,15 +220,22 @@ live desktop.
   `gui.text_field("Body").click()` reaches that path, because an AXTextArea
   publishes no AXPress and is neither checkable nor selectable.
 
-  `click_by_pointer` now refuses an aim point that is on no screen, naming
-  the point, the rectangle and the two ways round it. Refused rather than
-  clamped because no clamp is correct: clipping to the screen gives
-  `(570, 609)` for that case, which is outside the 439-tall window and
-  therefore on a *different application* — worse than an error. Clipping to
-  the window would be right and this layer has no window to clip to. A
-  session that cannot enumerate screens does not refuse anything, since
-  "cannot tell" must not become "cannot click". Verified on the live
-  document, which now refuses instead of clicking.
+  `_element_center` — where the point the pointer is actually sent to is
+  computed — now refuses an aim point outside the display, naming the point,
+  the rectangle and the two ways round it. Refused rather than clamped
+  because no clamp is correct: clipping to the screen gives `(570, 609)` for
+  that case, which is outside the 439-tall window and therefore on a
+  *different application* — worse than an error. Clipping to the window would
+  be right and this layer has no window to clip to.
+
+  The check runs **only on a single-output desktop**, and deliberately
+  declines to guess anywhere else: `Screen` carries size but not position, so
+  with several outputs there is no bound to judge against. A session that
+  does not report outputs, or cannot be asked, refuses nothing either —
+  "cannot tell" must not become "cannot click", which is also why
+  `SCREEN_INFO` is optional here rather than a new requirement of every
+  element gesture. Verified on the live document, which now refuses instead
+  of clicking.
 
 - **`press_key` could not name a key outside Latin-1 on X11, including every
   media key.** `load_keysym_group` is what puts a keysym family's names where

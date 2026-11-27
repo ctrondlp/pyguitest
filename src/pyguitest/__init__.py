@@ -1719,43 +1719,59 @@ class Session:
         `(242, 139, 656, 52013)` on a 1920x1080 screen, aiming at
         `(570, 26145)`, about 26,000 pixels below the display.
 
-        **Why the bound is the summed envelope and not each output's own
-        rectangle.** `Screen` carries size but deliberately *not* position,
-        so this cannot know how the outputs are arranged. Comparing the point
-        against each output's dimensions from the origin rejects a point that
-        is genuinely visible on a second monitor -- `(2100, 100)` on two
-        side-by-side 1920-wide outputs -- and rejects every negative
-        coordinate, which is where an output left of the primary lives. The
-        summed width and height are an envelope no arrangement can exceed in
-        either direction, so a point outside it is unreachable whatever the
-        layout, while anything a real layout could contain is allowed
-        through. That makes this deliberately loose: it catches a rectangle
-        that is absurd rather than every point that is merely off-screen.
+        **Why only a single-output desktop is checked.** `Screen` carries
+        size but deliberately *not* position, so this cannot know how several
+        outputs are arranged -- and no function of their sizes is a bound.
+        Summing them was the first attempt and is wrong: sway, Hyprland and
+        RandR all let an output be placed at an explicit coordinate, gaps
+        included, so two 1920-wide outputs at x=0 and x=3000 make x=4000
+        visible while the sum says 3840. That rejected real clicks on the
+        second output. Comparing against each output's own rectangle from the
+        origin is worse still, rejecting every negative coordinate, which is
+        where an output left of the primary lives. With one output the
+        question has an answer -- the output *is* the coordinate space, from
+        (0, 0) -- so the check runs there and steps aside everywhere else,
+        which is the "cannot tell must not become refuse" rule this whole
+        method is written around. The case it exists for, the macOS document
+        extent above, is a single-screen measurement.
 
-        It is loose in one more way worth stating: on a Retina Mac
+        It stays loose in one more way worth stating: on a Retina Mac
         `screens()` reports physical pixels while the pointer works in
-        points, so the envelope there is larger than the reachable area and
-        some genuinely off-screen aims pass. That is the behaviour this had
-        before the check existed, not a regression, and narrowing it needs a
+        points, so the bound there is about twice the reachable area and some
+        genuinely off-screen aims pass. That is the behaviour this had before
+        the check existed, not a regression, and narrowing it needs a
         points-space bound that `Screen` does not carry.
+
+        The `supports()` guard is not decoration: SCREEN_INFO is optional
+        here, and `scripts/gen-api-docs.py` reads exactly that spelling to
+        tell an optional capability from a required one. Without it every
+        element gesture was published in docs/api.md as *needing*
+        SCREEN_INFO, which would have had a reader skip clicks that work --
+        on KDE without `kscreen-doctor`, or any session with no output
+        reporting at all.
         """
+        if not self.supports(Capability.SCREEN_INFO):
+            return
         try:
             screens = self.screens()
-            limit_x = sum(int(screen.width) for screen in screens)
-            limit_y = sum(int(screen.height) for screen in screens)
         except Exception:  # noqa: BLE001 - "cannot tell" must not become "refuse"
             return
-        if not screens or not limit_x or not limit_y:
+        # One output only; see above. A desktop that reports none cannot be
+        # asked either.
+        if len(screens) != 1:
             return
-        if abs(aim[0]) <= limit_x and abs(aim[1]) <= limit_y:
+        limit_x, limit_y = int(screens[0].width), int(screens[0].height)
+        if not limit_x or not limit_y:
+            return
+        if 0 <= aim[0] <= limit_x and 0 <= aim[1] <= limit_y:
             return
         _, _, width, height = extents
         raise ElementNotActionable(
             element.role,
             element.name,
             f"its {width}x{height} rectangle puts the point to {verb} at "
-            f"{aim}, which no arrangement of this desktop's outputs can "
-            f"reach (they total {limit_x}x{limit_y}). On macOS this is AX "
+            f"{aim}, which is outside this desktop's only output "
+            f"({limit_x}x{limit_y}). On macOS this is AX "
             "reporting a text area's whole document rather than the part on "
             "screen. Scroll the part you want into view and aim at a more "
             "specific child element, or drive it with keys "
@@ -3639,10 +3655,18 @@ class Session:
         are read defensively: this runs on a failure path, where the element
         a caller scoped to may itself be gone.
         """
+        # `is not None`, not truthiness: `_build_predicate` filters on
+        # `name is not None`, so `element(name="")` is a search for a node
+        # whose name is exactly empty -- a real filter, and one a reader is
+        # most likely to have reached by accident, from a variable that came
+        # back empty. Reported by truthiness it vanished and the message read
+        # "no element with no filters given", which describes a different
+        # call. `role=()` is the same shape: an empty sequence of spellings
+        # matches nothing, where `role=None` matches any.
         parts = [
-            f"role={role!r}" if role else "",
-            f"name={name!r}" if name else "",
-            f"description={description!r}" if description else "",
+            f"role={role!r}" if role is not None else "",
+            f"name={name!r}" if name is not None else "",
+            f"description={description!r}" if description is not None else "",
             f"enabled={enabled!r}" if enabled is not None else "",
             f"visible={visible!r}" if visible is not None else "",
             "predicate=<given>" if predicate is not None else "",

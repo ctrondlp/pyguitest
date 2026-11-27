@@ -212,6 +212,31 @@ class TestOneExceptionTypePerFailureKind(unittest.TestCase):
         with self.assertRaises(ValueError):
             backend._keycode(self.UNKNOWN)
 
+    def test_macquartz_refuses_an_omitted_portable_alias_as_unsupported(self):
+        """The abbreviation has to be classified like the name it stands for.
+
+        `send_keys("{INS}")` reaches `_keycode` as the *alias*: `KeySender.brace`
+        resolves it against this backend's own table, finds nothing there, and
+        passes "INS" through. Classified against the portable vocabulary --
+        which holds the spelled-out "insert" -- the abbreviation missed and
+        every one of the seven aliases a Mac lacks raised `ValueError`, while
+        `{Insert}` on the same Mac raised `CapabilityUnsupported`. Two answers
+        for one key, and the abbreviation is the spelling a ported
+        X11::GUITest script actually uses.
+        """
+        backend = object.__new__(macquartz.MacquartzBackend)
+        omitted = set(GUIBackend.KEY_ALIASES) - set(
+            macquartz.MacquartzBackend.KEY_ALIASES
+        )
+        self.assertTrue(omitted, "nothing is omitted, so this proves nothing")
+        for alias in sorted(omitted):
+            with self.subTest(alias=alias):
+                with self.assertRaises(CapabilityUnsupported):
+                    backend._keycode(alias)
+                # And the name it stands for agrees, which is the point.
+                with self.assertRaises(CapabilityUnsupported):
+                    backend._keycode(GUIBackend.KEY_ALIASES[alias])
+
     def test_uinput_refuses_an_unknown_name_as_a_value_error(self):
         try:
             from evdev import ecodes
