@@ -271,6 +271,36 @@ the wrong spelling plays back the wrong key instead of failing loudly.
 Everything else is matched case-insensitively and needs no translation:
 `Return`, `Tab`, `Left`, `F5`.
 
+The one modifier with no Mac equivalent at all is `&`. On X11 it is
+`ISO_Level3_Shift` and under uinput the right Alt key; a Mac has neither, and
+`macquartz` offers exactly `^` (control), `%` (option), `+` (shift) and `#`
+(command). So `send_keys("&(q)")` — which the recorder emits for an AltGr
+chord, and which a Linux-authored script spells the same way — is **refused**
+rather than approximated. It used to type a literal ampersand into the focused
+application and report success, because the character tables have `&` as
+shift-7: a silent change of meaning, in the direction that quietly edits a
+document instead of pressing a chord.
+
+Which exception comes back is a deliberate distinction, and the same one
+`send_keys` documents everywhere:
+
+| What you asked for | What comes back |
+|---|---|
+| A name that is not a key at all — a typo, a Windows-only spelling | `ValueError`: the string itself is wrong |
+| A real key in the portable vocabulary that this desktop lacks — `Insert`, `Scroll_Lock` | `CapabilityUnsupported`: the string is fine and the desktop cannot serve it |
+| A `send_keys` modifier sigil this backend has no key for — `&` on a Mac | `CapabilityUnsupported`, naming the sigils it does offer |
+
+Collapsing them into one type is what the split fixes. A caller catching
+`CapabilityUnsupported` to fall back to another route is right to, and should
+not have that swallow its own typos; a caller catching `ValueError` on bad
+syntax should not have a missing key land there.
+
+The keypad is addressable by name (`kp_0`…`kp_9`, `kp_add`, `kp_subtract`,
+`kp_multiply`, `kp_divide`, `kp_decimal`, `kp_enter`, `kp_equal`), along with
+`clear` — the key where a PC keyboard has Num Lock — and `section`, the key an
+ISO Mac keyboard carries beside the left shift. `{CAP}` and `{HEL}` resolve
+here as they do elsewhere, to `capslock` and `help`.
+
 ## `eiinput`: keymap-safe input over libei
 
 `connect(backend="eiinput")` — opt-in — covers what `portal` deliberately

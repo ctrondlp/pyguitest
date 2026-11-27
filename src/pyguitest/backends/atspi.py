@@ -1390,12 +1390,48 @@ class Element:
         self._session = session
 
     def focus(self):
-        """Give the element keyboard focus."""
-        _run_bounded(_DEFAULT_CALL_TIMEOUT, self.node.grabFocus)
+        """Give the element keyboard focus.
+
+        dogtail reports this failure by *return value*: `grab_focus` answers
+        False both for an element with no Component interface and from inside
+        its own blanket `except`. That answer used to be discarded, so a
+        `focus()` on an element with no way in returned normally and the next
+        `type_text` went wherever focus actually was -- while the same script
+        raises `CapabilityUnsupported` on Windows and macOS, which `base.py`
+        documents as the point ("a caller who asked and got silence cannot
+        tell that apart from the thing having happened").
+        """
+        granted = _run_bounded(_DEFAULT_CALL_TIMEOUT, self.node.grabFocus)
+        if granted is False:
+            raise CapabilityUnsupported(
+                Capability.ELEMENT_ACTION,
+                _BACKEND_NAME,
+                "this element refused keyboard focus -- it publishes no "
+                "AT-SPI Component interface, or its toolkit declined to take "
+                "focus; `focusable` is the question asked first",
+            )
 
     def set_text(self, text):
-        """Replace the element's text content."""
-        _run_bounded(_DEFAULT_CALL_TIMEOUT, setattr, self.node, "text", text)
+        """Replace the element's text content.
+
+        Through `set_text_contents` rather than the `text` property, for the
+        boolean: dogtail returns False for an element that is not valid or
+        not editable text, and `setattr` discards whatever the setter
+        returned, so writing to a read-only field -- or to a `text`-role
+        label, which `Session.text_field` will happily match -- changed
+        nothing and raised nothing. Windows and macOS raise here, which
+        `base.py` records as deliberate.
+        """
+        written = _run_bounded(_DEFAULT_CALL_TIMEOUT, self.node.set_text_contents, text)
+        if written is False:
+            raise CapabilityUnsupported(
+                Capability.TEXT_ENTRY,
+                _BACKEND_NAME,
+                "this element would not take text through the accessible "
+                "interface -- it publishes no AT-SPI EditableText, or is "
+                "read-only; `editable` is the question asked first, and "
+                "`Session.type_text` sends real keys instead",
+            )
 
     def do_action(self, name):
         """Perform a named accessible action, such as "click" or "activate".
@@ -1410,8 +1446,24 @@ class Element:
         self._perform_action(name, actions.get(name))
 
     def select(self):
-        """Select this element, for a list item, tab, or menu entry."""
-        _run_bounded(_DEFAULT_CALL_TIMEOUT, self.node.select)
+        """Select this element, for a list item, tab, or menu entry.
+
+        dogtail only logs a debug line for an element publishing no Selection
+        interface and then asks the parent anyway, so a refusal arrives as a
+        False return rather than an exception. Discarded, that left the same
+        silence `base.py` rejects for the other two platforms: Windows and
+        macOS raise `CapabilityUnsupported` here, having asked `selectable`
+        first.
+        """
+        selected = _run_bounded(_DEFAULT_CALL_TIMEOUT, self.node.select)
+        if selected is False:
+            raise CapabilityUnsupported(
+                Capability.ELEMENT_ACTION,
+                _BACKEND_NAME,
+                "this element would not select -- neither it nor its parent "
+                "publishes an AT-SPI Selection interface; `selectable` is the "
+                "question asked first",
+            )
 
     def expand(self):
         """Open this tree item or similar disclosure control.
@@ -1796,6 +1848,15 @@ def _collection_candidates(node, role, call_timeout):
     except Exception:  # noqa: BLE001 - a broken/absent Collection must not lose matches
         return None
 
+
+_BACKEND_NAME = "atspi"
+"""What this backend calls itself in an error.
+
+A module constant because `Element` raises `CapabilityUnsupported` too and is
+defined above `AtspiBackend`, so it cannot read the class attribute -- and
+`Element.name` is the *element's* accessible name, which is what the
+`ElementNotActionable` raises here deliberately report instead.
+"""
 
 _DEFAULT_CALL_TIMEOUT = 20.0
 """Default seconds a single AT-SPI call gets before `_run_bounded` treats it
@@ -2259,7 +2320,7 @@ left of a multi-monitor desktop lives in the thousands, not the millions.
 class AtspiBackend(GUIBackend):
     """Element automation over the accessibility bus."""
 
-    name = "atspi"
+    name = _BACKEND_NAME
 
     def __init__(self, environment=None, call_timeout: float = _DEFAULT_CALL_TIMEOUT):
         """Connect to the accessibility bus through dogtail.

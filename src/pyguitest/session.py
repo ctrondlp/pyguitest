@@ -273,12 +273,30 @@ def _portal(env: Mapping[str, str]) -> bool:
         return False
     if shutil.which("xdg-desktop-portal"):
         return True
+    # `/usr/local` as well as `/usr`, because FreeBSD ports install there and
+    # the service binary lands in `libexec`, off PATH, so `which` does not
+    # rescue it either -- a BSD box with the portal installed from ports
+    # therefore answered False, which `pyguitest doctor` prints and which
+    # `can_use_clipboard`/`can_capture` both read.
+    #
+    # The *executable* directories only, deliberately: no
+    # `/usr/local/share`. Measured on GhostBSD (FreeBSD 15.1-RELEASE-p6),
+    # which has `/usr/local/share/xdg-desktop-portal` and no portal binary
+    # anywhere and no `xdg-desktop-portal` package installed -- something
+    # else ships that config directory. Adding it would have turned a
+    # correct False into a confident False-positive True on exactly the
+    # platform this was meant to fix, which is worse than the gap: a data
+    # directory is not a service. `/usr/share` keeps its entry because it is
+    # long-standing behaviour on Linux, where the data and the service do
+    # ship together, and narrowing that is a separate question.
     return any(
         os.path.exists(p)
         for p in (
             "/usr/libexec/xdg-desktop-portal",
             "/usr/lib/xdg-desktop-portal",
             "/usr/share/xdg-desktop-portal",
+            "/usr/local/libexec/xdg-desktop-portal",
+            "/usr/local/lib/xdg-desktop-portal",
         )
     )
 
@@ -891,6 +909,55 @@ def _darwin_environment() -> dict[str, Any]:
         "has_listen_event": _macapi.listen_event_allowed(),
         "macos_version": _darwin_version(),
     }
+
+
+def _no_display_note(session_type: SessionType, env: Mapping[str, str]) -> list[str]:
+    """Why nothing on this session can be driven, when no display is reachable.
+
+    The same job `_windows_notes` and `_darwin_notes` do for their platforms,
+    for the one case that had no note at all -- and the case this project's
+    own fleet hits most. `_session_type` returns HEADLESS when none of
+    WAYLAND_DISPLAY, DISPLAY or XDG_SESSION_TYPE is set, and UNKNOWN when
+    only the last is, which is the exact shape of an ordinary `ssh` login
+    (XDG_SESSION_TYPE=tty). Both report every tier-3 and tier-4 capability
+    as absent.
+
+    Without this, `doctor` answered that with a package shopping list: a
+    reader over SSH saw `session unknown` above a confidently detected
+    compositor -- read from XDG_CURRENT_DESKTOP, which survives into a
+    non-graphical login and so looks like a working desktop -- then a column
+    of `[ no]`, then `dnf install` lines. Installing all of them changes
+    nothing, because the problem was never packages. The raw variables were
+    only ever visible under `pyguitest debug`, which is named for filing bug
+    reports rather than for this.
+    """
+    if session_type not in (SessionType.HEADLESS, SessionType.UNKNOWN):
+        return []
+    declared = env.get("XDG_SESSION_TYPE", "")
+    how = (
+        f"XDG_SESSION_TYPE is {declared!r} and neither DISPLAY nor "
+        "WAYLAND_DISPLAY is set"
+        if declared
+        else "none of DISPLAY, WAYLAND_DISPLAY or XDG_SESSION_TYPE is set"
+    )
+    return [
+        f"no display server is reachable from this process ({how}), so "
+        "nothing that needs one -- the window backends, native capture, and "
+        "the input backends that go through a display server -- is "
+        "unavailable whatever is installed. Two things do not need one and "
+        "may still work: input injected below the compositor through "
+        "/dev/uinput, and AT-SPI, which reaches elements (and, on GNOME, "
+        "windows) over the accessibility bus rather than a display -- "
+        "measured on a GNOME session with both display variables unset, "
+        "where ELEMENT_TREE, ELEMENT_ACTION, WINDOW_LIST and WINDOW_ACTIVATE "
+        "were all still served. A service, a container or an SSH shell is "
+        "its own session and "
+        "cannot see the logged-in desktop: run the script inside that "
+        "session, or export its DISPLAY or WAYLAND_DISPLAY together with "
+        "XDG_RUNTIME_DIR (a relative Wayland socket name is resolved beneath "
+        "it, so the name alone is not enough) and DBUS_SESSION_BUS_ADDRESS "
+        "for AT-SPI. `pyguitest debug` prints the values currently in force."
+    ]
 
 
 def _windows_notes(windows: Mapping[str, Any]) -> list[str]:
@@ -1920,6 +1987,10 @@ def detect(env: Mapping[str, str] | None = None) -> Environment:
     has_dogtail = dogtail_installed and not gtk_conflict
     has_evdev = _module("evdev")
     notes = []
+
+    # First, because it subsumes every other note on such a session: nothing
+    # below can be acted on until there is a display to act on.
+    notes.extend(_no_display_note(session_type, env))
 
     if session_type is SessionType.WIN32:
         notes.extend(_windows_notes(windows))

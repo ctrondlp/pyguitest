@@ -3648,7 +3648,11 @@ this backend is broken", and nothing in this package checks it today.
   now exits 0 and writes a real image (223 KB, not the empty black one a denied
   grant produces), `Environment.can_capture` answers `True`, and
   `pyguitest.connect().capture()` -- the composed session, not a bare backend --
-  wrote a 265 KB PNG through `ToolCaptureBackend`. `require_screen_recording`'s
+  wrote a 265 KB PNG through `ToolCaptureBackend`. (That spelling is how the run
+  was made and is kept as the record of it; `Session` stopped forwarding
+  `capture` in 0.30.0, so the call to write today is
+  `screenshot(path=..., window=..., region=...)`, whose parameter order differs
+  -- name the arguments.) `require_screen_recording`'s
   refusal was exercised earlier on the same machine while the grant was still
   missing; this is the other side of that gate.
 - **Screen Recording being granted is not the end of it: a fifth, session-level

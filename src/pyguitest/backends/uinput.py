@@ -207,12 +207,21 @@ class UinputBackend(GUIBackend):
         "LAL": "LEFTALT", "RAL": "RIGHTALT",
         "LMA": "LEFTMETA", "RMA": "RIGHTMETA",
         "LSK": "LEFTMETA", "RSK": "RIGHTMETA",
+        # SYSRQ, not PRINT, for the reason `_KEYSYM_NAMES` already maps
+        # `print` -> `SYSRQ` at the top of this module: Print Screen is
+        # SYSRQ (99) and `KEY_PRINT` (210) is a printer key. Omitting the
+        # alias while the keysym spelling worked meant `press_key("Print")`
+        # pressed Print Screen here and `send_keys("{PRT}")` raised, which
+        # is two spellings of one key disagreeing on one backend.
+        "PRT": "SYSRQ",
     }  # fmt: skip
     """send_keys()'s `{BAC}`-style abbreviations, in evdev names. Narrower
-    than the X11-keysym default: BRE(ak), CAN(cel), HEL(p) and PRT have no
-    settled evdev equivalent on a standard keyboard, so they are left out
-    rather than guessed at -- send_keys raises for them here instead of
-    silently pressing the wrong key."""
+    than the X11-keysym default: BRE(ak), CAN(cel) and HEL(p) have no settled
+    evdev equivalent on a standard keyboard -- the codes exist (KEY_BREAK,
+    KEY_CANCEL, KEY_HELP) but no ordinary keyboard emits them and no
+    compositor is obliged to map them -- so they are left out rather than
+    guessed at, and send_keys raises for them here instead of silently
+    pressing a key nothing will act on."""
 
     def __init__(self, screen_size=(1920, 1080), device=None):
         """Create the virtual device, or accept an injected one for tests."""

@@ -543,12 +543,24 @@ class TestSendKeysMapping(UinputTestCase):
         self.assertEqual(self.gui.KEY_ALIASES["F1"], "F1")
 
     def test_uncertain_aliases_are_left_out_rather_than_guessed(self):
-        # BRE(ak)/CAN(cel)/HEL(p)/PRT have no settled evdev key on a standard
+        # BRE(ak)/CAN(cel)/HEL(p) have no settled evdev key on a standard
         # keyboard; send_keys should raise for them here, not press the
         # wrong thing.
-        for name in ("BRE", "CAN", "HEL", "PRT"):
+        for name in ("BRE", "CAN", "HEL"):
             with self.subTest(name=name):
                 self.assertNotIn(name, self.gui.KEY_ALIASES)
+
+    def test_prt_reaches_the_same_key_as_the_keysym_spelling(self):
+        # PRT used to sit in the list above, while `_KEYSYMS` already mapped
+        # `print` -> SYSRQ -- so `press_key("Print")` pressed Print Screen
+        # and `send_keys("{PRT}")` raised, two spellings of one key
+        # disagreeing on one backend. SYSRQ (99) is Print Screen; KEY_PRINT
+        # (210) is a printer key, which is the wrong-key trap this module's
+        # own docstring records.
+        from pyguitest.backends import uinput
+
+        self.assertEqual(self.gui.KEY_ALIASES["PRT"], "SYSRQ")
+        self.assertEqual(uinput._KEYSYM_NAMES["print"], "SYSRQ")
 
 
 class TestLifecycle(UinputTestCase):

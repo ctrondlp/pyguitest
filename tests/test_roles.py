@@ -1,5 +1,8 @@
+import ast
 import unittest
+from pathlib import Path
 
+from pyguitest import roles
 from pyguitest.roles import Role, canonical_role, spellings
 
 
@@ -137,3 +140,76 @@ class TestPromotedAndToolkitSplitNames(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAnAsymmetricRoleExplainsItself(unittest.TestCase):
+    """A role that resolves on one platform but not its peers says so.
+
+    AGENTS.md's rule: "A forced divergence is documented where a caller
+    looks: the role constant's own docstring in `roles.py`, the backend
+    table's comment beside the entry". The 0.29.0 round honoured it for
+    every role it touched and five older ones carried nothing -- including
+    `TABLE_CELL`, whose asymmetry that round *created* by mapping `AXCell`
+    and so leaving Windows the one platform it matches nothing on.
+
+    Checked against the tables rather than a list kept here, so a mapping
+    added on one platform and not the other cannot land silently.
+    """
+
+    def _documented(self):
+        source = Path(roles.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        klass = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "Role"
+        )
+        documented = set()
+        for index, node in enumerate(klass.body):
+            if not isinstance(node, ast.Assign):
+                continue
+            target = getattr(node.targets[0], "id", None)
+            following = klass.body[index + 1] if index + 1 < len(klass.body) else None
+            if (
+                target
+                and isinstance(following, ast.Expr)
+                and isinstance(following.value, ast.Constant)
+            ):
+                documented.add(target)
+        return documented
+
+    def test_every_role_mapped_on_one_of_ax_uia_but_not_both_is_documented(self):
+        # The flat tables are not the whole of resolution: 0.29.0 added the
+        # context tables for the roles a flat name cannot carry -- a dialog's
+        # subrole, a password field's property, a tab's container -- so a role
+        # reachable only through one of those is *not* asymmetric, and asking
+        # the flat maps alone would call six well-handled roles undocumented.
+        from pyguitest.backends.macos import (
+            _AX_PARENT_ROLES,
+            _AX_ROLES,
+            _AX_SUBROLES,
+        )
+        from pyguitest.backends.uia import _CONTEXT_CONTROL_TYPES, _UIA_ROLES
+
+        ax = set(_AX_ROLES.values()) | set(_AX_SUBROLES.values())
+        for by_parent in _AX_PARENT_ROLES.values():
+            ax |= set(by_parent.values())
+        uia = set(_UIA_ROLES.values()) | set(_CONTEXT_CONTROL_TYPES)
+        documented = self._documented()
+        for name in dir(Role):
+            if name.startswith("_") or name != name.upper():
+                continue
+            value = getattr(Role, name)
+            if not isinstance(value, str):
+                continue
+            in_ax, in_uia = value in ax, value in uia
+            if in_ax == in_uia:
+                continue
+            with self.subTest(role=name, ax=in_ax, uia=in_uia):
+                self.assertIn(
+                    name,
+                    documented,
+                    f"Role.{name} resolves on {'macOS' if in_ax else 'Windows'} "
+                    f"but not {'Windows' if in_ax else 'macOS'}, and carries no "
+                    "docstring saying so",
+                )

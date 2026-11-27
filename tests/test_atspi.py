@@ -2352,10 +2352,29 @@ class TestWaylandElementGeometry(AtspiTestCase):
     def test_click_via_pointer_skips_the_published_action(self):
         # via="pointer" is the user pathway only: even an element that
         # publishes a click action is clicked by coordinate instead.
+        #
+        # Through a session that can drive a pointer, which is the only way
+        # this route is honoured. Asked of a session-*less* element it used
+        # to fall to dogtail's own coordinate click -- measured in
+        # `Element.click`'s docstring as going nowhere and raising nothing on
+        # GNOME/Wayland -- so the old version of this test asserted exactly
+        # the silent path. `require_click_route` now refuses that case; see
+        # `test_via_pointer_on_a_session_less_element_is_refused`.
         node = FakeNode(name="Enabled", role="check box", actions={"Press": {}})
-        self.atspi.Element(node).click(via="pointer")
+        element = self.atspi.Element(node)
+        element._session = self._pointer_session()
+        element.click(via="pointer")
         self.assertEqual(node.actions_performed, [])
-        self.assertTrue(node.clicked)
+
+    def test_via_pointer_on_a_session_less_element_is_refused(self):
+        # An element straight from `backend.find_elements` carries no
+        # session, so nothing can aim a pointer for it. Refusing says so;
+        # the old early return let it reach dogtail's click instead.
+        node = FakeNode(name="Enabled", role="check box", actions={"Press": {}})
+        with self.assertRaises(CapabilityUnsupported) as caught:
+            self.atspi.Element(node).click(via="pointer")
+        self.assertIn("has none", str(caught.exception))
+        self.assertEqual(node.actions_performed, [])
 
     def test_double_click_via_action_is_a_refusal(self):
         # No toolkit publishes a double-click action, so via="action" is an
@@ -5049,3 +5068,59 @@ class TestDispatchActionItself(AtspiTestCase):
         self.dispatch(first, settle=0.01)
         first.deliver_late(_FakeGLib.contexts[0])
         self.assertIs(self.dispatch(_FakeConnection()), self.atspi._Dispatch.REPLIED)
+
+
+class TestAWriteVerbThatWasRefused(AtspiTestCase):
+    """dogtail reports these three refusals by return value, not by raising.
+
+    `set_text_contents` answers False for an element that is not valid or not
+    editable text; `grab_focus` answers False for one with no Component
+    interface and from inside its own blanket `except`; `select` answers
+    False where neither the element nor its parent publishes a Selection
+    interface. All three answers were discarded, so the call returned
+    normally having done nothing -- while `backends/base.py` documents
+    Windows and macOS as raising `CapabilityUnsupported` for exactly these
+    cases, on the stated grounds that silence cannot be told apart from
+    success.
+
+    `is False`, not falsy, is the test on purpose: dogtail's success paths
+    hand back whatever the underlying Atspi call returned, which is
+    sometimes None, and None is not a refusal.
+    """
+
+    def _node(self, **answers):
+        node = types.SimpleNamespace(
+            grabFocus=lambda: answers.get("focus"),
+            set_text_contents=lambda text: answers.get("text"),
+            select=lambda: answers.get("select"),
+        )
+        return self.atspi.Element(node)
+
+    def test_a_refused_focus_raises_rather_than_returning(self):
+        with self.assertRaises(CapabilityUnsupported) as caught:
+            self._node(focus=False).focus()
+        self.assertIn("refused keyboard focus", str(caught.exception))
+
+    def test_a_refused_set_text_raises_rather_than_writing_nothing(self):
+        with self.assertRaises(CapabilityUnsupported) as caught:
+            self._node(text=False).set_text("Ada Lovelace")
+        self.assertIn("would not take text", str(caught.exception))
+
+    def test_a_refused_select_raises_rather_than_returning(self):
+        with self.assertRaises(CapabilityUnsupported) as caught:
+            self._node(select=False).select()
+        self.assertIn("would not select", str(caught.exception))
+
+    def test_none_is_not_a_refusal(self):
+        # The success shape on the paths that return the Atspi call's own
+        # result: nothing to report, and nothing to raise about.
+        element = self._node(focus=None, text=None, select=None)
+        element.focus()
+        element.set_text("Ada Lovelace")
+        element.select()
+
+    def test_true_is_not_a_refusal(self):
+        element = self._node(focus=True, text=True, select=True)
+        element.focus()
+        element.set_text("Ada Lovelace")
+        element.select()

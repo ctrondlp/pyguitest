@@ -41,8 +41,8 @@ The desktop environments it can drive include, but may not be limited to:
 **Status:** beta. Every capability is implemented on every backend that can
 support it. Much of it has been run against real GNOME, KDE, COSMIC, sway,
 Hyprland, niri, Xfce, X11, Debian, GhostBSD, Windows 10 and 11 and macOS
-sessions — every desktop listed above has now met a live session, niri as
-of 2026-10-14.
+sessions — every desktop listed above has now met a live session.
+
 [docs/validation.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/validation.md) records what each
 run covered, including what it could *not* cover.
 

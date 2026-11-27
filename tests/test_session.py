@@ -124,6 +124,66 @@ class TestSessionClassification(unittest.TestCase):
         self.assertTrue(any("NO_AT_BRIDGE" in n for n in e.notes))
         self.assertFalse(any("NO_AT_BRIDGE" in n for n in quiet.notes))
 
+    def test_no_display_is_reported_on_a_headless_session(self):
+        """The note `_windows_notes`/`_darwin_notes` had no counterpart for.
+
+        An SSH login is the shape this exists for, and it is the one this
+        project's own fleet hits most: `doctor` reported every tier-3 and
+        tier-4 capability absent and answered with a package list, while the
+        cause -- no display to reach -- appeared nowhere. The compositor is
+        still detected from XDG_CURRENT_DESKTOP, which survives into a
+        non-graphical login, so the report positively looked like a working
+        desktop.
+        """
+        e = linux_detect(env())
+        self.assertIs(e.session_type, SessionType.HEADLESS)
+        self.assertTrue(any("no display server is reachable" in n for n in e.notes))
+
+    def test_no_display_is_reported_for_an_ssh_shell(self):
+        # XDG_SESSION_TYPE=tty with no DISPLAY: an ordinary `ssh` login, which
+        # detects as UNKNOWN rather than HEADLESS and needs the note just as
+        # much. The wording names the variable that is set, since that is the
+        # one a reader will check first.
+        e = linux_detect(env(XDG_SESSION_TYPE="tty"))
+        self.assertIs(e.session_type, SessionType.UNKNOWN)
+        note = next(n for n in e.notes if "no display server is reachable" in n)
+        self.assertIn("'tty'", note)
+
+    def test_the_note_does_not_claim_at_spi_is_unavailable(self):
+        """It said every window and element capability was gone. Measured false.
+
+        AT-SPI reaches the accessibility bus, not a display: with DISPLAY and
+        WAYLAND_DISPLAY both unset on a GNOME session, `connect(backend="atspi")`
+        still served ELEMENT_TREE, ELEMENT_ACTION, WINDOW_LIST and
+        WINDOW_ACTIVATE, listed three applications and answered `windows()`.
+        The note's own closing advice -- export DBUS_SESSION_BUS_ADDRESS "for
+        AT-SPI" -- only makes sense if that works, so the blanket claim
+        contradicted the same sentence that repaired it.
+        """
+        note = next(
+            n
+            for n in linux_detect(env(XDG_SESSION_TYPE="tty")).notes
+            if "no display server is reachable" in n
+        )
+        self.assertNotIn("every window and element capability", note)
+        self.assertIn("AT-SPI", note)
+        self.assertIn("accessibility bus", note)
+        # The advice at the end has to stay, since it is what makes it work.
+        self.assertIn("DBUS_SESSION_BUS_ADDRESS", note)
+
+    def test_a_graphical_session_gets_no_such_note(self):
+        for variables in (
+            env(WAYLAND_DISPLAY="wayland-0"),
+            env(DISPLAY=":0"),
+            env(DISPLAY=":0", WAYLAND_DISPLAY="wayland-0"),
+            env(XDG_SESSION_TYPE="wayland"),
+        ):
+            with self.subTest(env=variables):
+                e = linux_detect(variables)
+                self.assertFalse(
+                    any("no display server is reachable" in n for n in e.notes)
+                )
+
     def test_pure_x11(self):
         e = linux_detect(env(DISPLAY=":0", XDG_SESSION_TYPE="x11"))
         self.assertIs(e.session_type, SessionType.X11)
