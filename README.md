@@ -386,6 +386,9 @@ flags works unchanged.
 - [docs/getting-started.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/getting-started.md) — five minutes to a
   working script, which API to reach for, and what X11, Wayland and XWayland
   each change
+- [docs/choosing.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/choosing.md) — one table per fork, read from the
+  task: find it now or wait for it, `expect_` or `assert_`, which wait, which
+  click route, which way to type
 - [docs/recipes.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/recipes.md) — task-shaped answers: waiting properly,
   forms, windows, screenshots, CI, and a cheat sheet for porting a Perl script
 - [docs/troubleshooting.md](https://github.com/ctrondlp/pyguitest/blob/main/docs/troubleshooting.md) — symptom first: nothing

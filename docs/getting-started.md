@@ -272,6 +272,11 @@ is fixable at the source: hand its developers
 [testable-guis.md][testable-guis], which is written for exactly that
 conversation.
 
+That ladder answers how to *address* a control. The other forks a script
+meets — find it now or wait for it, `expect_` or `assert_`, which of the
+waits, which click route, which way to get text into a field — each have a
+table of their own in [choosing.md](choosing.md).
+
 ## Which desktop am I on, and why does it matter?
 
 The same script can behave differently on each, because the *desktop* decides
@@ -330,6 +335,7 @@ The full list, and when each one is the right one, is in
 
 | If you want… | Read |
 |---|---|
+| To know which of two similar calls to use | [choosing.md](choosing.md) |
 | Task-shaped answers ("how do I fill a form?") | [recipes.md](recipes.md) |
 | Something is not working | [troubleshooting.md](troubleshooting.md) |
 | Every method and what it needs | [api.md](api.md) |
