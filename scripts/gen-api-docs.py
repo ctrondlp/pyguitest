@@ -89,10 +89,10 @@ GROUPS: list[tuple[str, str, list[str]]] = [
         "Elements",
         "The recommended way to drive an application: match on what a widget "
         "is and what it is called, not where it happens to be.\n\n"
-        "Every lookup here **raises rather than returning `None`** -- "
-        "`ElementNotFound`, at the line that asked -- so there is nothing to "
-        "test for, and they do not wait: reach for them where the control "
-        "should already be on screen, and for `wait_for_element` or "
+        "`element` and the six typed shortcuts **raise rather than returning "
+        "`None`** -- `ElementNotFound`, at the line that asked -- so there is "
+        "nothing to test for, and they do not wait: reach for them where the "
+        "control should already be on screen, and for `wait_for_element` or "
         "`expect_element` where you have just done something that makes it "
         "appear. The typed shortcuts (`button`, `text_field`, `dropdown`, "
         "`checkbox`, `link`, `menu_item`) are `element` with the role "
@@ -103,10 +103,16 @@ GROUPS: list[tuple[str, str, list[str]]] = [
         "`text_field` tries three, and `dropdown` falls back to the "
         "description a Qt combo box hides its stable name in -- and "
         "`element(role=...)` is the way out when a shortcut finds nothing. "
-        "`elements` "
-        "is the same filter set returning every match, and `tree_items` is "
-        "the one that opens collapsed branches -- `elements(within=root)` "
-        "only ever sees what the tree already has visible.",
+        "`elements` is the same filter set returning every match, empty where "
+        "there is none, and `tree_items` is the one that opens collapsed "
+        "branches -- `elements(within=root)` only ever sees what the tree "
+        "already has visible.\n\n"
+        "Not everything here refuses a miss, though, and what does not needs "
+        "the check the lookups above make unnecessary: `focused`, "
+        "`element_at` and `extents` each answer `None` where there is nothing "
+        "to report. `window_element` does raise, but `WindowNotFound` rather "
+        "than `ElementNotFound` -- the title it was given is what failed to "
+        "match.",
         [
             "button",
             "text_field",

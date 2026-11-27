@@ -183,7 +183,7 @@ needs no display connection at all.
 | The children one level down | [`element.children`](api.md#children) |
 | The first match in a subtree, or `None` | [`element.child(role, name)`](api.md#child) |
 | Every match in a subtree, by role and name | [`element.find(role, name)`](api.md#find) |
-| Every match, with the full filter set | [`elements(within=element)`](api.md#elements) |
+| Every match, with the full filter set | [`elements(within=element)`](api.md#session-elements) |
 | Every row of a tree, including collapsed branches | [`tree_items(root)`](api.md#tree_items) |
 | One row's cells as plain text | [`row_values(row)`](api.md#row_values) |
 

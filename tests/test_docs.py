@@ -337,20 +337,41 @@ class TestLinksAndAnchorsResolve(unittest.TestCase):
 
         Checked wherever a **code-span** label names its destination: a link
         written `[`elements(...)`](#x)` promises to land on `elements`, which
-        is every index row api.md generates. Two more of these were found by
-        hand in the same sweep and are not covered here, because their
-        labels are prose rather than a name -- the reading guide's link to
-        the Capabilities table, which landed on the one-line
-        `Session.capabilities` property, and the module-level
-        `require_version` row, which landed on the method of that name.
+        is every index row api.md generates. Cross-page links count too, and
+        have to -- choosing.md pointed `elements(within=element)` at
+        `api.md#elements`, which is api.md's Elements *group*, and an in-page
+        check could not see it. Two more were found by hand in the same sweep
+        and are still not covered, because their labels are prose rather than
+        a name: the reading guide's link to the Capabilities table, which
+        landed on the one-line `Session.capabilities` property, and the
+        module-level `require_version` row, which landed on the method of
+        that name.
         """
-        labelled = re.compile(r"\[`([a-zA-Z_][\w]*)[^\]]*`\]\(#([^)]+)\)")
+        labelled = re.compile(r"\[`([^`\]]+)`\]\(([^)\s]+)\)")
+        landings = {}
         checked = 0
         for page in self.pages():
-            lines = page.read_text(encoding="utf-8").splitlines()
-            landing = self.anchor_landings(lines)
-            for name, target in labelled.findall("\n".join(lines)):
-                heading = landing.get(target)
+            for label, target in labelled.findall(page.read_text(encoding="utf-8")):
+                if target.startswith(("http://", "https://", "mailto:")):
+                    continue
+                # The call a label promises is its name with any arguments and
+                # any `gui.`/`element.` qualifier removed. A label that is not
+                # left with a bare name promises nothing checkable -- `expect_*`
+                # names a family and links to that family's section.
+                name = label.split("(", 1)[0].strip().rsplit(".", 1)[-1]
+                if not name.isidentifier():
+                    continue
+                path, _, fragment = target.partition("#")
+                if not fragment:
+                    continue
+                destination = (page.parent / path) if path else page
+                if destination.suffix != ".md" or not destination.is_file():
+                    continue
+                if destination not in landings:
+                    landings[destination] = self.anchor_landings(
+                        destination.read_text(encoding="utf-8").splitlines()
+                    )
+                heading = landings[destination].get(fragment)
                 if heading is None:
                     continue  # the resolve tests above own that failure
                 checked += 1
@@ -358,7 +379,7 @@ class TestLinksAndAnchorsResolve(unittest.TestCase):
                     self.assertEqual(
                         heading.strip("`"),
                         name,
-                        f"{page.name} links to #{target} from a label naming "
+                        f"{page.name} links to {target} from a label naming "
                         f"{name!r}, but that fragment lands on {heading!r} -- "
                         "two headings slug the same, so the one linked needs "
                         "an explicit `<a id>` of its own",
