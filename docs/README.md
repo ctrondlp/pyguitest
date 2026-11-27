@@ -9,6 +9,7 @@ X11::GUITest. For what it is and how to install it, start at the
 | File | What's in it |
 |------|---------------|
 | [getting-started.md](getting-started.md) | Five minutes from nothing to a script that drives a real application — plus which API to reach for, and what X11 / Wayland / XWayland each change |
+| [choosing.md](choosing.md) | One table per fork, read from the task: find it now or wait for it, `expect_` or `assert_`, which wait, which click route, which way to type |
 | [recipes.md](recipes.md) | Task-shaped answers: waiting properly, forms, windows, screenshots, clipboard, CI, and an X11::GUITest cheat sheet |
 | [troubleshooting.md](troubleshooting.md) | Symptom first: nothing is found, nothing is typed, nothing is captured |
 

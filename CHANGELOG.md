@@ -5,6 +5,52 @@ All notable changes to pyguitest are recorded here. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html) — with the usual
 0.x caveat that the API may still change between minor versions.
 
+## [Unreleased]
+
+### Documentation
+
+- **New page: `docs/choosing.md`, the decision the reference could not
+  answer.** The docstrings already steer between similar calls — most of
+  them name a sibling and say which to prefer — but only from the entry you
+  have already looked up, so "`wait()` is almost always the wrong tool"
+  reaches you after you went looking for `wait`. The new page is one small
+  table per fork, read from the task instead: find it now or wait for it,
+  `expect_` or `assert_`, which of the waits, which click route, pointer
+  motion, typing, a `Window` or a window's `Element`, focus, capture, tree
+  reading, capability checks, launching. The locator ladder is not repeated
+  there — it links to the one in `getting-started.md`.
+
+- **`expect_*` versus `assert_*`, which was written down nowhere.** An
+  `expect_*` polls to a deadline and an `assert_*` reads once and judges,
+  which is the whole reason both families exist and why the clipboard, focus
+  and tab-order checks are `assert_` while text, value and checked are
+  `expect_`. Their two group blurbs in `docs/api.md` had been near-identical
+  sentences. `assert_tab_order`'s `timeout` is now called out as per-Tab
+  focus settle time rather than a polling deadline.
+
+- **Six group blurbs in `docs/api.md` now name the fork** they sit above --
+  Elements, Windows, Expectations, Assertions, Screen and capture, Waiting
+  -- so the choice is made where a reader lands rather than three entries
+  later. The Elements one also stops implying the typed shortcuts are
+  `element` with a role filled in: `text_field` tries three roles and
+  `dropdown` falls back to the description a Qt combo box hides its stable
+  name in.
+
+### Fixed
+
+- **Four links in `docs/api.md` resolved to the wrong heading.** Markdown
+  cannot suppress a heading's implicit anchor and GitHub gives the bare slug
+  to the first heading that claims it, so `## Elements` took `#elements` and
+  the `elements` entry became `#elements-1` -- a number that moves whenever
+  a group above it is renamed. The index rows for `elements()` and
+  `windows()` therefore pointed at the group heading they were already
+  inside, the reading guide's link to the capability table landed on the
+  one-line `Session.capabilities` property, and the module-level
+  `require_version` row landed on the `Session` method of that name. Each of
+  the four now carries an explicit `<a id>`; the old anchors still resolve
+  into the right section, so no existing link breaks. A new test asserts
+  that a link whose label names a call lands on that call.
+
 ## [0.30.0] — 2026-11-26
 
 An ease-of-use and cross-platform review of this package and the recorder.

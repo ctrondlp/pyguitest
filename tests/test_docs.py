@@ -323,6 +323,84 @@ class TestLinksAndAnchorsResolve(unittest.TestCase):
                     )
         self.assertGreater(seen, 20)
 
+    def test_a_link_lands_on_the_entry_its_label_names(self):
+        """The failure every test above is blind to: the *wrong* heading.
+
+        Those ask whether a fragment resolves. This asks whether it resolves
+        to what the link says it does, which is a different question once two
+        headings slug the same: GitHub gives the bare slug to the first one
+        and `-1` to the next, so `## Elements` took `#elements` and the
+        `elements` entry became `#elements-1`. api.md's own index therefore
+        pointed `elements()` and `windows()` at the group heading they were
+        already sitting in -- a link that renders, resolves, and goes
+        nowhere a reader would notice.
+
+        Checked wherever a **code-span** label names its destination: a link
+        written `[`elements(...)`](#x)` promises to land on `elements`, which
+        is every index row api.md generates. Two more of these were found by
+        hand in the same sweep and are not covered here, because their
+        labels are prose rather than a name -- the reading guide's link to
+        the Capabilities table, which landed on the one-line
+        `Session.capabilities` property, and the module-level
+        `require_version` row, which landed on the method of that name.
+        """
+        labelled = re.compile(r"\[`([a-zA-Z_][\w]*)[^\]]*`\]\(#([^)]+)\)")
+        checked = 0
+        for page in self.pages():
+            lines = page.read_text(encoding="utf-8").splitlines()
+            landing = self.anchor_landings(lines)
+            for name, target in labelled.findall("\n".join(lines)):
+                heading = landing.get(target)
+                if heading is None:
+                    continue  # the resolve tests above own that failure
+                checked += 1
+                with self.subTest(page=page.name, target=target):
+                    self.assertEqual(
+                        heading.strip("`"),
+                        name,
+                        f"{page.name} links to #{target} from a label naming "
+                        f"{name!r}, but that fragment lands on {heading!r} -- "
+                        "two headings slug the same, so the one linked needs "
+                        "an explicit `<a id>` of its own",
+                    )
+        self.assertGreater(checked, 50)
+
+    @staticmethod
+    def anchor_landings(lines):
+        """Every fragment on a page mapped to the heading it reaches.
+
+        Applies the dedupe a renderer applies -- first heading keeps the bare
+        slug, later ones get `-1`, `-2`. An explicit `<a id>` stands for
+        whatever it was put there to name, and api.md uses one in both
+        available places: on its own line above a heading, and inside a table
+        row, where the row's first code span is the name it labels.
+        """
+        seen = {}
+        landing = {}
+        pending = []
+        for line in lines:
+            heading = _HEADING.match(line)
+            if heading:
+                text = heading.group(1).strip()
+                slug = heading_slug(text)
+                nth = seen.get(slug, 0)
+                seen[slug] = nth + 1
+                landing[slug if not nth else f"{slug}-{nth}"] = text
+                for anchor in pending:
+                    landing[anchor] = text
+                pending = []
+                continue
+            anchors = _EXPLICIT_ANCHOR.findall(line)
+            if not anchors:
+                continue
+            labelled = re.search(r"`([^`]+)`", _EXPLICIT_ANCHOR.sub("", line))
+            for anchor in anchors:
+                if labelled:
+                    landing[anchor] = labelled.group(1)
+                else:
+                    pending.append(anchor)
+        return landing
+
     def test_absolute_links_into_this_repository_resolve(self):
         """The README's cross-references are absolute, so check those instead.
 

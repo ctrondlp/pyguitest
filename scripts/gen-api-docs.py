@@ -88,7 +88,25 @@ GROUPS: list[tuple[str, str, list[str]]] = [
     (
         "Elements",
         "The recommended way to drive an application: match on what a widget "
-        "is and what it is called, not where it happens to be.",
+        "is and what it is called, not where it happens to be.\n\n"
+        "Every lookup here **raises rather than returning `None`** -- "
+        "`ElementNotFound`, at the line that asked -- so there is nothing to "
+        "test for, and they do not wait: reach for them where the control "
+        "should already be on screen, and for `wait_for_element` or "
+        "`expect_element` where you have just done something that makes it "
+        "appear. The typed shortcuts (`button`, `text_field`, `dropdown`, "
+        "`checkbox`, `link`, `menu_item`) are `element` with the role "
+        "decided for you, and each is narrower than its everyday word: "
+        "`button` is push buttons only, so a toolbar item or a tab that "
+        "looks like one to a user is not found here, and `checkbox` is "
+        "neither radio buttons nor toggles. Two know more than a role -- "
+        "`text_field` tries three, and `dropdown` falls back to the "
+        "description a Qt combo box hides its stable name in -- and "
+        "`element(role=...)` is the way out when a shortcut finds nothing. "
+        "`elements` "
+        "is the same filter set returning every match, and `tree_items` is "
+        "the one that opens collapsed branches -- `elements(within=root)` "
+        "only ever sees what the tree already has visible.",
         [
             "button",
             "text_field",
@@ -159,7 +177,18 @@ GROUPS: list[tuple[str, str, list[str]]] = [
         "`refresh_window` for current values rather than comparing against a title "
         "the application has since changed. Finding one by title is the usual way "
         "in, and a window the list already carries may still not be placed on "
-        "screen: check `is_window_viewable` before acting on a position.",
+        "screen: check `is_window_viewable` before acting on a position.\n\n"
+        "Three forks worth knowing before you pick one. `find_window` "
+        "**raises `WindowNotFound` now**, where `wait_for_window` polls and "
+        "hands back `None` and `expect_window` polls and raises -- the first "
+        "is for a window that should already be open, the other two for one "
+        "you have just asked for. A `Window` is the handle these operations "
+        "take; `window_element` is the *accessible* side of the same window, "
+        "and what `within=` wants. And `activate_window` asks the window "
+        "manager once and returns immediately, where `focus_window` waits "
+        "for the geometry to settle, retries, confirms, and returns whether "
+        "focus actually landed -- that one before typing, or the keystrokes "
+        "go somewhere else.",
         [
             "windows",
             "find_window",
@@ -187,8 +216,14 @@ GROUPS: list[tuple[str, str, list[str]]] = [
         "Screen and capture",
         "Capture is the one area where desktops differ most in what they permit; "
         "`screenshot` reports rather than guesses when a session will not serve it. "
-        "`capture_on_failure` is the one to reach for in a test suite, and `locate` "
-        "finds a known image on screen when nothing publishes an accessible element.",
+        "`capture_on_failure` is the one to reach for in a test suite: it takes the "
+        "screenshot, the accessible tree, the active window and whatever had focus "
+        "while the exception is still propagating, which is the only moment the "
+        "application is still up. The two image searches are not interchangeable -- "
+        "`locate_image` captures the live screen and raises `ImageNotFound`, while "
+        "`locate` searches an image you already have, answers `None`, and needs no "
+        "display connection at all. Either is the fallback for a control that "
+        "publishes no accessible element.",
         ["screens", "screenshot", "capture_on_failure", "locate", "locate_image"],
     ),
     (
@@ -219,7 +254,13 @@ GROUPS: list[tuple[str, str, list[str]]] = [
         "`interval` seconds instead. `timeout` bounds the wait in seconds, "
         "and `timeout` left `None` — which every `wait_*` here defaults to, "
         "`sync` excepted — waits indefinitely; there is no session-level "
-        "default to fall back on.",
+        "default to fall back on.\n\n"
+        "Which one you want follows from what you are waiting for, and the "
+        "index below is in that order; [choosing.md](choosing.md#which-wait) "
+        "is the same list read from the condition rather than the call. "
+        "`wait(seconds)` is the one to avoid: it is simultaneously too short "
+        "on a loaded machine and wasted time on a fast one, which is how a "
+        "suite ends up both flaky and slow.",
         [
             "wait",
             "sync",
@@ -245,7 +286,12 @@ GROUPS: list[tuple[str, str, list[str]]] = [
         "matching the `wait_*` calls they wrap; the state-checking six default "
         "to five seconds. So an element that never appears hangs a run where a "
         "value that never settles fails -- pass a `timeout` in any suite that "
-        "must not hang.",
+        "must not hang.\n\n"
+        "These are also the half of the pair that **lets time pass**: an "
+        "`expect_*` answers *does it become this?* and an `assert_*` answers "
+        "*is it this now?*. Use these after an action whose effect arrives "
+        "when the application gets round to it, and the Assertions below for "
+        "what is already settled.",
         [
             "expect_element",
             "expect_window",
@@ -260,7 +306,15 @@ GROUPS: list[tuple[str, str, list[str]]] = [
     (
         "Assertions",
         "Raise on failure with a message naming what was actually found, for "
-        "use directly in a test.",
+        "use directly in a test -- the same contract the Expectations above "
+        "have, with the deadline taken out. These **read once and judge**, "
+        "where an `expect_*` polls until its `timeout`, so they are the ones "
+        "for a property of the session rather than a value still in flight: "
+        "where focus is, what the clipboard holds, whether Tab visits the "
+        "right controls, whether anything is missing an accessible name. "
+        "`assert_tab_order` is the only one here that takes a `timeout`, and "
+        "it is not a polling deadline -- it is how long each Tab press gets "
+        "for focus to settle before the order is judged.",
         [
             "assert_focused",
             "assert_clipboard",
@@ -1136,6 +1190,47 @@ ARGUMENT_NEEDS: dict[str, dict[str, str]] = {
 """Session method -> capability -> when it is actually required."""
 
 
+def heading_slug(text: str) -> str:
+    """The fragment GitHub derives from a heading, for collision checks."""
+    lowered = re.sub(r"[`*\\]", "", text.strip().lower())
+    return re.sub(r"\s+", "-", re.sub(r"[^\w\s-]", "", lowered))
+
+
+# Group titles a method name can slug into. Markdown offers no way to
+# suppress a heading's implicit anchor and GitHub resolves a fragment to the
+# *first* heading that matches, so a call whose name matches the group it
+# sits in cannot be linked by name at all: `## Elements` takes `#elements`
+# and the `elements` entry becomes `#elements-1`, a number that moves the
+# moment a group above it is renamed. Both index rows that hit this --
+# `elements()` and `windows()` -- pointed at the group heading they were
+# already inside, so following the link appeared to do nothing. The
+# colliders get an explicit id and nothing else changes: every other call
+# keeps the plain `#name` anchor this page has always published, which is
+# what the other pages link to.
+GROUP_SLUGS = {heading_slug(title) for title, _, _ in GROUPS}
+
+
+def session_anchor(name: str) -> str:
+    """The fragment that actually reaches `name`'s own entry."""
+    return f"session-{name}" if heading_slug(name) in GROUP_SLUGS else name
+
+
+def module_anchor(name: str) -> str:
+    """The fragment that reaches a module-level name's own entry.
+
+    `pyguitest.require_version` and `Session.require_version` are two
+    entries with one heading text, and the Session one is rendered first --
+    so the module-level table's own row pointed a reader at the method
+    instead of at the function beside it. Prefixed where they collide, plain
+    everywhere else.
+    """
+    plain = name.lower()
+    members = {
+        n for n, _ in inspect.getmembers(pyguitest.Session) if not n.startswith("_")
+    }
+    return f"module-{plain}" if plain in {m.lower() for m in members} else plain
+
+
 def session_row(name: str, x11_only: set[str]) -> str:
     """One Session method as a table row."""
     required, optional = method_capabilities(pyguitest.Session, name)
@@ -1145,7 +1240,7 @@ def session_row(name: str, x11_only: set[str]) -> str:
         needs += (" — " if needs else "") + f"{cap_link(capability)} {when}"
     doc = first_line(inspect.getattr_static(pyguitest.Session, name))
     sig = cell(short_signature(pyguitest.Session, name))
-    return f"| [`{sig}`](#{name}) | {needs} | {cell(doc)} |"
+    return f"| [`{sig}`](#{session_anchor(name)}) | {needs} | {cell(doc)} |"
 
 
 HEADER = """# API reference
@@ -1155,10 +1250,13 @@ Generated by `scripts/gen-api-docs.py` — edit the docstrings, not this page.
 
 New to the library? [getting-started.md](getting-started.md) goes from an
 empty file to a working script; this page is the lookup you want once you
-know roughly what to reach for. [recipes.md](recipes.md) answers the
-task-shaped questions — waiting properly, filling a form, screenshots, CI —
-and [troubleshooting.md](troubleshooting.md) starts from the symptom when a
-call finds nothing, types nothing or captures nothing.
+know roughly what to reach for. **Not sure which call you want?**
+[choosing.md](choosing.md) is one table per fork — find it now or wait for
+it, `expect_` or `assert_`, which wait, which click route, which way to get
+text in. [recipes.md](recipes.md) answers the task-shaped questions —
+waiting properly, filling a form, screenshots, CI — and
+[troubleshooting.md](troubleshooting.md) starts from the symptom when a call
+finds nothing, types nothing or captures nothing.
 
 **Reading the tables.** Each group starts with an index — signature, what the
 call needs, and what it does in one line — and every signature links down to
@@ -1175,7 +1273,7 @@ That is why it is per-call rather than a footnote: `ELEMENT_TREE`, for
 instance, is the one that lets `gui.button("Save")` find a control by name,
 and a desktop with no accessibility bridge running does not have it, so
 every lookup fails there while typing and clicking still work. Each name
-links to [Capabilities](#capabilities), which says what it covers, which
+links to [Capabilities](#capabilities-table), which says what it covers, which
 backends provide it, and how hard it is to come by.
 
 Ask `gui.supports(...)` before depending on one, or let the call raise
@@ -1225,7 +1323,8 @@ accessibility interface and sends no key events, which is what you want when
 the value is the point; `Session.type_text` sends real keystrokes, which is
 what you want when the application's own key handling is under test. And
 `expect_*` raises on failure for use directly in a test, where `wait_*`
-returns a value for you to branch on.
+returns a value for you to branch on. [choosing.md](choosing.md) has the
+rest of them.
 """
 
 TABLE_HEAD = [
@@ -1289,6 +1388,12 @@ def session_details(names: list[str]) -> list[str]:
         # seven keyword filters -- which makes an unreadable heading and an
         # unusable anchor. A bare name also gives every call a stable
         # `#name` link that survives a signature change.
+        if session_anchor(name) != name:
+            # Its own name is taken by the group heading above it; see
+            # GROUP_SLUGS. The implicit anchor stays too, pointing at the
+            # group, so an old `#elements` link still lands in the right
+            # section rather than nowhere.
+            out += [f'<a id="{session_anchor(name)}"></a>', ""]
         out += [f"### `{name}`", ""]
         # The full signature, in a fence rather than a cell: this is where a
         # reader who followed the index link lands, and the long ones are
@@ -1609,6 +1714,14 @@ def render_helper_modules(out: list[str]) -> None:
 def render_capabilities(out: list[str], prov, x11_only: set[str]) -> None:
     """The capability set, its tiers, and who provides each one."""
     out += [
+        # `Session.capabilities` is documented further up the page and takes
+        # the implicit `#capabilities` anchor, so the reading guide's link to
+        # this section landed on that one-line property instead -- the wrong
+        # destination for the sentence "each name links to Capabilities,
+        # which says what it covers". Same collision as GROUP_SLUGS, fixed
+        # the same way.
+        '<a id="capabilities-table"></a>',
+        "",
         "## Capabilities",
         "",
         "The full set, with the tier each sits in and the backends providing",
@@ -1709,7 +1822,8 @@ def render_names(out: list[str]) -> None:
         obj = getattr(pyguitest, name, None)
         if obj is not None:
             described = first_line(obj) or note_for(name, obj)
-            linked = f"[`{name}`](#{name.lower()})" if _has_detail(obj) else f"`{name}`"
+            target = module_anchor(name)
+            linked = f"[`{name}`](#{target})" if _has_detail(obj) else f"`{name}`"
             out.append(f"| {linked} | {cell(described)} |")
     out.append("")
     # The module-level *functions* in full. `connect` is the first call in
@@ -1721,6 +1835,8 @@ def render_names(out: list[str]) -> None:
         obj = getattr(pyguitest, name, None)
         if not _has_detail(obj):
             continue
+        if module_anchor(name) != name.lower():
+            out += [f'<a id="{module_anchor(name)}"></a>', ""]
         out += [f"### `{name}`", ""]
         out += signature_fence(f"{name}{function_signature(obj)}")
         out += parameter_table(obj)
